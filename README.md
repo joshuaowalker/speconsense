@@ -31,7 +31,7 @@ The key features of Speconsense include:
 
 ```bash
 # Clone the repository
-git clone https://github.com/yourusername/speconsense.git
+git clone https://github.com/joshuaowalker/speconsense.git
 cd speconsense
 
 # Install required Python packages
