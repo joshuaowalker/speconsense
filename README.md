@@ -138,8 +138,10 @@ ls *.fastq | parallel NGSpeciesID --ont --consensus --t 1 --abundance_ratio 0.2 
 # With this command using Speconsense:
 ls *.fastq | parallel python speconsense.py {} --medaka --primers primers.fasta
 ```
-
-3. Process the output files as needed for your downstream analysis
+3. Process the output FASTA files with the summarize_speconsense.py script to prepare them for downstream analysis:
+```bash
+python summarize_speconsense.py
+```
 
 ## Algorithm Details
 
