@@ -23,7 +23,7 @@ class SpecimenClusterer:
     def __init__(self, min_identity: float = 0.8,
                  inflation: float = 4.0,
                  min_size: int = 5,
-                 min_yield: float = 0.8,
+                 min_cluster_ratio: float = 0.2,
                  max_sample_size: int = 500,
                  presample_size: int = 1000,
                  k_nearest_neighbors: int = 20,
@@ -33,7 +33,7 @@ class SpecimenClusterer:
         self.min_identity = min_identity
         self.inflation = inflation
         self.min_size = min_size
-        self.min_yield = min_yield
+        self.min_cluster_ratio = min_cluster_ratio
         self.max_sample_size = max_sample_size
         self.presample_size = presample_size
         self.k_nearest_neighbors = k_nearest_neighbors
@@ -413,23 +413,32 @@ class SpecimenClusterer:
             logging.info(
                 f"Found {len(large_clusters)} clusters larger than size threshold ({self.min_size}): {cluster_sizes_str}")
 
-            # Apply min_yield logic to determine how many clusters to output
             total_sequences = len(self.sequences)
-            min_needed = int(total_sequences * self.min_yield)
 
             sequences_covered = 0
             clusters_to_output = []
 
-            for cluster in large_clusters:
-                clusters_to_output.append(cluster)
-                sequences_covered += len(cluster)
+            largest_cluster_size = len(large_clusters[0]) if large_clusters else 0
 
-                # Check if we've reached the minimum yield
-                if sequences_covered >= min_needed:
-                    break
+            for cluster in large_clusters:
+                cluster_size = len(cluster)
+
+                # Apply min_cluster_ratio filter if specified and not the first cluster
+                if self.min_cluster_ratio > 0 and largest_cluster_size > 0:
+                    size_ratio = cluster_size / largest_cluster_size
+
+                    # Skip this cluster if it's too small relative to the largest cluster
+                    if size_ratio < self.min_cluster_ratio:
+                        logging.info(
+                            f"Skipping cluster of size {cluster_size} (ratio to largest: {size_ratio:.3f} < {self.min_cluster_ratio})")
+                        continue
+
+                clusters_to_output.append(cluster)
+                sequences_covered += cluster_size
+
 
             logging.info(f"Outputting {len(clusters_to_output)} clusters covering {sequences_covered} sequences "
-                         f"({sequences_covered / total_sequences:.1%} of total, min yield: {self.min_yield:.1%})")
+                         f"({sequences_covered / total_sequences:.1%} of total)")
 
             for i, cluster in enumerate(clusters_to_output, 1):
                 actual_size = len(cluster)
@@ -725,7 +734,6 @@ class SpecimenClusterer:
             logging.error(f"Error running medaka: {str(e)}")
             return None
 
-
 def main():
     parser = argparse.ArgumentParser(
         description="MCL-based clustering of nanopore amplicon reads"
@@ -739,8 +747,8 @@ def main():
                         help="MCL inflation parameter (default: 4.0)")
     parser.add_argument("--min-size", type=int, default=5,
                         help="Minimum cluster size (default: 5)")
-    parser.add_argument("--min-yield", type=float, default=0.8,
-                        help="Minimum fraction of sequences to be represented in clusters (default: 0.8)")
+    parser.add_argument("--min-cluster-ratio", type=float, default=0.2,
+                        help="Minimum size ratio between a cluster and the largest cluster (default 0.2)")
     parser.add_argument("--max-sample-size", type=int, default=500,
                         help="Maximum cluster size for consensus (default: 500)")
     parser.add_argument("--presample", type=int, default=1000,
@@ -776,7 +784,7 @@ def main():
         min_identity=args.min_identity,
         inflation=args.inflation,
         min_size=args.min_size,
-        min_yield=args.min_yield,
+        min_cluster_ratio=args.min_cluster_ratio,
         max_sample_size=args.max_sample_size,
         presample_size=args.presample,
         k_nearest_neighbors=args.k_nearest_neighbors,
@@ -800,7 +808,5 @@ def main():
 
     clusterer.cluster(algorithm=args.algorithm)
 
-
 if __name__ == "__main__":
     main()
-
