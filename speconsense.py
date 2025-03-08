@@ -939,8 +939,8 @@ def main():
                         help="Maximum cluster size for consensus (default: 500)")
     parser.add_argument("--presample", type=int, default=1000,
                         help="Presample size for initial reads (default: 1000, 0 to disable)")
-    parser.add_argument("--k-nearest-neighbors", type=int, default=20,
-                        help="Number of nearest neighbors for graph construction (default: 20)")
+    parser.add_argument("--k-nearest-neighbors", type=int, default=5,
+                        help="Number of nearest neighbors for graph construction (default: 5)")
     parser.add_argument("--primers", help="FASTA file containing primer sequences")
     parser.add_argument("--stability-trials", type=int, default=100,
                         help="Number of sampling trials to assess stability (default: 100)")
