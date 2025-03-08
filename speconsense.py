@@ -9,7 +9,8 @@ import statistics
 import subprocess
 import tempfile
 import math
-from typing import List, Set, Tuple, Optional
+import itertools
+from typing import List, Set, Tuple, Optional, Dict
 
 import edlib
 import numpy as np
@@ -18,6 +19,7 @@ from Bio.Seq import reverse_complement
 from tqdm import tqdm
 
 __version__ = "0.1"
+
 
 class SpecimenClusterer:
     def __init__(self, min_identity: float = 0.8,
@@ -29,7 +31,8 @@ class SpecimenClusterer:
                  k_nearest_neighbors: int = 20,
                  disable_stability: bool = False,
                  use_medaka: bool = False,
-                 sample_name: str = "sample"):
+                 sample_name: str = "sample",
+                 max_consensus_distance: int = 0):
         self.min_identity = min_identity
         self.inflation = inflation
         self.min_size = min_size
@@ -40,6 +43,7 @@ class SpecimenClusterer:
         self.disable_stability = disable_stability
         self.use_medaka = use_medaka
         self.sample_name = sample_name
+        self.max_consensus_distance = max_consensus_distance
         self.sequences = {}  # id -> sequence string
         self.records = {}  # id -> SeqRecord object
         self.id_map = {}  # short_id -> original_id
@@ -48,18 +52,49 @@ class SpecimenClusterer:
         # Create debug directory
         os.makedirs("cluster_debug", exist_ok=True)
 
-    def add_sequences(self, records: List[SeqIO.SeqRecord]) -> None:
+    def add_sequences(self, records: List[SeqIO.SeqRecord],
+                      augment_records: Optional[List[SeqIO.SeqRecord]] = None) -> None:
         """Add sequences to be clustered, with optional presampling."""
-        if self.presample_size and len(records) > self.presample_size:
-            logging.info(f"Presampling {self.presample_size} sequences from {len(records)} total")
-            # Sort by quality and take top N
-            quality_sorted = sorted(
+        all_records = records.copy()  # Start with primary records
+
+        # Track the source of each record for potential logging/debugging
+        primary_count = len(records)
+        augment_count = 0
+
+        # Add augmented records if provided
+        if augment_records:
+            augment_count = len(augment_records)
+            all_records.extend(augment_records)
+
+        if self.presample_size and len(all_records) > self.presample_size:
+            logging.info(f"Presampling {self.presample_size} sequences from {len(all_records)} total "
+                         f"({primary_count} primary, {augment_count} augmented)")
+
+            # First, sort primary sequences by quality and take as many as possible
+            primary_sorted = sorted(
                 records,
                 key=lambda r: -statistics.mean(r.letter_annotations["phred_quality"])
             )
-            records = quality_sorted[:self.presample_size]
 
-        for record in records:
+            # Determine how many primary sequences to include (all if possible)
+            primary_to_include = min(len(primary_sorted), self.presample_size)
+            presampled = primary_sorted[:primary_to_include]
+
+            # If we still have room, add augmented sequences sorted by quality
+            remaining_slots = self.presample_size - primary_to_include
+            if remaining_slots > 0 and augment_records:
+                augment_sorted = sorted(
+                    augment_records,
+                    key=lambda r: -statistics.mean(r.letter_annotations["phred_quality"])
+                )
+                presampled.extend(augment_sorted[:remaining_slots])
+
+            logging.info(f"Presampled {len(presampled)} sequences "
+                         f"({primary_to_include} primary, {len(presampled) - primary_to_include} augmented)")
+            all_records = presampled
+
+        # Add all selected records to internal storage
+        for record in all_records:
             self.sequences[record.id] = str(record.seq)
             self.records[record.id] = record
 
@@ -233,6 +268,138 @@ class SpecimenClusterer:
 
         return full_consensus, median_diff, percentile_95
 
+    def merge_similar_clusters(self, clusters: List[Set[str]]) -> List[Set[str]]:
+        """
+        Merge clusters whose consensus sequences are within the specified distance.
+
+        Args:
+            clusters: List of clusters, where each cluster is a set of sequence IDs
+
+        Returns:
+            List of merged clusters
+        """
+        if self.max_consensus_distance < 0:
+            # Skip merging if disabled
+            logging.info("Cluster merging is disabled (max_consensus_distance < 0)")
+            return clusters
+
+        if not clusters:
+            return []
+
+        # Sort clusters by size, largest first
+        clusters = sorted(clusters, key=len, reverse=True)
+
+        # Generate a consensus sequence for each cluster
+        logging.info("Generating consensus sequences for cluster merging...")
+        consensuses = []
+
+        with tqdm(total=len(clusters), desc="Generating cluster consensuses") as pbar:
+            for cluster in clusters:
+                # Sample from larger clusters to speed up consensus generation
+                if len(cluster) > self.max_sample_size:
+                    # Sample by quality
+                    qualities = []
+                    for seq_id in cluster:
+                        record = self.records[seq_id]
+                        mean_quality = statistics.mean(record.letter_annotations["phred_quality"])
+                        qualities.append((mean_quality, seq_id))
+
+                    sampled_ids = [seq_id for _, seq_id in
+                                   sorted(qualities, reverse=True)[:self.max_sample_size]]
+                    sampled_seqs = [self.sequences[seq_id] for seq_id in sampled_ids]
+                else:
+                    sampled_seqs = [self.sequences[seq_id] for seq_id in cluster]
+
+                consensus = self.run_spoa(sampled_seqs)
+                consensuses.append(consensus)
+                pbar.update(1)
+
+        # Check if merging is needed
+        if self.max_consensus_distance == 0:
+            # Special case for identical consensus sequences
+            # Group clusters with identical consensus
+            consensus_to_clusters = defaultdict(list)
+            for i, consensus in enumerate(consensuses):
+                consensus_to_clusters[consensus].append(i)
+
+            merged = []
+            merged_indices = set()
+
+            # Handle clusters with identical consensus sequences
+            for identical_clusters in consensus_to_clusters.values():
+                if len(identical_clusters) > 1:
+                    # Merge clusters with identical consensus
+                    new_cluster = set()
+                    for idx in identical_clusters:
+                        new_cluster.update(clusters[idx])
+                        merged_indices.add(idx)
+                    merged.append(new_cluster)
+
+            # Add remaining unmerged clusters
+            for i, cluster in enumerate(clusters):
+                if i not in merged_indices:
+                    merged.append(cluster)
+
+            if len(merged) < len(clusters):
+                logging.info(f"Merged {len(clusters) - len(merged)} clusters with identical consensus sequences")
+            else:
+                logging.info("No clusters were merged (no identical consensus sequences found)")
+
+            return merged
+
+        # For non-zero distance threshold, more complex merging is needed
+        logging.info(f"Merging clusters with consensus edit distance <= {self.max_consensus_distance}...")
+
+        # Calculate distances between all pairs of consensuses
+        distances = {}
+        for i, j in itertools.combinations(range(len(clusters)), 2):
+            if consensuses[i] and consensuses[j]:  # Skip empty consensuses
+                dist = self.calculate_consensus_distance(consensuses[i], consensuses[j])
+                if dist <= self.max_consensus_distance:
+                    distances[(i, j)] = dist
+
+        # If no clusters are similar enough, return original clusters
+        if not distances:
+            logging.info("No clusters were merged (no similar consensus sequences found)")
+            return clusters
+
+        # Create a mapping from original cluster index to merged cluster index
+        merged_to = list(range(len(clusters)))  # Each cluster initially maps to itself
+
+        # Sort distances by edit distance (ascending)
+        sorted_distances = sorted(distances.items(), key=lambda x: x[1])
+
+        # Merge clusters greedily
+        for (i, j), dist in sorted_distances:
+            # Find the current merged indices
+            root_i = self._find_root(merged_to, i)
+            root_j = self._find_root(merged_to, j)
+
+            # If they are not already merged, merge them
+            if root_i != root_j:
+                # Always merge the smaller root into the larger root for efficiency
+                if len(clusters[root_i]) >= len(clusters[root_j]):
+                    merged_to[root_j] = root_i
+                else:
+                    merged_to[root_i] = root_j
+
+        # Create new merged clusters
+        merged_clusters = defaultdict(set)
+        for i, cluster in enumerate(clusters):
+            root = self._find_root(merged_to, i)
+            merged_clusters[root].update(cluster)
+
+        merged = list(merged_clusters.values())
+        logging.info(f"Merged {len(clusters) - len(merged)} clusters with similar consensus sequences")
+
+        return merged
+
+    def _find_root(self, merged_to: List[int], i: int) -> int:
+        """Find the root index of a merged cluster using path compression."""
+        if merged_to[i] != i:
+            merged_to[i] = self._find_root(merged_to, merged_to[i])
+        return merged_to[i]
+
     def write_cluster_files(self, cluster_num: int, cluster: Set[str],
                             consensus: str, trimmed_consensus: Optional[str] = None,
                             found_primers: Optional[List[str]] = None,
@@ -399,11 +566,18 @@ class SpecimenClusterer:
             else:
                 raise ValueError(f"Unknown clustering algorithm: {algorithm}")
 
-            # Filter clusters by size
+            # Filter clusters by size before merging
             large_clusters = [c for c in clusters if len(c) >= self.min_size]
 
             # Sort by size (largest first)
             large_clusters.sort(key=lambda c: len(c), reverse=True)
+
+            # Merge similar clusters if enabled
+            if self.max_consensus_distance >= 0:
+                merged_clusters = self.merge_similar_clusters(large_clusters)
+                # Re-sort by size after merging
+                merged_clusters.sort(key=lambda c: len(c), reverse=True)
+                large_clusters = merged_clusters
 
             cluster_sizes = [len(c) for c in large_clusters]
             cluster_sizes_str = ', '.join(str(s) for s in cluster_sizes[:10])
@@ -420,6 +594,7 @@ class SpecimenClusterer:
 
             largest_cluster_size = len(large_clusters[0]) if large_clusters else 0
 
+            skipped_clusters = []
             for cluster in large_clusters:
                 cluster_size = len(cluster)
 
@@ -429,13 +604,22 @@ class SpecimenClusterer:
 
                     # Skip this cluster if it's too small relative to the largest cluster
                     if size_ratio < self.min_cluster_ratio:
-                        logging.info(
-                            f"Skipping cluster of size {cluster_size} (ratio to largest: {size_ratio:.3f} < {self.min_cluster_ratio})")
+                        skipped_clusters.append((cluster_size, size_ratio))
                         continue
 
                 clusters_to_output.append(cluster)
                 sequences_covered += cluster_size
 
+            # Log summary of skipped clusters if any were skipped
+            if skipped_clusters:
+                skipped_count = len(skipped_clusters)
+                skipped_sizes = [size for size, _ in skipped_clusters]
+                min_ratio = min([ratio for _, ratio in skipped_clusters])
+                max_ratio = max([ratio for _, ratio in skipped_clusters])
+
+                logging.info(
+                    f"Skipped {skipped_count} clusters with sizes {min(skipped_sizes)}-{max(skipped_sizes)} "
+                    f"(ratios to largest: {min_ratio:.3f}-{max_ratio:.3f} < {self.min_cluster_ratio})")
 
             logging.info(f"Outputting {len(clusters_to_output)} clusters covering {sequences_covered} sequences "
                          f"({sequences_covered / total_sequences:.1%} of total)")
@@ -734,11 +918,13 @@ class SpecimenClusterer:
             logging.error(f"Error running medaka: {str(e)}")
             return None
 
+
 def main():
     parser = argparse.ArgumentParser(
         description="MCL-based clustering of nanopore amplicon reads"
     )
     parser.add_argument("input_file", help="Input FASTQ file")
+    parser.add_argument("--augment-input", help="Additional input FASTQ file with mined sequences")
     parser.add_argument("--algorithm", type=str, default="graph", choices=["graph", "greedy"],
                         help="Clustering algorithm to use (default: graph)")
     parser.add_argument("--min-identity", type=float, default=0.85,
@@ -764,6 +950,8 @@ def main():
                         help="Disable stability assessment")
     parser.add_argument("--medaka", action="store_true",
                         help="Enable consensus polishing with medaka")
+    parser.add_argument("--max-consensus-distance", type=int, default=0,
+                        help="Maximum edit distance between consensus sequences to merge clusters (default: 0, -1 to disable)")
     parser.add_argument("--log-level", default="INFO",
                         choices=["DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL"])
     parser.add_argument("--version", action="version",
@@ -790,16 +978,27 @@ def main():
         k_nearest_neighbors=args.k_nearest_neighbors,
         disable_stability=args.disable_stability,
         use_medaka=args.medaka,
-        sample_name=sample
+        sample_name=sample,
+        max_consensus_distance=args.max_consensus_distance
     )
 
     clusterer.num_trials = args.stability_trials
     clusterer.stability_sample = args.stability_sample
 
-    # Read and optionally presample sequences
+    # Read primary sequences
     logging.info(f"Reading sequences from {args.input_file}")
     records = list(SeqIO.parse(args.input_file, "fastq"))
-    clusterer.add_sequences(records)
+    logging.info(f"Loaded {len(records)} primary sequences")
+
+    # Load augmented sequences if specified
+    augment_records = None
+    if args.augment_input:
+        logging.info(f"Reading augmented sequences from {args.augment_input}")
+        augment_records = list(SeqIO.parse(args.augment_input, "fastq"))
+        logging.info(f"Loaded {len(augment_records)} augmented sequences")
+
+    # Add sequences to clusterer (both primary and augmented)
+    clusterer.add_sequences(records, augment_records)
 
     if args.primers:
         clusterer.load_primers(args.primers)
@@ -807,6 +1006,7 @@ def main():
         logging.warning("No primer file specified. Primer trimming will be disabled.")
 
     clusterer.cluster(algorithm=args.algorithm)
+    print()
 
 if __name__ == "__main__":
     main()
