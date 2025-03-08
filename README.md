@@ -8,6 +8,7 @@ Speconsense is a specialized tool for generating high-quality consensus sequence
 
 The key features of Speconsense include:
 - Robust clustering of amplicon reads using either MCL graph-based or greedy algorithms
+- Automatic merging of clusters with identical or similar consensus sequences
 - High-quality consensus generation using SPOA
 - Primer trimming for clean consensus sequences
 - Optional polishing with Medaka
@@ -53,8 +54,9 @@ python speconsense.py input.fastq
 
 By default, this will:
 1. Cluster reads using graph-based MCL algorithm
-2. Generate a consensus sequence for each cluster
-3. Output FASTA files containing consensus sequences
+2. Merge clusters with identical consensus sequences
+3. Generate a consensus sequence for each cluster
+4. Output FASTA files containing consensus sequences
 
 ### Common Options
 
@@ -79,16 +81,24 @@ python speconsense.py input.fastq --max-sample-size 500
 
 # Filter out reads before clustering
 python speconsense.py input.fastq --presample 1000
+
+# Merge clusters with consensus sequences within 3 edits of each other
+python speconsense.py input.fastq --max-consensus-distance 3
+
+# Disable cluster merging
+python speconsense.py input.fastq --max-consensus-distance -1
 ```
 
 ### Full Command Line Options
 
 ```
-usage: speconsense.py [-h] [--algorithm {graph,greedy}] [--min-identity MIN_IDENTITY] [--inflation INFLATION]
-                     [--min-size MIN_SIZE] [--min-yield MIN_YIELD] [--max-sample-size MAX_SAMPLE_SIZE]
-                     [--presample PRESAMPLE] [--k-nearest-neighbors K_NEAREST_NEIGHBORS] [--primers PRIMERS]
+usage: speconsense.py [-h] [--augment-input AUGMENT_INPUT] [--algorithm {graph,greedy}] [--min-identity MIN_IDENTITY] 
+                     [--inflation INFLATION] [--min-size MIN_SIZE] [--min-cluster-ratio MIN_CLUSTER_RATIO]
+                     [--max-sample-size MAX_SAMPLE_SIZE] [--presample PRESAMPLE] 
+                     [--k-nearest-neighbors K_NEAREST_NEIGHBORS] [--primers PRIMERS]
                      [--stability-trials STABILITY_TRIALS] [--stability-sample STABILITY_SAMPLE]
-                     [--disable-stability] [--medaka] [--log-level {DEBUG,INFO,WARNING,ERROR,CRITICAL}]
+                     [--disable-stability] [--medaka] [--max-consensus-distance MAX_CONSENSUS_DISTANCE]
+                     [--log-level {DEBUG,INFO,WARNING,ERROR,CRITICAL}] [--version]
                      input_file
 
 MCL-based clustering of nanopore amplicon reads
@@ -98,6 +108,8 @@ positional arguments:
 
 optional arguments:
   -h, --help            show this help message and exit
+  --augment-input AUGMENT_INPUT
+                        Additional input FASTQ file with mined sequences
   --algorithm {graph,greedy}
                         Clustering algorithm to use (default: graph)
   --min-identity MIN_IDENTITY
@@ -105,14 +117,14 @@ optional arguments:
   --inflation INFLATION
                         MCL inflation parameter (default: 4.0)
   --min-size MIN_SIZE   Minimum cluster size (default: 5)
-  --min-yield MIN_YIELD
-                        Minimum fraction of sequences to be represented in clusters (default: 0.8)
+  --min-cluster-ratio MIN_CLUSTER_RATIO
+                        Minimum size ratio between a cluster and the largest cluster (default: 0.2)
   --max-sample-size MAX_SAMPLE_SIZE
                         Maximum cluster size for consensus (default: 500)
   --presample PRESAMPLE
                         Presample size for initial reads (default: 1000, 0 to disable)
   --k-nearest-neighbors K_NEAREST_NEIGHBORS
-                        Number of nearest neighbors for graph construction (default: 20)
+                        Number of nearest neighbors for graph construction (default: 5)
   --primers PRIMERS     FASTA file containing primer sequences
   --stability-trials STABILITY_TRIALS
                         Number of sampling trials to assess stability (default: 100)
@@ -120,8 +132,11 @@ optional arguments:
                         Size of stability samples (default: 20)
   --disable-stability   Disable stability assessment
   --medaka              Enable consensus polishing with medaka
+  --max-consensus-distance MAX_CONSENSUS_DISTANCE
+                        Maximum edit distance between consensus sequences to merge clusters (default: 0, -1 to disable)
   --log-level {DEBUG,INFO,WARNING,ERROR,CRITICAL}
                         Set logging level (default: INFO)
+  --version             Show program's version number and exit
 ```
 
 ## Integration with ONT Fungal Barcoding Pipeline
@@ -152,6 +167,18 @@ SpecConsense offers two clustering approaches:
 1. **Graph-based clustering (MCL)**: Constructs a similarity graph between reads and applies the Markov Cluster algorithm to identify clusters. This is the default and recommended method for most datasets.
 
 2. **Greedy clustering**: A simpler approach that iteratively finds seeds with the most connections above the similarity threshold to form clusters. This is provided as a fallback when MCL is not available.
+
+### Cluster Merging
+
+After initial clustering, Speconsense can merge clusters with identical or similar consensus sequences:
+
+1. **Identical consensus merging**: By default (`--max-consensus-distance 0`), only clusters with identical consensus sequences are merged.
+
+2. **Similar consensus merging**: When specifying a positive distance threshold (`--max-consensus-distance N`), clusters whose consensus sequences differ by N or fewer edits will be merged.
+
+3. **Disable merging**: Set `--max-consensus-distance -1` to disable the merging step entirely.
+
+This step helps eliminate redundant clusters that represent the same biological sequence but were separated during the initial clustering.
 
 ### Consensus Generation
 
