@@ -10,7 +10,7 @@ import subprocess
 import tempfile
 import math
 import itertools
-from typing import List, Set, Tuple, Optional, Dict
+from typing import List, Set, Tuple, Optional, Dict, Any
 
 import edlib
 import numpy as np
@@ -19,6 +19,33 @@ from Bio.Seq import reverse_complement
 from tqdm import tqdm
 
 __version__ = "0.1"
+
+# IUPAC nucleotide ambiguity codes mapping
+# Maps sets of nucleotides to their corresponding IUPAC code
+IUPAC_CODES = {
+    # Standard IUPAC codes
+    frozenset(['A']): 'A',
+    frozenset(['C']): 'C',
+    frozenset(['G']): 'G',
+    frozenset(['T']): 'T',
+    frozenset(['A', 'G']): 'R',
+    frozenset(['C', 'T']): 'Y',
+    frozenset(['G', 'C']): 'S',
+    frozenset(['A', 'T']): 'W',
+    frozenset(['G', 'T']): 'K',
+    frozenset(['A', 'C']): 'M',
+    frozenset(['C', 'G', 'T']): 'B',
+    frozenset(['A', 'G', 'T']): 'D',
+    frozenset(['A', 'C', 'T']): 'H',
+    frozenset(['A', 'C', 'G']): 'V',
+    frozenset(['A', 'C', 'G', 'T']): 'N',
+}
+
+
+# Define ambiguity modes
+class AmbiguityMode:
+    NONE = "none"  # No ambiguity codes, use first sequence's base
+    STANDARD = "standard"  # Standard IUPAC codes (no gaps)
 
 
 class SpecimenClusterer:
@@ -32,7 +59,8 @@ class SpecimenClusterer:
                  disable_stability: bool = False,
                  use_medaka: bool = False,
                  sample_name: str = "sample",
-                 max_consensus_distance: int = 0):
+                 max_consensus_distance: int = 0,
+                 ambiguity_mode: str = AmbiguityMode.STANDARD):
         self.min_identity = min_identity
         self.inflation = inflation
         self.min_size = min_size
@@ -44,6 +72,7 @@ class SpecimenClusterer:
         self.use_medaka = use_medaka
         self.sample_name = sample_name
         self.max_consensus_distance = max_consensus_distance
+        self.ambiguity_mode = ambiguity_mode
         self.sequences = {}  # id -> sequence string
         self.records = {}  # id -> SeqRecord object
         self.id_map = {}  # short_id -> original_id
@@ -268,9 +297,109 @@ class SpecimenClusterer:
 
         return full_consensus, median_diff, percentile_95
 
+    def create_iupac_consensus(self, consensuses: List[str]) -> str:
+        """
+        Create a consensus sequence with IUPAC ambiguity codes using SPOA for
+        multiple sequence alignment.
+        """
+        try:
+            # Create a temporary file for SPOA input
+            with tempfile.NamedTemporaryFile(mode='w', delete=False, suffix='.fasta') as f:
+                for i, seq in enumerate(consensuses):
+                    f.write(f">seq{i}\n{seq}\n")
+                temp_input = f.name
+
+            # Run SPOA to generate a multiple sequence alignment
+            cmd = [
+                "spoa",
+                temp_input,
+                "-r", "1",  # MSA output
+                "-l", "1",  # Global alignment
+            ]
+
+            result = subprocess.run(
+                cmd,
+                capture_output=True,
+                text=True,
+                check=True
+            )
+
+            # Clean up input file
+            os.unlink(temp_input)
+
+            # Parse SPOA output to get the MSA
+            aligned_seqs = []
+            current_seq = ""
+            current_header = ""
+
+            for line in result.stdout.split('\n'):
+                if line.startswith('>'):
+                    if current_header and current_seq:
+                        aligned_seqs.append(current_seq)
+                    current_header = line
+                    current_seq = ""
+                elif line.strip():
+                    current_seq += line.strip()
+
+            # Add the last sequence
+            if current_header and current_seq:
+                aligned_seqs.append(current_seq)
+
+            # Check if we got a valid alignment
+            if not aligned_seqs or len(aligned_seqs) != len(consensuses):
+                logging.warning(f"SPOA returned {len(aligned_seqs)} sequences instead of {len(consensuses)}")
+                return None
+
+            # Check all sequences have the same length
+            alignment_length = len(aligned_seqs[0])
+            if not all(len(seq) == alignment_length for seq in aligned_seqs):
+                logging.warning("SPOA alignment produced sequences of different lengths")
+                return None
+
+            # Generate consensus from the MSA based on ambiguity mode
+            consensus_seq = []
+            for pos in range(alignment_length):
+                # Collect all bases at this position
+                all_bases = [seq[pos] for seq in aligned_seqs]
+
+                # Count gaps
+                gap_count = all_bases.count('-')
+
+                # Skip positions where all sequences have gaps
+                if gap_count == len(all_bases):
+                    continue
+
+                # Extract the non-gap bases
+                non_gap_bases = {base.upper() for base in all_bases if base != '-'}
+
+                # In "none" ambiguity mode, just use the first non-gap base
+                if self.ambiguity_mode == AmbiguityMode.NONE:
+                    # Find first non-gap base
+                    for base in all_bases:
+                        if base != '-':
+                            consensus_seq.append(base)
+                            break
+                    continue
+
+                # Handle ambiguity codes based on mode
+                if len(non_gap_bases) == 1:
+                    # Only one type of base
+                    base = next(iter(non_gap_bases))
+                    consensus_seq.append(base)
+                else:
+                    # Standard IUPAC codes (no gaps)
+                    consensus_seq.append(IUPAC_CODES.get(frozenset(non_gap_bases), 'N'))
+
+            return ''.join(consensus_seq)
+
+        except Exception as e:
+            logging.error(f"Error in SPOA-based consensus: {str(e)}")
+            return None
+
     def merge_similar_clusters(self, clusters: List[Set[str]]) -> List[Set[str]]:
         """
         Merge clusters whose consensus sequences are within the specified distance.
+        Only counts unique consensus sequences when tracking merge information.
 
         Args:
             clusters: List of clusters, where each cluster is a set of sequence IDs
@@ -292,9 +421,10 @@ class SpecimenClusterer:
         # Generate a consensus sequence for each cluster
         logging.info("Generating consensus sequences for cluster merging...")
         consensuses = []
+        cluster_to_consensus = {}  # Map from cluster index to its consensus
 
         with tqdm(total=len(clusters), desc="Generating cluster consensuses") as pbar:
-            for cluster in clusters:
+            for i, cluster in enumerate(clusters):
                 # Sample from larger clusters to speed up consensus generation
                 if len(cluster) > self.max_sample_size:
                     # Sample by quality
@@ -312,6 +442,7 @@ class SpecimenClusterer:
 
                 consensus = self.run_spoa(sampled_seqs)
                 consensuses.append(consensus)
+                cluster_to_consensus[i] = consensus
                 pbar.update(1)
 
         # Check if merging is needed
@@ -324,6 +455,7 @@ class SpecimenClusterer:
 
             merged = []
             merged_indices = set()
+            merge_info = {}  # Track which clusters were merged
 
             # Handle clusters with identical consensus sequences
             for identical_clusters in consensus_to_clusters.values():
@@ -333,6 +465,14 @@ class SpecimenClusterer:
                     for idx in identical_clusters:
                         new_cluster.update(clusters[idx])
                         merged_indices.add(idx)
+
+                    # Track merge information - count UNIQUE consensuses
+                    unique_consensuses = {consensuses[idx] for idx in identical_clusters}
+                    merge_info[len(merged)] = {
+                        'merged_count': len(unique_consensuses),
+                        'consensuses': [consensuses[idx] for idx in identical_clusters]
+                    }
+
                     merged.append(new_cluster)
 
             # Add remaining unmerged clusters
@@ -345,6 +485,8 @@ class SpecimenClusterer:
             else:
                 logging.info("No clusters were merged (no identical consensus sequences found)")
 
+            # Store merge info for later use in write_cluster_files
+            self.merge_info = merge_info
             return merged
 
         # For non-zero distance threshold, more complex merging is needed
@@ -361,6 +503,7 @@ class SpecimenClusterer:
         # If no clusters are similar enough, return original clusters
         if not distances:
             logging.info("No clusters were merged (no similar consensus sequences found)")
+            self.merge_info = {}
             return clusters
 
         # Create a mapping from original cluster index to merged cluster index
@@ -368,6 +511,9 @@ class SpecimenClusterer:
 
         # Sort distances by edit distance (ascending)
         sorted_distances = sorted(distances.items(), key=lambda x: x[1])
+
+        # Track which clusters are in each merged group
+        merge_groups = [{i} for i in range(len(clusters))]
 
         # Merge clusters greedily
         for (i, j), dist in sorted_distances:
@@ -380,18 +526,49 @@ class SpecimenClusterer:
                 # Always merge the smaller root into the larger root for efficiency
                 if len(clusters[root_i]) >= len(clusters[root_j]):
                     merged_to[root_j] = root_i
+                    merge_groups[root_i].update(merge_groups[root_j])
+                    merge_groups[root_j] = set()
                 else:
                     merged_to[root_i] = root_j
+                    merge_groups[root_j].update(merge_groups[root_i])
+                    merge_groups[root_i] = set()
 
         # Create new merged clusters
         merged_clusters = defaultdict(set)
+        merge_info = {}
+
         for i, cluster in enumerate(clusters):
             root = self._find_root(merged_to, i)
             merged_clusters[root].update(cluster)
 
+        # Create IUPAC consensus for each merged cluster
+        for merged_idx, original_indices in enumerate(merge_groups):
+            if len(original_indices) > 1:  # This is a merged cluster
+                # Find the root index this merged group maps to
+                root_idx = None
+                for idx in original_indices:
+                    if self._find_root(merged_to, idx) == idx:
+                        root_idx = idx
+                        break
+
+                if root_idx is not None and root_idx in merged_clusters:
+                    # Get consensuses from the original clusters
+                    merged_consensuses = [consensuses[idx] for idx in original_indices if idx in cluster_to_consensus]
+
+                    # Count only unique consensuses
+                    unique_consensuses = set(merged_consensuses)
+
+                    # Create and store merge info
+                    merge_info[root_idx] = {
+                        'merged_count': len(unique_consensuses),
+                        'consensuses': merged_consensuses
+                    }
+
         merged = list(merged_clusters.values())
         logging.info(f"Merged {len(clusters) - len(merged)} clusters with similar consensus sequences")
 
+        # Store merge info for later use in write_cluster_files
+        self.merge_info = merge_info
         return merged
 
     def _find_root(self, merged_to: List[int], i: int) -> int:
@@ -405,13 +582,19 @@ class SpecimenClusterer:
                             found_primers: Optional[List[str]] = None,
                             median_diff: Optional[float] = None,
                             p95_diff: Optional[float] = None,
-                            actual_size: Optional[int] = None) -> None:
-        """Write cluster files: reads FASTQ and consensus FASTA."""
+                            actual_size: Optional[int] = None,
+                            merged_count: Optional[int] = None) -> None:
+        """Write cluster files: reads FASTQ and consensus FASTA/FASTG."""
         cluster_size = len(cluster)
         ric_size = min(actual_size or cluster_size, self.max_sample_size)
 
         # Create info string
         info_parts = [f"size={cluster_size}", f"ric={ric_size}"]
+
+        # Add merged count if this is a merged cluster
+        if merged_count and merged_count > 1:
+            info_parts.append(f"merged={merged_count}")
+
         if median_diff is not None:
             info_parts.append(f"median_diff={median_diff:.1f}")
         if p95_diff is not None:
@@ -432,15 +615,21 @@ class SpecimenClusterer:
             f.write(f">{self.sample_name}-{cluster_num};{info_str}\n")
             f.write(consensus + "\n")
 
-        # Write trimmed consensus to main directory if available
+        file_ext = "fasta"
+
+        output_dir = "."
+
+        # Write trimmed consensus to selected directory if available
         if trimmed_consensus:
-            with open(f"{self.sample_name}-{cluster_num}-RiC{ric_size}.fasta", 'w') as f:
-                f.write(f">{self.sample_name}-{cluster_num};{info_str}\n")
+            with open(os.path.join(output_dir, f"{self.sample_name}-{cluster_num}-RiC{ric_size}.{file_ext}"), 'w') as f:
+                f.write(f">{self.sample_name}-{cluster_num};{info_str}")
+                f.write("\n")
                 f.write(trimmed_consensus + "\n")
         else:
-            # Write untrimmed consensus to main directory if no trimming
-            with open(f"{self.sample_name}-{cluster_num}-RiC{ric_size}.fasta", 'w') as f:
-                f.write(f">{self.sample_name}-{cluster_num};{info_str}\n")
+            # Write untrimmed consensus to selected directory if no trimming
+            with open(os.path.join(output_dir, f"{self.sample_name}-{cluster_num}-RiC{ric_size}.{file_ext}"), 'w') as f:
+                f.write(f">{self.sample_name}-{cluster_num};{info_str}")
+                f.write("\n")
                 f.write(consensus + "\n")
 
     def run_mcl_clustering(self, temp_dir: str) -> List[Set[str]]:
@@ -572,6 +761,9 @@ class SpecimenClusterer:
             # Sort by size (largest first)
             large_clusters.sort(key=lambda c: len(c), reverse=True)
 
+            # Initialize merge_info attribute for tracking merged clusters
+            self.merge_info = {}
+
             # Merge similar clusters if enabled
             if self.max_consensus_distance >= 0:
                 merged_clusters = self.merge_similar_clusters(large_clusters)
@@ -626,7 +818,14 @@ class SpecimenClusterer:
 
             for i, cluster in enumerate(clusters_to_output, 1):
                 actual_size = len(cluster)
+                merged_count = None
 
+                # Check if this cluster was formed by merging
+                cluster_idx = large_clusters.index(cluster)
+                if cluster_idx in self.merge_info:
+                    merged_count = self.merge_info[cluster_idx].get('merged_count', None)
+
+                # Sample sequences for consensus generation if needed
                 if len(cluster) > self.max_sample_size:
                     logging.info(f"Sampling {self.max_sample_size} sequences from cluster {i} (size: {len(cluster)})")
                     qualities = []
@@ -639,11 +838,20 @@ class SpecimenClusterer:
                 else:
                     sampled_ids = cluster
 
+                # Generate consensus
                 consensus, median_diff, p95_diff = self.assess_cluster_stability(
                     sampled_ids,
                     num_trials=getattr(self, 'num_trials', 100),
                     sample_size=getattr(self, 'stability_sample', 20)
                 )
+
+                # If this is a merged cluster and ambiguity codes are enabled, create IUPAC consensus
+                if self.ambiguity_mode != AmbiguityMode.NONE and merged_count and merged_count > 1 and cluster_idx in self.merge_info:
+                    merged_consensuses = self.merge_info[cluster_idx].get('consensuses', [])
+                    if merged_consensuses and len(merged_consensuses) > 1:
+                        iupac_consensus = self.create_iupac_consensus(merged_consensuses)
+                        if iupac_consensus:  # Only use IUPAC consensus if it was successfully created
+                            consensus = iupac_consensus
 
                 if consensus:
                     # If medaka is enabled, polish the consensus before primer trimming
@@ -678,7 +886,8 @@ class SpecimenClusterer:
                         found_primers=found_primers,
                         median_diff=median_diff,
                         p95_diff=p95_diff,
-                        actual_size=actual_size
+                        actual_size=actual_size,
+                        merged_count=merged_count
                     )
 
     def _create_id_mapping(self) -> None:
@@ -948,6 +1157,11 @@ def main():
                         help="Size of stability samples (default: 20)")
     parser.add_argument("--disable-stability", action="store_true",
                         help="Disable stability assessment")
+    parser.add_argument("--ambiguity-mode", type=str, default="standard",
+                        choices=["none", "standard"],
+                        help="How to handle ambiguities in merged consensus sequences: "
+                             "none - no ambiguity codes, "
+                             "standard - regular IUPAC codes, ")
     parser.add_argument("--medaka", action="store_true",
                         help="Enable consensus polishing with medaka")
     parser.add_argument("--max-consensus-distance", type=int, default=0,
@@ -979,7 +1193,8 @@ def main():
         disable_stability=args.disable_stability,
         use_medaka=args.medaka,
         sample_name=sample,
-        max_consensus_distance=args.max_consensus_distance
+        max_consensus_distance=args.max_consensus_distance,
+        ambiguity_mode=args.ambiguity_mode
     )
 
     clusterer.num_trials = args.stability_trials
@@ -1010,3 +1225,4 @@ def main():
 
 if __name__ == "__main__":
     main()
+
