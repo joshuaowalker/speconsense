@@ -1202,7 +1202,8 @@ def main():
 
     # Read primary sequences
     logging.info(f"Reading sequences from {args.input_file}")
-    records = list(SeqIO.parse(args.input_file, "fastq"))
+    format = "fasta" if args.input_file.endswith(".fasta") else "fastq"
+    records = list(SeqIO.parse(args.input_file, format))
     logging.info(f"Loaded {len(records)} primary sequences")
 
     # Load augmented sequences if specified
