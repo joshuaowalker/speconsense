@@ -14,7 +14,7 @@ Speconsense is a Python tool for high-quality clustering and consensus generatio
 speconsense input.fastq
 
 # With common options
-speconsense input.fastq --algorithm greedy --min-size 10 --primers primers.fasta --medaka
+speconsense input.fastq --algorithm greedy --min-size 10 --primers primers.fasta --medaka --variant-merge-threshold 2
 
 # Test with sample data
 speconsense input.fastq --min-identity 0.85 --max-sample-size 500 --presample 1000

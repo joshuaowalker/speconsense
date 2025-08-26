@@ -13,6 +13,7 @@ import itertools
 from typing import List, Set, Tuple, Optional, Dict, Any
 
 import edlib
+from adjusted_identity import score_alignment, AdjustmentParams
 import numpy as np
 from Bio import SeqIO
 from Bio.Seq import reverse_complement
@@ -59,7 +60,7 @@ class SpecimenClusterer:
                  disable_stability: bool = False,
                  use_medaka: bool = False,
                  sample_name: str = "sample",
-                 max_consensus_distance: int = 0,
+                 variant_merge_threshold: int = 0,
                  ambiguity_mode: str = AmbiguityMode.STANDARD):
         self.min_identity = min_identity
         self.inflation = inflation
@@ -71,7 +72,7 @@ class SpecimenClusterer:
         self.disable_stability = disable_stability
         self.use_medaka = use_medaka
         self.sample_name = sample_name
-        self.max_consensus_distance = max_consensus_distance
+        self.variant_merge_threshold = variant_merge_threshold
         self.ambiguity_mode = ambiguity_mode
         self.sequences = {}  # id -> sequence string
         self.records = {}  # id -> SeqRecord object
@@ -407,9 +408,9 @@ class SpecimenClusterer:
         Returns:
             List of merged clusters
         """
-        if self.max_consensus_distance < 0:
+        if self.variant_merge_threshold < 0:
             # Skip merging if disabled
-            logging.info("Cluster merging is disabled (max_consensus_distance < 0)")
+            logging.info("Cluster merging is disabled (variant_merge_threshold < 0)")
             return clusters
 
         if not clusters:
@@ -446,7 +447,7 @@ class SpecimenClusterer:
                 pbar.update(1)
 
         # Check if merging is needed
-        if self.max_consensus_distance == 0:
+        if self.variant_merge_threshold == 0:
             # Special case for identical consensus sequences
             # Group clusters with identical consensus
             consensus_to_clusters = defaultdict(list)
@@ -490,14 +491,14 @@ class SpecimenClusterer:
             return merged
 
         # For non-zero distance threshold, more complex merging is needed
-        logging.info(f"Merging clusters with consensus edit distance <= {self.max_consensus_distance}...")
+        logging.info(f"Merging clusters with consensus distance <= {self.variant_merge_threshold}...")
 
         # Calculate distances between all pairs of consensuses
         distances = {}
         for i, j in itertools.combinations(range(len(clusters)), 2):
             if consensuses[i] and consensuses[j]:  # Skip empty consensuses
                 dist = self.calculate_consensus_distance(consensuses[i], consensuses[j])
-                if dist <= self.max_consensus_distance:
+                if dist <= self.variant_merge_threshold:
                     distances[(i, j)] = dist
 
         # If no clusters are similar enough, return original clusters
@@ -765,7 +766,7 @@ class SpecimenClusterer:
             self.merge_info = {}
 
             # Merge similar clusters if enabled
-            if self.max_consensus_distance >= 0:
+            if self.variant_merge_threshold >= 0:
                 merged_clusters = self.merge_similar_clusters(large_clusters)
                 # Re-sort by size after merging
                 merged_clusters.sort(key=lambda c: len(c), reverse=True)
@@ -1017,6 +1018,7 @@ class SpecimenClusterer:
                     best_start_end = result["locations"][0][1] + 1
 
         if best_start_primer:
+            logging.debug(f"Found {best_start_primer} at 5' end (k={best_start_dist})")
             found_primers.append(f"5'-{best_start_primer}")
             trimmed_seq = trimmed_seq[best_start_end:]
 
@@ -1040,15 +1042,60 @@ class SpecimenClusterer:
                     best_end_start = base_pos + result["locations"][0][0]
 
         if best_end_primer:
+            logging.debug(f"Found {best_end_primer} at 3' end (k={best_end_dist})")
             found_primers.append(f"3'-{best_end_primer}")
             trimmed_seq = trimmed_seq[:best_end_start]
 
         return trimmed_seq, found_primers
 
     def calculate_consensus_distance(self, seq1: str, seq2: str) -> int:
-        """Calculate edit distance between two consensus sequences."""
-        result = edlib.align(seq1, seq2, task="distance")
-        return result["editDistance"] if result["editDistance"] != -1 else len(seq1)
+        """Calculate distance between two consensus sequences using adjusted identity.
+        
+        Uses custom adjustment parameters that enable only homopolymer normalization:
+        - Homopolymer differences (e.g., AAA vs AAAAA) are treated as identical
+        - Regular substitutions, indels, and other differences count as mismatches
+        - No end trimming or indel normalization is applied
+        
+        Returns the mismatches count from adjusted identity scoring.
+        """
+        if not seq1 or not seq2:
+            return max(len(seq1), len(seq2))
+            
+        # Get alignment from edlib
+        result = edlib.align(seq1, seq2, task="path")
+        if result["editDistance"] == -1:
+            # Alignment failed, return maximum possible distance
+            return max(len(seq1), len(seq2))
+            
+        # Get nice alignment for adjusted identity scoring
+        alignment = edlib.getNiceAlignment(result, seq1, seq2)
+        if not alignment or not alignment.get('query_aligned') or not alignment.get('target_aligned'):
+            # Fall back to edit distance if alignment extraction fails
+            return result["editDistance"]
+            
+        # Configure custom adjustment parameters for homopolymer normalization only
+        custom_params = AdjustmentParams(
+            normalize_homopolymers=True,    # Enable homopolymer normalization
+            handle_iupac_overlap=False,     # Disable IUPAC overlap handling
+            normalize_indels=False,         # Disable indel normalization
+            end_skip_distance=0,            # Disable end trimming
+            max_repeat_motif_length=2       # Keep default motif length
+        )
+        
+        # Calculate adjusted identity with custom parameters
+        score_result = score_alignment(
+            alignment['query_aligned'], 
+            alignment['target_aligned'],
+            adjustment_params=custom_params
+        )
+        
+        # Use the mismatches field which is equivalent to edit distance
+        distance = score_result.mismatches
+        
+        logging.debug(f"Adjusted identity (homopolymer-only): {score_result.identity:.3f}, "
+                     f"mismatches: {distance}")
+        
+        return distance
 
     def parse_mcl_output(self, mcl_output_file: str) -> List[Set[str]]:
         """Parse MCL output file into clusters of original sequence IDs."""
@@ -1164,8 +1211,9 @@ def main():
                              "standard - regular IUPAC codes, ")
     parser.add_argument("--medaka", action="store_true",
                         help="Enable consensus polishing with medaka")
-    parser.add_argument("--max-consensus-distance", type=int, default=0,
-                        help="Maximum edit distance between consensus sequences to merge clusters (default: 0, -1 to disable)")
+    parser.add_argument("--variant-merge-threshold", "--max-consensus-distance", 
+                        type=int, default=0, dest="variant_merge_threshold",
+                        help="Maximum distance between consensus sequences to merge sequence variants (default: 0, -1 to disable)")
     parser.add_argument("--log-level", default="INFO",
                         choices=["DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL"])
     parser.add_argument("--version", action="version",
@@ -1193,7 +1241,7 @@ def main():
         disable_stability=args.disable_stability,
         use_medaka=args.medaka,
         sample_name=sample,
-        max_consensus_distance=args.max_consensus_distance,
+        variant_merge_threshold=args.variant_merge_threshold,
         ambiguity_mode=args.ambiguity_mode
     )
 

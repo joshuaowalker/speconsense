@@ -135,11 +135,11 @@ speconsense input.fastq --max-sample-size 500
 # Filter out reads before clustering
 speconsense input.fastq --presample 1000
 
-# Merge clusters with consensus sequences within 3 edits of each other
-speconsense input.fastq --max-consensus-distance 3
+# Merge sequence variants within 3 differences of each other
+speconsense input.fastq --variant-merge-threshold 3
 
-# Disable cluster merging
-speconsense input.fastq --max-consensus-distance -1
+# Disable variant merging
+speconsense input.fastq --variant-merge-threshold -1
 ```
 
 ### Post-processing and Summary
@@ -165,7 +165,7 @@ usage: speconsense.py [-h] [--augment-input AUGMENT_INPUT] [--algorithm {graph,g
                      [--max-sample-size MAX_SAMPLE_SIZE] [--presample PRESAMPLE] 
                      [--k-nearest-neighbors K_NEAREST_NEIGHBORS] [--primers PRIMERS]
                      [--stability-trials STABILITY_TRIALS] [--stability-sample STABILITY_SAMPLE]
-                     [--disable-stability] [--medaka] [--max-consensus-distance MAX_CONSENSUS_DISTANCE]
+                     [--disable-stability] [--medaka] [--variant-merge-threshold VARIANT_MERGE_THRESHOLD]
                      [--log-level {DEBUG,INFO,WARNING,ERROR,CRITICAL}] [--version]
                      input_file
 
@@ -200,8 +200,8 @@ optional arguments:
                         Size of stability samples (default: 20)
   --disable-stability   Disable stability assessment
   --medaka              Enable consensus polishing with medaka
-  --max-consensus-distance MAX_CONSENSUS_DISTANCE
-                        Maximum edit distance between consensus sequences to merge clusters (default: 0, -1 to disable)
+  --variant-merge-threshold VARIANT_MERGE_THRESHOLD
+                        Maximum distance between consensus sequences to merge sequence variants (default: 0, -1 to disable)
   --log-level {DEBUG,INFO,WARNING,ERROR,CRITICAL}
                         Set logging level (default: INFO)
   --version             Show program's version number and exit
@@ -240,13 +240,13 @@ SpecConsense offers two clustering approaches:
 
 After initial clustering, Speconsense can merge clusters with identical or similar consensus sequences:
 
-1. **Identical consensus merging**: By default (`--max-consensus-distance 0`), only clusters with identical consensus sequences are merged.
+1. **Identical sequence merging**: By default (`--variant-merge-threshold 0`), only clusters with identical consensus sequences are merged.
 
-2. **Similar consensus merging**: When specifying a positive distance threshold (`--max-consensus-distance N`), clusters whose consensus sequences differ by N or fewer edits will be merged.
+2. **Similar sequence merging**: When specifying a positive threshold (`--variant-merge-threshold N`), clusters whose consensus sequences differ by N or fewer mismatches will be merged.
 
-3. **Disable merging**: Set `--max-consensus-distance -1` to disable the merging step entirely.
+3. **Disable merging**: Set `--variant-merge-threshold -1` to disable the merging step entirely.
 
-This step helps eliminate redundant clusters that represent the same biological sequence but were separated during the initial clustering.
+This step helps eliminate redundant clusters that represent the same biological sequence but were separated during the initial clustering. The adjusted identity scoring with homopolymer normalization provides more accurate assessment of sequence similarity for merging decisions, especially for nanopore data where homopolymer length variation is common.
 
 ### Consensus Generation
 
@@ -256,10 +256,13 @@ Consensus sequences are generated using SPOA (SIMD Partial Order Alignment) whic
 
 To evaluate the reliability of consensus sequences, Speconsense performs stability assessment by:
 1. Generating multiple consensus sequences from random subsets of the cluster
-2. Measuring the edit distance between each subsample consensus and the full consensus
-3. Reporting the median and 95th percentile distances as stability metrics
+2. Measuring the adjusted identity between each subsample consensus and the full consensus
+3. Converting identity scores to distance metrics for stability reporting
+4. Reporting the median and 95th percentile distances as stability metrics
 
 Sequences with higher than expected distance should be checked for bioinformatic contamination and/or underlying biological variation, as these may indicate mixed clusters or other issues with the data.
+
+**Adjusted Identity Scoring**: Speconsense uses the adjusted-identity algorithm with homopolymer normalization for more accurate sequence comparisons. This means that differences in homopolymer run lengths (e.g., AAA vs AAAAA) are treated as identical, which is particularly important for nanopore sequencing data where homopolymer length calling can be inconsistent.
 
 ### Primer Trimming
 
