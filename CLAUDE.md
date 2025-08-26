@@ -11,28 +11,33 @@ Speconsense is a Python tool for high-quality clustering and consensus generatio
 ### Running the main tool
 ```bash
 # Basic usage
-python speconsense.py input.fastq
+speconsense input.fastq
 
 # With common options
-python speconsense.py input.fastq --algorithm greedy --min-size 10 --primers primers.fasta --medaka
+speconsense input.fastq --algorithm greedy --min-size 10 --primers primers.fasta --medaka
 
 # Test with sample data
-python speconsense.py --min-identity 0.85 --max-sample-size 500 --presample 1000
+speconsense input.fastq --min-identity 0.85 --max-sample-size 500 --presample 1000
 ```
 
 ### Post-processing
 ```bash
 # Generate summary from output files
-python summarize_speconsense.py
+speconsense-summarize
 
 # With custom parameters
-python summarize_speconsense.py --min-ric 5 --source /path/to/output --summary-dir MyResults
+speconsense-summarize --min-ric 5 --source /path/to/output --summary-dir MyResults
 ```
 
-### Dependencies installation
+### Installation
 ```bash
-# Install Python dependencies
-pip install -r requirements.txt
+# Install from GitHub (recommended)
+pip install git+https://github.com/joshuaowalker/speconsense.git
+
+# Or for development
+git clone https://github.com/joshuaowalker/speconsense.git
+cd speconsense
+pip install -e .
 
 # External tools (must be in PATH):
 # - SPOA (SIMD POA): https://github.com/rvaser/spoa
@@ -44,7 +49,7 @@ pip install -r requirements.txt
 
 ### Main Components
 
-**speconsense.py** - Core clustering and consensus tool:
+**speconsense/core.py** - Core clustering and consensus tool (formerly speconsense.py):
 - `SpecimenClusterer` class: Main orchestrator for the clustering pipeline
 - `AmbiguityMode` class: Controls handling of ambiguous nucleotides using IUPAC codes
 - Two clustering algorithms: graph-based MCL (default) and greedy clustering
@@ -52,10 +57,12 @@ pip install -r requirements.txt
 - Optional Medaka polishing integration
 - Cluster merging based on consensus sequence similarity
 
-**summarize_speconsense.py** - Post-processing utility:
+**speconsense/summarize.py** - Post-processing utility (formerly summarize_speconsense.py):
 - Parses Speconsense FASTA output files
 - Generates summary reports and filtered datasets
 - Handles RiC (Reads in Consensus) filtering
+
+**speconsense/cli.py** - Command-line interface entry point for main speconsense command
 
 ### Key Processing Steps
 

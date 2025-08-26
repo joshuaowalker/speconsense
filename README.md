@@ -20,23 +20,22 @@ The key features of Speconsense include:
 ### Requirements
 
 - Python 3.8 or higher
-- Required Python packages:
-  - edlib
-  - numpy
-  - biopython
-  - tqdm
 - External dependencies:
   - [SPOA (SIMD POA)](https://github.com/rvaser/spoa) - Must be in PATH
   - [MCL](https://micans.org/mcl/) - Optional but recommended for graph-based clustering
   - [Medaka](https://github.com/nanoporetech/medaka) - Optional for consensus polishing
 
-```bash
-# Clone the repository
-git clone https://github.com/joshuaowalker/speconsense.git
-cd speconsense
+### Install from GitHub (Recommended)
 
-# Install required Python packages
-pip install -r requirements.txt
+The easiest way to install speconsense is directly from GitHub using pip. We recommend using a virtual environment to avoid dependency conflicts:
+
+```bash
+# Create and activate a virtual environment (recommended)
+python -m venv speconsense-env
+source speconsense-env/bin/activate  # On Windows: speconsense-env\Scripts\activate
+
+# Install directly from GitHub
+pip install git+https://github.com/joshuaowalker/speconsense.git
 
 # External dependencies need to be installed separately
 # SPOA can be installed from https://github.com/rvaser/spoa
@@ -44,12 +43,38 @@ pip install -r requirements.txt
 # Medaka can be installed with: pip install medaka
 ```
 
+After installation, the tools will be available as command-line programs:
+- `speconsense` - Main clustering and consensus tool
+- `speconsense-summarize` - Post-processing and summary tool
+
+To deactivate the virtual environment when done:
+```bash
+deactivate
+```
+
+### Development Installation
+
+For development or if you want to modify the code:
+
+```bash
+# Create and activate a virtual environment (recommended)
+python -m venv speconsense-dev
+source speconsense-dev/bin/activate  # On Windows: speconsense-dev\Scripts\activate
+
+# Clone the repository
+git clone https://github.com/joshuaowalker/speconsense.git
+cd speconsense
+
+# Install in editable mode
+pip install -e .
+```
+
 ## Usage
 
 ### Basic Usage
 
 ```bash
-python speconsense.py input.fastq
+speconsense input.fastq
 ```
 
 By default, this will:
@@ -62,31 +87,46 @@ By default, this will:
 
 ```bash
 # Use greedy clustering algorithm instead of MCL
-python speconsense.py input.fastq --algorithm greedy
+speconsense input.fastq --algorithm greedy
 
 # Set minimum cluster size
-python speconsense.py input.fastq --min-size 10
+speconsense input.fastq --min-size 10
 
 # Set minimum identity threshold for clustering
-python speconsense.py input.fastq --min-identity 0.85
+speconsense input.fastq --min-identity 0.85
 
 # Enable primer trimming
-python speconsense.py input.fastq --primers primers.fasta
+speconsense input.fastq --primers primers.fasta
 
 # Enable Medaka polishing
-python speconsense.py input.fastq --medaka
+speconsense input.fastq --medaka
 
 # Control the maximum sample size for consensus generation
-python speconsense.py input.fastq --max-sample-size 500
+speconsense input.fastq --max-sample-size 500
 
 # Filter out reads before clustering
-python speconsense.py input.fastq --presample 1000
+speconsense input.fastq --presample 1000
 
 # Merge clusters with consensus sequences within 3 edits of each other
-python speconsense.py input.fastq --max-consensus-distance 3
+speconsense input.fastq --max-consensus-distance 3
 
 # Disable cluster merging
-python speconsense.py input.fastq --max-consensus-distance -1
+speconsense input.fastq --max-consensus-distance -1
+```
+
+### Post-processing and Summary
+
+After running speconsense, use the summarize tool to process outputs:
+
+```bash
+# Generate summary with default settings
+speconsense-summarize
+
+# Custom minimum RiC threshold and output directory
+speconsense-summarize --min-ric 5 --summary-dir MyResults
+
+# Process specific source directory
+speconsense-summarize --source /path/to/speconsense/output
 ```
 
 ### Full Command Line Options
@@ -151,11 +191,11 @@ SpecConsense is designed to replace the NGSpeciesID step in the [ONT DNA Barcodi
 ls *.fastq | parallel NGSpeciesID --ont --consensus --t 1 --abundance_ratio 0.2 --top_reads --sample_size 500 --symmetric_map_align_thresholds --aligned_threshold 0.75 --mapped_threshold 1.0 --medaka --fastq {} --outfolder {.}
 
 # With this command using Speconsense:
-ls *.fastq | parallel python speconsense.py {} --medaka --primers primers.fasta
+ls *.fastq | parallel speconsense {} --medaka --primers primers.fasta
 ```
-3. Process the output FASTA files with the summarize_speconsense.py script to prepare them for downstream analysis:
+3. Process the output FASTA files with the speconsense-summarize tool to prepare them for downstream analysis:
 ```bash
-python summarize_speconsense.py
+speconsense-summarize
 ```
 
 ## Algorithm Details
