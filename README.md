@@ -21,8 +21,8 @@ The key features of Speconsense include:
 
 - Python 3.8 or higher
 - External dependencies:
-  - [SPOA (SIMD POA)](https://github.com/rvaser/spoa) - Must be in PATH
-  - [MCL](https://micans.org/mcl/) - Optional but recommended for graph-based clustering
+  - [SPOA (SIMD POA)](https://github.com/rvaser/spoa) - Required (install via conda)
+  - [MCL](https://micans.org/mcl/) - Optional but recommended for graph-based clustering (install via conda)
   - [Medaka](https://github.com/nanoporetech/medaka) - Optional for consensus polishing
 
 ### Install from GitHub (Recommended)
@@ -38,9 +38,9 @@ source speconsense-env/bin/activate  # On Windows: speconsense-env\Scripts\activ
 pip install git+https://github.com/joshuaowalker/speconsense.git
 
 # External dependencies need to be installed separately
-# SPOA can be installed from https://github.com/rvaser/spoa
-# MCL can be installed from https://micans.org/mcl/
-# Medaka can be installed with: pip install medaka
+# SPOA: conda install bioconda::spoa
+# MCL: conda install bioconda::mcl (optional but recommended)
+# Medaka: pip install medaka (optional)
 ```
 
 After installation, the tools will be available as command-line programs:
@@ -51,6 +51,34 @@ To deactivate the virtual environment when done:
 ```bash
 deactivate
 ```
+
+### Installing External Dependencies
+
+**MCL (Markov Clustering) - Recommended:**
+```bash
+# Via conda (easiest)
+conda install bioconda::mcl
+
+# Or from source (more complex)
+# See https://micans.org/mcl/ for source installation
+```
+
+**SPOA (SIMD POA) - Required:**
+```bash
+# Via conda (easiest)
+conda install bioconda::spoa
+
+# Or install from GitHub releases or build from source
+# See https://github.com/rvaser/spoa for source installation instructions
+```
+
+**Medaka - Optional:**
+```bash
+# For consensus polishing (optional)
+pip install medaka
+```
+
+**Note:** If MCL is not available, speconsense will automatically fall back to the greedy clustering algorithm.
 
 ### Development Installation
 

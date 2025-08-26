@@ -40,8 +40,8 @@ cd speconsense
 pip install -e .
 
 # External tools (must be in PATH):
-# - SPOA (SIMD POA): https://github.com/rvaser/spoa
-# - MCL: https://micans.org/mcl/ (optional but recommended)
+# - SPOA: conda install bioconda::spoa
+# - MCL: conda install bioconda::mcl (optional but recommended)
 # - Medaka: pip install medaka (optional)
 ```
 
