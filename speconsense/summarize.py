@@ -248,6 +248,26 @@ def count_ambiguities_in_sequence(sequence: str) -> int:
 
 
 
+def bases_match_with_iupac(base1: str, base2: str) -> bool:
+    """
+    Check if two bases match, considering IUPAC ambiguity codes.
+    Two bases match if their IUPAC expansions have any nucleotides in common.
+    """
+    if base1 == base2:
+        return True
+    
+    # Handle gap characters
+    if base1 == '-' or base2 == '-':
+        return base1 == base2
+    
+    # Expand IUPAC codes and check for overlap
+    expansion1 = expand_iupac_code(base1)
+    expansion2 = expand_iupac_code(base2)
+    
+    # Bases match if their expansions have any nucleotides in common
+    return bool(expansion1.intersection(expansion2))
+
+
 def expand_iupac_code(base: str) -> set:
     """
     Expand an IUPAC code to its constituent nucleotides.
@@ -354,6 +374,92 @@ def create_iupac_consensus(consensuses: List[str]) -> Tuple[Optional[str], int]:
     except Exception as e:
         logging.error(f"Error in pairwise consensus generation: {str(e)}")
         return None, 0
+
+
+def create_variant_summary(primary_seq: str, variant_seq: str) -> str:
+    """
+    Compare a variant sequence to the primary sequence and create a summary string
+    describing the differences. Returns a summary like:
+    "3 substitutions, 1 single-nt indel, 1 short (<= 3nt) indel, 2 long indels"
+    """
+    if not primary_seq or not variant_seq:
+        return "sequences empty - cannot compare"
+    
+    if primary_seq == variant_seq:
+        return "identical sequences"
+    
+    try:
+        # Get alignment from edlib
+        result = edlib.align(primary_seq, variant_seq, task="path")
+        if result["editDistance"] == -1:
+            return "alignment failed"
+        
+        # Get nice alignment to examine differences
+        alignment = edlib.getNiceAlignment(result, primary_seq, variant_seq)
+        if not alignment or not alignment.get('query_aligned') or not alignment.get('target_aligned'):
+            return f"alignment parsing failed - edit distance {result['editDistance']}"
+        
+        query_aligned = alignment['query_aligned']
+        target_aligned = alignment['target_aligned']
+        
+        # Categorize differences
+        substitutions = 0
+        single_nt_indels = 0  # Single nucleotide indels
+        short_indels = 0      # 2-3 nt indels  
+        long_indels = 0       # 4+ nt indels
+        
+        i = 0
+        while i < len(query_aligned):
+            query_char = query_aligned[i]
+            target_char = target_aligned[i]
+            
+            # Check if characters are different, considering IUPAC codes
+            if not bases_match_with_iupac(query_char, target_char):
+                if query_char == '-' or target_char == '-':
+                    # This is an indel - determine its length
+                    indel_length = 1
+                    
+                    # Count consecutive indels
+                    j = i + 1
+                    while j < len(query_aligned) and (query_aligned[j] == '-' or target_aligned[j] == '-'):
+                        indel_length += 1
+                        j += 1
+                    
+                    # Categorize by length
+                    if indel_length == 1:
+                        single_nt_indels += 1
+                    elif indel_length <= 3:
+                        short_indels += 1
+                    else:
+                        long_indels += 1
+                    
+                    # Skip the rest of this indel
+                    i = j
+                    continue
+                else:
+                    # This is a substitution
+                    substitutions += 1
+            
+            i += 1
+        
+        # Build summary string
+        parts = []
+        if substitutions > 0:
+            parts.append(f"{substitutions} substitution{'s' if substitutions != 1 else ''}")
+        if single_nt_indels > 0:
+            parts.append(f"{single_nt_indels} single-nt indel{'s' if single_nt_indels != 1 else ''}")
+        if short_indels > 0:
+            parts.append(f"{short_indels} short (<= 3nt) indel{'s' if short_indels != 1 else ''}")
+        if long_indels > 0:
+            parts.append(f"{long_indels} long indel{'s' if long_indels != 1 else ''}")
+        
+        if not parts:
+            return "identical sequences (after alignment)"
+        
+        return ", ".join(parts)
+        
+    except Exception as e:
+        return f"comparison failed: {str(e)}"
 
 
 def calculate_adjusted_identity_distance(seq1: str, seq2: str) -> float:
@@ -465,7 +571,9 @@ def perform_hac_clustering(consensus_list: List[ConsensusInfo],
     logging.info(f"HAC clustering created {len(groups)} groups")
     for group_id, group_members in groups.items():
         member_names = [m.sample_name for m in group_members]
-        logging.info(f"Group {group_id}: {member_names}")
+        # Convert group_id to final naming (group 0 -> 1, group 1 -> 2, etc.)
+        final_group_name = group_id + 1
+        logging.info(f"Group {final_group_name}: {member_names}")
     
     return groups
 
@@ -477,44 +585,72 @@ def select_variants(group: List[ConsensusInfo],
     Select variants from a group based on the specified strategy.
     Always includes the largest variant first.
     max_variants of -1 means no limit (return all variants).
+    
+    Logs variant summaries for ALL variants in the group, including those
+    that will be skipped in the final output.
     """
-    # Handle no limit case
-    if max_variants == -1:
-        return sorted(group, key=lambda x: x.size, reverse=True)
-    
-    if len(group) <= max_variants + 1:  # +1 for main variant
-        return sorted(group, key=lambda x: x.size, reverse=True)
-    
     # Sort by size, largest first
     sorted_group = sorted(group, key=lambda x: x.size, reverse=True)
     
-    # Always include the largest (main) variant
-    selected = [sorted_group[0]]
-    candidates = sorted_group[1:]
+    if not sorted_group:
+        return []
     
-    if variant_selection == "size":
-        # Select by size
-        selected.extend(candidates[:max_variants])
-    else:  # diversity
-        # Select by diversity (maximum distance from already selected)
-        while len(selected) < max_variants + 1 and candidates:
-            best_candidate = None
-            best_min_distance = -1
-            
-            for candidate in candidates:
-                # Calculate minimum distance to all selected variants
-                min_distance = min(
-                    calculate_adjusted_identity_distance(candidate.sequence, sel.sequence)
-                    for sel in selected
-                )
+    # The primary variant is always the largest
+    primary_variant = sorted_group[0]
+    logging.info(f"Primary: {primary_variant.sample_name} (size={primary_variant.size}, ric={primary_variant.ric})")
+    
+    # Handle no limit case
+    if max_variants == -1:
+        selected = sorted_group
+    elif len(group) <= max_variants + 1:  # +1 for main variant
+        selected = sorted_group
+    else:
+        # Always include the largest (main) variant
+        selected = [primary_variant]
+        candidates = sorted_group[1:]
+        
+        if variant_selection == "size":
+            # Select by size
+            selected.extend(candidates[:max_variants])
+        else:  # diversity
+            # Select by diversity (maximum distance from already selected)
+            while len(selected) < max_variants + 1 and candidates:
+                best_candidate = None
+                best_min_distance = -1
                 
-                if min_distance > best_min_distance:
-                    best_min_distance = min_distance
-                    best_candidate = candidate
-            
-            if best_candidate:
-                selected.append(best_candidate)
-                candidates.remove(best_candidate)
+                for candidate in candidates:
+                    # Calculate minimum distance to all selected variants
+                    min_distance = min(
+                        calculate_adjusted_identity_distance(candidate.sequence, sel.sequence)
+                        for sel in selected
+                    )
+                    
+                    if min_distance > best_min_distance:
+                        best_min_distance = min_distance
+                        best_candidate = candidate
+                
+                if best_candidate:
+                    selected.append(best_candidate)
+                    candidates.remove(best_candidate)
+    
+    # Now generate variant summaries, showing selected variants first in their final order
+    # Then show skipped variants
+    
+    # Log selected variants first (excluding primary, which is already logged)
+    selected_secondary = selected[1:]  # Exclude primary variant
+    for i, variant in enumerate(selected_secondary, 1):
+        variant_summary = create_variant_summary(primary_variant.sequence, variant.sequence)
+        logging.info(f"Variant {i}: (size={variant.size}, ric={variant.ric}) - {variant_summary}")
+    
+    # Log skipped variants
+    selected_names = {variant.sample_name for variant in selected}
+    skipped_variants = [v for v in sorted_group[1:] if v.sample_name not in selected_names]
+    
+    for i, variant in enumerate(skipped_variants):
+        # Calculate what the variant number would have been in the original sorted order
+        original_position = next(j for j, v in enumerate(sorted_group) if v.sample_name == variant.sample_name)
+        variant_summary = create_variant_summary(primary_variant.sequence, variant.sequence)
+        logging.info(f"Variant {original_position}: (size={variant.size}, ric={variant.ric}) - {variant_summary} - skipping")
     
     return selected
 
@@ -765,6 +901,10 @@ def process_single_specimen(file_consensuses: List[ConsensusInfo],
                           reverse=True)
     
     for group_idx, (_, group_members) in enumerate(sorted_groups):
+        # Log group context before variant selection
+        final_group_name = group_idx + 1
+        logging.info(f"Processing Variants in Group {final_group_name}")
+        
         # Select variants for this group
         selected_variants = select_variants(group_members, args.max_variants, args.variant_selection)
         
@@ -797,6 +937,7 @@ def process_single_specimen(file_consensuses: List[ConsensusInfo],
         naming_info[group_idx + 1] = group_naming
     
     logging.info(f"Processed {file_name}: {len(variant_groups)} groups -> {len(final_consensus)} final variants")
+    logging.info("")  # Empty line for readability between specimens
     
     return final_consensus, merge_traceability, naming_info
 
