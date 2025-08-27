@@ -11,7 +11,6 @@ The key features of Speconsense include:
 - Automatic merging of clusters with identical or similar consensus sequences
 - High-quality consensus generation using SPOA
 - Primer trimming for clean consensus sequences
-- Optional polishing with Medaka
 - Stability assessment through subsampling
 - Optimized for fungal amplicon datasets but suitable for any amplicon sequencing application
 
@@ -23,7 +22,6 @@ The key features of Speconsense include:
 - External dependencies:
   - [SPOA (SIMD POA)](https://github.com/rvaser/spoa) - Required (install via conda)
   - [MCL](https://micans.org/mcl/) - Optional but recommended for graph-based clustering (install via conda)
-  - [Medaka](https://github.com/nanoporetech/medaka) - Optional for consensus polishing
 
 ### Install from GitHub (Recommended)
 
@@ -40,7 +38,6 @@ pip install git+https://github.com/joshuaowalker/speconsense.git
 # External dependencies need to be installed separately
 # SPOA: conda install bioconda::spoa
 # MCL: conda install bioconda::mcl (optional but recommended)
-# Medaka: pip install medaka (optional)
 ```
 
 After installation, the tools will be available as command-line programs:
@@ -70,12 +67,6 @@ conda install bioconda::spoa
 
 # Or install from GitHub releases or build from source
 # See https://github.com/rvaser/spoa for source installation instructions
-```
-
-**Medaka - Optional:**
-```bash
-# For consensus polishing (optional)
-pip install medaka
 ```
 
 **Note:** If MCL is not available, speconsense will automatically fall back to the greedy clustering algorithm.
@@ -152,9 +143,6 @@ speconsense input.fastq --min-identity 0.85
 # Enable primer trimming
 speconsense input.fastq --primers primers.fasta
 
-# Enable Medaka polishing
-speconsense input.fastq --medaka
-
 # Control the maximum sample size for consensus generation
 speconsense input.fastq --max-sample-size 500
 
@@ -193,7 +181,7 @@ speconsense results/full/specimen_name.fastq --augment-input recovered.fastq
 speconsense primary_demux.fastq --augment-input recovered_sequences.fastq
 
 # Can be combined with other options
-speconsense primary_demux.fastq --augment-input recovered.fastq --primers primers.fasta --medaka
+speconsense primary_demux.fastq --augment-input recovered.fastq --primers primers.fasta
 ```
 
 **Key Features:**
@@ -232,7 +220,7 @@ usage: speconsense.py [-h] [--augment-input AUGMENT_INPUT] [--algorithm {graph,g
                      [--max-sample-size MAX_SAMPLE_SIZE] [--presample PRESAMPLE] 
                      [--k-nearest-neighbors K_NEAREST_NEIGHBORS] [--primers PRIMERS]
                      [--stability-trials STABILITY_TRIALS] [--stability-sample STABILITY_SAMPLE]
-                     [--disable-stability] [--medaka] [--variant-merge-threshold VARIANT_MERGE_THRESHOLD]
+                     [--disable-stability] [--variant-merge-threshold VARIANT_MERGE_THRESHOLD]
                      [--log-level {DEBUG,INFO,WARNING,ERROR,CRITICAL}] [--version]
                      input_file
 
@@ -266,7 +254,6 @@ optional arguments:
   --stability-sample STABILITY_SAMPLE
                         Size of stability samples (default: 20)
   --disable-stability   Disable stability assessment
-  --medaka              Enable consensus polishing with medaka
   --variant-merge-threshold VARIANT_MERGE_THRESHOLD
                         Maximum distance between consensus sequences to merge sequence variants (default: 0, -1 to disable)
   --log-level {DEBUG,INFO,WARNING,ERROR,CRITICAL}
@@ -286,7 +273,7 @@ SpecConsense is designed to replace the NGSpeciesID step in the [ONT DNA Barcodi
 ls *.fastq | parallel NGSpeciesID --ont --consensus --t 1 --abundance_ratio 0.2 --top_reads --sample_size 500 --symmetric_map_align_thresholds --aligned_threshold 0.75 --mapped_threshold 1.0 --medaka --fastq {} --outfolder {.}
 
 # With this command using Speconsense:
-ls *.fastq | parallel speconsense {} --medaka --primers primers.fasta
+ls *.fastq | parallel speconsense {} --primers primers.fasta
 ```
 3. Process the output FASTA files with the speconsense-summarize tool to prepare them for downstream analysis:
 ```bash

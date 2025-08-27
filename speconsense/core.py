@@ -53,7 +53,6 @@ class SpecimenClusterer:
                  presample_size: int = 1000,
                  k_nearest_neighbors: int = 20,
                  disable_stability: bool = False,
-                 use_medaka: bool = False,
                  sample_name: str = "sample",
                  disable_homopolymer_equivalence: bool = False):
         self.min_identity = min_identity
@@ -64,7 +63,6 @@ class SpecimenClusterer:
         self.presample_size = presample_size
         self.k_nearest_neighbors = k_nearest_neighbors
         self.disable_stability = disable_stability
-        self.use_medaka = use_medaka
         self.sample_name = sample_name
         self.disable_homopolymer_equivalence = disable_homopolymer_equivalence
         self.sequences = {}  # id -> sequence string
@@ -643,25 +641,7 @@ class SpecimenClusterer:
                     # (we use the consensus from the larger cluster during merging)
 
                     if consensus:
-                        # If medaka is enabled, polish the consensus before primer trimming
-                        info_str_medaka = ""
-                        if self.use_medaka:
-                            # Write reads FASTQ for medaka (update naming for new cluster convention)
-                            reads_file = os.path.join("cluster_debug",
-                                                      f"{self.sample_name}-c{i}-RiC{min(actual_size, self.max_sample_size)}-reads.fastq")
-                            with open(reads_file, 'w') as f:
-                                for seq_id in cluster:
-                                    SeqIO.write(self.records[seq_id], f, "fastq")
-
-                            # Run medaka polishing
-                            polished_consensus = self.run_medaka_consensus(reads_file, consensus)
-                            if polished_consensus:
-                                consensus = polished_consensus
-                                info_str_medaka = " medaka=yes"
-                            else:
-                                info_str_medaka = " medaka=failed"
-
-                        # After polishing (if applicable), perform primer trimming
+                        # Perform primer trimming
                         trimmed_consensus = None
                         found_primers = None
                         if hasattr(self, 'primers'):
@@ -941,70 +921,6 @@ class SpecimenClusterer:
                 clusters.append(cluster)
         return clusters
 
-    def run_medaka_consensus(self, reads_file: str, draft_consensus: str) -> Optional[str]:
-        """Run medaka to polish the draft consensus.
-
-        Args:
-            reads_file: Path to FASTQ file containing reads
-            draft_consensus: Draft consensus sequence string
-
-        Returns:
-            Polished consensus sequence or None if polishing failed
-        """
-        try:
-            # Create temporary directory for medaka output
-            with tempfile.TemporaryDirectory() as temp_dir:
-                logging.info(f"Running medaka polishing...")
-
-                # Create a temporary FASTA file for the draft consensus
-                draft_path = os.path.join(temp_dir, "draft.fasta")
-                with open(draft_path, 'w') as f:
-                    f.write(">draft\n")
-                    f.write(draft_consensus + "\n")
-
-                # Run medaka_consensus
-                cmd = [
-                    "medaka_consensus",
-                    "-i", reads_file,
-                    "-d", draft_path,
-                    "-o", temp_dir,
-                    "-t", "1"
-                ]
-
-                result = subprocess.run(
-                    cmd,
-                    check=True,
-                    capture_output=True,
-                    text=True
-                )
-
-                logging.debug(f"Medaka stderr: {result.stderr}")
-
-                # Read the polished consensus from medaka output
-                consensus_path = os.path.join(temp_dir, "consensus.fasta")
-                if not os.path.exists(consensus_path):
-                    logging.error("Medaka failed to produce consensus output")
-                    return None
-
-                for record in SeqIO.parse(consensus_path, "fasta"):
-                    polished_consensus = str(record.seq)
-                    # Calculate difference between draft and polished consensus
-                    edit_distance = self.calculate_consensus_distance(draft_consensus, polished_consensus)
-                    logging.info(f"Medaka polishing completed with {edit_distance} edits")
-                    return polished_consensus
-
-                logging.error("No sequences found in medaka consensus output")
-                return None
-
-        except subprocess.CalledProcessError as e:
-            logging.error(f"Medaka failed with return code {e.returncode}")
-            logging.error(f"Command: {' '.join(cmd)}")
-            logging.error(f"Stderr: {e.stderr}")
-            return None
-
-        except Exception as e:
-            logging.error(f"Error running medaka: {str(e)}")
-            return None
 
 
 def main():
@@ -1036,8 +952,6 @@ def main():
                         help="Size of stability samples (default: 20)")
     parser.add_argument("--disable-stability", action="store_true",
                         help="Disable stability assessment")
-    parser.add_argument("--medaka", action="store_true",
-                        help="Enable consensus polishing with medaka")
     parser.add_argument("--disable-homopolymer-equivalence", action="store_true",
                         help="Disable homopolymer equivalence in cluster merging (only merge identical sequences)")
     parser.add_argument("--log-level", default="INFO",
@@ -1065,7 +979,6 @@ def main():
         presample_size=args.presample,
         k_nearest_neighbors=args.k_nearest_neighbors,
         disable_stability=args.disable_stability,
-        use_medaka=args.medaka,
         sample_name=sample,
         disable_homopolymer_equivalence=args.disable_homopolymer_equivalence
     )

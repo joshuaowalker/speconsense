@@ -14,7 +14,7 @@ Speconsense is a Python tool for high-quality clustering and consensus generatio
 speconsense input.fastq
 
 # With common options
-speconsense input.fastq --algorithm greedy --min-size 10 --primers primers.fasta --medaka --variant-merge-threshold 2
+speconsense input.fastq --algorithm greedy --min-size 10 --primers primers.fasta --variant-merge-threshold 2
 
 # Test with sample data
 speconsense input.fastq --min-identity 0.85 --max-sample-size 500 --presample 1000
@@ -42,7 +42,6 @@ pip install -e .
 # External tools (must be in PATH):
 # - SPOA: conda install bioconda::spoa
 # - MCL: conda install bioconda::mcl (optional but recommended)
-# - Medaka: pip install medaka (optional)
 ```
 
 ## Code Architecture
@@ -54,7 +53,6 @@ pip install -e .
 - `AmbiguityMode` class: Controls handling of ambiguous nucleotides using IUPAC codes
 - Two clustering algorithms: graph-based MCL (default) and greedy clustering
 - Consensus generation using external SPOA tool
-- Optional Medaka polishing integration
 - Cluster merging based on consensus sequence similarity
 
 **speconsense/summarize.py** - Post-processing utility (formerly summarize_speconsense.py):
@@ -78,7 +76,6 @@ pip install -e .
 
 - **SPOA**: Required for consensus generation, must be available in PATH
 - **MCL**: Optional but recommended for graph clustering
-- **Medaka**: Optional for consensus polishing
 - **edlib**: Python library for edit distance calculations
 - **BioPython**: Sequence handling and file I/O
 
