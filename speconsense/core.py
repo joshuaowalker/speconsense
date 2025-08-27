@@ -19,7 +19,7 @@ from Bio import SeqIO
 from Bio.Seq import reverse_complement
 from tqdm import tqdm
 
-__version__ = "0.1"
+__version__ = "0.2.1"
 
 # IUPAC nucleotide ambiguity codes mapping
 # Maps sets of nucleotides to their corresponding IUPAC code
@@ -298,10 +298,14 @@ class SpecimenClusterer:
 
         return full_consensus, median_diff, percentile_95
 
-    def create_iupac_consensus(self, consensuses: List[str]) -> str:
+    def create_iupac_consensus(self, consensuses: List[str]) -> Tuple[str, int]:
         """
         Create a consensus sequence with IUPAC ambiguity codes using SPOA for
         multiple sequence alignment.
+        
+        Returns:
+            Tuple of (consensus_sequence, snp_count) where snp_count is the number
+            of positions with ambiguous nucleotides.
         """
         try:
             # Create a temporary file for SPOA input
@@ -355,10 +359,12 @@ class SpecimenClusterer:
             alignment_length = len(aligned_seqs[0])
             if not all(len(seq) == alignment_length for seq in aligned_seqs):
                 logging.warning("SPOA alignment produced sequences of different lengths")
-                return None
+                return None, 0
 
             # Generate consensus from the MSA based on ambiguity mode
             consensus_seq = []
+            snp_count = 0  # Count positions with ambiguous nucleotides
+            
             for pos in range(alignment_length):
                 # Collect all bases at this position
                 all_bases = [seq[pos] for seq in aligned_seqs]
@@ -388,14 +394,18 @@ class SpecimenClusterer:
                     base = next(iter(non_gap_bases))
                     consensus_seq.append(base)
                 else:
-                    # Standard IUPAC codes (no gaps)
-                    consensus_seq.append(IUPAC_CODES.get(frozenset(non_gap_bases), 'N'))
+                    # Multiple bases - this is a SNP position
+                    iupac_code = IUPAC_CODES.get(frozenset(non_gap_bases), 'N')
+                    consensus_seq.append(iupac_code)
+                    # Count this as a SNP position (has ambiguous nucleotide)
+                    if iupac_code != 'N' or len(non_gap_bases) > 0:  # Count all ambiguous positions
+                        snp_count += 1
 
-            return ''.join(consensus_seq)
+            return ''.join(consensus_seq), snp_count
 
         except Exception as e:
             logging.error(f"Error in SPOA-based consensus: {str(e)}")
-            return None
+            return None, 0
 
     def merge_similar_clusters(self, clusters: List[Set[str]]) -> List[Set[str]]:
         """
@@ -467,11 +477,10 @@ class SpecimenClusterer:
                         new_cluster.update(clusters[idx])
                         merged_indices.add(idx)
 
-                    # Track merge information - count UNIQUE consensuses
-                    unique_consensuses = {consensuses[idx] for idx in identical_clusters}
+                    # Track merge information - just store consensuses
+                    cluster_consensuses = [consensuses[idx] for idx in identical_clusters]
                     merge_info[len(merged)] = {
-                        'merged_count': len(unique_consensuses),
-                        'consensuses': [consensuses[idx] for idx in identical_clusters]
+                        'consensuses': cluster_consensuses
                     }
 
                     merged.append(new_cluster)
@@ -497,8 +506,9 @@ class SpecimenClusterer:
         distances = {}
         for i, j in itertools.combinations(range(len(clusters)), 2):
             if consensuses[i] and consensuses[j]:  # Skip empty consensuses
-                dist = self.calculate_consensus_distance(consensuses[i], consensuses[j])
-                if dist <= self.variant_merge_threshold:
+                dist = self.calculate_consensus_distance(consensuses[i], consensuses[j], require_merge_compatible=True)
+                # Only add to distances if no non-homopolymer indels and within threshold
+                if dist >= 0 and dist <= self.variant_merge_threshold:
                     distances[(i, j)] = dist
 
         # If no clusters are similar enough, return original clusters
@@ -556,12 +566,8 @@ class SpecimenClusterer:
                     # Get consensuses from the original clusters
                     merged_consensuses = [consensuses[idx] for idx in original_indices if idx in cluster_to_consensus]
 
-                    # Count only unique consensuses
-                    unique_consensuses = set(merged_consensuses)
-
-                    # Create and store merge info
+                    # Store merge info
                     merge_info[root_idx] = {
-                        'merged_count': len(unique_consensuses),
                         'consensuses': merged_consensuses
                     }
 
@@ -584,7 +590,7 @@ class SpecimenClusterer:
                             median_diff: Optional[float] = None,
                             p95_diff: Optional[float] = None,
                             actual_size: Optional[int] = None,
-                            merged_count: Optional[int] = None) -> None:
+                            snp_count: Optional[int] = None) -> None:
         """Write cluster files: reads FASTQ and consensus FASTA/FASTG."""
         cluster_size = len(cluster)
         ric_size = min(actual_size or cluster_size, self.max_sample_size)
@@ -592,9 +598,9 @@ class SpecimenClusterer:
         # Create info string
         info_parts = [f"size={cluster_size}", f"ric={ric_size}"]
 
-        # Add merged count if this is a merged cluster
-        if merged_count and merged_count > 1:
-            info_parts.append(f"merged={merged_count}")
+        # Add SNP count if there are ambiguous nucleotides
+        if snp_count and snp_count > 0:
+            info_parts.append(f"snp={snp_count}")
 
         if median_diff is not None:
             info_parts.append(f"median_diff={median_diff:.1f}")
@@ -819,12 +825,9 @@ class SpecimenClusterer:
 
             for i, cluster in enumerate(clusters_to_output, 1):
                 actual_size = len(cluster)
-                merged_count = None
 
                 # Check if this cluster was formed by merging
                 cluster_idx = large_clusters.index(cluster)
-                if cluster_idx in self.merge_info:
-                    merged_count = self.merge_info[cluster_idx].get('merged_count', None)
 
                 # Sample sequences for consensus generation if needed
                 if len(cluster) > self.max_sample_size:
@@ -846,11 +849,14 @@ class SpecimenClusterer:
                     sample_size=getattr(self, 'stability_sample', 20)
                 )
 
+                # Track SNP count for IUPAC consensus
+                snp_count = None
+                
                 # If this is a merged cluster and ambiguity codes are enabled, create IUPAC consensus
-                if self.ambiguity_mode != AmbiguityMode.NONE and merged_count and merged_count > 1 and cluster_idx in self.merge_info:
+                if self.ambiguity_mode != AmbiguityMode.NONE and cluster_idx in self.merge_info:
                     merged_consensuses = self.merge_info[cluster_idx].get('consensuses', [])
                     if merged_consensuses and len(merged_consensuses) > 1:
-                        iupac_consensus = self.create_iupac_consensus(merged_consensuses)
+                        iupac_consensus, snp_count = self.create_iupac_consensus(merged_consensuses)
                         if iupac_consensus:  # Only use IUPAC consensus if it was successfully created
                             consensus = iupac_consensus
 
@@ -888,7 +894,7 @@ class SpecimenClusterer:
                         median_diff=median_diff,
                         p95_diff=p95_diff,
                         actual_size=actual_size,
-                        merged_count=merged_count
+                        snp_count=snp_count
                     )
 
     def _create_id_mapping(self) -> None:
@@ -1048,15 +1054,23 @@ class SpecimenClusterer:
 
         return trimmed_seq, found_primers
 
-    def calculate_consensus_distance(self, seq1: str, seq2: str) -> int:
+    def calculate_consensus_distance(self, seq1: str, seq2: str, require_merge_compatible: bool = False) -> int:
         """Calculate distance between two consensus sequences using adjusted identity.
         
         Uses custom adjustment parameters that enable only homopolymer normalization:
         - Homopolymer differences (e.g., AAA vs AAAAA) are treated as identical
-        - Regular substitutions, indels, and other differences count as mismatches
-        - No end trimming or indel normalization is applied
+        - Regular substitutions count as mismatches
+        - Non-homopolymer indels optionally prevent merging
         
-        Returns the mismatches count from adjusted identity scoring.
+        Args:
+            seq1: First consensus sequence
+            seq2: Second consensus sequence
+            require_merge_compatible: If True, return -1 when sequences have variations
+                                     that cannot be represented in IUPAC consensus (indels)
+        
+        Returns:
+            Distance between sequences (substitutions only), or -1 if require_merge_compatible=True
+            and sequences contain non-homopolymer indels
         """
         if not seq1 or not seq2:
             return max(len(seq1), len(seq2))
@@ -1082,18 +1096,43 @@ class SpecimenClusterer:
             max_repeat_motif_length=2       # Keep default motif length
         )
         
-        # Calculate adjusted identity with custom parameters
+        # Create custom scoring format to distinguish indels from substitutions
+        from adjusted_identity import ScoringFormat
+        custom_format = ScoringFormat(
+            match='|',
+            substitution='X',     # Distinct code for substitutions
+            indel_start='I',      # Distinct code for indels
+            indel_extension='-',
+            homopolymer_extension='=',
+            end_trimmed='.'
+        )
+        
+        # Calculate adjusted identity with custom format
         score_result = score_alignment(
             alignment['query_aligned'], 
             alignment['target_aligned'],
-            adjustment_params=custom_params
+            adjustment_params=custom_params,
+            scoring_format=custom_format
         )
         
-        # Use the mismatches field which is equivalent to edit distance
+        # Check for merge compatibility if requested
+        if require_merge_compatible and 'I' in score_result.score_aligned:
+            logging.debug(f"Non-homopolymer indel detected, sequences not merge-compatible")
+            return -1  # Signal that merging should not occur
+        
+        # Count only substitutions (not homopolymer adjustments or indels)
+        # Note: mismatches includes both substitutions and non-homopolymer indels
+        # For accurate distance when indels are present, we use the mismatches count
         distance = score_result.mismatches
         
-        logging.debug(f"Adjusted identity (homopolymer-only): {score_result.identity:.3f}, "
-                     f"mismatches: {distance}")
+        # Log details about the variations found
+        substitutions = score_result.score_aligned.count('X')
+        indels = score_result.score_aligned.count('I')
+        homopolymers = score_result.score_aligned.count('=')
+        
+        logging.debug(f"Consensus distance: {distance} total mismatches "
+                     f"({substitutions} substitutions, {indels} indels, "
+                     f"{homopolymers} homopolymer adjustments)")
         
         return distance
 

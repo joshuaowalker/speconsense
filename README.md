@@ -242,11 +242,16 @@ After initial clustering, Speconsense can merge clusters with identical or simil
 
 1. **Identical sequence merging**: By default (`--variant-merge-threshold 0`), only clusters with identical consensus sequences are merged.
 
-2. **Similar sequence merging**: When specifying a positive threshold (`--variant-merge-threshold N`), clusters whose consensus sequences differ by N or fewer mismatches will be merged.
+2. **Similar sequence merging**: When specifying a positive threshold (`--variant-merge-threshold N`), clusters whose consensus sequences differ by N or fewer **substitutions** will be merged. Important notes:
+   - Only substitutions (SNPs) count toward the threshold
+   - Homopolymer length differences are ignored (treated as sequencing artifacts)
+   - Non-homopolymer indels prevent merging to ensure IUPAC consensus validity
 
 3. **Disable merging**: Set `--variant-merge-threshold -1` to disable the merging step entirely.
 
 This step helps eliminate redundant clusters that represent the same biological sequence but were separated during the initial clustering. The adjusted identity scoring with homopolymer normalization provides more accurate assessment of sequence similarity for merging decisions, especially for nanopore data where homopolymer length variation is common.
+
+**Merged Cluster Output**: When clusters are merged, the consensus sequence includes IUPAC ambiguity codes at SNP positions. The FASTA header includes `snp=N` indicating the number of positions with ambiguous nucleotides. Note that due to transitive merging, the total SNP count can exceed the merge threshold.
 
 ### Consensus Generation
 
@@ -274,7 +279,8 @@ For each cluster, Speconsense generates:
 
 1. **Main consensus FASTA**: `{sample_name}-{cluster_num}-RiC{size}.fasta`
    - Contains the final (trimmed, if primers provided) consensus sequence
-   - Header includes cluster size, stability metrics, and found primers
+   - Header includes cluster size, stability metrics, found primers, and SNP count (if applicable)
+   - Header format: `>{sample_name}-{cluster_num} size={N} ric={M} [snp={S}] [median_diff={X}] [p95_diff={Y}] [primers=...]`
 
 2. **Debug directory files**:
    - `{sample_name}-{cluster_num}-RiC{size}-reads.fastq`: Original reads in the cluster
