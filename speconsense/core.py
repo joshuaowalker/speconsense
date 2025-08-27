@@ -60,8 +60,8 @@ class SpecimenClusterer:
                  disable_stability: bool = False,
                  use_medaka: bool = False,
                  sample_name: str = "sample",
-                 variant_merge_threshold: int = 0,
-                 ambiguity_mode: str = AmbiguityMode.STANDARD):
+                 ambiguity_mode: str = AmbiguityMode.STANDARD,
+                 disable_homopolymer_equivalence: bool = False):
         self.min_identity = min_identity
         self.inflation = inflation
         self.min_size = min_size
@@ -72,8 +72,8 @@ class SpecimenClusterer:
         self.disable_stability = disable_stability
         self.use_medaka = use_medaka
         self.sample_name = sample_name
-        self.variant_merge_threshold = variant_merge_threshold
         self.ambiguity_mode = ambiguity_mode
+        self.disable_homopolymer_equivalence = disable_homopolymer_equivalence
         self.sequences = {}  # id -> sequence string
         self.records = {}  # id -> SeqRecord object
         self.id_map = {}  # short_id -> original_id
@@ -409,7 +409,7 @@ class SpecimenClusterer:
 
     def merge_similar_clusters(self, clusters: List[Set[str]]) -> List[Set[str]]:
         """
-        Merge clusters whose consensus sequences are within the specified distance.
+        Merge clusters whose consensus sequences are identical or homopolymer-equivalent.
         Only counts unique consensus sequences when tracking merge information.
 
         Args:
@@ -418,11 +418,6 @@ class SpecimenClusterer:
         Returns:
             List of merged clusters
         """
-        if self.variant_merge_threshold < 0:
-            # Skip merging if disabled
-            logging.info("Cluster merging is disabled (variant_merge_threshold < 0)")
-            return clusters
-
         if not clusters:
             return []
 
@@ -456,123 +451,57 @@ class SpecimenClusterer:
                 cluster_to_consensus[i] = consensus
                 pbar.update(1)
 
-        # Check if merging is needed
-        if self.variant_merge_threshold == 0:
-            # Special case for identical consensus sequences
-            # Group clusters with identical consensus
-            consensus_to_clusters = defaultdict(list)
+        consensus_to_clusters = defaultdict(list)
+        
+        if self.disable_homopolymer_equivalence:
+            # Only merge exactly identical sequences
             for i, consensus in enumerate(consensuses):
                 consensus_to_clusters[consensus].append(i)
-
-            merged = []
-            merged_indices = set()
-            merge_info = {}  # Track which clusters were merged
-
-            # Handle clusters with identical consensus sequences
-            for identical_clusters in consensus_to_clusters.values():
-                if len(identical_clusters) > 1:
-                    # Merge clusters with identical consensus
-                    new_cluster = set()
-                    for idx in identical_clusters:
-                        new_cluster.update(clusters[idx])
-                        merged_indices.add(idx)
-
-                    # Track merge information - just store consensuses
-                    cluster_consensuses = [consensuses[idx] for idx in identical_clusters]
-                    merge_info[len(merged)] = {
-                        'consensuses': cluster_consensuses
-                    }
-
-                    merged.append(new_cluster)
-
-            # Add remaining unmerged clusters
-            for i, cluster in enumerate(clusters):
-                if i not in merged_indices:
-                    merged.append(cluster)
-
-            if len(merged) < len(clusters):
-                logging.info(f"Merged {len(clusters) - len(merged)} clusters with identical consensus sequences")
-            else:
-                logging.info("No clusters were merged (no identical consensus sequences found)")
-
-            # Store merge info for later use in write_cluster_files
-            self.merge_info = merge_info
-            return merged
-
-        # For non-zero distance threshold, more complex merging is needed
-        logging.info(f"Merging clusters with consensus distance <= {self.variant_merge_threshold}...")
-
-        # Calculate distances between all pairs of consensuses
-        distances = {}
-        for i, j in itertools.combinations(range(len(clusters)), 2):
-            if consensuses[i] and consensuses[j]:  # Skip empty consensuses
-                dist = self.calculate_consensus_distance(consensuses[i], consensuses[j], require_merge_compatible=True)
-                # Only add to distances if no non-homopolymer indels and within threshold
-                if dist >= 0 and dist <= self.variant_merge_threshold:
-                    distances[(i, j)] = dist
-
-        # If no clusters are similar enough, return original clusters
-        if not distances:
-            logging.info("No clusters were merged (no similar consensus sequences found)")
-            self.merge_info = {}
-            return clusters
-
-        # Create a mapping from original cluster index to merged cluster index
-        merged_to = list(range(len(clusters)))  # Each cluster initially maps to itself
-
-        # Sort distances by edit distance (ascending)
-        sorted_distances = sorted(distances.items(), key=lambda x: x[1])
-
-        # Track which clusters are in each merged group
-        merge_groups = [{i} for i in range(len(clusters))]
-
-        # Merge clusters greedily
-        for (i, j), dist in sorted_distances:
-            # Find the current merged indices
-            root_i = self._find_root(merged_to, i)
-            root_j = self._find_root(merged_to, j)
-
-            # If they are not already merged, merge them
-            if root_i != root_j:
-                # Always merge the smaller root into the larger root for efficiency
-                if len(clusters[root_i]) >= len(clusters[root_j]):
-                    merged_to[root_j] = root_i
-                    merge_groups[root_i].update(merge_groups[root_j])
-                    merge_groups[root_j] = set()
-                else:
-                    merged_to[root_i] = root_j
-                    merge_groups[root_j].update(merge_groups[root_i])
-                    merge_groups[root_i] = set()
-
-        # Create new merged clusters
-        merged_clusters = defaultdict(set)
-        merge_info = {}
-
-        for i, cluster in enumerate(clusters):
-            root = self._find_root(merged_to, i)
-            merged_clusters[root].update(cluster)
-
-        # Create IUPAC consensus for each merged cluster
-        for merged_idx, original_indices in enumerate(merge_groups):
-            if len(original_indices) > 1:  # This is a merged cluster
-                # Find the root index this merged group maps to
-                root_idx = None
-                for idx in original_indices:
-                    if self._find_root(merged_to, idx) == idx:
-                        root_idx = idx
+        else:
+            # Group by homopolymer-equivalent sequences
+            for i, consensus in enumerate(consensuses):
+                # Find if this consensus is homopolymer-equivalent to any existing group
+                found_group = False
+                for existing_consensus in consensus_to_clusters.keys():
+                    if self.are_homopolymer_equivalent(consensus, existing_consensus):
+                        consensus_to_clusters[existing_consensus].append(i)
+                        found_group = True
                         break
+                
+                if not found_group:
+                    consensus_to_clusters[consensus].append(i)
 
-                if root_idx is not None and root_idx in merged_clusters:
-                    # Get consensuses from the original clusters
-                    merged_consensuses = [consensuses[idx] for idx in original_indices if idx in cluster_to_consensus]
+        merged = []
+        merged_indices = set()
+        merge_info = {}  # Track which clusters were merged
 
-                    # Store merge info
-                    merge_info[root_idx] = {
-                        'consensuses': merged_consensuses
-                    }
+        # Handle clusters with equivalent consensus sequences
+        for equivalent_clusters in consensus_to_clusters.values():
+            if len(equivalent_clusters) > 1:
+                # Merge clusters with equivalent consensus
+                new_cluster = set()
+                for idx in equivalent_clusters:
+                    new_cluster.update(clusters[idx])
+                    merged_indices.add(idx)
 
-        merged = list(merged_clusters.values())
-        logging.info(f"Merged {len(clusters) - len(merged)} clusters with similar consensus sequences")
+                # Track merge information - just store consensuses
+                cluster_consensuses = [consensuses[idx] for idx in equivalent_clusters]
+                merge_info[len(merged)] = {
+                    'consensuses': cluster_consensuses
+                }
+
+                merged.append(new_cluster)
+
+        # Add remaining unmerged clusters
+        for i, cluster in enumerate(clusters):
+            if i not in merged_indices:
+                merged.append(cluster)
+
+        merge_type = "identical" if self.disable_homopolymer_equivalence else "homopolymer-equivalent"
+        if len(merged) < len(clusters):
+            logging.info(f"Merged {len(clusters) - len(merged)} clusters with {merge_type} consensus sequences")
+        else:
+            logging.info(f"No clusters were merged (no {merge_type} consensus sequences found)")
 
         # Store merge info for later use in write_cluster_files
         self.merge_info = merge_info
@@ -590,7 +519,8 @@ class SpecimenClusterer:
                             median_diff: Optional[float] = None,
                             p95_diff: Optional[float] = None,
                             actual_size: Optional[int] = None,
-                            snp_count: Optional[int] = None) -> None:
+                            snp_count: Optional[int] = None,
+                            consensus_fasta_handle = None) -> None:
         """Write cluster files: reads FASTQ and consensus FASTA/FASTG."""
         cluster_size = len(cluster)
         ric_size = min(actual_size or cluster_size, self.max_sample_size)
@@ -610,34 +540,23 @@ class SpecimenClusterer:
             info_parts.append(f"primers={','.join(found_primers)}")
         info_str = " ".join(info_parts)
 
-        # Write reads FASTQ to debug directory
-        reads_file = os.path.join("cluster_debug", f"{self.sample_name}-{cluster_num}-RiC{ric_size}-reads.fastq")
+        # Write reads FASTQ to debug directory with new naming convention
+        reads_file = os.path.join("cluster_debug", f"{self.sample_name}-c{cluster_num}-RiC{ric_size}-reads.fastq")
         with open(reads_file, 'w') as f:
             for seq_id in cluster:
                 SeqIO.write(self.records[seq_id], f, "fastq")
 
         # Write untrimmed consensus to debug directory
-        with open(os.path.join("cluster_debug", f"{self.sample_name}-{cluster_num}-RiC{ric_size}-untrimmed.fasta"),
+        with open(os.path.join("cluster_debug", f"{self.sample_name}-c{cluster_num}-RiC{ric_size}-untrimmed.fasta"),
                   'w') as f:
-            f.write(f">{self.sample_name}-{cluster_num};{info_str}\n")
+            f.write(f">{self.sample_name}-c{cluster_num};{info_str}\n")
             f.write(consensus + "\n")
 
-        file_ext = "fasta"
-
-        output_dir = "."
-
-        # Write trimmed consensus to selected directory if available
-        if trimmed_consensus:
-            with open(os.path.join(output_dir, f"{self.sample_name}-{cluster_num}-RiC{ric_size}.{file_ext}"), 'w') as f:
-                f.write(f">{self.sample_name}-{cluster_num};{info_str}")
-                f.write("\n")
-                f.write(trimmed_consensus + "\n")
-        else:
-            # Write untrimmed consensus to selected directory if no trimming
-            with open(os.path.join(output_dir, f"{self.sample_name}-{cluster_num}-RiC{ric_size}.{file_ext}"), 'w') as f:
-                f.write(f">{self.sample_name}-{cluster_num};{info_str}")
-                f.write("\n")
-                f.write(consensus + "\n")
+        # Write consensus to main output file if handle is provided
+        if consensus_fasta_handle:
+            final_consensus = trimmed_consensus if trimmed_consensus else consensus
+            consensus_fasta_handle.write(f">{self.sample_name}-c{cluster_num};{info_str}\n")
+            consensus_fasta_handle.write(final_consensus + "\n")
 
     def run_mcl_clustering(self, temp_dir: str) -> List[Set[str]]:
         """Run MCL clustering algorithm and return the clusters.
@@ -771,12 +690,11 @@ class SpecimenClusterer:
             # Initialize merge_info attribute for tracking merged clusters
             self.merge_info = {}
 
-            # Merge similar clusters if enabled
-            if self.variant_merge_threshold >= 0:
-                merged_clusters = self.merge_similar_clusters(large_clusters)
-                # Re-sort by size after merging
-                merged_clusters.sort(key=lambda c: len(c), reverse=True)
-                large_clusters = merged_clusters
+            # Merge clusters with identical/homopolymer-equivalent consensus sequences
+            merged_clusters = self.merge_similar_clusters(large_clusters)
+            # Re-sort by size after merging
+            merged_clusters.sort(key=lambda c: len(c), reverse=True)
+            large_clusters = merged_clusters
 
             cluster_sizes = [len(c) for c in large_clusters]
             cluster_sizes_str = ', '.join(str(s) for s in cluster_sizes[:10])
@@ -823,79 +741,83 @@ class SpecimenClusterer:
             logging.info(f"Outputting {len(clusters_to_output)} clusters covering {sequences_covered} sequences "
                          f"({sequences_covered / total_sequences:.1%} of total)")
 
-            for i, cluster in enumerate(clusters_to_output, 1):
-                actual_size = len(cluster)
+            # Create the main consensus output file
+            consensus_output_file = f"{self.sample_name}_consensus_sequences.fasta"
+            with open(consensus_output_file, 'w') as consensus_fasta_handle:
+                for i, cluster in enumerate(clusters_to_output, 1):
+                    actual_size = len(cluster)
 
-                # Check if this cluster was formed by merging
-                cluster_idx = large_clusters.index(cluster)
+                    # Check if this cluster was formed by merging
+                    cluster_idx = large_clusters.index(cluster)
 
-                # Sample sequences for consensus generation if needed
-                if len(cluster) > self.max_sample_size:
-                    logging.info(f"Sampling {self.max_sample_size} sequences from cluster {i} (size: {len(cluster)})")
-                    qualities = []
-                    for seq_id in cluster:
-                        record = self.records[seq_id]
-                        mean_quality = statistics.mean(record.letter_annotations["phred_quality"])
-                        qualities.append((mean_quality, seq_id))
-                    sampled_ids = {seq_id for _, seq_id in
-                                   sorted(qualities, reverse=True)[:self.max_sample_size]}
-                else:
-                    sampled_ids = cluster
+                    # Sample sequences for consensus generation if needed
+                    if len(cluster) > self.max_sample_size:
+                        logging.info(f"Sampling {self.max_sample_size} sequences from cluster {i} (size: {len(cluster)})")
+                        qualities = []
+                        for seq_id in cluster:
+                            record = self.records[seq_id]
+                            mean_quality = statistics.mean(record.letter_annotations["phred_quality"])
+                            qualities.append((mean_quality, seq_id))
+                        sampled_ids = {seq_id for _, seq_id in
+                                       sorted(qualities, reverse=True)[:self.max_sample_size]}
+                    else:
+                        sampled_ids = cluster
 
-                # Generate consensus
-                consensus, median_diff, p95_diff = self.assess_cluster_stability(
-                    sampled_ids,
-                    num_trials=getattr(self, 'num_trials', 100),
-                    sample_size=getattr(self, 'stability_sample', 20)
-                )
-
-                # Track SNP count for IUPAC consensus
-                snp_count = None
-                
-                # If this is a merged cluster and ambiguity codes are enabled, create IUPAC consensus
-                if self.ambiguity_mode != AmbiguityMode.NONE and cluster_idx in self.merge_info:
-                    merged_consensuses = self.merge_info[cluster_idx].get('consensuses', [])
-                    if merged_consensuses and len(merged_consensuses) > 1:
-                        iupac_consensus, snp_count = self.create_iupac_consensus(merged_consensuses)
-                        if iupac_consensus:  # Only use IUPAC consensus if it was successfully created
-                            consensus = iupac_consensus
-
-                if consensus:
-                    # If medaka is enabled, polish the consensus before primer trimming
-                    info_str_medaka = ""
-                    if self.use_medaka:
-                        # Write reads FASTQ for medaka
-                        reads_file = os.path.join("cluster_debug",
-                                                  f"{self.sample_name}-{i}-RiC{min(actual_size, self.max_sample_size)}-reads.fastq")
-                        with open(reads_file, 'w') as f:
-                            for seq_id in cluster:
-                                SeqIO.write(self.records[seq_id], f, "fastq")
-
-                        # Run medaka polishing
-                        polished_consensus = self.run_medaka_consensus(reads_file, consensus)
-                        if polished_consensus:
-                            consensus = polished_consensus
-                            info_str_medaka = " medaka=yes"
-                        else:
-                            info_str_medaka = " medaka=failed"
-
-                    # After polishing (if applicable), perform primer trimming
-                    trimmed_consensus = None
-                    found_primers = None
-                    if hasattr(self, 'primers'):
-                        trimmed_consensus, found_primers = self.trim_primers(consensus)
-
-                    self.write_cluster_files(
-                        cluster_num=i,
-                        cluster=cluster,
-                        consensus=consensus,
-                        trimmed_consensus=trimmed_consensus,
-                        found_primers=found_primers,
-                        median_diff=median_diff,
-                        p95_diff=p95_diff,
-                        actual_size=actual_size,
-                        snp_count=snp_count
+                    # Generate consensus
+                    consensus, median_diff, p95_diff = self.assess_cluster_stability(
+                        sampled_ids,
+                        num_trials=getattr(self, 'num_trials', 100),
+                        sample_size=getattr(self, 'stability_sample', 20)
                     )
+
+                    # Track SNP count for IUPAC consensus
+                    snp_count = None
+                    
+                    # If this is a merged cluster and ambiguity codes are enabled, create IUPAC consensus
+                    if self.ambiguity_mode != AmbiguityMode.NONE and cluster_idx in self.merge_info:
+                        merged_consensuses = self.merge_info[cluster_idx].get('consensuses', [])
+                        if merged_consensuses and len(merged_consensuses) > 1:
+                            iupac_consensus, snp_count = self.create_iupac_consensus(merged_consensuses)
+                            if iupac_consensus:  # Only use IUPAC consensus if it was successfully created
+                                consensus = iupac_consensus
+
+                    if consensus:
+                        # If medaka is enabled, polish the consensus before primer trimming
+                        info_str_medaka = ""
+                        if self.use_medaka:
+                            # Write reads FASTQ for medaka (update naming for new cluster convention)
+                            reads_file = os.path.join("cluster_debug",
+                                                      f"{self.sample_name}-c{i}-RiC{min(actual_size, self.max_sample_size)}-reads.fastq")
+                            with open(reads_file, 'w') as f:
+                                for seq_id in cluster:
+                                    SeqIO.write(self.records[seq_id], f, "fastq")
+
+                            # Run medaka polishing
+                            polished_consensus = self.run_medaka_consensus(reads_file, consensus)
+                            if polished_consensus:
+                                consensus = polished_consensus
+                                info_str_medaka = " medaka=yes"
+                            else:
+                                info_str_medaka = " medaka=failed"
+
+                        # After polishing (if applicable), perform primer trimming
+                        trimmed_consensus = None
+                        found_primers = None
+                        if hasattr(self, 'primers'):
+                            trimmed_consensus, found_primers = self.trim_primers(consensus)
+
+                        self.write_cluster_files(
+                            cluster_num=i,
+                            cluster=cluster,
+                            consensus=consensus,
+                            trimmed_consensus=trimmed_consensus,
+                            found_primers=found_primers,
+                            median_diff=median_diff,
+                            p95_diff=p95_diff,
+                            actual_size=actual_size,
+                            snp_count=snp_count,
+                            consensus_fasta_handle=consensus_fasta_handle
+                        )
 
     def _create_id_mapping(self) -> None:
         """Create short numeric IDs for all sequences."""
@@ -1136,6 +1058,17 @@ class SpecimenClusterer:
         
         return distance
 
+    def are_homopolymer_equivalent(self, seq1: str, seq2: str) -> bool:
+        """Check if two sequences are equivalent when considering only homopolymer differences."""
+        if not seq1 or not seq2:
+            return seq1 == seq2
+            
+        # Use calculate_consensus_distance with merge compatibility check
+        # Returns: -1 (non-homopolymer indels), 0 (homopolymer-equivalent), >0 (substitutions)
+        # Only distance == 0 means truly homopolymer-equivalent
+        distance = self.calculate_consensus_distance(seq1, seq2, require_merge_compatible=True)
+        return distance == 0
+
     def parse_mcl_output(self, mcl_output_file: str) -> List[Set[str]]:
         """Parse MCL output file into clusters of original sequence IDs."""
         clusters = []
@@ -1250,9 +1183,8 @@ def main():
                              "standard - regular IUPAC codes, ")
     parser.add_argument("--medaka", action="store_true",
                         help="Enable consensus polishing with medaka")
-    parser.add_argument("--variant-merge-threshold", "--max-consensus-distance", 
-                        type=int, default=0, dest="variant_merge_threshold",
-                        help="Maximum distance between consensus sequences to merge sequence variants (default: 0, -1 to disable)")
+    parser.add_argument("--disable-homopolymer-equivalence", action="store_true",
+                        help="Disable homopolymer equivalence in cluster merging (only merge identical sequences)")
     parser.add_argument("--log-level", default="INFO",
                         choices=["DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL"])
     parser.add_argument("--version", action="version",
@@ -1280,8 +1212,8 @@ def main():
         disable_stability=args.disable_stability,
         use_medaka=args.medaka,
         sample_name=sample,
-        variant_merge_threshold=args.variant_merge_threshold,
-        ambiguity_mode=args.ambiguity_mode
+        ambiguity_mode=args.ambiguity_mode,
+        disable_homopolymer_equivalence=args.disable_homopolymer_equivalence
     )
 
     clusterer.num_trials = args.stability_trials
