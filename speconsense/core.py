@@ -24,7 +24,6 @@ __version__ = "0.2.1"
 # IUPAC nucleotide ambiguity codes mapping
 # Maps sets of nucleotides to their corresponding IUPAC code
 IUPAC_CODES = {
-    # Standard IUPAC codes
     frozenset(['A']): 'A',
     frozenset(['C']): 'C',
     frozenset(['G']): 'G',
@@ -43,11 +42,6 @@ IUPAC_CODES = {
 }
 
 
-# Define ambiguity modes
-class AmbiguityMode:
-    NONE = "none"  # No ambiguity codes, use first sequence's base
-    STANDARD = "standard"  # Standard IUPAC codes (no gaps)
-
 
 class SpecimenClusterer:
     def __init__(self, min_identity: float = 0.8,
@@ -60,7 +54,6 @@ class SpecimenClusterer:
                  disable_stability: bool = False,
                  use_medaka: bool = False,
                  sample_name: str = "sample",
-                 ambiguity_mode: str = AmbiguityMode.STANDARD,
                  disable_homopolymer_equivalence: bool = False):
         self.min_identity = min_identity
         self.inflation = inflation
@@ -72,7 +65,6 @@ class SpecimenClusterer:
         self.disable_stability = disable_stability
         self.use_medaka = use_medaka
         self.sample_name = sample_name
-        self.ambiguity_mode = ambiguity_mode
         self.disable_homopolymer_equivalence = disable_homopolymer_equivalence
         self.sequences = {}  # id -> sequence string
         self.records = {}  # id -> SeqRecord object
@@ -298,115 +290,6 @@ class SpecimenClusterer:
 
         return full_consensus, median_diff, percentile_95
 
-    def create_iupac_consensus(self, consensuses: List[str]) -> Tuple[str, int]:
-        """
-        Create a consensus sequence with IUPAC ambiguity codes using SPOA for
-        multiple sequence alignment.
-        
-        Returns:
-            Tuple of (consensus_sequence, snp_count) where snp_count is the number
-            of positions with ambiguous nucleotides.
-        """
-        try:
-            # Create a temporary file for SPOA input
-            with tempfile.NamedTemporaryFile(mode='w', delete=False, suffix='.fasta') as f:
-                for i, seq in enumerate(consensuses):
-                    f.write(f">seq{i}\n{seq}\n")
-                temp_input = f.name
-
-            # Run SPOA to generate a multiple sequence alignment
-            cmd = [
-                "spoa",
-                temp_input,
-                "-r", "1",  # MSA output
-                "-l", "1",  # Global alignment
-            ]
-
-            result = subprocess.run(
-                cmd,
-                capture_output=True,
-                text=True,
-                check=True
-            )
-
-            # Clean up input file
-            os.unlink(temp_input)
-
-            # Parse SPOA output to get the MSA
-            aligned_seqs = []
-            current_seq = ""
-            current_header = ""
-
-            for line in result.stdout.split('\n'):
-                if line.startswith('>'):
-                    if current_header and current_seq:
-                        aligned_seqs.append(current_seq)
-                    current_header = line
-                    current_seq = ""
-                elif line.strip():
-                    current_seq += line.strip()
-
-            # Add the last sequence
-            if current_header and current_seq:
-                aligned_seqs.append(current_seq)
-
-            # Check if we got a valid alignment
-            if not aligned_seqs or len(aligned_seqs) != len(consensuses):
-                logging.warning(f"SPOA returned {len(aligned_seqs)} sequences instead of {len(consensuses)}")
-                return None
-
-            # Check all sequences have the same length
-            alignment_length = len(aligned_seqs[0])
-            if not all(len(seq) == alignment_length for seq in aligned_seqs):
-                logging.warning("SPOA alignment produced sequences of different lengths")
-                return None, 0
-
-            # Generate consensus from the MSA based on ambiguity mode
-            consensus_seq = []
-            snp_count = 0  # Count positions with ambiguous nucleotides
-            
-            for pos in range(alignment_length):
-                # Collect all bases at this position
-                all_bases = [seq[pos] for seq in aligned_seqs]
-
-                # Count gaps
-                gap_count = all_bases.count('-')
-
-                # Skip positions where all sequences have gaps
-                if gap_count == len(all_bases):
-                    continue
-
-                # Extract the non-gap bases
-                non_gap_bases = {base.upper() for base in all_bases if base != '-'}
-
-                # In "none" ambiguity mode, just use the first non-gap base
-                if self.ambiguity_mode == AmbiguityMode.NONE:
-                    # Find first non-gap base
-                    for base in all_bases:
-                        if base != '-':
-                            consensus_seq.append(base)
-                            break
-                    continue
-
-                # Handle ambiguity codes based on mode
-                if len(non_gap_bases) == 1:
-                    # Only one type of base
-                    base = next(iter(non_gap_bases))
-                    consensus_seq.append(base)
-                else:
-                    # Multiple bases - this is a SNP position
-                    iupac_code = IUPAC_CODES.get(frozenset(non_gap_bases), 'N')
-                    consensus_seq.append(iupac_code)
-                    # Count this as a SNP position (has ambiguous nucleotide)
-                    if iupac_code != 'N' or len(non_gap_bases) > 0:  # Count all ambiguous positions
-                        snp_count += 1
-
-            return ''.join(consensus_seq), snp_count
-
-        except Exception as e:
-            logging.error(f"Error in SPOA-based consensus: {str(e)}")
-            return None, 0
-
     def merge_similar_clusters(self, clusters: List[Set[str]]) -> List[Set[str]]:
         """
         Merge clusters whose consensus sequences are identical or homopolymer-equivalent.
@@ -473,7 +356,6 @@ class SpecimenClusterer:
 
         merged = []
         merged_indices = set()
-        merge_info = {}  # Track which clusters were merged
 
         # Handle clusters with equivalent consensus sequences
         for equivalent_clusters in consensus_to_clusters.values():
@@ -484,11 +366,6 @@ class SpecimenClusterer:
                     new_cluster.update(clusters[idx])
                     merged_indices.add(idx)
 
-                # Track merge information - just store consensuses
-                cluster_consensuses = [consensuses[idx] for idx in equivalent_clusters]
-                merge_info[len(merged)] = {
-                    'consensuses': cluster_consensuses
-                }
 
                 merged.append(new_cluster)
 
@@ -503,8 +380,6 @@ class SpecimenClusterer:
         else:
             logging.info(f"No clusters were merged (no {merge_type} consensus sequences found)")
 
-        # Store merge info for later use in write_cluster_files
-        self.merge_info = merge_info
         return merged
 
     def _find_root(self, merged_to: List[int], i: int) -> int:
@@ -519,7 +394,6 @@ class SpecimenClusterer:
                             median_diff: Optional[float] = None,
                             p95_diff: Optional[float] = None,
                             actual_size: Optional[int] = None,
-                            snp_count: Optional[int] = None,
                             consensus_fasta_handle = None) -> None:
         """Write cluster files: reads FASTQ and consensus FASTA/FASTG."""
         cluster_size = len(cluster)
@@ -527,10 +401,6 @@ class SpecimenClusterer:
 
         # Create info string
         info_parts = [f"size={cluster_size}", f"ric={ric_size}"]
-
-        # Add SNP count if there are ambiguous nucleotides
-        if snp_count and snp_count > 0:
-            info_parts.append(f"snp={snp_count}")
 
         if median_diff is not None:
             info_parts.append(f"median_diff={median_diff:.1f}")
@@ -687,8 +557,6 @@ class SpecimenClusterer:
             # Sort by size (largest first)
             large_clusters.sort(key=lambda c: len(c), reverse=True)
 
-            # Initialize merge_info attribute for tracking merged clusters
-            self.merge_info = {}
 
             # Merge clusters with identical/homopolymer-equivalent consensus sequences
             merged_clusters = self.merge_similar_clusters(large_clusters)
@@ -770,16 +638,8 @@ class SpecimenClusterer:
                         sample_size=getattr(self, 'stability_sample', 20)
                     )
 
-                    # Track SNP count for IUPAC consensus
-                    snp_count = None
-                    
-                    # If this is a merged cluster and ambiguity codes are enabled, create IUPAC consensus
-                    if self.ambiguity_mode != AmbiguityMode.NONE and cluster_idx in self.merge_info:
-                        merged_consensuses = self.merge_info[cluster_idx].get('consensuses', [])
-                        if merged_consensuses and len(merged_consensuses) > 1:
-                            iupac_consensus, snp_count = self.create_iupac_consensus(merged_consensuses)
-                            if iupac_consensus:  # Only use IUPAC consensus if it was successfully created
-                                consensus = iupac_consensus
+                    # For merged homopolymer-equivalent clusters, the consensus is already correct
+                    # (we use the consensus from the larger cluster during merging)
 
                     if consensus:
                         # If medaka is enabled, polish the consensus before primer trimming
@@ -815,7 +675,6 @@ class SpecimenClusterer:
                             median_diff=median_diff,
                             p95_diff=p95_diff,
                             actual_size=actual_size,
-                            snp_count=snp_count,
                             consensus_fasta_handle=consensus_fasta_handle
                         )
 
@@ -1176,11 +1035,6 @@ def main():
                         help="Size of stability samples (default: 20)")
     parser.add_argument("--disable-stability", action="store_true",
                         help="Disable stability assessment")
-    parser.add_argument("--ambiguity-mode", type=str, default="standard",
-                        choices=["none", "standard"],
-                        help="How to handle ambiguities in merged consensus sequences: "
-                             "none - no ambiguity codes, "
-                             "standard - regular IUPAC codes, ")
     parser.add_argument("--medaka", action="store_true",
                         help="Enable consensus polishing with medaka")
     parser.add_argument("--disable-homopolymer-equivalence", action="store_true",
@@ -1212,7 +1066,6 @@ def main():
         disable_stability=args.disable_stability,
         use_medaka=args.medaka,
         sample_name=sample,
-        ambiguity_mode=args.ambiguity_mode,
         disable_homopolymer_equivalence=args.disable_homopolymer_equivalence
     )
 

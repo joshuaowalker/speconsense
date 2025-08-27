@@ -17,6 +17,28 @@ import edlib
 import numpy as np
 from Bio import SeqIO
 from adjusted_identity import score_alignment, AdjustmentParams, ScoringFormat
+import tempfile
+import subprocess
+
+
+# IUPAC nucleotide ambiguity codes mapping
+IUPAC_CODES = {
+    frozenset(['A']): 'A',
+    frozenset(['C']): 'C',
+    frozenset(['G']): 'G',
+    frozenset(['T']): 'T',
+    frozenset(['A', 'G']): 'R',
+    frozenset(['C', 'T']): 'Y',
+    frozenset(['G', 'C']): 'S',
+    frozenset(['A', 'T']): 'W',
+    frozenset(['G', 'T']): 'K',
+    frozenset(['A', 'C']): 'M',
+    frozenset(['C', 'G', 'T']): 'B',
+    frozenset(['A', 'G', 'T']): 'D',
+    frozenset(['A', 'C', 'T']): 'H',
+    frozenset(['A', 'C', 'G']): 'V',
+    frozenset(['A', 'C', 'G', 'T']): 'N',
+}
 
 
 class ConsensusInfo(NamedTuple):
@@ -28,6 +50,7 @@ class ConsensusInfo(NamedTuple):
     ric: int
     size: int
     file_path: str
+    snp_count: Optional[int] = None  # Number of SNPs from IUPAC consensus generation
 
 
 def parse_arguments():
@@ -38,8 +61,8 @@ def parse_arguments():
                         help="Source directory containing Speconsense output (default: current directory)")
     parser.add_argument("--summary-dir", type=str, default="__Summary__",
                         help="Output directory for summary files (default: __Summary__)")
-    parser.add_argument("--variant-merge-threshold", type=int, default=2,
-                        help="Maximum number of SNPs allowed in merged variants (default: 2)")
+    parser.add_argument("--snp-merge-limit", type=int, default=2,
+                        help="Maximum number of SNP positions (bp) allowed in merged consensus sequences (default: 2)")
     parser.add_argument("--variant-group-identity", type=float, default=0.9,
                         help="Identity threshold for variant grouping using HAC (default: 0.9)")
     parser.add_argument("--max-variants", type=int, default=2,
@@ -114,7 +137,8 @@ def load_consensus_sequences(source_folder: str, min_ric: int) -> List[Consensus
                         length=len(record.seq),
                         ric=ric,
                         size=size,
-                        file_path=fasta_file
+                        file_path=fasta_file,
+                        snp_count=None  # No SNP info from original speconsense output
                     )
                     consensus_list.append(consensus_info)
     
@@ -168,123 +192,144 @@ def calculate_substitution_distance(seq1: str, seq2: str) -> int:
         scoring_format=custom_format
     )
     
-    # Count only substitutions (not homopolymer adjustments or indels)
+    # Check for indels - distinguish between internal indels and overhang differences
+    indel_starts = score_result.score_aligned.count('I')
+    indel_extensions = score_result.score_aligned.count('-')
+    end_trimmed = score_result.score_aligned.count('.')
+    
+    # Internal indels (I or -) are not allowed for SNP-only merging
+    if indel_starts > 0 or indel_extensions > 0:
+        logging.debug(f"Found {indel_starts} indel starts and {indel_extensions} indel extensions - sequences incompatible for SNP-only merging")
+        return -1
+    
+    # End trimmed regions (.) are allowed - these represent overhang differences
+    if end_trimmed > 0:
+        logging.debug(f"Found {end_trimmed} end-trimmed positions - overhang differences allowed")
+    
+    # Count only substitutions (not homopolymer adjustments)
     substitutions = score_result.score_aligned.count('X')
     
     logging.debug(f"Substitution distance: {substitutions} substitutions")
     return substitutions
 
 
-def merge_variants_per_file(consensus_list: List[ConsensusInfo], 
-                           variant_merge_threshold: int) -> Tuple[List[ConsensusInfo], Dict[str, List[str]]]:
+def count_ambiguities_in_sequence(sequence: str) -> int:
     """
-    Merge consensus sequences that differ by at most variant_merge_threshold substitutions.
-    Only merges variants within the same input file to prevent cross-specimen contamination.
-    Returns merged consensus list and traceability information.
+    Count the number of ambiguous nucleotides (IUPAC codes other than A, T, G, C) in a sequence.
+    This is used to count existing SNPs before performing merges.
     """
-    if variant_merge_threshold <= 0:
-        logging.info("Variant merging disabled")
-        return consensus_list, {}
+    ambiguous_bases = set(['R', 'Y', 'S', 'W', 'K', 'M', 'B', 'D', 'H', 'V', 'N'])
+    return sum(1 for base in sequence.upper() if base in ambiguous_bases)
+
+
+
+
+def expand_iupac_code(base: str) -> set:
+    """
+    Expand an IUPAC code to its constituent nucleotides.
+    Returns a set of nucleotides that the code represents.
+    """
+    iupac_expansion = {
+        'A': {'A'},
+        'C': {'C'},
+        'G': {'G'},
+        'T': {'T'},
+        'R': {'A', 'G'},
+        'Y': {'C', 'T'},
+        'S': {'G', 'C'},
+        'W': {'A', 'T'},
+        'K': {'G', 'T'},
+        'M': {'A', 'C'},
+        'B': {'C', 'G', 'T'},
+        'D': {'A', 'G', 'T'},
+        'H': {'A', 'C', 'T'},
+        'V': {'A', 'C', 'G'},
+        'N': {'A', 'C', 'G', 'T'},
+    }
     
-    logging.info(f"Merging variants with threshold of {variant_merge_threshold} substitutions")
+    return iupac_expansion.get(base.upper(), {'N'})
+
+
+def create_iupac_consensus(consensuses: List[str]) -> Tuple[Optional[str], int]:
+    """
+    Create a consensus sequence with IUPAC ambiguity codes using adjusted_identity
+    for pairwise alignment. Now only supports exactly 2 sequences since we do
+    pairwise merging.
     
-    # Group by input file to ensure we only merge within specimens
-    file_groups = defaultdict(list)
-    for cons in consensus_list:
-        file_groups[cons.file_path].append(cons)
+    Returns:
+        Tuple of (consensus_sequence, snp_count) where snp_count is the number
+        of positions with ambiguous nucleotides.
+    """
+    if len(consensuses) != 2:
+        raise ValueError(f"create_iupac_consensus now only supports pairwise alignment, got {len(consensuses)} sequences")
+        
+    seq1, seq2 = consensuses
     
-    merged_consensus = []
-    merge_traceability = {}
-    
-    for file_path, file_consensuses in file_groups.items():
-        if len(file_consensuses) <= 1:
-            # No variants to merge in this file
-            merged_consensus.extend(file_consensuses)
-            continue
+    try:
+        # Use the same alignment method as calculate_substitution_distance
+        # Get alignment from edlib first
+        result = edlib.align(seq1, seq2, task="path")
+        if result["editDistance"] == -1:
+            logging.warning("Could not align sequences with edlib")
+            return None, 0
+            
+        nice_alignment = edlib.getNiceAlignment(result, seq1, seq2)
+        query_aligned = nice_alignment['query_aligned']
+        target_aligned = nice_alignment['target_aligned']
+
+        # Use the edlib alignment directly since we already have it
+        aligned_seq1 = query_aligned
+        aligned_seq2 = target_aligned
         
-        # Extract file base name for logging
-        file_name = os.path.basename(file_path)
-        logging.info(f"Processing {len(file_consensuses)} variants from file {file_name}")
+        # Check all sequences have the same length
+        if len(aligned_seq1) != len(aligned_seq2):
+            logging.warning(f"Alignment produced sequences of different lengths: {len(aligned_seq1)} vs {len(aligned_seq2)}")
+            return None, 0
+            
+        alignment_length = len(aligned_seq1)
+
+        # Generate consensus from the pairwise alignment
+        consensus_seq = []
+        snp_count = 0  # Count positions with ambiguous nucleotides
         
-        # Sort by cluster size (largest first) for merging priority
-        file_consensuses.sort(key=lambda x: x.size, reverse=True)
-        
-        # Build distance matrix
-        n = len(file_consensuses)
-        distances = np.zeros((n, n))
-        
-        for i, j in itertools.combinations(range(n), 2):
-            dist = calculate_substitution_distance(
-                file_consensuses[i].sequence,
-                file_consensuses[j].sequence
-            )
-            distances[i, j] = dist
-            distances[j, i] = dist
-        
-        # Greedy merging starting with largest cluster
-        merged_indices = set()
-        merge_groups = []
-        
-        for i in range(n):
-            if i in merged_indices:
+        for pos in range(alignment_length):
+            base1 = aligned_seq1[pos]
+            base2 = aligned_seq2[pos]
+
+            # Skip positions where both sequences have gaps
+            if base1 == '-' and base2 == '-':
                 continue
                 
-            # Start a new merge group with the current consensus
-            current_group = [i]
-            merged_indices.add(i)
+            # Handle gaps by using the non-gap character
+            if base1 == '-' or base2 == '-':
+                non_gap_base = base2 if base1 == '-' else base1
+                consensus_seq.append(non_gap_base)
+                continue
+
+            # Both sequences have bases - expand any existing IUPAC codes
+            bases1 = expand_iupac_code(base1.upper())
+            bases2 = expand_iupac_code(base2.upper())
             
-            # Find all compatible consensuses
-            for j in range(i + 1, n):
-                if j in merged_indices:
-                    continue
-                    
-                # Check if j is compatible with all members of current group
-                compatible = True
-                for group_member in current_group:
-                    if distances[group_member, j] > variant_merge_threshold:
-                        compatible = False
-                        break
-                
-                if compatible:
-                    current_group.append(j)
-                    merged_indices.add(j)
-            
-            merge_groups.append(current_group)
-        
-        # Create merged consensus sequences
-        for group_idx, group in enumerate(merge_groups):
-            if len(group) == 1:
-                # No merging needed
-                merged_consensus.append(file_consensuses[group[0]])
+            # Union of both sets to get all possible nucleotides
+            all_nucleotides = bases1.union(bases2)
+
+            # Handle consensus generation from expanded nucleotides
+            if len(all_nucleotides) == 1:
+                # Only one type of nucleotide
+                nucleotide = next(iter(all_nucleotides))
+                consensus_seq.append(nucleotide)
             else:
-                # Merge group - use the largest (first) as representative
-                representative = file_consensuses[group[0]]
-                
-                # Create traceability entry
-                original_names = [file_consensuses[idx].sample_name for idx in group]
-                merge_key = representative.sample_name
-                merge_traceability[merge_key] = original_names
-                
-                # Create new merged consensus info
-                total_size = sum(file_consensuses[idx].size for idx in group)
-                total_ric = sum(file_consensuses[idx].ric for idx in group)
-                
-                merged_info = ConsensusInfo(
-                    sample_name=representative.sample_name,
-                    cluster_id=representative.cluster_id,
-                    sequence=representative.sequence,
-                    length=representative.length,
-                    ric=total_ric,
-                    size=total_size,
-                    file_path=representative.file_path
-                )
-                
-                merged_consensus.append(merged_info)
-                
-                logging.info(f"Merged {len(group)} variants from {file_name}: {original_names}")
-    
-    logging.info(f"Variant merging completed: {len(consensus_list)} -> {len(merged_consensus)} sequences")
-    return merged_consensus, merge_traceability
+                # Multiple nucleotides - this is a SNP position, need IUPAC code
+                iupac_code = IUPAC_CODES.get(frozenset(all_nucleotides), 'N')
+                consensus_seq.append(iupac_code)
+                # Count this as a SNP position (has ambiguous nucleotide)
+                snp_count += 1
+
+        return ''.join(consensus_seq), snp_count
+
+    except Exception as e:
+        logging.error(f"Error in pairwise consensus generation: {str(e)}")
+        return None, 0
 
 
 def calculate_adjusted_identity_distance(seq1: str, seq2: str) -> float:
@@ -488,7 +533,8 @@ def create_output_structure(groups: Dict[int, List[ConsensusInfo]],
                 length=variant.length,
                 ric=variant.ric,
                 size=variant.size,
-                file_path=variant.file_path
+                file_path=variant.file_path,
+                snp_count=variant.snp_count  # Preserve SNP count from original
             )
             
             final_consensus.append(renamed_variant)
@@ -509,16 +555,22 @@ def write_output_files(final_consensus: List[ConsensusInfo],
     for consensus in final_consensus:
         output_file = os.path.join(summary_folder, f"{consensus.sample_name}.fasta")
         with open(output_file, 'w') as f:
-            # Clean header without stability metrics (p95_diff, median_diff)
-            f.write(f">{consensus.sample_name};length={consensus.length} ric={consensus.ric} size={consensus.size}\n")
+            # Clean header without stability metrics (p95_diff, median_diff), but include SNP count if present
+            header_parts = [f"length={consensus.length}", f"ric={consensus.ric}", f"size={consensus.size}"]
+            if consensus.snp_count is not None and consensus.snp_count > 0:
+                header_parts.append(f"snp={consensus.snp_count}")
+            f.write(f">{consensus.sample_name};{' '.join(header_parts)}\n")
             f.write(f"{consensus.sequence}\n")
     
     # Write combined summary.fasta (without stability metrics)
     summary_fasta_path = os.path.join(summary_folder, 'summary.fasta')
     with open(summary_fasta_path, 'w') as f:
         for consensus in final_consensus:
-            # Clean header without stability metrics (p95_diff, median_diff)
-            f.write(f">{consensus.sample_name};length={consensus.length} ric={consensus.ric} size={consensus.size}\n")
+            # Clean header without stability metrics (p95_diff, median_diff), but include SNP count if present
+            header_parts = [f"length={consensus.length}", f"ric={consensus.ric}", f"size={consensus.size}"]
+            if consensus.snp_count is not None and consensus.snp_count > 0:
+                header_parts.append(f"snp={consensus.snp_count}")
+            f.write(f">{consensus.sample_name};{' '.join(header_parts)}\n")
             f.write(f"{consensus.sequence}\n")
     
     # Write summary statistics
@@ -584,7 +636,7 @@ def process_single_specimen(file_consensuses: List[ConsensusInfo],
     logging.info(f"Processing specimen from file: {file_name}")
     
     # Phase 1: Merge variants within this specimen file
-    merged_consensus, merge_traceability = merge_variants_within_specimen(file_consensuses, args.variant_merge_threshold)
+    merged_consensus, merge_traceability = merge_variants_within_specimen(file_consensuses, args.snp_merge_limit)
     
     if not merged_consensus:
         return [], merge_traceability, {}
@@ -624,7 +676,8 @@ def process_single_specimen(file_consensuses: List[ConsensusInfo],
                 length=variant.length,
                 ric=variant.ric,
                 size=variant.size,
-                file_path=variant.file_path
+                file_path=variant.file_path,
+                snp_count=variant.snp_count  # Preserve SNP count from original
             )
             
             final_consensus.append(renamed_variant)
@@ -638,100 +691,116 @@ def process_single_specimen(file_consensuses: List[ConsensusInfo],
 
 
 def merge_variants_within_specimen(file_consensuses: List[ConsensusInfo], 
-                                 variant_merge_threshold: int) -> Tuple[List[ConsensusInfo], Dict[str, List[str]]]:
+                                 snp_merge_limit: int) -> Tuple[List[ConsensusInfo], Dict[str, List[str]]]:
     """
-    Merge consensus sequences within a single specimen file that differ by at most variant_merge_threshold substitutions.
-    Returns merged consensus list and traceability information.
+    Iteratively merge consensus sequences within a specimen using greedy approach.
+    At each step, finds all valid pairwise merges, selects the one with largest clusters,
+    and enforces that final SNP count doesn't exceed snp_merge_limit.
     """
-    if variant_merge_threshold <= 0 or len(file_consensuses) <= 1:
-        if variant_merge_threshold <= 0:
+    if snp_merge_limit <= 0 or len(file_consensuses) <= 1:
+        if snp_merge_limit <= 0:
             logging.debug("Variant merging disabled for this specimen")
         return file_consensuses, {}
     
     file_name = os.path.basename(file_consensuses[0].file_path)
-    logging.info(f"Merging {len(file_consensuses)} variants within {file_name} (threshold: {variant_merge_threshold} substitutions)")
+    logging.info(f"Merging {len(file_consensuses)} variants within {file_name} (SNP limit: {snp_merge_limit} bp)")
     
-    # Sort by cluster size (largest first) for merging priority
-    file_consensuses.sort(key=lambda x: x.size, reverse=True)
-    
-    # Build distance matrix
-    n = len(file_consensuses)
-    distances = np.zeros((n, n))
-    
-    for i, j in itertools.combinations(range(n), 2):
-        dist = calculate_substitution_distance(
-            file_consensuses[i].sequence,
-            file_consensuses[j].sequence
-        )
-        distances[i, j] = dist
-        distances[j, i] = dist
-    
-    # Greedy merging starting with largest cluster
-    merged_indices = set()
-    merge_groups = []
-    
-    for i in range(n):
-        if i in merged_indices:
-            continue
-            
-        # Start a new merge group with the current consensus
-        current_group = [i]
-        merged_indices.add(i)
-        
-        # Find all compatible consensuses
-        for j in range(i + 1, n):
-            if j in merged_indices:
-                continue
-                
-            # Check if j is compatible with all members of current group
-            compatible = True
-            for group_member in current_group:
-                if distances[group_member, j] > variant_merge_threshold:
-                    compatible = False
-                    break
-            
-            if compatible:
-                current_group.append(j)
-                merged_indices.add(j)
-        
-        merge_groups.append(current_group)
-    
-    # Create merged consensus sequences
-    merged_consensus = []
+    # Create working list that we'll modify during iteration
+    current_consensuses = list(file_consensuses)
     merge_traceability = {}
+    merge_round = 0
     
-    for group in merge_groups:
-        if len(group) == 1:
-            # No merging needed
-            merged_consensus.append(file_consensuses[group[0]])
-        else:
-            # Merge group - use the largest (first) as representative
-            representative = file_consensuses[group[0]]
-            
-            # Create traceability entry
-            original_names = [file_consensuses[idx].sample_name for idx in group]
-            merge_key = representative.sample_name
-            merge_traceability[merge_key] = original_names
-            
-            # Create new merged consensus info
-            total_size = sum(file_consensuses[idx].size for idx in group)
-            total_ric = sum(file_consensuses[idx].ric for idx in group)
-            
-            merged_info = ConsensusInfo(
-                sample_name=representative.sample_name,
-                cluster_id=representative.cluster_id,
-                sequence=representative.sequence,
-                length=representative.length,
-                ric=total_ric,
-                size=total_size,
-                file_path=representative.file_path
-            )
-            
-            merged_consensus.append(merged_info)
-            
-            logging.info(f"Merged {len(group)} variants in {file_name}: {original_names}")
+    while len(current_consensuses) > 1:
+        merge_round += 1
+        logging.debug(f"Merge round {merge_round}: {len(current_consensuses)} consensuses remaining")
+        
+        # Find all valid pairwise merges
+        valid_merges = []
+        
+        for i in range(len(current_consensuses)):
+            for j in range(i + 1, len(current_consensuses)):
+                consensus_i = current_consensuses[i]
+                consensus_j = current_consensuses[j]
+                
+                # Calculate substitution distance between the two sequences
+                dist = calculate_substitution_distance(consensus_i.sequence, consensus_j.sequence)
+                
+                # Skip if sequences contain indels (dist == -1) or exceed SNP limit
+                if dist == -1:
+                    logging.debug(f"Skipping merge: {consensus_i.sample_name} + {consensus_j.sample_name} -> contains indels")
+                    continue
+                elif dist > snp_merge_limit:
+                    logging.debug(f"Skipping merge: {consensus_i.sample_name} + {consensus_j.sample_name} -> {dist} SNPs > {snp_merge_limit} limit")
+                    continue
+                    
+                # Sequences are compatible - test actual IUPAC consensus creation
+                test_sequences = [consensus_i.sequence, consensus_j.sequence]
+                test_consensus, actual_snp_count = create_iupac_consensus(test_sequences)
+                
+                if test_consensus is not None and actual_snp_count <= snp_merge_limit:
+                    # Valid merge - store info for selection
+                    combined_size = consensus_i.size + consensus_j.size
+                    valid_merges.append({
+                        'i': i,
+                        'j': j,
+                        'combined_size': combined_size,
+                        'consensus_sequence': test_consensus,
+                        'snp_count': actual_snp_count,
+                        'distance': dist
+                    })
+                    logging.debug(f"Valid merge: {consensus_i.sample_name} + {consensus_j.sample_name} -> {actual_snp_count} SNPs, combined size {combined_size}")
+                else:
+                    if test_consensus is not None:
+                        logging.debug(f"Rejected merge: {consensus_i.sample_name} + {consensus_j.sample_name} -> {actual_snp_count} SNPs > {snp_merge_limit} bp limit")
+                    else:
+                        logging.warning(f"IUPAC consensus creation failed for {consensus_i.sample_name} + {consensus_j.sample_name}")
+        
+        if not valid_merges:
+            logging.debug("No more valid merges found")
+            break
+        
+        # Select the merge with largest combined size (greedy)
+        # Secondary sort by smallest distance for tie-breaking
+        best_merge = max(valid_merges, key=lambda x: (x['combined_size'], -x['distance']))
+        
+        i, j = best_merge['i'], best_merge['j']
+        consensus_i = current_consensuses[i]
+        consensus_j = current_consensuses[j]
+        
+        logging.info(f"Performing merge: {consensus_i.sample_name} + {consensus_j.sample_name} -> {best_merge['snp_count']} SNPs, size {best_merge['combined_size']}")
+        
+        # Create merged consensus info
+        merged_info = ConsensusInfo(
+            sample_name=consensus_i.sample_name,  # Keep name from larger cluster
+            cluster_id=consensus_i.cluster_id,
+            sequence=best_merge['consensus_sequence'],
+            length=len(best_merge['consensus_sequence']),
+            ric=consensus_i.ric + consensus_j.ric,
+            size=best_merge['combined_size'],
+            file_path=consensus_i.file_path,
+            snp_count=best_merge['snp_count'] if best_merge['snp_count'] > 0 else None
+        )
+        
+        # Update traceability
+        original_names_i = merge_traceability.get(consensus_i.sample_name, [consensus_i.sample_name])
+        original_names_j = merge_traceability.get(consensus_j.sample_name, [consensus_j.sample_name])
+        merge_traceability[merged_info.sample_name] = original_names_i + original_names_j
+        
+        # Remove old entries from traceability if they exist
+        merge_traceability.pop(consensus_j.sample_name, None)
+        
+        # Replace the two consensuses with the merged one
+        # Remove in reverse order to maintain indices
+        current_consensuses.pop(max(i, j))
+        current_consensuses.pop(min(i, j))
+        current_consensuses.append(merged_info)
+        
+        # Sort by size to maintain greedy preference for larger clusters
+        current_consensuses.sort(key=lambda x: x.size, reverse=True)
     
-    return merged_consensus, merge_traceability
+    logging.info(f"Variant merging completed in {merge_round} rounds: {len(file_consensuses)} -> {len(current_consensuses)} consensuses")
+    
+    return current_consensuses, merge_traceability
 
 
 def main():
