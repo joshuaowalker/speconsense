@@ -46,11 +46,11 @@ class ConsensusInfo(NamedTuple):
     sample_name: str
     cluster_id: str
     sequence: str
-    length: int
     ric: int
     size: int
     file_path: str
     snp_count: Optional[int] = None  # Number of SNPs from IUPAC consensus generation
+    primers: Optional[List[str]] = None  # List of detected primer names
 
 
 def parse_arguments():
@@ -66,7 +66,7 @@ def parse_arguments():
     parser.add_argument("--variant-group-identity", type=float, default=0.9,
                         help="Identity threshold for variant grouping using HAC (default: 0.9)")
     parser.add_argument("--max-variants", type=int, default=2,
-                        help="Maximum number of additional variants to output per group (default: 2)")
+                        help="Maximum number of additional variants to output per group (default: 2, -1 = no limit)")
     parser.add_argument("--variant-selection", choices=["size", "diversity"], default="size",
                         help="Variant selection strategy: size or diversity (default: size)")
     parser.add_argument("--log-level", default="INFO",
@@ -75,15 +75,35 @@ def parse_arguments():
     return parser.parse_args()
 
 
-def setup_logging(log_level: str):
-    """Setup logging configuration."""
-    logging.basicConfig(
-        level=getattr(logging, log_level),
-        format='%(asctime)s - %(levelname)s - %(message)s'
-    )
+def setup_logging(log_level: str, log_file: str = None):
+    """Setup logging configuration with optional file output."""
+    # Clear any existing handlers
+    for handler in logging.root.handlers[:]:
+        logging.root.removeHandler(handler)
+    
+    # Create formatter
+    formatter = logging.Formatter('%(asctime)s - %(levelname)s - %(message)s')
+    
+    # Console handler
+    console_handler = logging.StreamHandler()
+    console_handler.setFormatter(formatter)
+    
+    # Set up root logger
+    logger = logging.getLogger()
+    logger.setLevel(getattr(logging, log_level))
+    logger.addHandler(console_handler)
+    
+    # File handler if specified
+    if log_file:
+        file_handler = logging.FileHandler(log_file, mode='w')
+        file_handler.setFormatter(formatter)
+        logger.addHandler(file_handler)
+        return log_file
+    
+    return None
 
 
-def parse_consensus_header(header: str) -> Tuple[Optional[str], Optional[int], Optional[int]]:
+def parse_consensus_header(header: str) -> Tuple[Optional[str], Optional[int], Optional[int], Optional[List[str]]]:
     """
     Extract information from Speconsense consensus FASTA header.
     
@@ -92,7 +112,7 @@ def parse_consensus_header(header: str) -> Tuple[Optional[str], Optional[int], O
     """
     sample_match = re.match(r'>([^;]+);(.+)', header)
     if not sample_match:
-        return None, None, None
+        return None, None, None, None
 
     sample_name = sample_match.group(1)
     info_string = sample_match.group(2)
@@ -105,10 +125,14 @@ def parse_consensus_header(header: str) -> Tuple[Optional[str], Optional[int], O
     size_match = re.search(r'size=(\d+)', info_string)
     size = int(size_match.group(1)) if size_match else 0
 
+    # Extract primers value
+    primers_match = re.search(r'primers=([^,\s]+(?:,[^,\s]+)*)', info_string)
+    primers = primers_match.group(1).split(',') if primers_match else None
+
     # Note: median_diff and p95_diff are available in original files but
     # are intentionally not extracted here as they will be dropped from final output
     
-    return sample_name, ric, size
+    return sample_name, ric, size, primers
 
 
 def load_consensus_sequences(source_folder: str, min_ric: int) -> List[ConsensusInfo]:
@@ -116,14 +140,14 @@ def load_consensus_sequences(source_folder: str, min_ric: int) -> List[Consensus
     consensus_list = []
     
     # Find all consensus FASTA files matching the new naming pattern
-    fasta_pattern = os.path.join(source_folder, "*_consensus_sequences.fasta")
+    fasta_pattern = os.path.join(source_folder, "*-all.fasta")
     
     for fasta_file in sorted(glob.glob(fasta_pattern)):
         logging.info(f"Processing consensus file: {fasta_file}")
         
         with open(fasta_file, 'r') as f:
             for record in SeqIO.parse(f, "fasta"):
-                sample_name, ric, size = parse_consensus_header(f">{record.description}")
+                sample_name, ric, size, primers = parse_consensus_header(f">{record.description}")
                 
                 if sample_name and ric >= min_ric:
                     # Extract cluster ID from sample name (e.g., "sample-c1" -> "c1")
@@ -134,11 +158,11 @@ def load_consensus_sequences(source_folder: str, min_ric: int) -> List[Consensus
                         sample_name=sample_name,
                         cluster_id=cluster_id,
                         sequence=str(record.seq),
-                        length=len(record.seq),
                         ric=ric,
                         size=size,
                         file_path=fasta_file,
-                        snp_count=None  # No SNP info from original speconsense output
+                        snp_count=None,  # No SNP info from original speconsense output
+                        primers=primers
                     )
                     consensus_list.append(consensus_info)
     
@@ -452,7 +476,12 @@ def select_variants(group: List[ConsensusInfo],
     """
     Select variants from a group based on the specified strategy.
     Always includes the largest variant first.
+    max_variants of -1 means no limit (return all variants).
     """
+    # Handle no limit case
+    if max_variants == -1:
+        return sorted(group, key=lambda x: x.size, reverse=True)
+    
     if len(group) <= max_variants + 1:  # +1 for main variant
         return sorted(group, key=lambda x: x.size, reverse=True)
     
@@ -500,7 +529,7 @@ def create_output_structure(groups: Dict[int, List[ConsensusInfo]],
     """
     os.makedirs(summary_folder, exist_ok=True)
     os.makedirs(os.path.join(summary_folder, 'FASTQ Files'), exist_ok=True)
-    os.makedirs(os.path.join(summary_folder, 'original_clusters'), exist_ok=True)
+    os.makedirs(os.path.join(summary_folder, 'raw_clusters'), exist_ok=True)
     
     final_consensus = []
     naming_info = {}
@@ -530,11 +559,11 @@ def create_output_structure(groups: Dict[int, List[ConsensusInfo]],
                 sample_name=new_name,
                 cluster_id=variant.cluster_id,
                 sequence=variant.sequence,
-                length=variant.length,
                 ric=variant.ric,
                 size=variant.size,
                 file_path=variant.file_path,
-                snp_count=variant.snp_count  # Preserve SNP count from original
+                snp_count=variant.snp_count,  # Preserve SNP count from original
+                primers=variant.primers  # Preserve primers
             )
             
             final_consensus.append(renamed_variant)
@@ -545,31 +574,130 @@ def create_output_structure(groups: Dict[int, List[ConsensusInfo]],
     return final_consensus, naming_info
 
 
+def write_consensus_fastq(consensus: ConsensusInfo, 
+                         merge_traceability: Dict[str, List[str]],
+                         naming_info: Dict,
+                         fastq_dir: str):
+    """Write FASTQ file for a consensus containing all reads from contributing clusters."""
+    import glob
+    from Bio import SeqIO
+    
+    # Find all original cluster names that contributed to this consensus
+    contributing_clusters = set()
+    
+    # Start with the consensus sample name, but we need to trace back to original clusters
+    # Use merge_traceability to find all original clusters that were merged
+    current_name = consensus.sample_name
+    
+    # Find the original cluster name(s) by looking through naming_info
+    original_clusters = []
+    for group_naming in naming_info.values():
+        for original_name, final_name in group_naming:
+            if final_name == current_name:
+                # This original cluster contributed to our final consensus
+                if original_name in merge_traceability:
+                    # This was a merged cluster, get all original contributors
+                    original_clusters.extend(merge_traceability[original_name])
+                else:
+                    # This was not merged, just add it directly
+                    original_clusters.append(original_name)
+                break
+    
+    if not original_clusters:
+        logging.warning(f"Could not find contributing clusters for {consensus.sample_name}")
+        return
+    
+    # Find FASTQ files for these clusters in cluster_debug directory
+    fastq_output_path = os.path.join(fastq_dir, f"{consensus.sample_name}.fastq")
+    reads_written = 0
+    
+    with open(fastq_output_path, 'w') as outf:
+        for cluster_name in original_clusters:
+            # Look for reads FASTQ file in cluster_debug
+            debug_pattern = f"cluster_debug/*{cluster_name}*reads.fastq"
+            debug_files = glob.glob(debug_pattern)
+            
+            for debug_file in debug_files:
+                try:
+                    with open(debug_file, 'r') as inf:
+                        for record in SeqIO.parse(inf, "fastq"):
+                            SeqIO.write(record, outf, "fastq")
+                            reads_written += 1
+                except Exception as e:
+                    logging.debug(f"Could not read {debug_file}: {e}")
+    
+    if reads_written > 0:
+        logging.debug(f"Wrote {reads_written} reads to {fastq_output_path}")
+    else:
+        logging.warning(f"No reads found for {consensus.sample_name} from clusters: {original_clusters}")
+
+
+def copy_raw_cluster_fastq(consensus: ConsensusInfo, raw_clusters_dir: str):
+    """Copy all cluster FASTQ files for a specimen from cluster_debug."""
+    import glob
+    import os
+    import shutil
+    
+    # Extract base specimen name from consensus file path
+    # e.g., "sample-all.fasta" -> "sample"
+    base_name = os.path.basename(consensus.file_path).replace('-all.fasta', '')
+    
+    # Look for ALL cluster FASTQ files for this specimen in cluster_debug
+    debug_pattern = f"cluster_debug/{base_name}*reads.fastq"
+    debug_files = glob.glob(debug_pattern)
+    
+    copied_count = 0
+    for source_fastq in debug_files:
+        dest_fastq = os.path.join(raw_clusters_dir, os.path.basename(source_fastq))
+        
+        try:
+            shutil.copy(source_fastq, dest_fastq)
+            copied_count += 1
+            logging.debug(f"Copied raw cluster FASTQ: {os.path.basename(source_fastq)}")
+        except Exception as e:
+            logging.warning(f"Could not copy FASTQ file {source_fastq}: {e}")
+    
+    if copied_count > 0:
+        logging.debug(f"Copied {copied_count} cluster FASTQ files for specimen {base_name}")
+    else:
+        logging.debug(f"No cluster FASTQ files found for specimen {base_name} in cluster_debug/")
+
+
 def write_output_files(final_consensus: List[ConsensusInfo],
                       merge_traceability: Dict[str, List[str]],
                       naming_info: Dict,
-                      summary_folder: str):
-    """Write all output files."""
+                      summary_folder: str,
+                      temp_log_file: str = None):
+    """Write all output files including FASTQ files with reads from contributing clusters."""
     
     # Write individual FASTA files (without stability metrics)
     for consensus in final_consensus:
         output_file = os.path.join(summary_folder, f"{consensus.sample_name}.fasta")
         with open(output_file, 'w') as f:
-            # Clean header without stability metrics (p95_diff, median_diff), but include SNP count if present
-            header_parts = [f"length={consensus.length}", f"ric={consensus.ric}", f"size={consensus.size}"]
+            # Clean header with size first, no length field
+            header_parts = [f"size={consensus.size}", f"ric={consensus.ric}"]
             if consensus.snp_count is not None and consensus.snp_count > 0:
                 header_parts.append(f"snp={consensus.snp_count}")
+            if consensus.primers:
+                header_parts.append(f"primers={','.join(consensus.primers)}")
             f.write(f">{consensus.sample_name};{' '.join(header_parts)}\n")
             f.write(f"{consensus.sequence}\n")
+    
+    # Write FASTQ files for each final consensus containing all contributing reads
+    fastq_dir = os.path.join(summary_folder, 'FASTQ Files')
+    for consensus in final_consensus:
+        write_consensus_fastq(consensus, merge_traceability, naming_info, fastq_dir)
     
     # Write combined summary.fasta (without stability metrics)
     summary_fasta_path = os.path.join(summary_folder, 'summary.fasta')
     with open(summary_fasta_path, 'w') as f:
         for consensus in final_consensus:
-            # Clean header without stability metrics (p95_diff, median_diff), but include SNP count if present
-            header_parts = [f"length={consensus.length}", f"ric={consensus.ric}", f"size={consensus.size}"]
+            # Clean header with size first, no length field
+            header_parts = [f"size={consensus.size}", f"ric={consensus.ric}"]
             if consensus.snp_count is not None and consensus.snp_count > 0:
                 header_parts.append(f"snp={consensus.snp_count}")
+            if consensus.primers:
+                header_parts.append(f"primers={','.join(consensus.primers)}")
             f.write(f">{consensus.sample_name};{' '.join(header_parts)}\n")
             f.write(f"{consensus.sequence}\n")
     
@@ -583,7 +711,7 @@ def write_output_files(final_consensus: List[ConsensusInfo],
         total_ric = 0
         
         for consensus in final_consensus:
-            writer.writerow([consensus.sample_name, consensus.length, consensus.ric, 1])
+            writer.writerow([consensus.sample_name, len(consensus.sequence), consensus.ric, 1])
             base_name = consensus.sample_name.split('-')[0]
             unique_samples.add(base_name)
             total_ric += consensus.ric
@@ -593,34 +721,17 @@ def write_output_files(final_consensus: List[ConsensusInfo],
         writer.writerow(['Total Consensus Sequences', len(final_consensus)])
         writer.writerow(['Total Reads in Consensus Sequences', total_ric])
     
-    # Write variants_merged.txt for traceability
-    variants_merged_path = os.path.join(summary_folder, 'variants_merged.txt')
-    with open(variants_merged_path, 'w') as f:
-        writer = csv.writer(f, delimiter='\t', lineterminator='\n')
-        writer.writerow(['Final_Name', 'Original_Clusters', 'Merged_From'])
-        
-        for consensus in final_consensus:
-            original_clusters = []
-            merged_from = []
-            
-            # Check if this was renamed
-            for group_id, renamings in naming_info.items():
-                for original_name, final_name in renamings:
-                    if final_name == consensus.sample_name:
-                        original_clusters.append(original_name)
-                        
-                        # Check if this was also merged
-                        if original_name in merge_traceability:
-                            merged_from.extend(merge_traceability[original_name])
-                        else:
-                            merged_from.append(original_name)
-                        break
-            
-            writer.writerow([
-                consensus.sample_name,
-                ';'.join(original_clusters) if original_clusters else consensus.sample_name,
-                ';'.join(merged_from) if merged_from else consensus.sample_name
-            ])
+    # Copy log file to summary directory as summarize_log.txt
+    if temp_log_file:
+        import shutil
+        summarize_log_path = os.path.join(summary_folder, 'summarize_log.txt')
+        try:
+            # Flush any remaining log entries before copying
+            logging.getLogger().handlers[1].flush() if len(logging.getLogger().handlers) > 1 else None
+            shutil.copy2(temp_log_file, summarize_log_path)
+            logging.info(f"Created log file: {summarize_log_path}")
+        except Exception as e:
+            logging.warning(f"Could not copy log file: {e}")
 
 
 def process_single_specimen(file_consensuses: List[ConsensusInfo], 
@@ -641,51 +752,51 @@ def process_single_specimen(file_consensuses: List[ConsensusInfo],
     if not merged_consensus:
         return [], merge_traceability, {}
     
-    # Phase 2: HAC clustering to separate organisms within this specimen (primary vs contaminants)
-    organism_groups = perform_hac_clustering(merged_consensus, args.variant_group_identity)
+    # Phase 2: HAC clustering to separate variant groups within this specimen (primary vs contaminants)
+    variant_groups = perform_hac_clustering(merged_consensus, args.variant_group_identity)
     
-    # Phase 3: Select representative variants for each organism in this specimen
+    # Phase 3: Select representative variants for each group in this specimen
     final_consensus = []
     naming_info = {}
     
-    # Sort organism groups by size of largest member (descending)
-    sorted_groups = sorted(organism_groups.items(), 
+    # Sort variant groups by size of largest member (descending)
+    sorted_groups = sorted(variant_groups.items(), 
                           key=lambda x: max(m.size for m in x[1]), 
                           reverse=True)
     
-    for organism_idx, (_, group_members) in enumerate(sorted_groups):
-        # Select variants for this organism
+    for group_idx, (_, group_members) in enumerate(sorted_groups):
+        # Select variants for this group
         selected_variants = select_variants(group_members, args.max_variants, args.variant_selection)
         
-        # Create naming for this organism within this specimen
+        # Create naming for this group within this specimen
         group_naming = []
         
         for variant_idx, variant in enumerate(selected_variants):
             if variant_idx == 0:
-                # Main variant gets local organism number (1, 2, etc. within this specimen)
-                new_name = f"{variant.sample_name.split('-c')[0]}-{organism_idx + 1}"
+                # Main variant gets local group number (1, 2, etc. within this specimen)
+                new_name = f"{variant.sample_name.split('-c')[0]}-{group_idx + 1}"
             else:
                 # Additional variants get .v suffix  
-                new_name = f"{variant.sample_name.split('-c')[0]}-{organism_idx + 1}.v{variant_idx}"
+                new_name = f"{variant.sample_name.split('-c')[0]}-{group_idx + 1}.v{variant_idx}"
             
             # Create new ConsensusInfo with updated name
             renamed_variant = ConsensusInfo(
                 sample_name=new_name,
                 cluster_id=variant.cluster_id,
                 sequence=variant.sequence,
-                length=variant.length,
                 ric=variant.ric,
                 size=variant.size,
                 file_path=variant.file_path,
-                snp_count=variant.snp_count  # Preserve SNP count from original
+                snp_count=variant.snp_count,  # Preserve SNP count from original
+                primers=variant.primers  # Preserve primers
             )
             
             final_consensus.append(renamed_variant)
             group_naming.append((variant.sample_name, new_name))
         
-        naming_info[organism_idx + 1] = group_naming
+        naming_info[group_idx + 1] = group_naming
     
-    logging.info(f"Processed {file_name}: {len(organism_groups)} organisms -> {len(final_consensus)} final variants")
+    logging.info(f"Processed {file_name}: {len(variant_groups)} groups -> {len(final_consensus)} final variants")
     
     return final_consensus, merge_traceability, naming_info
 
@@ -721,6 +832,11 @@ def merge_variants_within_specimen(file_consensuses: List[ConsensusInfo],
             for j in range(i + 1, len(current_consensuses)):
                 consensus_i = current_consensuses[i]
                 consensus_j = current_consensuses[j]
+                
+                # Check primer compatibility first (primers must match)
+                if consensus_i.primers != consensus_j.primers:
+                    logging.debug(f"Skipping merge: {consensus_i.sample_name} + {consensus_j.sample_name} -> incompatible primers: {consensus_i.primers} vs {consensus_j.primers}")
+                    continue
                 
                 # Calculate substitution distance between the two sequences
                 dist = calculate_substitution_distance(consensus_i.sequence, consensus_j.sequence)
@@ -774,11 +890,11 @@ def merge_variants_within_specimen(file_consensuses: List[ConsensusInfo],
             sample_name=consensus_i.sample_name,  # Keep name from larger cluster
             cluster_id=consensus_i.cluster_id,
             sequence=best_merge['consensus_sequence'],
-            length=len(best_merge['consensus_sequence']),
             ric=consensus_i.ric + consensus_j.ric,
             size=best_merge['combined_size'],
             file_path=consensus_i.file_path,
-            snp_count=best_merge['snp_count'] if best_merge['snp_count'] > 0 else None
+            snp_count=best_merge['snp_count'] if best_merge['snp_count'] > 0 else None,
+            primers=consensus_i.primers  # Preserve primers (they must match due to compatibility check)
         )
         
         # Update traceability
@@ -806,11 +922,17 @@ def merge_variants_within_specimen(file_consensuses: List[ConsensusInfo],
 def main():
     """Main function to process command line arguments and run the summarization."""
     args = parse_arguments()
-    setup_logging(args.log_level)
+    
+    # Set up logging with temporary log file
+    import tempfile
+    temp_log_file = tempfile.NamedTemporaryFile(mode='w', suffix='.log', delete=False)
+    temp_log_file.close()
+    
+    setup_logging(args.log_level, temp_log_file.name)
     
     logging.info("Starting enhanced speconsense summarization")
     logging.info("Note: Stability metrics (median_diff, p95_diff) will be dropped from final output")
-    logging.info("Original stability metrics are preserved in cluster_debug/ files for debugging")
+    logging.info("Original stability metrics are preserved in cluster_debug/ and raw_clusters/ for debugging")
     logging.info("Processing each specimen file independently to organize variants within specimens")
     
     # Load all consensus sequences
@@ -848,26 +970,40 @@ def main():
     # Create output directories
     os.makedirs(args.summary_dir, exist_ok=True)
     os.makedirs(os.path.join(args.summary_dir, 'FASTQ Files'), exist_ok=True)
-    os.makedirs(os.path.join(args.summary_dir, 'original_clusters'), exist_ok=True)
+    os.makedirs(os.path.join(args.summary_dir, 'raw_clusters'), exist_ok=True)
     
     # Write output files
-    write_output_files(all_final_consensus, all_merge_traceability, all_naming_info, args.summary_dir)
+    write_output_files(all_final_consensus, all_merge_traceability, all_naming_info, args.summary_dir, temp_log_file.name)
     
     logging.info(f"Enhanced summarization completed successfully")
     logging.info(f"Final output: {len(all_final_consensus)} consensus sequences in {args.summary_dir}")
     
-    # Copy original consensus files for traceability and debugging
+    # Copy raw cluster files for traceability and debugging
     # These files contain the original stability metrics (median_diff, p95_diff)
-    original_clusters_dir = os.path.join(args.summary_dir, 'original_clusters')
-    copied_files = set()  # Track unique files to avoid duplicates
+    raw_clusters_dir = os.path.join(args.summary_dir, 'raw_clusters')
+    copied_files = set()  # Track unique FASTA files to avoid duplicates
+    copied_specimens = set()  # Track specimens to avoid duplicating FASTQ copies
     
     for consensus in consensus_list:
         if os.path.exists(consensus.file_path) and consensus.file_path not in copied_files:
-            shutil.copy(consensus.file_path, original_clusters_dir)
+            # Copy the FASTA file
+            shutil.copy(consensus.file_path, raw_clusters_dir)
             copied_files.add(consensus.file_path)
-            logging.debug(f"Copied original consensus file: {os.path.basename(consensus.file_path)}")
+            logging.debug(f"Copied raw cluster FASTA: {os.path.basename(consensus.file_path)}")
+            
+            # Also copy all cluster FASTQ files for this specimen (only once per specimen)
+            base_name = os.path.basename(consensus.file_path).replace('-all.fasta', '')
+            if base_name not in copied_specimens:
+                copy_raw_cluster_fastq(consensus, raw_clusters_dir)
+                copied_specimens.add(base_name)
     
-    logging.info(f"Copied {len(copied_files)} original consensus files with stability metrics to original_clusters/")
+    logging.info(f"Copied {len(copied_files)} raw cluster FASTA files and cluster FASTQ files from {len(copied_specimens)} specimens to raw_clusters/")
+    
+    # Clean up temporary log file
+    try:
+        os.unlink(temp_log_file.name)
+    except Exception as e:
+        logging.debug(f"Could not clean up temporary log file: {e}")
 
 
 if __name__ == "__main__":

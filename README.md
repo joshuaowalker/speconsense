@@ -275,16 +275,92 @@ When a primers file is provided, Speconsense will identify and trim primer seque
 
 ## Output Files
 
-For each cluster, Speconsense generates:
+### Speconsense Core Output
 
-1. **Main consensus FASTA**: `{sample_name}-{cluster_num}-RiC{size}.fasta`
-   - Contains the final (trimmed, if primers provided) consensus sequence
-   - Header includes cluster size, stability metrics, found primers, and SNP count (if applicable)
-   - Header format: `>{sample_name}-{cluster_num} size={N} ric={M} [snp={S}] [median_diff={X}] [p95_diff={Y}] [primers=...]`
+For each specimen, Speconsense generates:
 
-2. **Debug directory files**:
-   - `{sample_name}-{cluster_num}-RiC{size}-reads.fastq`: Original reads in the cluster
-   - `{sample_name}-{cluster_num}-RiC{size}-untrimmed.fasta`: Untrimmed consensus sequence
+1. **Main consensus FASTA**: `{sample_name}-all.fasta`
+   - Contains all consensus sequences for the specimen (one per cluster)
+   - Uses original cluster numbering: `{sample_name}-c{cluster_num}-RiC{size}`
+
+2. **Debug directory** (`cluster_debug/`):
+   - `{sample_name}-c{cluster_num}-RiC{size}-reads.fastq`: Original reads in each cluster
+   - `{sample_name}-c{cluster_num}-RiC{size}-untrimmed.fasta`: Untrimmed consensus sequences
+
+### Speconsense-Summarize Output
+
+When using `speconsense-summarize` for post-processing, creates `__Summary__/` directory with:
+
+#### **Main Output Files** (summarization numbering: `-1`, `-1.v1`, `-2`):
+- **Individual FASTA files**: `{sample_name}-{group}.fasta`, `{sample_name}-{group}.v{variant}.fasta`
+- **Combined file**: `summary.fasta` - all final consensus sequences
+- **Statistics**: `summary.txt` - sequence counts and metrics
+- **Log file**: `summarize_log.txt` - complete processing log
+
+#### **FASTQ Files/** (aggregated reads for final consensus):
+- `{sample_name}-{group}.fastq` - all reads contributing to main consensus
+- `{sample_name}-{group}.v{variant}.fastq` - all reads contributing to variant consensus
+
+#### **raw_clusters/** (original speconsense numbering: `-c1`, `-c2`):
+- `{sample_name}-all.fasta` - original consensus files with stability metrics
+- `{sample_name}-c{cluster_num}-RiC{size}-reads.fastq` - individual cluster reads
+
+### Naming Convention Summary
+
+**Two distinct namespaces maintain traceability:**
+
+| **Namespace** | **Used In** | **Format** | **Purpose** |
+|---------------|-------------|------------|-------------|
+| **Original** | `raw_clusters/`, `cluster_debug/` | `-c1`, `-c2`, `-c3` | Preserves speconsense clustering results |
+| **Summarization** | Main output, `FASTQ Files/` | `-1`, `-1.v1`, `-2` | Post-processing groups and variants |
+
+### Example Directory Structure
+```
+__Summary__/
+├── sample-1.fasta                           # Main consensus (group 1)
+├── sample-1.v1.fasta                        # Additional variant
+├── sample-2.fasta                           # Second organism group
+├── summary.fasta                            # All sequences combined
+├── summary.txt                              # Statistics
+├── summarize_log.txt                        # Processing log
+├── FASTQ Files/                             # Reads for final consensus
+│   ├── sample-1.fastq                       # All reads for main consensus
+│   ├── sample-1.v1.fastq                    # All reads for variant
+│   └── sample-2.fastq                       # All reads for second group
+└── raw_clusters/                            # Original clustering results
+    ├── sample-all.fasta                     # Original consensus with stability metrics
+    ├── sample-c1-RiC500-reads.fastq         # Original cluster 1 reads
+    └── sample-c2-RiC300-reads.fastq         # Original cluster 2 reads
+```
+
+### FASTA Header Metadata
+
+Consensus sequence headers contain metadata fields separated by spaces:
+
+**Core Fields (Always Present):**
+- `size=N` - Total number of raw sequence reads in the cluster
+- `ric=N` - **Reads in Consensus** - Number of reads actually used for consensus generation (may be less than size due to sampling limits)
+
+**Optional Fields:**
+- `snp=N` - Number of SNP positions with IUPAC ambiguity codes (only present in merged variants from speconsense-summarize)
+- `primers=list` - Comma-separated list of detected primer names (e.g., `primers=ITS1F,ITS4`)
+- `median_diff=X.X` - Median edit distance from stability assessment (debug files only)  
+- `p95_diff=X.X` - 95th percentile edit distance from stability assessment (debug files only)
+
+**Example Headers:**
+```
+# Simple consensus from speconsense:
+>sample-c1-RiC45;size=50 ric=45 median_diff=2.1 p95_diff=4.8 primers=ITS1F,ITS4
+
+# Merged variant from speconsense-summarize (stability metrics removed):
+>sample-1;size=95 ric=78 snp=2 primers=ITS1F,ITS4
+```
+
+**Notes:**
+- Length is not included (easily calculated from sequence)
+- Stability metrics (`median_diff`, `p95_diff`) are preserved in debug files but removed from final speconsense-summarize output
+- Variant merging only occurs between sequences with identical primer sets
+- SNP counts reflect IUPAC ambiguity positions in consensus sequences
 
 ## Citations
 

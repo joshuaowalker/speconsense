@@ -399,7 +399,7 @@ class SpecimenClusterer:
         cluster_size = len(cluster)
         ric_size = min(actual_size or cluster_size, self.max_sample_size)
 
-        # Create info string
+        # Create info string with size first
         info_parts = [f"size={cluster_size}", f"ric={ric_size}"]
 
         if median_diff is not None:
@@ -610,7 +610,7 @@ class SpecimenClusterer:
                          f"({sequences_covered / total_sequences:.1%} of total)")
 
             # Create the main consensus output file
-            consensus_output_file = f"{self.sample_name}_consensus_sequences.fasta"
+            consensus_output_file = f"{self.sample_name}-all.fasta"
             with open(consensus_output_file, 'w') as consensus_fasta_handle:
                 for i, cluster in enumerate(clusters_to_output, 1):
                     actual_size = len(cluster)
