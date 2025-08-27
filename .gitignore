@@ -32,6 +32,11 @@ env.bak/
 venv.bak/
 *-env/
 
+# Testing
+.pytest_cache/
+htmlcov/
+.coverage
+
 # IDE
 .vscode/
 .idea/

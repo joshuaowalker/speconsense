@@ -97,6 +97,32 @@ cd speconsense
 pip install -e .
 ```
 
+### Running Tests
+
+The project includes pytest-based integration tests. To run the tests:
+
+```bash
+# Set up test virtual environment
+python -m venv test-venv
+source test-venv/bin/activate  # On Windows: test-venv\Scripts\activate
+
+# Install project and test dependencies
+pip install -e .
+pip install pytest pytest-cov
+
+# Run all tests
+python -m pytest tests/ -v
+
+# Run specific test file
+python -m pytest tests/test_augment_input.py -v
+
+# Run with coverage
+python -m pytest tests/ --cov=speconsense --cov-report=html
+```
+
+**Available Tests:**
+- `tests/test_augment_input.py`: Integration tests for --augment-input functionality
+
 ## Usage
 
 ### Basic Usage
@@ -142,6 +168,37 @@ speconsense input.fastq --variant-merge-threshold 3
 speconsense input.fastq --variant-merge-threshold -1
 ```
 
+### Augmenting Input with Additional Sequences
+
+The `--augment-input` parameter allows you to include additional sequences in the clustering process alongside your primary input. This is useful for several scenarios:
+
+**Common Use Cases:**
+- **Reference sequences**: Include known sequences to help guide clustering
+- **Cross-run consistency**: Add sequences from previous runs to maintain consistent clustering
+- **Database sequences**: Include curated sequences from databases
+- **Quality control**: Add synthetic or control sequences
+
+**Usage:**
+```bash
+# Basic usage with reference sequences
+speconsense input.fastq --augment-input reference_sequences.fasta
+
+# Multiple options can be combined
+speconsense input.fastq --augment-input controls.fastq --primers primers.fasta --medaka
+```
+
+**Key Features:**
+- Supports both FASTQ and FASTA formats (auto-detected by file extension)
+- Augmented sequences participate equally in clustering with primary sequences
+- During presampling, primary sequences are prioritized over augmented sequences
+- All sequences (primary + augmented) appear in output files and contribute to final consensus
+- Augmented sequences are fully traceable through the entire pipeline
+
+**Important Notes:**
+- Augmented sequences will only cluster with primary sequences if they meet the similarity threshold
+- If augmented sequences are very different, they may form separate clusters
+- The final consensus sequence headers will show the total count including augmented sequences
+
 ### Post-processing and Summary
 
 After running speconsense, use the summarize tool to process outputs:
@@ -177,7 +234,7 @@ positional arguments:
 optional arguments:
   -h, --help            show this help message and exit
   --augment-input AUGMENT_INPUT
-                        Additional input FASTQ file with mined sequences
+                        Additional FASTQ/FASTA file with sequences to include in clustering
   --algorithm {graph,greedy}
                         Clustering algorithm to use (default: graph)
   --min-identity MIN_IDENTITY
