@@ -1012,7 +1012,7 @@ def main():
         description="MCL-based clustering of nanopore amplicon reads"
     )
     parser.add_argument("input_file", help="Input FASTQ file")
-    parser.add_argument("--augment-input", help="Additional FASTQ/FASTA file with sequences to include in clustering (e.g., reference sequences, sequences from other runs)")
+    parser.add_argument("--augment-input", help="Additional FASTQ/FASTA file with sequences recovered after primary demultiplexing (e.g., from specimine)")
     parser.add_argument("--algorithm", type=str, default="graph", choices=["graph", "greedy"],
                         help="Clustering algorithm to use (default: graph)")
     parser.add_argument("--min-identity", type=float, default=0.85,

@@ -170,21 +170,30 @@ speconsense input.fastq --variant-merge-threshold -1
 
 ### Augmenting Input with Additional Sequences
 
-The `--augment-input` parameter allows you to include additional sequences in the clustering process alongside your primary input. This is useful for several scenarios:
+The `--augment-input` parameter allows you to include additional sequences that were not successfully matched during primary demultiplexing but were recovered through other means. This is particularly useful in the specimux workflow when using sequence recovery tools.
 
-**Common Use Cases:**
-- **Reference sequences**: Include known sequences to help guide clustering
-- **Cross-run consistency**: Add sequences from previous runs to maintain consistent clustering
-- **Database sequences**: Include curated sequences from databases
-- **Quality control**: Add synthetic or control sequences
+**Primary Use Case:**
+After primary demultiplexing with specimux, some sequences may remain unmatched due to sequencing errors, primer degradation, or other issues. These sequences can be recovered using tools like `specimine` from the specimux suite and then included in speconsense clustering to maximize data utilization.
+
+**Workflow Integration:**
+```bash
+# 1. Run primary demultiplexing with specimux
+specimux primers.fasta specimens.txt input.fastq -O results/
+
+# 2. Recover additional sequences from unmatched reads
+specimine results/unknown/ specimen_name --output recovered.fastq
+
+# 3. Cluster with both primary and recovered sequences
+speconsense results/full/specimen_name.fastq --augment-input recovered.fastq
+```
 
 **Usage:**
 ```bash
-# Basic usage with reference sequences
-speconsense input.fastq --augment-input reference_sequences.fasta
+# Basic usage with recovered sequences
+speconsense primary_demux.fastq --augment-input recovered_sequences.fastq
 
-# Multiple options can be combined
-speconsense input.fastq --augment-input controls.fastq --primers primers.fasta --medaka
+# Can be combined with other options
+speconsense primary_demux.fastq --augment-input recovered.fastq --primers primers.fasta --medaka
 ```
 
 **Key Features:**
@@ -196,8 +205,9 @@ speconsense input.fastq --augment-input controls.fastq --primers primers.fasta -
 
 **Important Notes:**
 - Augmented sequences will only cluster with primary sequences if they meet the similarity threshold
-- If augmented sequences are very different, they may form separate clusters
+- Recovered sequences may form separate clusters if they represent different taxa
 - The final consensus sequence headers will show the total count including augmented sequences
+- This approach maximizes data utilization by including sequences that would otherwise be discarded
 
 ### Post-processing and Summary
 
@@ -234,7 +244,7 @@ positional arguments:
 optional arguments:
   -h, --help            show this help message and exit
   --augment-input AUGMENT_INPUT
-                        Additional FASTQ/FASTA file with sequences to include in clustering
+                        Additional FASTQ/FASTA file with sequences recovered after primary demultiplexing
   --algorithm {graph,greedy}
                         Clustering algorithm to use (default: graph)
   --min-identity MIN_IDENTITY
