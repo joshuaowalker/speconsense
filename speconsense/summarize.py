@@ -57,8 +57,8 @@ def parse_arguments():
     parser = argparse.ArgumentParser(description="Process Speconsense output with advanced variant handling.")
     parser.add_argument("--min-ric", type=int, default=3,
                         help="Minimum Reads in Consensus (RiC) threshold (default: 3)")
-    parser.add_argument("--source", type=str, default=".",
-                        help="Source directory containing Speconsense output (default: current directory)")
+    parser.add_argument("--source", type=str, default="clusters",
+                        help="Source directory containing Speconsense output (default: clusters)")
     parser.add_argument("--summary-dir", type=str, default="__Summary__",
                         help="Output directory for summary files (default: __Summary__)")
     parser.add_argument("--snp-merge-limit", type=int, default=2,
@@ -110,7 +110,7 @@ def parse_consensus_header(header: str) -> Tuple[Optional[str], Optional[int], O
     Note: Stability metrics (median_diff, p95_diff) are intentionally ignored
     as they will be dropped from final output - they're debug info only.
     """
-    sample_match = re.match(r'>([^;]+);(.+)', header)
+    sample_match = re.match(r'>([^ ]+) (.+)', header)
     if not sample_match:
         return None, None, None, None
 
@@ -737,7 +737,7 @@ def write_consensus_fastq(consensus: ConsensusInfo,
         return
     
     # Find FASTQ files for these clusters using lookup table
-    fastq_output_path = os.path.join(fastq_dir, f"{consensus.sample_name}.fastq")
+    fastq_output_path = os.path.join(fastq_dir, f"{consensus.sample_name}-RiC{consensus.ric}.fastq")
     input_files = []
     
     for cluster_name in original_clusters:
@@ -799,7 +799,7 @@ def write_consensus_fastq(consensus: ConsensusInfo,
         logging.error(f"Failed to write concatenated FASTQ file {fastq_output_path}: {e}")
 
 
-def build_fastq_lookup_table() -> Dict[str, List[str]]:
+def build_fastq_lookup_table(source_dir: str = ".") -> Dict[str, List[str]]:
     """
     Build a lookup table mapping specimen base names to their cluster FASTQ files.
     This avoids repeated directory scanning during file copying.
@@ -809,8 +809,9 @@ def build_fastq_lookup_table() -> Dict[str, List[str]]:
     lookup = defaultdict(list)
     
     # Scan cluster_debug directory once to build lookup table
-    if os.path.exists("cluster_debug"):
-        debug_files = glob.glob("cluster_debug/*reads.fastq")
+    cluster_debug_path = os.path.join(source_dir, "cluster_debug")
+    if os.path.exists(cluster_debug_path):
+        debug_files = glob.glob(os.path.join(cluster_debug_path, "*reads.fastq"))
         
         for fastq_path in debug_files:
             filename = os.path.basename(fastq_path)
@@ -865,7 +866,7 @@ def write_output_files(final_consensus: List[ConsensusInfo],
     
     # Write individual FASTA files (without stability metrics)
     for consensus in final_consensus:
-        output_file = os.path.join(summary_folder, f"{consensus.sample_name}.fasta")
+        output_file = os.path.join(summary_folder, f"{consensus.sample_name}-RiC{consensus.ric}.fasta")
         with open(output_file, 'w') as f:
             # Clean header with size first, no length field
             header_parts = [f"size={consensus.size}", f"ric={consensus.ric}"]
@@ -873,7 +874,7 @@ def write_output_files(final_consensus: List[ConsensusInfo],
                 header_parts.append(f"snp={consensus.snp_count}")
             if consensus.primers:
                 header_parts.append(f"primers={','.join(consensus.primers)}")
-            f.write(f">{consensus.sample_name};{' '.join(header_parts)}\n")
+            f.write(f">{consensus.sample_name} {' '.join(header_parts)}\n")
             f.write(f"{consensus.sequence}\n")
     
     # Write FASTQ files for each final consensus containing all contributing reads
@@ -891,7 +892,7 @@ def write_output_files(final_consensus: List[ConsensusInfo],
                 header_parts.append(f"snp={consensus.snp_count}")
             if consensus.primers:
                 header_parts.append(f"primers={','.join(consensus.primers)}")
-            f.write(f">{consensus.sample_name};{' '.join(header_parts)}\n")
+            f.write(f">{consensus.sample_name} {' '.join(header_parts)}\n")
             f.write(f"{consensus.sequence}\n")
     
     # Write summary statistics
@@ -902,10 +903,19 @@ def write_output_files(final_consensus: List[ConsensusInfo],
         
         unique_samples = set()
         total_ric = 0
+        specimen_counters = {}
         
         for consensus in final_consensus:
-            writer.writerow([consensus.sample_name, len(consensus.sequence), consensus.ric, 1])
             base_name = consensus.sample_name.split('-')[0]
+            
+            # Initialize counter for new specimen
+            if base_name not in specimen_counters:
+                specimen_counters[base_name] = 1
+            else:
+                specimen_counters[base_name] += 1
+            
+            multiple_id = specimen_counters[base_name]
+            writer.writerow([consensus.sample_name, len(consensus.sequence), consensus.ric, multiple_id])
             unique_samples.add(base_name)
             total_ric += consensus.ric
         
@@ -1171,7 +1181,7 @@ def main():
     os.makedirs(os.path.join(args.summary_dir, 'raw_clusters'), exist_ok=True)
     
     # Build lookup table for FASTQ files to avoid repeated directory scanning
-    fastq_lookup = build_fastq_lookup_table()
+    fastq_lookup = build_fastq_lookup_table(args.source)
     
     # Write output files (reuse the same lookup table for efficiency)
     write_output_files(all_final_consensus, all_merge_traceability, all_naming_info, args.summary_dir, temp_log_file.name, fastq_lookup)

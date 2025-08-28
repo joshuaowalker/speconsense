@@ -154,6 +154,12 @@ speconsense input.fastq --variant-merge-threshold 3
 
 # Disable variant merging
 speconsense input.fastq --variant-merge-threshold -1
+
+# Specify output directory (default: clusters)
+speconsense input.fastq --output-dir results/
+
+# Using short form for output directory
+speconsense input.fastq -O my_results/
 ```
 
 ### Augmenting Input with Additional Sequences
@@ -292,7 +298,7 @@ speconsense-summarize --snp-merge-limit 2
 ```bash
 speconsense-summarize --source /path/to/speconsense/output --summary-dir MyResults
 ```
-- `--source`: Directory containing speconsense output files (default: current directory)
+- `--source`: Directory containing speconsense output files (default: clusters)
 - `--summary-dir`: Output directory name (default: `__Summary__`)
 
 #### Processing Workflow Summary
@@ -342,7 +348,7 @@ usage: speconsense.py [-h] [--augment-input AUGMENT_INPUT] [--algorithm {graph,g
                      [--inflation INFLATION] [--min-size MIN_SIZE] [--min-cluster-ratio MIN_CLUSTER_RATIO]
                      [--max-sample-size MAX_SAMPLE_SIZE] [--presample PRESAMPLE] 
                      [--k-nearest-neighbors K_NEAREST_NEIGHBORS] [--primers PRIMERS]
-                     [--stability-trials STABILITY_TRIALS] [--stability-sample STABILITY_SAMPLE]
+                     [-O OUTPUT_DIR] [--stability-trials STABILITY_TRIALS] [--stability-sample STABILITY_SAMPLE]
                      [--disable-stability] [--variant-merge-threshold VARIANT_MERGE_THRESHOLD]
                      [--log-level {DEBUG,INFO,WARNING,ERROR,CRITICAL}] [--version]
                      input_file
@@ -371,7 +377,9 @@ optional arguments:
                         Presample size for initial reads (default: 1000, 0 to disable)
   --k-nearest-neighbors K_NEAREST_NEIGHBORS
                         Number of nearest neighbors for graph construction (default: 5)
-  --primers PRIMERS     FASTA file containing primer sequences
+  --primers PRIMERS     FASTA file containing primer sequences (default: looks for primers.fasta in input file directory)
+  -O OUTPUT_DIR, --output-dir OUTPUT_DIR
+                        Output directory for all files (default: clusters)
   --stability-trials STABILITY_TRIALS
                         Number of sampling trials to assess stability (default: 100)
   --stability-sample STABILITY_SAMPLE
@@ -474,7 +482,9 @@ Sequences with higher than expected distance should be checked for bioinformatic
 
 ### Primer Trimming
 
-When a primers file is provided, Speconsense will identify and trim primer sequences from the 5' and 3' ends of consensus sequences, producing clean amplicon sequences for downstream analysis.
+When a primers file is provided via `--primers`, Speconsense will identify and trim primer sequences from the 5' and 3' ends of consensus sequences, producing clean amplicon sequences for downstream analysis.
+
+**Automatic primer detection**: If `--primers` is not specified, Speconsense will automatically look for `primers.fasta` in the same directory as the input FASTQ file. If found, primer trimming will be enabled automatically.
 
 ## Output Files
 
@@ -495,14 +505,14 @@ For each specimen, Speconsense generates:
 When using `speconsense-summarize` for post-processing, creates `__Summary__/` directory with:
 
 #### **Main Output Files** (summarization numbering: `-1`, `-1.v1`, `-2`):
-- **Individual FASTA files**: `{sample_name}-{group}.fasta`, `{sample_name}-{group}.v{variant}.fasta`
+- **Individual FASTA files**: `{sample_name}-{group}-RiC{reads}.fasta`, `{sample_name}-{group}.v{variant}-RiC{reads}.fasta`
 - **Combined file**: `summary.fasta` - all final consensus sequences
 - **Statistics**: `summary.txt` - sequence counts and metrics
 - **Log file**: `summarize_log.txt` - complete processing log
 
 #### **FASTQ Files/** (aggregated reads for final consensus):
-- `{sample_name}-{group}.fastq` - all reads contributing to main consensus
-- `{sample_name}-{group}.v{variant}.fastq` - all reads contributing to variant consensus
+- `{sample_name}-{group}-RiC{reads}.fastq` - all reads contributing to main consensus
+- `{sample_name}-{group}.v{variant}-RiC{reads}.fastq` - all reads contributing to variant consensus
 
 #### **raw_clusters/** (original speconsense numbering: `-c1`, `-c2`):
 - `{sample_name}-all.fasta` - original consensus files with stability metrics
@@ -520,16 +530,16 @@ When using `speconsense-summarize` for post-processing, creates `__Summary__/` d
 ### Example Directory Structure
 ```
 __Summary__/
-├── sample-1.fasta                           # Main consensus (group 1)
-├── sample-1.v1.fasta                        # Additional variant
-├── sample-2.fasta                           # Second organism group
+├── sample-1-RiC45.fasta                      # Main consensus (group 1)
+├── sample-1.v1-RiC23.fasta                  # Additional variant
+├── sample-2-RiC30.fasta                     # Second organism group
 ├── summary.fasta                            # All sequences combined
 ├── summary.txt                              # Statistics
 ├── summarize_log.txt                        # Processing log
 ├── FASTQ Files/                             # Reads for final consensus
-│   ├── sample-1.fastq                       # All reads for main consensus
-│   ├── sample-1.v1.fastq                    # All reads for variant
-│   └── sample-2.fastq                       # All reads for second group
+│   ├── sample-1-RiC45.fastq                 # All reads for main consensus
+│   ├── sample-1.v1-RiC23.fastq              # All reads for variant
+│   └── sample-2-RiC30.fastq                 # All reads for second group
 └── raw_clusters/                            # Original clustering results
     ├── sample-all.fasta                     # Original consensus with stability metrics
     ├── sample-c1-RiC500-reads.fastq         # Original cluster 1 reads
@@ -553,10 +563,10 @@ Consensus sequence headers contain metadata fields separated by spaces:
 **Example Headers:**
 ```
 # Simple consensus from speconsense:
->sample-c1-RiC45;size=50 ric=45 median_diff=2.1 p95_diff=4.8 primers=ITS1F,ITS4
+>sample-c1 size=50 ric=45 median_diff=2.1 p95_diff=4.8 primers=ITS1F,ITS4
 
 # Merged variant from speconsense-summarize (stability metrics removed):
->sample-1;size=95 ric=78 snp=2 primers=ITS1F,ITS4
+>sample-1 size=95 ric=78 snp=2 primers=ITS1F,ITS4
 ```
 
 **Notes:**
@@ -566,6 +576,23 @@ Consensus sequence headers contain metadata fields separated by spaces:
 - SNP counts reflect IUPAC ambiguity positions in consensus sequences
 
 ## Changelog
+
+### Version 0.3.1 (2025-08-28)
+
+**New Features:**
+- **Output directory control** - Added `--output-dir` (`-O`) option to specify output directory (default: `clusters`)
+- **Automatic primer detection** - Automatically searches for `primers.fasta` in input file directory when `--primers` not specified
+- **Enhanced speconsense-summarize defaults** - `--source` now defaults to `clusters` to match speconsense output directory
+
+**Compatibility Improvements:**
+- **Enhanced output file naming** - Added `-RiC{number}` suffix to individual output files for compatibility with downstream tools
+- **Improved header format** - Changed FASTA header delimiter from semicolon to space for consistency across all fields
+- **Fixed Multiple ID counter** - Now correctly counts sequences within each specimen (resets per specimen)
+- **Fixed FASTQ file path resolution** - Resolved issue where speconsense-summarize couldn't find FASTQ files when run from outside the clusters directory
+
+**Documentation Updates:**
+- **Updated all examples** - File naming patterns, directory structures, and header formats now reflect current implementation
+- **Enhanced help text** - Improved argument descriptions with default values and automatic behaviors
 
 ### Version 0.3.0 (2025-08-28)
 

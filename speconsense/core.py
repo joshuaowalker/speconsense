@@ -20,7 +20,7 @@ from Bio import SeqIO
 from Bio.Seq import reverse_complement
 from tqdm import tqdm
 
-__version__ = "0.3.0"
+__version__ = "0.3.1"
 
 # IUPAC nucleotide ambiguity codes mapping
 # Maps sets of nucleotides to their corresponding IUPAC code
@@ -54,7 +54,8 @@ class SpecimenClusterer:
                  k_nearest_neighbors: int = 20,
                  disable_stability: bool = False,
                  sample_name: str = "sample",
-                 disable_homopolymer_equivalence: bool = False):
+                 disable_homopolymer_equivalence: bool = False,
+                 output_dir: str = "clusters"):
         self.min_identity = min_identity
         self.inflation = inflation
         self.min_size = min_size
@@ -65,13 +66,16 @@ class SpecimenClusterer:
         self.disable_stability = disable_stability
         self.sample_name = sample_name
         self.disable_homopolymer_equivalence = disable_homopolymer_equivalence
+        self.output_dir = output_dir
         self.sequences = {}  # id -> sequence string
         self.records = {}  # id -> SeqRecord object
         self.id_map = {}  # short_id -> original_id
         self.rev_id_map = {}  # original_id -> short_id
 
-        # Create debug directory
-        os.makedirs("cluster_debug", exist_ok=True)
+        # Create output directory and debug subdirectory
+        os.makedirs(self.output_dir, exist_ok=True)
+        self.debug_dir = os.path.join(self.output_dir, "cluster_debug")
+        os.makedirs(self.debug_dir, exist_ok=True)
 
     def add_sequences(self, records: List[SeqIO.SeqRecord],
                       augment_records: Optional[List[SeqIO.SeqRecord]] = None) -> None:
@@ -410,21 +414,21 @@ class SpecimenClusterer:
         info_str = " ".join(info_parts)
 
         # Write reads FASTQ to debug directory with new naming convention
-        reads_file = os.path.join("cluster_debug", f"{self.sample_name}-c{cluster_num}-RiC{ric_size}-reads.fastq")
+        reads_file = os.path.join(self.debug_dir, f"{self.sample_name}-c{cluster_num}-RiC{ric_size}-reads.fastq")
         with open(reads_file, 'w') as f:
             for seq_id in cluster:
                 SeqIO.write(self.records[seq_id], f, "fastq")
 
         # Write untrimmed consensus to debug directory
-        with open(os.path.join("cluster_debug", f"{self.sample_name}-c{cluster_num}-RiC{ric_size}-untrimmed.fasta"),
+        with open(os.path.join(self.debug_dir, f"{self.sample_name}-c{cluster_num}-RiC{ric_size}-untrimmed.fasta"),
                   'w') as f:
-            f.write(f">{self.sample_name}-c{cluster_num};{info_str}\n")
+            f.write(f">{self.sample_name}-c{cluster_num} {info_str}\n")
             f.write(consensus + "\n")
 
         # Write consensus to main output file if handle is provided
         if consensus_fasta_handle:
             final_consensus = trimmed_consensus if trimmed_consensus else consensus
-            consensus_fasta_handle.write(f">{self.sample_name}-c{cluster_num};{info_str}\n")
+            consensus_fasta_handle.write(f">{self.sample_name}-c{cluster_num} {info_str}\n")
             consensus_fasta_handle.write(final_consensus + "\n")
 
     def run_mcl_clustering(self, temp_dir: str) -> List[Set[str]]:
@@ -609,7 +613,7 @@ class SpecimenClusterer:
                          f"({sequences_covered / total_sequences:.1%} of total)")
 
             # Create the main consensus output file
-            consensus_output_file = f"{self.sample_name}-all.fasta"
+            consensus_output_file = os.path.join(self.output_dir, f"{self.sample_name}-all.fasta")
             with open(consensus_output_file, 'w') as consensus_fasta_handle:
                 for i, cluster in enumerate(clusters_to_output, 1):
                     actual_size = len(cluster)
@@ -945,7 +949,9 @@ def main():
                         help="Presample size for initial reads (default: 1000, 0 to disable)")
     parser.add_argument("--k-nearest-neighbors", type=int, default=5,
                         help="Number of nearest neighbors for graph construction (default: 5)")
-    parser.add_argument("--primers", help="FASTA file containing primer sequences")
+    parser.add_argument("--primers", help="FASTA file containing primer sequences (default: looks for primers.fasta in input file directory)")
+    parser.add_argument("-O", "--output-dir", default="clusters",
+                        help="Output directory for all files (default: clusters)")
     parser.add_argument("--stability-trials", type=int, default=100,
                         help="Number of sampling trials to assess stability (default: 100)")
     parser.add_argument("--stability-sample", type=int, default=20,
@@ -980,7 +986,8 @@ def main():
         k_nearest_neighbors=args.k_nearest_neighbors,
         disable_stability=args.disable_stability,
         sample_name=sample,
-        disable_homopolymer_equivalence=args.disable_homopolymer_equivalence
+        disable_homopolymer_equivalence=args.disable_homopolymer_equivalence,
+        output_dir=args.output_dir
     )
 
     clusterer.num_trials = args.stability_trials
@@ -1030,7 +1037,15 @@ def main():
     if args.primers:
         clusterer.load_primers(args.primers)
     else:
-        logging.warning("No primer file specified. Primer trimming will be disabled.")
+        # Look for primers.fasta in the same directory as the input file
+        input_dir = os.path.dirname(os.path.abspath(args.input_file))
+        auto_primer_path = os.path.join(input_dir, "primers.fasta")
+        
+        if os.path.exists(auto_primer_path):
+            logging.info(f"Found primers.fasta in input directory: {auto_primer_path}")
+            clusterer.load_primers(auto_primer_path)
+        else:
+            logging.warning("No primer file specified and primers.fasta not found in input directory. Primer trimming will be disabled.")
 
     clusterer.cluster(algorithm=args.algorithm)
     print()
