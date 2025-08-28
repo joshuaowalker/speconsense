@@ -565,6 +565,45 @@ Consensus sequence headers contain metadata fields separated by spaces:
 - Variant merging only occurs between sequences with identical primer sets
 - SNP counts reflect IUPAC ambiguity positions in consensus sequences
 
+## Changelog
+
+### Version 0.3.0 (2025-08-28)
+
+**Major Performance Optimizations:**
+- **Dramatically improved file I/O performance** - Replaced BioPython FASTQ parsing with direct file concatenation, achieving orders of magnitude speedup
+- **Eliminated directory scanning bottleneck** - Single lookup table build replaces hundreds of glob operations
+- **Optimized raw file copying** - Pre-built file lookup system scales efficiently with large datasets
+
+**Enhanced Variant Processing:**
+- **Complete variant selection framework** - Added size-based and diversity-based selection strategies with configurable limits
+- **Hierarchical variant grouping** - Implemented HAC clustering to separate distinct biological sequences
+- **SNP-based variant merging** - Greedy merging approach with IUPAC consensus generation
+- **Comprehensive variant analysis** - Detailed logging with difference categorization (substitutions, indels by length)
+
+**Algorithm Selection Guide:**
+- **Expanded clustering documentation** - Clear guidance on when to use greedy vs. graph clustering
+- **Technical algorithm descriptions** - Proper terminology and algorithmic details
+- **User decision framework** - Specific use cases and parameter recommendations
+
+**Documentation Improvements:**
+- **Complete workflow documentation** - Step-by-step processing pipeline with all options explained
+- **Enhanced logging features** - IUPAC-aware comparisons and full traceability through processing steps
+- **Parameter reference** - Comprehensive guide to all summarize options with examples
+- **Example outputs** - Real log examples and file structure illustrations
+
+**Code Quality:**
+- **Removed legacy code** - Eliminated all non-optimized function versions
+- **Simplified interfaces** - Clean function signatures and reduced conditional logic
+- **Maintained backward compatibility** - All existing functionality preserved
+
+### Version 0.2.1 (2025-08-27)
+
+**Core Functionality:**
+- Stable clustering and consensus generation with MCL and greedy algorithms
+- Comprehensive variant merging with adjusted identity scoring
+- SPOA-based consensus generation with stability assessment
+- Complete output structure with traceability features
+
 ## Citations
 
 This project uses and builds upon:
