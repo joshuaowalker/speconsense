@@ -212,6 +212,129 @@ speconsense-summarize --min-ric 5 --summary-dir MyResults
 speconsense-summarize --source /path/to/speconsense/output
 ```
 
+#### Variant Grouping and Selection
+
+When multiple variants exist per specimen, `speconsense-summarize` first groups similar variants together, then applies selection strategies within each group:
+
+**Variant Grouping:**
+```bash
+speconsense-summarize --variant-group-identity 0.9
+```
+- Uses **Hierarchical Agglomerative Clustering (HAC)** to group variants with sequence identity ≥ threshold
+- Default threshold is 0.9 (90% identity) 
+- Variants within each group are considered similar enough to represent the same biological entity
+- Each group will contribute one primary variant plus additional variants based on selection strategy
+
+**Variant Selection (within each group):**
+
+When multiple variants exist per specimen, `speconsense-summarize` offers two strategies for selecting which variants to output from each group:
+
+**Size-based selection (default):**
+```bash
+speconsense-summarize --variant-selection size --max-variants 2
+```
+- Selects variants by cluster size (largest first)
+- Primary variant is always the largest cluster
+- Additional variants are selected in order of decreasing size
+- Best for identifying the most abundant sequence variants
+- Suitable when read count reflects biological abundance
+
+**Diversity-based selection:**
+```bash
+speconsense-summarize --variant-selection diversity --max-variants 2
+```
+- Uses a **maximum distance algorithm** to select variants that are most genetically different from each other
+- Primary variant is still the largest cluster
+- Additional variants are selected to maximize sequence diversity in the output
+- Iteratively selects the variant with the **maximum minimum distance** to all previously selected variants
+- Best for capturing the full range of genetic variation in your sample
+- Suitable when you want to detect distinct sequence types regardless of their abundance
+
+**Algorithm Details for Diversity Selection (within each group):**
+1. Primary variant = largest cluster within the group (by read count)
+2. For each additional variant slot in the group:
+   - Calculate the minimum sequence distance from each remaining candidate to all already-selected variants in this group
+   - Select the candidate with the largest minimum distance (farthest from all selected in this group)
+   - Repeat until max_variants reached for this group
+
+**Overall Process:**
+1. Group variants by sequence identity using HAC clustering
+2. For each group independently:
+   - Apply variant selection strategy (size or diversity)
+   - Output up to max_variants per group
+3. Final output contains representatives from all groups, ensuring both biological diversity (between groups) and appropriate sampling within each biological entity (within groups)
+
+This two-stage process ensures that distinct biological sequences are preserved as separate groups, while providing control over variant complexity within each group.
+
+#### Additional Summarize Options
+
+**Quality Filtering:**
+```bash
+speconsense-summarize --min-ric 5
+```
+- Filters out consensus sequences with fewer than the specified number of Reads in Consensus (RiC)
+- Default is 3 - only sequences supported by at least 3 reads are processed
+- Higher values provide more stringent quality control but may exclude valid low-abundance variants
+
+**SNP-based Variant Merging:**
+```bash
+speconsense-summarize --snp-merge-limit 2
+```
+- **Occurs before variant grouping** - merges variants within each specimen that differ by ≤ N SNP positions
+- Uses a **greedy merging approach**: repeatedly finds the best pairwise merge (largest combined cluster size) until no valid merges remain
+- Creates **IUPAC consensus sequences** with ambiguity codes at polymorphic positions
+- Only merges variants with **identical primer sets** to maintain biological validity
+- Prevents merging if the result would exceed the SNP limit or contain complex indels
+- Helps consolidate very similar variants that likely represent the same biological sequence
+- **Note**: This is distinct from the `--variant-merge-threshold` in the main clustering step
+
+**Directory Control:**
+```bash
+speconsense-summarize --source /path/to/speconsense/output --summary-dir MyResults
+```
+- `--source`: Directory containing speconsense output files (default: current directory)
+- `--summary-dir`: Output directory name (default: `__Summary__`)
+
+#### Processing Workflow Summary
+
+The complete speconsense-summarize workflow operates in this order:
+
+1. **Load sequences** with RiC filtering (`--min-ric`)
+2. **SNP-based merging** within each specimen (`--snp-merge-limit`)  
+3. **HAC variant grouping** by sequence identity (`--variant-group-identity`)
+4. **Variant selection** within each group (`--max-variants`, `--variant-selection`)
+5. **Output generation** with full traceability and statistics
+
+#### Enhanced Logging and Traceability
+
+Speconsense-summarize provides comprehensive logging to help users understand processing decisions:
+
+**Variant Analysis Logging:**
+- **Complete variant summaries** for every variant in each group, including those that are skipped
+- **Detailed difference categorization**: substitutions, single-nt indels, short (≤3nt) indels, and long indels
+- **IUPAC-aware comparisons**: treats ambiguity codes as matches (e.g., R matches A or G)
+- **Group context**: clearly shows which variants belong to each HAC clustering group
+- **Selection rationale**: explains why variants were included or excluded
+
+**Example log output:**
+```
+HAC clustering created 2 groups
+Group 1: ['sample-c3']  
+Group 2: ['sample-c1', 'sample-c2']
+Processing Variants in Group 2
+Primary: sample-c1 (size=403, ric=403)
+Variant 1: (size=269, ric=269) - 1 short (<= 3nt) indel
+Variant 2: (size=180, ric=180) - 3 substitutions, 1 single-nt indel - skipping
+```
+
+**Traceability Features:**
+- **Merge history**: tracks which original clusters were combined during SNP merging
+- **File lineage**: maintains connection between final outputs and original speconsense clusters  
+- **Read aggregation**: `FASTQ Files/` directory contains all reads that contributed to each final consensus
+- **Raw preservation**: `raw_clusters/` directory preserves original speconsense output with stability metrics
+
+This comprehensive logging allows users to understand exactly how the pipeline processed their data and make informed decisions about parameter tuning.
+
 ### Full Command Line Options
 
 ```
@@ -284,11 +407,37 @@ speconsense-summarize
 
 ### Clustering Methods
 
-SpecConsense offers two clustering approaches:
+SpecConsense offers two clustering approaches with different characteristics:
 
-1. **Graph-based clustering (MCL)**: Constructs a similarity graph between reads and applies the Markov Cluster algorithm to identify clusters. This is the default and recommended method for most datasets.
+#### **Graph-based clustering (MCL)** - Default and recommended
+- Constructs a similarity graph between reads and applies the Markov Cluster algorithm to identify clusters
+- **Tends to produce more clusters** by discriminating between sequence variants within a specimen
+- Suitable when you want to identify multiple variants per specimen and are willing to interpret complex results
+- Excellent for detecting subtle sequence differences and biological variation
+- Relatively fast with high-quality results for most datasets
 
-2. **Greedy clustering**: A simpler approach that iteratively finds seeds with the most connections above the similarity threshold to form clusters. This is provided as a fallback when MCL is not available.
+#### **Greedy clustering** - Fast and simple alternative  
+- Uses greedy star clustering that iteratively selects the sequence with the most similar neighbors as cluster centers
+- **Tends to produce fewer, simpler clusters** by focusing on well-separated sequences
+- Excellent at discriminating between distinct targets (e.g., primary sequence vs. contaminant)
+- Usually does not separate variants within the same biological sequence
+- Suitable when you want a fast algorithm with minimal complexity in interpreting results
+- Ideal for applications where one consensus per specimen is sufficient
+
+#### **Choosing the Right Algorithm**
+
+**Use `--algorithm greedy` when:**
+- You want one clear consensus sequence per specimen
+- Speed is prioritized over detailed variant detection  
+- You prefer simpler output interpretation
+- Your dataset has well-separated sequences (targets vs. contaminants)
+
+**Use `--algorithm graph` (default) when:**
+- You want to detect sequence variants within specimens
+- You're willing to evaluate multiple consensus sequences per specimen
+- You need fine-grained discrimination between similar sequences
+- You want the most comprehensive analysis of sequence diversity
+- **Note**: Use `speconsense-summarize` after clustering to manage multiple variants per specimen. Key options include `--snp-merge-limit` for merging variants differing by few SNPs, `--variant-group-identity` for grouping similar variants, and `--max-variants`/`--variant-selection` for controlling which variants to output
 
 ### Cluster Merging
 

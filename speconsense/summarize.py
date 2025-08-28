@@ -713,23 +713,16 @@ def create_output_structure(groups: Dict[int, List[ConsensusInfo]],
 def write_consensus_fastq(consensus: ConsensusInfo, 
                          merge_traceability: Dict[str, List[str]],
                          naming_info: Dict,
-                         fastq_dir: str):
-    """Write FASTQ file for a consensus containing all reads from contributing clusters."""
-    import glob
-    from Bio import SeqIO
-    
-    # Find all original cluster names that contributed to this consensus
-    contributing_clusters = set()
-    
-    # Start with the consensus sample name, but we need to trace back to original clusters
-    # Use merge_traceability to find all original clusters that were merged
-    current_name = consensus.sample_name
+                         fastq_dir: str,
+                         fastq_lookup: Dict[str, List[str]]):
+    """Write FASTQ file for a consensus by concatenating existing FASTQ files."""
+    import shutil
     
     # Find the original cluster name(s) by looking through naming_info
     original_clusters = []
     for group_naming in naming_info.values():
         for original_name, final_name in group_naming:
-            if final_name == current_name:
+            if final_name == consensus.sample_name:
                 # This original cluster contributed to our final consensus
                 if original_name in merge_traceability:
                     # This was a merged cluster, get all original contributors
@@ -743,44 +736,107 @@ def write_consensus_fastq(consensus: ConsensusInfo,
         logging.warning(f"Could not find contributing clusters for {consensus.sample_name}")
         return
     
-    # Find FASTQ files for these clusters in cluster_debug directory
+    # Find FASTQ files for these clusters using lookup table
     fastq_output_path = os.path.join(fastq_dir, f"{consensus.sample_name}.fastq")
-    reads_written = 0
+    input_files = []
     
-    with open(fastq_output_path, 'w') as outf:
-        for cluster_name in original_clusters:
-            # Look for reads FASTQ file in cluster_debug
-            debug_pattern = f"cluster_debug/*{cluster_name}*reads.fastq"
-            debug_files = glob.glob(debug_pattern)
+    for cluster_name in original_clusters:
+        # Look for specimen name from cluster name (e.g., "sample-c1" -> "sample")
+        if '-c' in cluster_name:
+            specimen_name = cluster_name.rsplit('-c', 1)[0]
+            debug_files = fastq_lookup.get(specimen_name, [])
             
-            for debug_file in debug_files:
-                try:
-                    with open(debug_file, 'r') as inf:
-                        for record in SeqIO.parse(inf, "fastq"):
-                            SeqIO.write(record, outf, "fastq")
-                            reads_written += 1
-                except Exception as e:
-                    logging.debug(f"Could not read {debug_file}: {e}")
+            # Filter files that match this specific cluster
+            matching_files = [f for f in debug_files if cluster_name in f]
+            input_files.extend(matching_files)
     
-    if reads_written > 0:
-        logging.debug(f"Wrote {reads_written} reads to {fastq_output_path}")
-    else:
-        logging.warning(f"No reads found for {consensus.sample_name} from clusters: {original_clusters}")
+    if not input_files:
+        logging.warning(f"No FASTQ files found for {consensus.sample_name} from clusters: {original_clusters}")
+        return
+    
+    # Concatenate files directly without parsing
+    files_processed = 0
+    try:
+        with open(fastq_output_path, 'wb') as outf:
+            for input_file in input_files:
+                try:
+                    file_size = os.path.getsize(input_file)
+                    if file_size > 0:
+                        with open(input_file, 'rb') as inf:
+                            shutil.copyfileobj(inf, outf)
+                        files_processed += 1
+                    else:
+                        logging.debug(f"Skipping empty file: {input_file}")
+                except Exception as e:
+                    logging.debug(f"Could not concatenate {input_file}: {e}")
+        
+        # Check if the output file has content
+        output_size = os.path.getsize(fastq_output_path)
+        if output_size > 0:
+            # Count reads for logging by quickly counting lines and dividing by 4
+            with open(fastq_output_path, 'r') as f:
+                line_count = sum(1 for line in f)
+            read_count = line_count // 4
+            logging.debug(f"Concatenated {files_processed}/{len(input_files)} files ({output_size:,} bytes) with ~{read_count} reads to {fastq_output_path}")
+        else:
+            # Debug: check what files were supposed to be concatenated
+            file_info = []
+            for input_file in input_files:
+                if os.path.exists(input_file):
+                    size = os.path.getsize(input_file)
+                    file_info.append(f"{os.path.basename(input_file)}:{size}B")
+                else:
+                    file_info.append(f"{os.path.basename(input_file)}:missing")
+            
+            logging.warning(f"No data written for {consensus.sample_name} - input files: {', '.join(file_info)}")
+            # Remove empty output file
+            try:
+                os.unlink(fastq_output_path)
+            except:
+                pass
+            
+    except Exception as e:
+        logging.error(f"Failed to write concatenated FASTQ file {fastq_output_path}: {e}")
 
 
-def copy_raw_cluster_fastq(consensus: ConsensusInfo, raw_clusters_dir: str):
-    """Copy all cluster FASTQ files for a specimen from cluster_debug."""
+def build_fastq_lookup_table() -> Dict[str, List[str]]:
+    """
+    Build a lookup table mapping specimen base names to their cluster FASTQ files.
+    This avoids repeated directory scanning during file copying.
+    """
     import glob
-    import os
+    
+    lookup = defaultdict(list)
+    
+    # Scan cluster_debug directory once to build lookup table
+    if os.path.exists("cluster_debug"):
+        debug_files = glob.glob("cluster_debug/*reads.fastq")
+        
+        for fastq_path in debug_files:
+            filename = os.path.basename(fastq_path)
+            # Extract specimen name from filename (e.g., "sample-c1-RiC500-reads.fastq" -> "sample")
+            # Pattern: {specimen}-c{cluster}-RiC{size}-reads.fastq
+            parts = filename.split('-')
+            if len(parts) >= 3 and parts[-1] == 'reads.fastq':
+                # Find where cluster info starts (pattern: -c{number})
+                specimen_parts = []
+                for i, part in enumerate(parts):
+                    if part.startswith('c') and part[1:].isdigit():
+                        # Found cluster identifier, specimen name is everything before this
+                        specimen_name = '-'.join(specimen_parts)
+                        lookup[specimen_name].append(fastq_path)
+                        break
+                    specimen_parts.append(part)
+    
+    logging.debug(f"Built FASTQ lookup table for {len(lookup)} specimens with {sum(len(files) for files in lookup.values())} files")
+    return dict(lookup)
+
+
+def copy_raw_cluster_fastq(base_name: str, raw_clusters_dir: str, fastq_lookup: Dict[str, List[str]]):
+    """Copy all cluster FASTQ files for a specimen using pre-built lookup table."""
     import shutil
     
-    # Extract base specimen name from consensus file path
-    # e.g., "sample-all.fasta" -> "sample"
-    base_name = os.path.basename(consensus.file_path).replace('-all.fasta', '')
-    
-    # Look for ALL cluster FASTQ files for this specimen in cluster_debug
-    debug_pattern = f"cluster_debug/{base_name}*reads.fastq"
-    debug_files = glob.glob(debug_pattern)
+    debug_files = fastq_lookup.get(base_name, [])
     
     copied_count = 0
     for source_fastq in debug_files:
@@ -796,14 +852,15 @@ def copy_raw_cluster_fastq(consensus: ConsensusInfo, raw_clusters_dir: str):
     if copied_count > 0:
         logging.debug(f"Copied {copied_count} cluster FASTQ files for specimen {base_name}")
     else:
-        logging.debug(f"No cluster FASTQ files found for specimen {base_name} in cluster_debug/")
+        logging.debug(f"No cluster FASTQ files found for specimen {base_name} in lookup table")
 
 
 def write_output_files(final_consensus: List[ConsensusInfo],
                       merge_traceability: Dict[str, List[str]],
                       naming_info: Dict,
                       summary_folder: str,
-                      temp_log_file: str = None):
+                      temp_log_file: str = None,
+                      fastq_lookup: Dict[str, List[str]] = None):
     """Write all output files including FASTQ files with reads from contributing clusters."""
     
     # Write individual FASTA files (without stability metrics)
@@ -822,7 +879,7 @@ def write_output_files(final_consensus: List[ConsensusInfo],
     # Write FASTQ files for each final consensus containing all contributing reads
     fastq_dir = os.path.join(summary_folder, 'FASTQ Files')
     for consensus in final_consensus:
-        write_consensus_fastq(consensus, merge_traceability, naming_info, fastq_dir)
+        write_consensus_fastq(consensus, merge_traceability, naming_info, fastq_dir, fastq_lookup)
     
     # Write combined summary.fasta (without stability metrics)
     summary_fasta_path = os.path.join(summary_folder, 'summary.fasta')
@@ -1113,8 +1170,11 @@ def main():
     os.makedirs(os.path.join(args.summary_dir, 'FASTQ Files'), exist_ok=True)
     os.makedirs(os.path.join(args.summary_dir, 'raw_clusters'), exist_ok=True)
     
-    # Write output files
-    write_output_files(all_final_consensus, all_merge_traceability, all_naming_info, args.summary_dir, temp_log_file.name)
+    # Build lookup table for FASTQ files to avoid repeated directory scanning
+    fastq_lookup = build_fastq_lookup_table()
+    
+    # Write output files (reuse the same lookup table for efficiency)
+    write_output_files(all_final_consensus, all_merge_traceability, all_naming_info, args.summary_dir, temp_log_file.name, fastq_lookup)
     
     logging.info(f"Enhanced summarization completed successfully")
     logging.info(f"Final output: {len(all_final_consensus)} consensus sequences in {args.summary_dir}")
@@ -1135,7 +1195,7 @@ def main():
             # Also copy all cluster FASTQ files for this specimen (only once per specimen)
             base_name = os.path.basename(consensus.file_path).replace('-all.fasta', '')
             if base_name not in copied_specimens:
-                copy_raw_cluster_fastq(consensus, raw_clusters_dir)
+                copy_raw_cluster_fastq(base_name, raw_clusters_dir, fastq_lookup)
                 copied_specimens.add(base_name)
     
     logging.info(f"Copied {len(copied_files)} raw cluster FASTA files and cluster FASTQ files from {len(copied_specimens)} specimens to raw_clusters/")
