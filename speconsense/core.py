@@ -20,7 +20,7 @@ from Bio import SeqIO
 from Bio.Seq import reverse_complement
 from tqdm import tqdm
 
-__version__ = "0.3.1"
+__version__ = "0.3.2"
 
 # IUPAC nucleotide ambiguity codes mapping
 # Maps sets of nucleotides to their corresponding IUPAC code
@@ -397,7 +397,8 @@ class SpecimenClusterer:
                             median_diff: Optional[float] = None,
                             p95_diff: Optional[float] = None,
                             actual_size: Optional[int] = None,
-                            consensus_fasta_handle = None) -> None:
+                            consensus_fasta_handle = None,
+                            sampled_ids: Optional[Set[str]] = None) -> None:
         """Write cluster files: reads FASTQ and consensus FASTA/FASTG."""
         cluster_size = len(cluster)
         ric_size = min(actual_size or cluster_size, self.max_sample_size)
@@ -418,6 +419,13 @@ class SpecimenClusterer:
         with open(reads_file, 'w') as f:
             for seq_id in cluster:
                 SeqIO.write(self.records[seq_id], f, "fastq")
+
+        # Write sampled reads FASTQ (only sequences used for consensus generation)
+        if sampled_ids is not None:
+            sampled_file = os.path.join(self.debug_dir, f"{self.sample_name}-c{cluster_num}-RiC{ric_size}-sampled.fastq")
+            with open(sampled_file, 'w') as f:
+                for seq_id in sampled_ids:
+                    SeqIO.write(self.records[seq_id], f, "fastq")
 
         # Write untrimmed consensus to debug directory
         with open(os.path.join(self.debug_dir, f"{self.sample_name}-c{cluster_num}-RiC{ric_size}-untrimmed.fasta"),
@@ -660,7 +668,8 @@ class SpecimenClusterer:
                             median_diff=median_diff,
                             p95_diff=p95_diff,
                             actual_size=actual_size,
-                            consensus_fasta_handle=consensus_fasta_handle
+                            consensus_fasta_handle=consensus_fasta_handle,
+                            sampled_ids=sampled_ids
                         )
 
     def _create_id_mapping(self) -> None:

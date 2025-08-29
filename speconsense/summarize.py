@@ -811,14 +811,19 @@ def build_fastq_lookup_table(source_dir: str = ".") -> Dict[str, List[str]]:
     # Scan cluster_debug directory once to build lookup table
     cluster_debug_path = os.path.join(source_dir, "cluster_debug")
     if os.path.exists(cluster_debug_path):
-        debug_files = glob.glob(os.path.join(cluster_debug_path, "*reads.fastq"))
+        # Look for sampled FASTQ files first, fall back to reads files if not available
+        debug_files = glob.glob(os.path.join(cluster_debug_path, "*sampled.fastq"))
+        file_type = "sampled"
+        if not debug_files:
+            debug_files = glob.glob(os.path.join(cluster_debug_path, "*reads.fastq"))
+            file_type = "reads"
         
         for fastq_path in debug_files:
             filename = os.path.basename(fastq_path)
-            # Extract specimen name from filename (e.g., "sample-c1-RiC500-reads.fastq" -> "sample")
-            # Pattern: {specimen}-c{cluster}-RiC{size}-reads.fastq
+            # Extract specimen name from filename (e.g., "sample-c1-RiC500-sampled.fastq" -> "sample")
+            # Pattern: {specimen}-c{cluster}-RiC{size}-(sampled|reads).fastq
             parts = filename.split('-')
-            if len(parts) >= 3 and parts[-1] == 'reads.fastq':
+            if len(parts) >= 3 and (parts[-1] == 'sampled.fastq' or parts[-1] == 'reads.fastq'):
                 # Find where cluster info starts (pattern: -c{number})
                 specimen_parts = []
                 for i, part in enumerate(parts):
@@ -829,7 +834,10 @@ def build_fastq_lookup_table(source_dir: str = ".") -> Dict[str, List[str]]:
                         break
                     specimen_parts.append(part)
     
-    logging.debug(f"Built FASTQ lookup table for {len(lookup)} specimens with {sum(len(files) for files in lookup.values())} files")
+    if debug_files:
+        logging.debug(f"Built FASTQ lookup table for {len(lookup)} specimens with {sum(len(files) for files in lookup.values())} {file_type} files")
+    else:
+        logging.debug("No FASTQ files found in cluster_debug directory")
     return dict(lookup)
 
 

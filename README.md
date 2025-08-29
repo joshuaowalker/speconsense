@@ -498,6 +498,7 @@ For each specimen, Speconsense generates:
 
 2. **Debug directory** (`cluster_debug/`):
    - `{sample_name}-c{cluster_num}-RiC{size}-reads.fastq`: Original reads in each cluster
+   - `{sample_name}-c{cluster_num}-RiC{size}-sampled.fastq`: Sampled reads used for consensus generation
    - `{sample_name}-c{cluster_num}-RiC{size}-untrimmed.fasta`: Untrimmed consensus sequences
 
 ### Speconsense-Summarize Output
@@ -576,6 +577,12 @@ Consensus sequence headers contain metadata fields separated by spaces:
 - SNP counts reflect IUPAC ambiguity positions in consensus sequences
 
 ## Changelog
+
+### Version 0.3.2 (2025-08-29)
+**Enhancements:**
+- **Sampled FASTQ files** - Added `-sampled.fastq` files to cluster_debug containing only sequences used for consensus generation
+- **Improved summarize process** - Summary FASTQ files now contain only consensus-contributing reads rather than entire clusters
+- **Better debugging workflow** - Separate full cluster files for complete debugging and sampled files for meaningful summary output
 
 ### Version 0.3.1 (2025-08-28)
 
