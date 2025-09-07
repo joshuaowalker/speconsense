@@ -121,8 +121,8 @@ class TestAugmentInput:
         ], capture_output=True, text=True)
         
         assert result.returncode == 0, "Speconsense should succeed"
-        assert os.path.exists('test_main-all.fasta'), "Main output file should be created"
-        assert os.path.exists('cluster_debug'), "Debug directory should be created"
+        assert os.path.exists('clusters/test_main-all.fasta'), "Main output file should be created"
+        assert os.path.exists('clusters/cluster_debug'), "Debug directory should be created"
     
     def test_augmented_sequence_in_cluster_output(self, temp_dir, core_script_path, test_data):
         """Test that augmented sequences appear in cluster debug files."""
@@ -137,12 +137,12 @@ class TestAugmentInput:
         assert result.returncode == 0, "Speconsense should succeed"
         
         # Check cluster debug files
-        debug_files = [f for f in os.listdir('cluster_debug') 
+        debug_files = [f for f in os.listdir('clusters/cluster_debug') 
                       if f.endswith('-reads.fastq') or f.endswith('-reads.fasta')]
         assert len(debug_files) > 0, "Should create cluster debug read files"
         
         # Check that augmented sequence is in cluster output
-        with open(os.path.join('cluster_debug', debug_files[0]), 'r') as f:
+        with open(os.path.join('clusters/cluster_debug', debug_files[0]), 'r') as f:
             debug_content = f.read()
             assert 'augmented_1' in debug_content, "Augmented sequence should be in cluster output"
     
@@ -162,7 +162,7 @@ class TestAugmentInput:
         # Run summarize
         result = subprocess.run([
             sys.executable, summarize_script_path,
-            '--source', '.', '--log-level', 'INFO'
+            '--source', 'clusters', '--log-level', 'INFO'
         ], capture_output=True, text=True)
         
         assert result.returncode == 0, f"Summarize should succeed: {result.stderr}"
@@ -182,7 +182,7 @@ class TestAugmentInput:
         # Run summarize
         subprocess.run([
             sys.executable, summarize_script_path,
-            '--source', '.', '--log-level', 'INFO'
+            '--source', 'clusters', '--log-level', 'INFO'
         ], capture_output=True, text=True)
         
         # Check that augmented sequence is in final FASTQ output
@@ -207,7 +207,7 @@ class TestAugmentInput:
         # Run summarize
         subprocess.run([
             sys.executable, summarize_script_path,
-            '--source', '.', '--log-level', 'INFO'
+            '--source', 'clusters', '--log-level', 'INFO'
         ], capture_output=True, text=True)
         
         # Check final FASTA header shows correct counts

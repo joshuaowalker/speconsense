@@ -20,7 +20,7 @@ from Bio import SeqIO
 from Bio.Seq import reverse_complement
 from tqdm import tqdm
 
-__version__ = "0.3.2"
+__version__ = "0.3.3"
 
 # IUPAC nucleotide ambiguity codes mapping
 # Maps sets of nucleotides to their corresponding IUPAC code
@@ -750,22 +750,198 @@ class SpecimenClusterer:
             return sequences[0]  # Fall back to first sequence
 
     def load_primers(self, primer_file: str) -> None:
-        """Load primers from FASTA file."""
-        self.primers = []  # Clear any existing primers
+        """Load primers from FASTA file with position awareness."""
+        # Store primers in separate lists by position
+        self.forward_primers = []
+        self.reverse_primers = []
+        self.forward_primers_rc = []  # RC of forward primers
+        self.reverse_primers_rc = []  # RC of reverse primers
+        
+        # For backward compatibility with trim_primers
+        self.primers = []  # Will be populated with all primers for existing code
+        
         try:
+            primer_count = {'forward': 0, 'reverse': 0, 'unknown': 0}
+            
             for record in SeqIO.parse(primer_file, "fasta"):
-                self.primers.append((record.id, str(record.seq)))
-                # Also add reverse complement
-                seq_obj = record.seq
-                rc = reverse_complement(seq_obj)
-                self.primers.append((f"{record.id}_RC", rc))
+                sequence = str(record.seq)
+                sequence_rc = str(reverse_complement(sequence))
+                
+                # Parse position from header
+                if "position=forward" in record.description:
+                    self.forward_primers.append((record.id, sequence))
+                    self.forward_primers_rc.append((f"{record.id}_RC", sequence_rc))
+                    primer_count['forward'] += 1
+                elif "position=reverse" in record.description:
+                    self.reverse_primers.append((record.id, sequence))
+                    self.reverse_primers_rc.append((f"{record.id}_RC", sequence_rc))
+                    primer_count['reverse'] += 1
+                else:
+                    # For primers without position info, add to both lists
+                    logging.warning(f"Primer {record.id} has no position annotation, treating as bidirectional")
+                    self.forward_primers.append((record.id, sequence))
+                    self.forward_primers_rc.append((f"{record.id}_RC", sequence_rc))
+                    self.reverse_primers.append((record.id, sequence))
+                    self.reverse_primers_rc.append((f"{record.id}_RC", sequence_rc))
+                    primer_count['unknown'] += 1
+                
+                # Maintain backward compatibility
+                self.primers.append((record.id, sequence))
+                self.primers.append((f"{record.id}_RC", sequence_rc))
 
-            if len(self.primers) == 0:
+            total_primers = sum(primer_count.values())
+            if total_primers == 0:
                 logging.warning("No primers were loaded. Primer trimming will be disabled.")
+            else:
+                logging.info(f"Loaded {total_primers} primers: {primer_count['forward']} forward, "
+                           f"{primer_count['reverse']} reverse, {primer_count['unknown']} unknown")
         except Exception as e:
             logging.error(f"Error loading primers: {str(e)}")
             raise
 
+    def orient_sequences(self) -> set:
+        """Normalize sequence orientations based on primer matches.
+        
+        Scoring system:
+        - +1 point if a forward primer is found at the expected position
+        - +1 point if a reverse primer is found at the expected position
+        - Maximum score: 2 (both primers found)
+        
+        Decision logic:
+        - If one orientation scores >0 and the other scores 0: use the non-zero orientation
+        - If both score 0 or both score >0: keep original orientation (ambiguous/failed)
+        """
+        if not hasattr(self, 'forward_primers') or not hasattr(self, 'reverse_primers'):
+            logging.warning("No positioned primers loaded, skipping orientation")
+            return set()
+            
+        if len(self.forward_primers) == 0 and len(self.reverse_primers) == 0:
+            logging.warning("No positioned primers available, skipping orientation")
+            return set()
+        
+        logging.info("Starting sequence orientation based on primer positions...")
+        
+        oriented_count = 0
+        already_correct = 0
+        failed_count = 0
+        failed_sequences = set()  # Track which sequences failed orientation
+        
+        # Process each sequence
+        for seq_id in tqdm(self.sequences, desc="Orienting sequences"):
+            sequence = self.sequences[seq_id]
+            
+            # Test both orientations (scores will be 0, 1, or 2)
+            forward_score = self._score_orientation(sequence, "forward")
+            reverse_score = self._score_orientation(sequence, "reverse")
+            
+            # Decision logic
+            if forward_score > 0 and reverse_score == 0:
+                # Clear forward orientation
+                already_correct += 1
+                logging.debug(f"Kept {seq_id} as-is: forward_score={forward_score}, reverse_score={reverse_score}")
+            elif reverse_score > 0 and forward_score == 0:
+                # Clear reverse orientation - needs to be flipped
+                self.sequences[seq_id] = str(reverse_complement(sequence))
+                
+                # Also update the record if it exists
+                if seq_id in self.records:
+                    record = self.records[seq_id]
+                    record.seq = reverse_complement(record.seq)
+                    # Reverse quality scores too if they exist
+                    if 'phred_quality' in record.letter_annotations:
+                        record.letter_annotations['phred_quality'] = \
+                            record.letter_annotations['phred_quality'][::-1]
+                
+                oriented_count += 1
+                logging.debug(f"Reoriented {seq_id}: forward_score={forward_score}, reverse_score={reverse_score}")
+            else:
+                # Both zero (no primers) or both non-zero (ambiguous) - orientation failed
+                failed_count += 1
+                failed_sequences.add(seq_id)  # Track this sequence as failed
+                if forward_score == 0 and reverse_score == 0:
+                    logging.debug(f"No primer matches for {seq_id}")
+                else:
+                    logging.debug(f"Ambiguous orientation for {seq_id}: forward_score={forward_score}, reverse_score={reverse_score}")
+        
+        logging.info(f"Orientation complete: {already_correct} kept as-is, "
+                    f"{oriented_count} reverse-complemented, {failed_count} orientation failed")
+        
+        # Return set of failed sequence IDs for potential filtering
+        return failed_sequences
+    
+    def _score_orientation(self, sequence: str, orientation: str) -> int:
+        """Score how well primers match in the given orientation.
+        
+        Simple binary scoring:
+        - +1 if a forward primer is found at the expected position
+        - +1 if a reverse primer is found at the expected position
+        
+        Args:
+            sequence: The sequence to test
+            orientation: Either "forward" or "reverse"
+            
+        Returns:
+            Score from 0-2 (integer)
+        """
+        score = 0
+        
+        if orientation == "forward":
+            # Forward orientation:
+            # - Check for forward primers at 5' end (as-is)
+            # - Check for RC of reverse primers at 3' end
+            if self._has_primer_match(sequence, self.forward_primers, "start"):
+                score += 1
+            if self._has_primer_match(sequence, self.reverse_primers_rc, "end"):
+                score += 1
+        else:
+            # Reverse orientation:
+            # - Check for reverse primers at 5' end (as-is)
+            # - Check for RC of forward primers at 3' end
+            if self._has_primer_match(sequence, self.reverse_primers, "start"):
+                score += 1
+            if self._has_primer_match(sequence, self.forward_primers_rc, "end"):
+                score += 1
+        
+        return score
+    
+    def _has_primer_match(self, sequence: str, primers: List[Tuple[str, str]], end: str) -> bool:
+        """Check if any primer matches at the specified end of sequence.
+        
+        Args:
+            sequence: The sequence to search in
+            primers: List of (name, sequence) tuples to search for
+            end: Either "start" or "end"
+            
+        Returns:
+            True if any primer has a good match, False otherwise
+        """
+        if not primers or not sequence:
+            return False
+        
+        # Determine search region
+        max_primer_len = max(len(p[1]) for p in primers) if primers else 50
+        if end == "start":
+            search_region = sequence[:min(max_primer_len * 2, len(sequence))]
+        else:
+            search_region = sequence[-min(max_primer_len * 2, len(sequence)):]
+        
+        for primer_name, primer_seq in primers:
+            # Allow up to 25% errors
+            k = len(primer_seq) // 4
+            
+            # Use edlib to find best match
+            result = edlib.align(primer_seq, search_region, task="distance", mode="HW", k=k)
+            
+            if result["editDistance"] != -1:
+                # Consider it a match if identity is >= 75%
+                identity = 1.0 - (result["editDistance"] / len(primer_seq))
+                if identity >= 0.75:
+                    logging.debug(f"Found {primer_name} at {end} with identity {identity:.2%} "
+                                f"(edit_dist={result['editDistance']}, len={len(primer_seq)})")
+                    return True
+        
+        return False
+    
     def trim_primers(self, sequence: str) -> Tuple[str, List[str]]:
         """
         Trim primers from start and end of sequence.
@@ -969,6 +1145,8 @@ def main():
                         help="Disable stability assessment")
     parser.add_argument("--disable-homopolymer-equivalence", action="store_true",
                         help="Disable homopolymer equivalence in cluster merging (only merge identical sequences)")
+    parser.add_argument("--orient-mode", choices=["skip", "keep-all", "filter-failed"], default="skip",
+                        help="Sequence orientation mode: skip (default, no orientation), keep-all (orient but keep failed), or filter-failed (orient and remove failed)")
     parser.add_argument("--log-level", default="INFO",
                         choices=["DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL"])
     parser.add_argument("--version", action="version",
@@ -1055,6 +1233,25 @@ def main():
             clusterer.load_primers(auto_primer_path)
         else:
             logging.warning("No primer file specified and primers.fasta not found in input directory. Primer trimming will be disabled.")
+    
+    # Handle sequence orientation based on mode
+    if args.orient_mode != "skip":
+        if hasattr(clusterer, 'forward_primers') and hasattr(clusterer, 'reverse_primers'):
+            failed_sequences = clusterer.orient_sequences()
+            
+            # Filter failed sequences if requested
+            if args.orient_mode == "filter-failed" and failed_sequences:
+                logging.info(f"Filtering out {len(failed_sequences)} sequences with failed orientation")
+                
+                # Remove failed sequences from clusterer
+                for seq_id in failed_sequences:
+                    del clusterer.sequences[seq_id]
+                    del clusterer.records[seq_id]
+                
+                remaining = len(clusterer.sequences)
+                logging.info(f"Continuing with {remaining} successfully oriented sequences")
+        else:
+            logging.warning(f"--orient-mode={args.orient_mode} specified but no primers with position information loaded")
 
     clusterer.cluster(algorithm=args.algorithm)
     print()

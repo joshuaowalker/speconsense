@@ -113,6 +113,7 @@ python -m pytest tests/ --cov=speconsense --cov-report=html
 
 **Available Tests:**
 - `tests/test_augment_input.py`: Integration tests for --augment-input functionality
+- `tests/test_orientation.py`: Tests for sequence orientation feature
 
 ## Usage
 
@@ -143,6 +144,9 @@ speconsense input.fastq --min-identity 0.85
 # Enable primer trimming
 speconsense input.fastq --primers primers.fasta
 
+# Sequence orientation based on primer positions
+speconsense input.fastq --primers primers.fasta --orient-mode keep-all
+
 # Control the maximum sample size for consensus generation
 speconsense input.fastq --max-sample-size 500
 
@@ -161,6 +165,49 @@ speconsense input.fastq --output-dir results/
 # Using short form for output directory
 speconsense input.fastq -O my_results/
 ```
+
+### Sequence Orientation
+
+The `--orient-mode` parameter enables automatic detection and correction of sequence orientation based on primer positions. This is particularly useful when processing older datasets or files where forward and reverse orientation sequences may be mixed.
+
+**How it works:**
+- Detects sequence orientation by checking for forward and reverse primers at expected positions
+- Uses a simple binary scoring system: +1 for forward primer match, +1 for reverse primer match
+- Sequences scoring clearly in one orientation (score >0) vs the other (score 0) are reoriented if needed
+- Sequences with ambiguous orientation (both score 0 or both score >0) are marked as failed
+
+**Available modes:**
+- `skip` (default): No orientation performed, sequences processed as-is
+- `keep-all`: Perform orientation but keep all sequences, including those that failed
+- `filter-failed`: Perform orientation and remove sequences with failed/ambiguous orientation
+
+**Usage:**
+```bash
+# Keep all sequences, including those with ambiguous orientation
+speconsense input.fastq --primers primers.fasta --orient-mode keep-all
+
+# Filter out sequences that couldn't be reliably oriented
+speconsense input.fastq --primers primers.fasta --orient-mode filter-failed
+
+# Skip orientation (default behavior)
+speconsense input.fastq --primers primers.fasta
+```
+
+**Requirements:**
+- Primers FASTA file must include position annotations: `position=forward` or `position=reverse`
+- Example primers.fasta format:
+```
+>ITS1F  pool=ITS    position=forward
+CTTGGTCATTTAGAGGAAGTAA
+>ITS4   pool=ITS    position=reverse
+TCCTCCGCTTATTGATATGC
+```
+
+**Important Notes:**
+- Orientation is performed before clustering, ensuring all sequences are in the same direction
+- Failed orientations typically indicate: no primers found, chimeric sequences, or degraded primers
+- The tool reports counts: sequences kept as-is, reverse-complemented, and orientation failed
+- Quality scores are also reversed when sequences are reverse-complemented
 
 ### Augmenting Input with Additional Sequences
 
@@ -577,6 +624,22 @@ Consensus sequence headers contain metadata fields separated by spaces:
 - SNP counts reflect IUPAC ambiguity positions in consensus sequences
 
 ## Changelog
+
+### Version 0.3.3 (2025-09-07)
+**New Features:**
+- **Sequence orientation detection** - Added `--orient-mode` parameter for automatic detection and correction of sequence orientation based on primer positions
+- **Three orientation modes** - `skip` (default, no orientation), `keep-all` (orient but keep failed), `filter-failed` (orient and remove failed)
+- **Binary scoring system** - Simple and robust orientation detection using forward and reverse primer matches
+- **Comprehensive primer handling** - Improved primer loading with position awareness (forward/reverse) and backward compatibility
+
+**Improvements:**
+- **Enhanced primer storage** - Primers now stored separately by position for more accurate orientation detection
+- **Quality score handling** - Properly reverses quality scores when sequences are reverse-complemented
+- **Better logging** - Reports orientation statistics (kept as-is, reverse-complemented, failed)
+
+**Testing:**
+- Added comprehensive test suite for orientation feature
+- Fixed existing tests to work with new default output directory structure
 
 ### Version 0.3.2 (2025-08-29)
 **Enhancements:**

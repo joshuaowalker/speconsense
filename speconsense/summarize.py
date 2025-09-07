@@ -166,7 +166,7 @@ def load_consensus_sequences(source_folder: str, min_ric: int) -> List[Consensus
                     )
                     consensus_list.append(consensus_info)
     
-    logging.info(f"Loaded {len(consensus_list)} consensus sequences")
+    logging.info(f"Loaded {len(consensus_list)} consensus sequences from {source_folder}")
     return consensus_list
 
 
