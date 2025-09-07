@@ -42,6 +42,7 @@ Issues = "https://github.com/joshuaowalker/speconsense/issues"
 [project.scripts]
 speconsense = "speconsense.cli:main"
 speconsense-summarize = "speconsense.summarize:main"
+speconsense-synth = "speconsense.synth:main"
 
 [tool.setuptools.packages.find]
 where = ["."]

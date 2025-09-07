@@ -11,5 +11,6 @@ __email__ = "joshowalker@yahoo.com"
 
 from .core import main as speconsense_main
 from .summarize import main as summarize_main
+from .synth import main as synth_main
 
-__all__ = ["speconsense_main", "summarize_main", "__version__"]
+__all__ = ["speconsense_main", "summarize_main", "synth_main", "__version__"]
