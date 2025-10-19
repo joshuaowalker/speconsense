@@ -7,7 +7,7 @@ A tool for high-quality clustering and consensus generation from Oxford Nanopore
 Speconsense is a specialized tool for generating high-quality consensus sequences from Oxford Nanopore Technology (ONT) amplicon data. It is specifically designed as an experimental alternative to NGSpeciesID in the fungal DNA barcoding pipeline.
 
 The key features of Speconsense include:
-- Robust clustering of amplicon reads using either MCL graph-based or greedy algorithms
+- Robust clustering of amplicon reads using either Markov Clustering (MCL) graph-based or greedy algorithms
 - Automatic merging of clusters with identical or similar consensus sequences
 - High-quality consensus generation using SPOA
 - Primer trimming for clean consensus sequences
@@ -69,7 +69,7 @@ conda install bioconda::spoa
 # See https://github.com/rvaser/spoa for source installation instructions
 ```
 
-**Note:** If MCL is not available, speconsense will automatically fall back to the greedy clustering algorithm.
+**Note:** If the mcl tool is not available, speconsense will automatically fall back to the greedy clustering algorithm.
 
 ## Usage
 
@@ -80,7 +80,7 @@ speconsense input.fastq
 ```
 
 By default, this will:
-1. Cluster reads using graph-based MCL algorithm
+1. Cluster reads using graph-based Markov Clustering (MCL) algorithm
 2. Merge clusters with identical consensus sequences
 3. Generate a consensus sequence for each cluster
 4. Output FASTA files containing consensus sequences
@@ -88,7 +88,7 @@ By default, this will:
 ### Common Options
 
 ```bash
-# Use greedy clustering algorithm instead of MCL
+# Use greedy clustering algorithm instead of Markov Clustering
 speconsense input.fastq --algorithm greedy
 
 # Set minimum cluster size
@@ -262,12 +262,14 @@ Consensus sequence headers contain metadata fields separated by spaces:
 
 SpecConsense offers two clustering approaches with different characteristics:
 
-#### **Graph-based clustering (MCL)** - Default and recommended
-- Constructs a similarity graph between reads and applies the Markov Cluster algorithm to identify clusters
+#### **Graph-based clustering with Markov Clustering (MCL)** - Default and recommended
+- Constructs a similarity graph between reads and applies the Markov Clustering algorithm to identify clusters
 - **Tends to produce more clusters** by discriminating between sequence variants within a specimen
 - Suitable when you want to identify multiple variants per specimen and are willing to interpret complex results
 - Excellent for detecting subtle sequence differences and biological variation
 - Relatively fast with high-quality results for most datasets
+
+**Why MCL?** Markov Clustering was chosen for its ability to detect natural communities in densely connected graphs without requiring a priori specification of cluster numbers. The algorithm simulates flow in the graph, causing flow to spread within natural clusters and evaporate between different clusters. By varying a single parameter (inflation), MCL can detect clusters at different scales of granularity. MCL has proven highly effective in bioinformatics applications, particularly for protein family detection in large-scale sequence databases, making it well-suited for identifying sequence variants in amplicon data.
 
 #### **Greedy clustering** - Fast and simple alternative
 - Uses greedy star clustering that iteratively selects the sequence with the most similar neighbors as cluster centers
@@ -500,7 +502,7 @@ usage: speconsense.py [-h] [--augment-input AUGMENT_INPUT] [--algorithm {graph,g
                      [--log-level {DEBUG,INFO,WARNING,ERROR,CRITICAL}] [--version]
                      input_file
 
-MCL-based clustering of nanopore amplicon reads
+Markov Clustering-based clustering of nanopore amplicon reads
 
 positional arguments:
   input_file            Input FASTQ file
@@ -697,7 +699,7 @@ After primary demultiplexing, some sequences may remain unmatched due to sequenc
 ### Version 0.2.1 (2025-08-27)
 
 **Core Functionality:**
-- Stable clustering and consensus generation with MCL and greedy algorithms
+- Stable clustering and consensus generation with Markov Clustering and greedy algorithms
 - Comprehensive variant merging with adjusted identity scoring
 - SPOA-based consensus generation with stability assessment
 - Complete output structure with traceability features
@@ -706,7 +708,11 @@ After primary demultiplexing, some sequences may remain unmatched due to sequenc
 
 This project uses and builds upon:
 
-- **MCL clustering algorithm**: van Dongen, Stijn, *Graph clustering via a discrete uncoupling process*, Siam Journal on Matrix Analysis and Applications 30-1, p121-141, 2008. (https://doi.org/10.1137/040608635)
+- **Markov Clustering (MCL) algorithm**:
+  - van Dongen, S. (2000). *Graph Clustering by Flow Simulation*. PhD thesis, University of Utrecht. https://micans.org/mcl/
+  - van Dongen, S. (2008). *Graph clustering via a discrete uncoupling process*. SIAM Journal on Matrix Analysis and Applications 30(1):121-141. https://doi.org/10.1137/040608635
+
+- **MCL in bioinformatics**: Enright, A.J., Van Dongen, S., Ouzounis, C.A. (2002). *An efficient algorithm for large-scale detection of protein families*. Nucleic Acids Research 30(7):1575-1584. https://doi.org/10.1093/nar/30.7.1575 (PMC: https://pmc.ncbi.nlm.nih.gov/articles/PMC101833/)
 
 - **ONT fungal barcoding protocol**: Russell, S.D., Geurin, Z., Walker, J. (2024). *Primary Data Analysis - Basecalling, Demultiplexing, and Consensus Building for ONT Fungal Barcodes*. protocols.io. https://dx.doi.org/10.17504/protocols.io.dm6gpbm88lzp/v4
 
