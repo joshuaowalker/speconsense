@@ -5,6 +5,18 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.3.5] - 2025-10-19
+
+### Fixed
+- Fixed cluster file matching in `speconsense-summarize` to prevent false positives (e.g., cluster "c1" incorrectly matching "c10", "c11")
+- Fixed specimen name parsing in FASTQ lookup table using robust regex pattern instead of fragile string splitting
+- Added validation for matched FASTQ files to detect missing or empty files
+
+### Changed
+- Improved FASTQ file lookup with stage priority system (sampled → reads → untrimmed) to prevent duplicate processing
+- Elevated logging level to WARNING for unexpected file conditions (empty files, unmatched patterns) for better visibility
+- Enhanced file matching to use pattern `{cluster_name}-RiC` for more precise cluster identification
+
 ## [0.3.4] - 2025-10-19
 
 ### Fixed

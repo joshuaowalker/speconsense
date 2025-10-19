@@ -758,11 +758,22 @@ def write_consensus_fastq(consensus: ConsensusInfo,
         if '-c' in cluster_name:
             specimen_name = cluster_name.rsplit('-c', 1)[0]
             debug_files = fastq_lookup.get(specimen_name, [])
-            
+
             # Filter files that match this specific cluster
-            matching_files = [f for f in debug_files if cluster_name in f]
+            # Match the full pattern: {specimen}-c{cluster}-RiC{size}-{stage}.fastq
+            # Where stage can be: sampled, reads, untrimmed, etc.
+            # This prevents c1 from matching c10, c11, etc. and validates file structure
+            matching_files = [f for f in debug_files if f"{cluster_name}-RiC" in f]
+
+            # Validate that matched files exist and log any issues
+            for mf in matching_files:
+                if not os.path.exists(mf):
+                    logging.warning(f"Matched file does not exist: {mf}")
+                elif os.path.getsize(mf) == 0:
+                    logging.warning(f"Matched file is empty: {mf}")
+
             input_files.extend(matching_files)
-    
+
     if not input_files:
         logging.warning(f"No FASTQ files found for {consensus.sample_name} from clusters: {original_clusters}")
         return
@@ -818,37 +829,50 @@ def build_fastq_lookup_table(source_dir: str = ".") -> Dict[str, List[str]]:
     This avoids repeated directory scanning during file copying.
     """
     import glob
-    
+    import re
+
     lookup = defaultdict(list)
     
     # Scan cluster_debug directory once to build lookup table
     cluster_debug_path = os.path.join(source_dir, "cluster_debug")
     if os.path.exists(cluster_debug_path):
-        # Look for sampled FASTQ files first, fall back to reads files if not available
-        debug_files = glob.glob(os.path.join(cluster_debug_path, "*sampled.fastq"))
-        file_type = "sampled"
+        # Define priority order for stage types (first match wins)
+        # This prevents including multiple versions of the same cluster
+        stage_priority = ['sampled', 'reads', 'untrimmed']
+
+        # Try each stage type in priority order until we find files
+        debug_files = []
+        selected_stage = None
+        for stage in stage_priority:
+            debug_files = glob.glob(os.path.join(cluster_debug_path, f"*-{stage}.fastq"))
+            if debug_files:
+                selected_stage = stage
+                break
+
+        # If no files found with known stage types, try generic pattern
         if not debug_files:
-            debug_files = glob.glob(os.path.join(cluster_debug_path, "*reads.fastq"))
-            file_type = "reads"
-        
+            debug_files = glob.glob(os.path.join(cluster_debug_path, "*.fastq"))
+            selected_stage = "unknown"
+
+        # Use regex to robustly parse the filename pattern
+        # Pattern: {specimen}-c{cluster}-RiC{size}-{stage}.fastq
+        # Where stage can be: sampled, reads, untrimmed, or other variants
+        pattern = re.compile(r'^(.+)-c(\d+)-RiC(\d+)-([a-z]+)\.fastq$')
+
         for fastq_path in debug_files:
             filename = os.path.basename(fastq_path)
-            # Extract specimen name from filename (e.g., "sample-c1-RiC500-sampled.fastq" -> "sample")
-            # Pattern: {specimen}-c{cluster}-RiC{size}-(sampled|reads).fastq
-            parts = filename.split('-')
-            if len(parts) >= 3 and (parts[-1] == 'sampled.fastq' or parts[-1] == 'reads.fastq'):
-                # Find where cluster info starts (pattern: -c{number})
-                specimen_parts = []
-                for i, part in enumerate(parts):
-                    if part.startswith('c') and part[1:].isdigit():
-                        # Found cluster identifier, specimen name is everything before this
-                        specimen_name = '-'.join(specimen_parts)
-                        lookup[specimen_name].append(fastq_path)
-                        break
-                    specimen_parts.append(part)
-    
+            match = pattern.match(filename)
+            if match:
+                specimen_name = match.group(1)  # Extract specimen name
+                # cluster_num = match.group(2)  # Available if needed
+                # ric_value = match.group(3)    # Available if needed
+                # stage = match.group(4)        # Stage: sampled, reads, untrimmed, etc.
+                lookup[specimen_name].append(fastq_path)
+            else:
+                logging.warning(f"Skipping file with unexpected name pattern: {filename}")
+
     if debug_files:
-        logging.debug(f"Built FASTQ lookup table for {len(lookup)} specimens with {sum(len(files) for files in lookup.values())} {file_type} files")
+        logging.debug(f"Built FASTQ lookup table for {len(lookup)} specimens with {sum(len(files) for files in lookup.values())} {selected_stage} files")
     else:
         logging.debug("No FASTQ files found in cluster_debug directory")
     return dict(lookup)
