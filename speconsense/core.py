@@ -562,18 +562,19 @@ class SpecimenClusterer:
             else:
                 raise ValueError(f"Unknown clustering algorithm: {algorithm}")
 
-            # Filter clusters by size before merging
-            large_clusters = [c for c in clusters if len(c) >= self.min_size]
-
             # Sort by size (largest first)
-            large_clusters.sort(key=lambda c: len(c), reverse=True)
-
+            clusters.sort(key=lambda c: len(c), reverse=True)
 
             # Merge clusters with identical/homopolymer-equivalent consensus sequences
-            merged_clusters = self.merge_similar_clusters(large_clusters)
+            # This happens BEFORE size filtering so that small clusters with identical
+            # consensus can merge to meet the size threshold
+            merged_clusters = self.merge_similar_clusters(clusters)
+
             # Re-sort by size after merging
             merged_clusters.sort(key=lambda c: len(c), reverse=True)
-            large_clusters = merged_clusters
+
+            # Filter clusters by size AFTER merging
+            large_clusters = [c for c in merged_clusters if len(c) >= self.min_size]
 
             cluster_sizes = [len(c) for c in large_clusters]
             cluster_sizes_str = ', '.join(str(s) for s in cluster_sizes[:10])
@@ -581,7 +582,7 @@ class SpecimenClusterer:
                 cluster_sizes_str += f", ... ({len(cluster_sizes) - 10} more)"
 
             logging.info(
-                f"Found {len(large_clusters)} clusters larger than size threshold ({self.min_size}): {cluster_sizes_str}")
+                f"After merging, found {len(large_clusters)} clusters meeting size threshold (>={self.min_size}): {cluster_sizes_str}")
 
             total_sequences = len(self.sequences)
 

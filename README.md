@@ -319,23 +319,23 @@ Speconsense provides two complementary filters to control which clusters are out
 
 **Absolute size filtering (`--min-size`, default: 5):**
 - Filters clusters by absolute number of sequences
-- Applied before merging identical/homopolymer-equivalent clusters
+- Applied **after merging** identical/homopolymer-equivalent clusters
 - Set to 0 to disable and output all clusters regardless of size
 
 **Relative size filtering (`--min-cluster-ratio`, default: 0.2):**
 - Filters clusters based on size relative to the largest cluster
-- **Applied after merging** identical/homopolymer-equivalent clusters (post-merge sizes)
+- Also applied **after merging** identical/homopolymer-equivalent clusters (post-merge sizes)
 - **Based on original cluster sizes**, not sampled sizes from `--max-sample-size`
 - Set to 0 to disable and keep all clusters that pass `--min-size`
 
 **Processing order:**
 1. Initial clustering produces raw clusters
-2. Filter by `--min-size` (absolute threshold)
-3. Merge identical/homopolymer-equivalent clusters
+2. Merge identical/homopolymer-equivalent clusters
+3. Filter by `--min-size` (absolute threshold, using post-merge sizes)
 4. Filter by `--min-cluster-ratio` (relative threshold, using post-merge sizes)
 5. Sample sequences for consensus generation if cluster > `--max-sample-size`
 
-This order ensures that filtering decisions are based on biological abundance (true cluster sizes after merging redundant variants) rather than technical parameters (sampling limits for consensus generation).
+This order ensures that small clusters with identical/homopolymer-equivalent consensus sequences can merge before size filtering is applied. This allows, for example, two clusters of size 3 with identical consensus to merge into a size-6 cluster that passes the `--min-size=5` threshold, rather than being discarded prematurely.
 
 **Deferred filtering strategy:**
 For maximum flexibility in detecting rare variants and contaminants, disable filtering in speconsense (`--min-size 0 --min-cluster-ratio 0`) and apply final quality thresholds using `--min-ric` in speconsense-summarize. This allows you to run expensive clustering once and experiment with different quality thresholds during post-processing. However, be aware that permissive filtering may allow more bioinformatic contamination through the pipeline. When using this approach, consider stricter filtering during upstream demultiplexing or perform careful manual review of low-abundance clusters.
