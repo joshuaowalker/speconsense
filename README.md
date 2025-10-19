@@ -153,11 +153,8 @@ speconsense input.fastq --max-sample-size 500
 # Filter out reads before clustering
 speconsense input.fastq --presample 1000
 
-# Merge sequence variants within 3 differences of each other
-speconsense input.fastq --variant-merge-threshold 3
-
-# Disable variant merging
-speconsense input.fastq --variant-merge-threshold -1
+# Disable automatic merging of homopolymer-equivalent clusters
+speconsense input.fastq --disable-homopolymer-equivalence
 
 # Specify output directory (default: clusters)
 speconsense input.fastq --output-dir results/
@@ -339,7 +336,7 @@ speconsense-summarize --snp-merge-limit 2
 - Only merges variants with **identical primer sets** to maintain biological validity
 - Prevents merging if the result would exceed the SNP limit or contain complex indels
 - Helps consolidate very similar variants that likely represent the same biological sequence
-- **Note**: This is distinct from the `--variant-merge-threshold` in the main clustering step
+- **Note**: This is distinct from the automatic homopolymer-aware merging that occurs during the main clustering step in speconsense
 
 **Directory Control:**
 ```bash
@@ -391,12 +388,13 @@ This comprehensive logging allows users to understand exactly how the pipeline p
 ### Full Command Line Options
 
 ```
-usage: speconsense.py [-h] [--augment-input AUGMENT_INPUT] [--algorithm {graph,greedy}] [--min-identity MIN_IDENTITY] 
+usage: speconsense.py [-h] [--augment-input AUGMENT_INPUT] [--algorithm {graph,greedy}] [--min-identity MIN_IDENTITY]
                      [--inflation INFLATION] [--min-size MIN_SIZE] [--min-cluster-ratio MIN_CLUSTER_RATIO]
-                     [--max-sample-size MAX_SAMPLE_SIZE] [--presample PRESAMPLE] 
+                     [--max-sample-size MAX_SAMPLE_SIZE] [--presample PRESAMPLE]
                      [--k-nearest-neighbors K_NEAREST_NEIGHBORS] [--primers PRIMERS]
                      [-O OUTPUT_DIR] [--stability-trials STABILITY_TRIALS] [--stability-sample STABILITY_SAMPLE]
-                     [--disable-stability] [--variant-merge-threshold VARIANT_MERGE_THRESHOLD]
+                     [--disable-stability] [--disable-homopolymer-equivalence]
+                     [--orient-mode {skip,keep-all,filter-failed}]
                      [--log-level {DEBUG,INFO,WARNING,ERROR,CRITICAL}] [--version]
                      input_file
 
@@ -415,9 +413,9 @@ optional arguments:
                         Minimum sequence identity threshold (default: 0.85)
   --inflation INFLATION
                         MCL inflation parameter (default: 4.0)
-  --min-size MIN_SIZE   Minimum cluster size (default: 5)
+  --min-size MIN_SIZE   Minimum cluster size (default: 5, 0 to disable)
   --min-cluster-ratio MIN_CLUSTER_RATIO
-                        Minimum size ratio between a cluster and the largest cluster (default: 0.2)
+                        Minimum size ratio between a cluster and the largest cluster (default: 0.2, 0 to disable)
   --max-sample-size MAX_SAMPLE_SIZE
                         Maximum cluster size for consensus (default: 500)
   --presample PRESAMPLE
@@ -432,8 +430,11 @@ optional arguments:
   --stability-sample STABILITY_SAMPLE
                         Size of stability samples (default: 20)
   --disable-stability   Disable stability assessment
-  --variant-merge-threshold VARIANT_MERGE_THRESHOLD
-                        Maximum distance between consensus sequences to merge sequence variants (default: 0, -1 to disable)
+  --disable-homopolymer-equivalence
+                        Disable homopolymer equivalence in cluster merging (only merge identical sequences)
+  --orient-mode {skip,keep-all,filter-failed}
+                        Sequence orientation mode: skip (default, no orientation), keep-all (orient but keep failed),
+                        or filter-failed (orient and remove failed). Requires primers file with position annotations.
   --log-level {DEBUG,INFO,WARNING,ERROR,CRITICAL}
                         Set logging level (default: INFO)
   --version             Show program's version number and exit
@@ -496,20 +497,46 @@ SpecConsense offers two clustering approaches with different characteristics:
 
 ### Cluster Merging
 
-After initial clustering, Speconsense can merge clusters with identical or similar consensus sequences:
+After initial clustering, Speconsense automatically merges clusters with identical or homopolymer-equivalent consensus sequences:
 
-1. **Identical sequence merging**: By default (`--variant-merge-threshold 0`), only clusters with identical consensus sequences are merged.
+**Default behavior (homopolymer-aware merging):**
+- Clusters with identical consensus sequences are automatically merged
+- Clusters with homopolymer-equivalent sequences are also merged (e.g., "AAA" vs "AAAAA" treated as identical)
+- Homopolymer length differences are ignored as they typically represent ONT sequencing artifacts
+- This helps eliminate redundant clusters that represent the same biological sequence but differ only in homopolymer lengths
 
-2. **Similar sequence merging**: When specifying a positive threshold (`--variant-merge-threshold N`), clusters whose consensus sequences differ by N or fewer **substitutions** will be merged. Important notes:
-   - Only substitutions (SNPs) count toward the threshold
-   - Homopolymer length differences are ignored (treated as sequencing artifacts)
-   - Non-homopolymer indels prevent merging to ensure IUPAC consensus validity
+**Strict identity merging (`--disable-homopolymer-equivalence`):**
+- Only clusters with perfectly identical consensus sequences are merged
+- Use this flag when homopolymer differences may have biological significance
+- Results in more clusters but ensures no information loss from homopolymer variation
 
-3. **Disable merging**: Set `--variant-merge-threshold -1` to disable the merging step entirely.
+This automatic merging step helps consolidate redundant clusters that were separated during initial clustering. The adjusted identity scoring with homopolymer normalization provides more accurate assessment of sequence similarity for merging decisions, especially for nanopore data where homopolymer length calling can be inconsistent.
 
-This step helps eliminate redundant clusters that represent the same biological sequence but were separated during the initial clustering. The adjusted identity scoring with homopolymer normalization provides more accurate assessment of sequence similarity for merging decisions, especially for nanopore data where homopolymer length variation is common.
+**SNP-based variant merging:** For more aggressive merging based on SNP thresholds (which creates IUPAC consensus sequences with ambiguity codes), use the `--snp-merge-limit` option in `speconsense-summarize` during post-processing. See the "SNP-based Variant Merging" section under post-processing documentation.
 
-**Merged Cluster Output**: When clusters are merged, the consensus sequence includes IUPAC ambiguity codes at SNP positions. The FASTA header includes `snp=N` indicating the number of positions with ambiguous nucleotides. Note that due to transitive merging, the total SNP count can exceed the merge threshold.
+### Cluster Size Filtering
+
+Speconsense provides two complementary filters to control which clusters are output:
+
+**Absolute size filtering (`--min-size`, default: 5):**
+- Filters clusters by absolute number of sequences
+- Applied before merging identical/homopolymer-equivalent clusters
+- Set to 0 to disable and output all clusters regardless of size
+
+**Relative size filtering (`--min-cluster-ratio`, default: 0.2):**
+- Filters clusters based on size relative to the largest cluster
+- **Applied after merging** identical/homopolymer-equivalent clusters (post-merge sizes)
+- **Based on original cluster sizes**, not sampled sizes from `--max-sample-size`
+- Set to 0 to disable and keep all clusters that pass `--min-size`
+
+**Processing order:**
+1. Initial clustering produces raw clusters
+2. Filter by `--min-size` (absolute threshold)
+3. Merge identical/homopolymer-equivalent clusters
+4. Filter by `--min-cluster-ratio` (relative threshold, using post-merge sizes)
+5. Sample sequences for consensus generation if cluster > `--max-sample-size`
+
+This order ensures that filtering decisions are based on biological abundance (true cluster sizes after merging redundant variants) rather than technical parameters (sampling limits for consensus generation).
 
 ### Consensus Generation
 

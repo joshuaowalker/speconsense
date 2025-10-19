@@ -1125,9 +1125,9 @@ def main():
     parser.add_argument("--inflation", type=float, default=4.0,
                         help="MCL inflation parameter (default: 4.0)")
     parser.add_argument("--min-size", type=int, default=5,
-                        help="Minimum cluster size (default: 5)")
+                        help="Minimum cluster size (default: 5, 0 to disable)")
     parser.add_argument("--min-cluster-ratio", type=float, default=0.2,
-                        help="Minimum size ratio between a cluster and the largest cluster (default 0.2)")
+                        help="Minimum size ratio between a cluster and the largest cluster (default: 0.2, 0 to disable)")
     parser.add_argument("--max-sample-size", type=int, default=500,
                         help="Maximum cluster size for consensus (default: 500)")
     parser.add_argument("--presample", type=int, default=1000,
