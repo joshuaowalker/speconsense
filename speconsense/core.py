@@ -298,6 +298,10 @@ class SpecimenClusterer:
         Merge clusters whose consensus sequences are identical or homopolymer-equivalent.
         Only counts unique consensus sequences when tracking merge information.
 
+        Note: Primer trimming is performed before comparison to ensure clusters that differ
+        only in primer regions are properly merged. Trimmed consensuses are used only for
+        comparison and are discarded after merging.
+
         Args:
             clusters: List of clusters, where each cluster is a set of sequence IDs
 
@@ -333,6 +337,12 @@ class SpecimenClusterer:
                     sampled_seqs = [self.sequences[seq_id] for seq_id in cluster]
 
                 consensus = self.run_spoa(sampled_seqs)
+
+                # Trim primers before comparison to merge clusters that differ only in primer regions
+                # The trimmed consensus is used only for comparison and discarded after merging
+                if hasattr(self, 'primers'):
+                    consensus, _ = self.trim_primers(consensus)  # Discard found_primers
+
                 consensuses.append(consensus)
                 cluster_to_consensus[i] = consensus
                 pbar.update(1)
