@@ -71,50 +71,6 @@ conda install bioconda::spoa
 
 **Note:** If MCL is not available, speconsense will automatically fall back to the greedy clustering algorithm.
 
-### Development Installation
-
-For development or if you want to modify the code:
-
-```bash
-# Create and activate a virtual environment (recommended)
-python -m venv speconsense-dev
-source speconsense-dev/bin/activate  # On Windows: speconsense-dev\Scripts\activate
-
-# Clone the repository
-git clone https://github.com/joshuaowalker/speconsense.git
-cd speconsense
-
-# Install in editable mode
-pip install -e .
-```
-
-### Running Tests
-
-The project includes pytest-based integration tests. To run the tests:
-
-```bash
-# Set up test virtual environment
-python -m venv test-venv
-source test-venv/bin/activate  # On Windows: test-venv\Scripts\activate
-
-# Install project and test dependencies
-pip install -e .
-pip install pytest pytest-cov
-
-# Run all tests
-python -m pytest tests/ -v
-
-# Run specific test file
-python -m pytest tests/test_augment_input.py -v
-
-# Run with coverage
-python -m pytest tests/ --cov=speconsense --cov-report=html
-```
-
-**Available Tests:**
-- `tests/test_augment_input.py`: Integration tests for --augment-input functionality
-- `tests/test_orientation.py`: Tests for sequence orientation feature
-
 ## Usage
 
 ### Basic Usage
@@ -162,90 +118,6 @@ speconsense input.fastq --output-dir results/
 # Using short form for output directory
 speconsense input.fastq -O my_results/
 ```
-
-### Sequence Orientation
-
-The `--orient-mode` parameter enables automatic detection and correction of sequence orientation based on primer positions. This is particularly useful when processing older datasets or files where forward and reverse orientation sequences may be mixed.
-
-**How it works:**
-- Detects sequence orientation by checking for forward and reverse primers at expected positions
-- Uses a simple binary scoring system: +1 for forward primer match, +1 for reverse primer match
-- Sequences scoring clearly in one orientation (score >0) vs the other (score 0) are reoriented if needed
-- Sequences with ambiguous orientation (both score 0 or both score >0) are marked as failed
-
-**Available modes:**
-- `skip` (default): No orientation performed, sequences processed as-is
-- `keep-all`: Perform orientation but keep all sequences, including those that failed
-- `filter-failed`: Perform orientation and remove sequences with failed/ambiguous orientation
-
-**Usage:**
-```bash
-# Keep all sequences, including those with ambiguous orientation
-speconsense input.fastq --primers primers.fasta --orient-mode keep-all
-
-# Filter out sequences that couldn't be reliably oriented
-speconsense input.fastq --primers primers.fasta --orient-mode filter-failed
-
-# Skip orientation (default behavior)
-speconsense input.fastq --primers primers.fasta
-```
-
-**Requirements:**
-- Primers FASTA file must include position annotations: `position=forward` or `position=reverse`
-- Example primers.fasta format:
-```
->ITS1F  pool=ITS    position=forward
-CTTGGTCATTTAGAGGAAGTAA
->ITS4   pool=ITS    position=reverse
-TCCTCCGCTTATTGATATGC
-```
-
-**Important Notes:**
-- Orientation is performed before clustering, ensuring all sequences are in the same direction
-- Failed orientations typically indicate: no primers found, chimeric sequences, or degraded primers
-- The tool reports counts: sequences kept as-is, reverse-complemented, and orientation failed
-- Quality scores are also reversed when sequences are reverse-complemented
-
-### Augmenting Input with Additional Sequences
-
-The `--augment-input` parameter allows you to include additional sequences that were not successfully matched during primary demultiplexing but were recovered through other means. This is particularly useful in the specimux workflow when using sequence recovery tools.
-
-**Primary Use Case:**
-After primary demultiplexing with specimux, some sequences may remain unmatched due to sequencing errors, primer degradation, or other issues. These sequences can be recovered using tools like `specimine` from the specimux suite and then included in speconsense clustering to maximize data utilization.
-
-**Workflow Integration:**
-```bash
-# 1. Run primary demultiplexing with specimux
-specimux primers.fasta specimens.txt input.fastq -O results/
-
-# 2. Recover additional sequences from unmatched reads
-specimine results/unknown/ specimen_name --output recovered.fastq
-
-# 3. Cluster with both primary and recovered sequences
-speconsense results/full/specimen_name.fastq --augment-input recovered.fastq
-```
-
-**Usage:**
-```bash
-# Basic usage with recovered sequences
-speconsense primary_demux.fastq --augment-input recovered_sequences.fastq
-
-# Can be combined with other options
-speconsense primary_demux.fastq --augment-input recovered.fastq --primers primers.fasta
-```
-
-**Key Features:**
-- Supports both FASTQ and FASTA formats (auto-detected by file extension)
-- Augmented sequences participate equally in clustering with primary sequences
-- During presampling, primary sequences are prioritized over augmented sequences
-- All sequences (primary + augmented) appear in output files and contribute to final consensus
-- Augmented sequences are fully traceable through the entire pipeline
-
-**Important Notes:**
-- Augmented sequences will only cluster with primary sequences if they meet the similarity threshold
-- Recovered sequences may form separate clusters if they represent different taxa
-- The final consensus sequence headers will show the total count including augmented sequences
-- This approach maximizes data utilization by including sequences that would otherwise be discarded
 
 ### Post-processing and Summary
 
@@ -452,7 +324,7 @@ SpecConsense is designed to replace the NGSpeciesID step in the [ONT DNA Barcodi
 ls *.fastq | parallel NGSpeciesID --ont --consensus --t 1 --abundance_ratio 0.2 --top_reads --sample_size 500 --symmetric_map_align_thresholds --aligned_threshold 0.75 --mapped_threshold 1.0 --medaka --fastq {} --outfolder {.}
 
 # With this command using Speconsense:
-ls *.fastq | parallel speconsense {} --primers primers.fasta
+ls *.fastq | parallel speconsense {}
 ```
 3. Process the output FASTA files with the speconsense-summarize tool to prepare them for downstream analysis:
 ```bash
@@ -537,6 +409,9 @@ Speconsense provides two complementary filters to control which clusters are out
 5. Sample sequences for consensus generation if cluster > `--max-sample-size`
 
 This order ensures that filtering decisions are based on biological abundance (true cluster sizes after merging redundant variants) rather than technical parameters (sampling limits for consensus generation).
+
+**Deferred filtering strategy:**
+For maximum flexibility in detecting rare variants and contaminants, disable filtering in speconsense (`--min-size 0 --min-cluster-ratio 0`) and apply final quality thresholds using `--min-ric` in speconsense-summarize. This allows you to run expensive clustering once and experiment with different quality thresholds during post-processing. However, be aware that permissive filtering may allow more bioinformatic contamination through the pipeline. When using this approach, consider stricter filtering during upstream demultiplexing or perform careful manual review of low-abundance clusters.
 
 ### Consensus Generation
 
@@ -650,6 +525,88 @@ Consensus sequence headers contain metadata fields separated by spaces:
 - Variant merging only occurs between sequences with identical primer sets
 - SNP counts reflect IUPAC ambiguity positions in consensus sequences
 
+## Specialized Workflows
+
+The following features support less common workflows and specialized use cases.
+
+### Sequence Orientation Normalization
+
+**Use Case:** Reprocessing output from older bioinformatics pipelines (such as minibar) that do not automatically normalize sequence orientation.
+
+**Note:** When using speconsense downstream of specimux (recommended workflow), orientation normalization is unnecessary as specimux automatically orients all sequences during demultiplexing.
+
+The `--orient-mode` parameter enables automatic detection and correction of sequence orientation based on primer positions:
+
+```bash
+# Keep all sequences, including those with ambiguous orientation
+speconsense input.fastq --primers primers.fasta --orient-mode keep-all
+
+# Filter out sequences that couldn't be reliably oriented
+speconsense input.fastq --primers primers.fasta --orient-mode filter-failed
+
+# Skip orientation (default, appropriate when using specimux output)
+speconsense input.fastq --primers primers.fasta
+```
+
+**Available modes:**
+- `skip` (default): No orientation performed, sequences processed as-is
+- `keep-all`: Perform orientation but keep all sequences, including those that failed
+- `filter-failed`: Perform orientation and remove sequences with failed/ambiguous orientation
+
+**How it works:**
+- Detects orientation by checking for forward and reverse primers at expected positions
+- Uses binary scoring: +1 for forward primer match, +1 for reverse primer match
+- Sequences with clear orientation (score >0 in one direction, 0 in the other) are reoriented if needed
+- Sequences with ambiguous orientation (both 0 or both >0) are marked as failed
+
+**Requirements:**
+- Primers FASTA file must include position annotations: `position=forward` or `position=reverse`
+- Example format:
+  ```
+  >ITS1F  pool=ITS    position=forward
+  CTTGGTCATTTAGAGGAAGTAA
+  >ITS4   pool=ITS    position=reverse
+  TCCTCCGCTTATTGATATGC
+  ```
+
+**Technical details:**
+- Orientation occurs before clustering, ensuring all sequences are in the same direction
+- Failed orientations typically indicate: no primers found, chimeric sequences, or degraded primers
+- Quality scores are reversed when sequences are reverse-complemented
+
+### Augmenting Clusters with Recovered Sequences
+
+**Use Case:** Increasing cluster abundance by including sequences that were partially demultiplexed or recovered through mining tools like `specimine`.
+
+The `--augment-input` parameter allows you to supplement primary demultiplexing results with additional sequences recovered from unmatched reads:
+
+```bash
+# 1. Run primary demultiplexing with specimux
+specimux primers.fasta specimens.txt input.fastq -O results/
+
+# 2. Recover additional sequences from unmatched reads
+specimine results/unknown/ specimen_name --output recovered.fastq
+
+# 3. Cluster with both primary and recovered sequences
+speconsense results/full/specimen_name.fastq --augment-input recovered.fastq
+```
+
+**How it works:**
+- Augmented sequences participate equally in clustering with primary sequences
+- During presampling, primary sequences are prioritized to ensure representative sampling
+- All sequences (primary + augmented) contribute to final consensus generation
+- Final output headers show total read counts including augmented sequences
+
+**Key features:**
+- Supports both FASTQ and FASTA formats (auto-detected by file extension)
+- Augmented sequences fully traceable through the entire pipeline
+- Sequences only cluster together if they meet the similarity threshold
+- Recovered sequences may form separate clusters if they represent different taxa
+- Maximizes data utilization by including sequences that would otherwise be discarded
+
+**Typical workflow:**
+After primary demultiplexing, some sequences may remain unmatched due to sequencing errors, primer degradation, or edge cases in barcode detection. Mining tools like `specimine` can recover these sequences based on sequence composition or other characteristics, allowing them to be included in consensus generation and increase cluster support.
+
 ## Changelog
 
 ### Version 0.3.3 (2025-09-07)
@@ -735,6 +692,10 @@ This project uses and builds upon:
 - **MCL clustering algorithm**: van Dongen, Stijn, *Graph clustering via a discrete uncoupling process*, Siam Journal on Matrix Analysis and Applications 30-1, p121-141, 2008. (https://doi.org/10.1137/040608635)
 
 - **ONT fungal barcoding protocol**: Russell, S.D., Geurin, Z., Walker, J. (2024). *Primary Data Analysis - Basecalling, Demultiplexing, and Consensus Building for ONT Fungal Barcodes*. protocols.io. https://dx.doi.org/10.17504/protocols.io.dm6gpbm88lzp/v4
+
+## Contributing
+
+Contributions are welcome! For development setup, testing guidelines, and contribution workflow, please see [CONTRIBUTING.md](CONTRIBUTING.md).
 
 ## License
 
