@@ -97,20 +97,8 @@ speconsense input.fastq --min-size 10
 # Set minimum identity threshold for clustering
 speconsense input.fastq --min-identity 0.85
 
-# Enable primer trimming
-speconsense input.fastq --primers primers.fasta
-
-# Sequence orientation based on primer positions
-speconsense input.fastq --primers primers.fasta --orient-mode keep-all
-
 # Control the maximum sample size for consensus generation
 speconsense input.fastq --max-sample-size 500
-
-# Filter out reads before clustering
-speconsense input.fastq --presample 1000
-
-# Disable automatic merging of homopolymer-equivalent clusters
-speconsense input.fastq --disable-homopolymer-equivalence
 
 # Specify output directory (default: clusters)
 speconsense input.fastq --output-dir results/
@@ -119,321 +107,64 @@ speconsense input.fastq --output-dir results/
 speconsense input.fastq -O my_results/
 ```
 
-### Post-processing and Summary
+### Post-processing with Speconsense-Summarize
 
-After running speconsense, use the summarize tool to process outputs:
+After running speconsense, use the summarize tool to process and refine outputs:
 
 ```bash
 # Generate summary with default settings
 speconsense-summarize
 
-# Custom minimum RiC threshold and output directory
-speconsense-summarize --min-ric 5 --summary-dir MyResults
-
-# Process specific source directory
-speconsense-summarize --source /path/to/speconsense/output
-```
-
-#### Variant Grouping and Selection
-
-When multiple variants exist per specimen, `speconsense-summarize` first groups similar variants together, then applies selection strategies within each group:
-
-**Variant Grouping:**
-```bash
-speconsense-summarize --variant-group-identity 0.9
-```
-- Uses **Hierarchical Agglomerative Clustering (HAC)** to group variants with sequence identity ≥ threshold
-- Default threshold is 0.9 (90% identity) 
-- Variants within each group are considered similar enough to represent the same biological entity
-- Each group will contribute one primary variant plus additional variants based on selection strategy
-
-**Variant Selection (within each group):**
-
-When multiple variants exist per specimen, `speconsense-summarize` offers two strategies for selecting which variants to output from each group:
-
-**Size-based selection (default):**
-```bash
-speconsense-summarize --variant-selection size --max-variants 2
-```
-- Selects variants by cluster size (largest first)
-- Primary variant is always the largest cluster
-- Additional variants are selected in order of decreasing size
-- Best for identifying the most abundant sequence variants
-- Suitable when read count reflects biological abundance
-
-**Diversity-based selection:**
-```bash
-speconsense-summarize --variant-selection diversity --max-variants 2
-```
-- Uses a **maximum distance algorithm** to select variants that are most genetically different from each other
-- Primary variant is still the largest cluster
-- Additional variants are selected to maximize sequence diversity in the output
-- Iteratively selects the variant with the **maximum minimum distance** to all previously selected variants
-- Best for capturing the full range of genetic variation in your sample
-- Suitable when you want to detect distinct sequence types regardless of their abundance
-
-**Algorithm Details for Diversity Selection (within each group):**
-1. Primary variant = largest cluster within the group (by read count)
-2. For each additional variant slot in the group:
-   - Calculate the minimum sequence distance from each remaining candidate to all already-selected variants in this group
-   - Select the candidate with the largest minimum distance (farthest from all selected in this group)
-   - Repeat until max_variants reached for this group
-
-**Overall Process:**
-1. Group variants by sequence identity using HAC clustering
-2. For each group independently:
-   - Apply variant selection strategy (size or diversity)
-   - Output up to max_variants per group
-3. Final output contains representatives from all groups, ensuring both biological diversity (between groups) and appropriate sampling within each biological entity (within groups)
-
-This two-stage process ensures that distinct biological sequences are preserved as separate groups, while providing control over variant complexity within each group.
-
-#### Additional Summarize Options
-
-**Quality Filtering:**
-```bash
+# Custom minimum RiC (Reads in Consensus) threshold
 speconsense-summarize --min-ric 5
-```
-- Filters out consensus sequences with fewer than the specified number of Reads in Consensus (RiC)
-- Default is 3 - only sequences supported by at least 3 reads are processed
-- Higher values provide more stringent quality control but may exclude valid low-abundance variants
 
-**SNP-based Variant Merging:**
-```bash
-speconsense-summarize --snp-merge-limit 2
-```
-- **Occurs before variant grouping** - merges variants within each specimen that differ by ≤ N SNP positions
-- Uses a **greedy merging approach**: repeatedly finds the best pairwise merge (largest combined cluster size) until no valid merges remain
-- Creates **IUPAC consensus sequences** with ambiguity codes at polymorphic positions
-- Only merges variants with **identical primer sets** to maintain biological validity
-- Prevents merging if the result would exceed the SNP limit or contain complex indels
-- Helps consolidate very similar variants that likely represent the same biological sequence
-- **Note**: This is distinct from the automatic homopolymer-aware merging that occurs during the main clustering step in speconsense
-
-**Directory Control:**
-```bash
+# Process specific source directory and custom output
 speconsense-summarize --source /path/to/speconsense/output --summary-dir MyResults
 ```
-- `--source`: Directory containing speconsense output files (default: clusters)
-- `--summary-dir`: Output directory name (default: `__Summary__`)
 
-#### Processing Workflow Summary
+**Variant Detection and Haplotype Phasing:**
 
-The complete speconsense-summarize workflow operates in this order:
+Speconsense can detect and isolate sequence variants within specimens (aka "haplotype phasing"). The graph-based clustering algorithm excels at discriminating between variants, and `speconsense-summarize` provides sophisticated tools for managing multiple variants per specimen, including:
+- SNP-based variant merging with IUPAC ambiguity codes
+- Hierarchical variant grouping
+- Size-based or diversity-based variant selection strategies
 
-1. **Load sequences** with RiC filtering (`--min-ric`)
-2. **SNP-based merging** within each specimen (`--snp-merge-limit`)  
-3. **HAC variant grouping** by sequence identity (`--variant-group-identity`)
-4. **Variant selection** within each group (`--max-variants`, `--variant-selection`)
-5. **Output generation** with full traceability and statistics
+For detailed information on variant handling options, see the [Advanced Post-Processing](#advanced-post-processing) section below.
 
-#### Enhanced Logging and Traceability
+## Quick Start: Complete Workflow
 
-Speconsense-summarize provides comprehensive logging to help users understand processing decisions:
+Speconsense is designed to replace the NGSpeciesID step in the [ONT DNA Barcoding Fungal Amplicons protocol](https://www.protocols.io/view/primary-data-analysis-basecalling-demultiplexing-a-dm6gpbm88lzp/v4). Here's a complete workflow:
 
-**Variant Analysis Logging:**
-- **Complete variant summaries** for every variant in each group, including those that are skipped
-- **Detailed difference categorization**: substitutions, single-nt indels, short (≤3nt) indels, and long indels
-- **IUPAC-aware comparisons**: treats ambiguity codes as matches (e.g., R matches A or G)
-- **Group context**: clearly shows which variants belong to each HAC clustering group
-- **Selection rationale**: explains why variants were included or excluded
+**1. Demultiplex with Specimux**
 
-**Example log output:**
-```
-HAC clustering created 2 groups
-Group 1: ['sample-c3']  
-Group 2: ['sample-c1', 'sample-c2']
-Processing Variants in Group 2
-Primary: sample-c1 (size=403, ric=403)
-Variant 1: (size=269, ric=269) - 1 short (<= 3nt) indel
-Variant 2: (size=180, ric=180) - 3 substitutions, 1 single-nt indel - skipping
-```
+Follow the protocol through the "Demultiplex the Reads with Specimux" step.
 
-**Traceability Features:**
-- **Merge history**: tracks which original clusters were combined during SNP merging
-- **File lineage**: maintains connection between final outputs and original speconsense clusters  
-- **Read aggregation**: `FASTQ Files/` directory contains all reads that contributed to each final consensus
-- **Raw preservation**: `raw_clusters/` directory preserves original speconsense output with stability metrics
+**2. Run Speconsense**
 
-This comprehensive logging allows users to understand exactly how the pipeline processed their data and make informed decisions about parameter tuning.
-
-### Full Command Line Options
-
-```
-usage: speconsense.py [-h] [--augment-input AUGMENT_INPUT] [--algorithm {graph,greedy}] [--min-identity MIN_IDENTITY]
-                     [--inflation INFLATION] [--min-size MIN_SIZE] [--min-cluster-ratio MIN_CLUSTER_RATIO]
-                     [--max-sample-size MAX_SAMPLE_SIZE] [--presample PRESAMPLE]
-                     [--k-nearest-neighbors K_NEAREST_NEIGHBORS] [--primers PRIMERS]
-                     [-O OUTPUT_DIR] [--stability-trials STABILITY_TRIALS] [--stability-sample STABILITY_SAMPLE]
-                     [--disable-stability] [--disable-homopolymer-equivalence]
-                     [--orient-mode {skip,keep-all,filter-failed}]
-                     [--log-level {DEBUG,INFO,WARNING,ERROR,CRITICAL}] [--version]
-                     input_file
-
-MCL-based clustering of nanopore amplicon reads
-
-positional arguments:
-  input_file            Input FASTQ file
-
-optional arguments:
-  -h, --help            show this help message and exit
-  --augment-input AUGMENT_INPUT
-                        Additional FASTQ/FASTA file with sequences recovered after primary demultiplexing
-  --algorithm {graph,greedy}
-                        Clustering algorithm to use (default: graph)
-  --min-identity MIN_IDENTITY
-                        Minimum sequence identity threshold (default: 0.85)
-  --inflation INFLATION
-                        MCL inflation parameter (default: 4.0)
-  --min-size MIN_SIZE   Minimum cluster size (default: 5, 0 to disable)
-  --min-cluster-ratio MIN_CLUSTER_RATIO
-                        Minimum size ratio between a cluster and the largest cluster (default: 0.2, 0 to disable)
-  --max-sample-size MAX_SAMPLE_SIZE
-                        Maximum cluster size for consensus (default: 500)
-  --presample PRESAMPLE
-                        Presample size for initial reads (default: 1000, 0 to disable)
-  --k-nearest-neighbors K_NEAREST_NEIGHBORS
-                        Number of nearest neighbors for graph construction (default: 5)
-  --primers PRIMERS     FASTA file containing primer sequences (default: looks for primers.fasta in input file directory)
-  -O OUTPUT_DIR, --output-dir OUTPUT_DIR
-                        Output directory for all files (default: clusters)
-  --stability-trials STABILITY_TRIALS
-                        Number of sampling trials to assess stability (default: 100)
-  --stability-sample STABILITY_SAMPLE
-                        Size of stability samples (default: 20)
-  --disable-stability   Disable stability assessment
-  --disable-homopolymer-equivalence
-                        Disable homopolymer equivalence in cluster merging (only merge identical sequences)
-  --orient-mode {skip,keep-all,filter-failed}
-                        Sequence orientation mode: skip (default, no orientation), keep-all (orient but keep failed),
-                        or filter-failed (orient and remove failed). Requires primers file with position annotations.
-  --log-level {DEBUG,INFO,WARNING,ERROR,CRITICAL}
-                        Set logging level (default: INFO)
-  --version             Show program's version number and exit
-```
-
-## Integration with ONT Fungal Barcoding Pipeline
-
-SpecConsense is designed to replace the NGSpeciesID step in the [ONT DNA Barcoding Fungal Amplicons protocol](https://www.protocols.io/view/primary-data-analysis-basecalling-demultiplexing-a-dm6gpbm88lzp/v4). To use SpecConsense in this pipeline:
-
-1. Follow the protocol through the "Demultiplex the Reads with Specimux" step
-2. Instead of running NGSpeciesID, run SpecConsense on each demultiplexed FASTQ file:
+Replace the NGSpeciesID step with speconsense:
 
 ```bash
-# Replace this command from the protocol:
-ls *.fastq | parallel NGSpeciesID --ont --consensus --t 1 --abundance_ratio 0.2 --top_reads --sample_size 500 --symmetric_map_align_thresholds --aligned_threshold 0.75 --mapped_threshold 1.0 --medaka --fastq {} --outfolder {.}
+# Instead of NGSpeciesID:
+# ls *.fastq | parallel NGSpeciesID --ont --consensus --t 1 --abundance_ratio 0.2 ...
 
-# With this command using Speconsense:
+# Use Speconsense:
 ls *.fastq | parallel speconsense {}
 ```
-3. Process the output FASTA files with the speconsense-summarize tool to prepare them for downstream analysis:
+
+**3. Post-process with Speconsense-Summarize**
+
+Process the outputs to prepare for downstream analysis:
+
 ```bash
 speconsense-summarize
 ```
 
-## Algorithm Details
-
-### Clustering Methods
-
-SpecConsense offers two clustering approaches with different characteristics:
-
-#### **Graph-based clustering (MCL)** - Default and recommended
-- Constructs a similarity graph between reads and applies the Markov Cluster algorithm to identify clusters
-- **Tends to produce more clusters** by discriminating between sequence variants within a specimen
-- Suitable when you want to identify multiple variants per specimen and are willing to interpret complex results
-- Excellent for detecting subtle sequence differences and biological variation
-- Relatively fast with high-quality results for most datasets
-
-#### **Greedy clustering** - Fast and simple alternative  
-- Uses greedy star clustering that iteratively selects the sequence with the most similar neighbors as cluster centers
-- **Tends to produce fewer, simpler clusters** by focusing on well-separated sequences
-- Excellent at discriminating between distinct targets (e.g., primary sequence vs. contaminant)
-- Usually does not separate variants within the same biological sequence
-- Suitable when you want a fast algorithm with minimal complexity in interpreting results
-- Ideal for applications where one consensus per specimen is sufficient
-
-#### **Choosing the Right Algorithm**
-
-**Use `--algorithm greedy` when:**
-- You want one clear consensus sequence per specimen
-- Speed is prioritized over detailed variant detection  
-- You prefer simpler output interpretation
-- Your dataset has well-separated sequences (targets vs. contaminants)
-
-**Use `--algorithm graph` (default) when:**
-- You want to detect sequence variants within specimens
-- You're willing to evaluate multiple consensus sequences per specimen
-- You need fine-grained discrimination between similar sequences
-- You want the most comprehensive analysis of sequence diversity
-- **Note**: Use `speconsense-summarize` after clustering to manage multiple variants per specimen. Key options include `--snp-merge-limit` for merging variants differing by few SNPs, `--variant-group-identity` for grouping similar variants, and `--max-variants`/`--variant-selection` for controlling which variants to output
-
-### Cluster Merging
-
-After initial clustering, Speconsense automatically merges clusters with identical or homopolymer-equivalent consensus sequences:
-
-**Default behavior (homopolymer-aware merging):**
-- Clusters with identical consensus sequences are automatically merged
-- Clusters with homopolymer-equivalent sequences are also merged (e.g., "AAA" vs "AAAAA" treated as identical)
-- Homopolymer length differences are ignored as they typically represent ONT sequencing artifacts
-- This helps eliminate redundant clusters that represent the same biological sequence but differ only in homopolymer lengths
-
-**Strict identity merging (`--disable-homopolymer-equivalence`):**
-- Only clusters with perfectly identical consensus sequences are merged
-- Use this flag when homopolymer differences may have biological significance
-- Results in more clusters but ensures no information loss from homopolymer variation
-
-This automatic merging step helps consolidate redundant clusters that were separated during initial clustering. The adjusted identity scoring with homopolymer normalization provides more accurate assessment of sequence similarity for merging decisions, especially for nanopore data where homopolymer length calling can be inconsistent.
-
-**SNP-based variant merging:** For more aggressive merging based on SNP thresholds (which creates IUPAC consensus sequences with ambiguity codes), use the `--snp-merge-limit` option in `speconsense-summarize` during post-processing. See the "SNP-based Variant Merging" section under post-processing documentation.
-
-### Cluster Size Filtering
-
-Speconsense provides two complementary filters to control which clusters are output:
-
-**Absolute size filtering (`--min-size`, default: 5):**
-- Filters clusters by absolute number of sequences
-- Applied before merging identical/homopolymer-equivalent clusters
-- Set to 0 to disable and output all clusters regardless of size
-
-**Relative size filtering (`--min-cluster-ratio`, default: 0.2):**
-- Filters clusters based on size relative to the largest cluster
-- **Applied after merging** identical/homopolymer-equivalent clusters (post-merge sizes)
-- **Based on original cluster sizes**, not sampled sizes from `--max-sample-size`
-- Set to 0 to disable and keep all clusters that pass `--min-size`
-
-**Processing order:**
-1. Initial clustering produces raw clusters
-2. Filter by `--min-size` (absolute threshold)
-3. Merge identical/homopolymer-equivalent clusters
-4. Filter by `--min-cluster-ratio` (relative threshold, using post-merge sizes)
-5. Sample sequences for consensus generation if cluster > `--max-sample-size`
-
-This order ensures that filtering decisions are based on biological abundance (true cluster sizes after merging redundant variants) rather than technical parameters (sampling limits for consensus generation).
-
-**Deferred filtering strategy:**
-For maximum flexibility in detecting rare variants and contaminants, disable filtering in speconsense (`--min-size 0 --min-cluster-ratio 0`) and apply final quality thresholds using `--min-ric` in speconsense-summarize. This allows you to run expensive clustering once and experiment with different quality thresholds during post-processing. However, be aware that permissive filtering may allow more bioinformatic contamination through the pipeline. When using this approach, consider stricter filtering during upstream demultiplexing or perform careful manual review of low-abundance clusters.
-
-### Consensus Generation
-
-Consensus sequences are generated using SPOA (SIMD Partial Order Alignment) which efficiently handles the error profile of nanopore reads. For larger clusters, a random subset of reads (controlled by `--max-sample-size`) is used to generate the consensus.
-
-### Stability Assessment
-
-To evaluate the reliability of consensus sequences, Speconsense performs stability assessment by:
-1. Generating multiple consensus sequences from random subsets of the cluster
-2. Measuring the adjusted identity between each subsample consensus and the full consensus
-3. Converting identity scores to distance metrics for stability reporting
-4. Reporting the median and 95th percentile distances as stability metrics
-
-Sequences with higher than expected distance should be checked for bioinformatic contamination and/or underlying biological variation, as these may indicate mixed clusters or other issues with the data.
-
-**Adjusted Identity Scoring**: Speconsense uses the adjusted-identity algorithm with homopolymer normalization for more accurate sequence comparisons. This means that differences in homopolymer run lengths (e.g., AAA vs AAAAA) are treated as identical, which is particularly important for nanopore sequencing data where homopolymer length calling can be inconsistent.
-
-### Primer Trimming
-
-When a primers file is provided via `--primers`, Speconsense will identify and trim primer sequences from the 5' and 3' ends of consensus sequences, producing clean amplicon sequences for downstream analysis.
-
-**Automatic primer detection**: If `--primers` is not specified, Speconsense will automatically look for `primers.fasta` in the same directory as the input FASTQ file. If found, primer trimming will be enabled automatically.
+This will create a `__Summary__/` directory with:
+- `summary.fasta` - All final consensus sequences
+- Individual FASTA files per specimen
+- `summary.txt` - Statistics and metrics
+- `FASTQ Files/` - Reads contributing to each consensus
+- `raw_clusters/` - Original clustering results for reference
 
 ## Output Files
 
@@ -507,7 +238,7 @@ Consensus sequence headers contain metadata fields separated by spaces:
 **Optional Fields:**
 - `snp=N` - Number of SNP positions with IUPAC ambiguity codes (only present in merged variants from speconsense-summarize)
 - `primers=list` - Comma-separated list of detected primer names (e.g., `primers=ITS1F,ITS4`)
-- `median_diff=X.X` - Median edit distance from stability assessment (debug files only)  
+- `median_diff=X.X` - Median edit distance from stability assessment (debug files only)
 - `p95_diff=X.X` - 95th percentile edit distance from stability assessment (debug files only)
 
 **Example Headers:**
@@ -524,6 +255,292 @@ Consensus sequence headers contain metadata fields separated by spaces:
 - Stability metrics (`median_diff`, `p95_diff`) are preserved in debug files but removed from final speconsense-summarize output
 - Variant merging only occurs between sequences with identical primer sets
 - SNP counts reflect IUPAC ambiguity positions in consensus sequences
+
+## Algorithm Details
+
+### Clustering Methods
+
+SpecConsense offers two clustering approaches with different characteristics:
+
+#### **Graph-based clustering (MCL)** - Default and recommended
+- Constructs a similarity graph between reads and applies the Markov Cluster algorithm to identify clusters
+- **Tends to produce more clusters** by discriminating between sequence variants within a specimen
+- Suitable when you want to identify multiple variants per specimen and are willing to interpret complex results
+- Excellent for detecting subtle sequence differences and biological variation
+- Relatively fast with high-quality results for most datasets
+
+#### **Greedy clustering** - Fast and simple alternative
+- Uses greedy star clustering that iteratively selects the sequence with the most similar neighbors as cluster centers
+- **Tends to produce fewer, simpler clusters** by focusing on well-separated sequences
+- Excellent at discriminating between distinct targets (e.g., primary sequence vs. contaminant)
+- Usually does not separate variants within the same biological sequence
+- Suitable when you want a fast algorithm with minimal complexity in interpreting results
+- Ideal for applications where one consensus per specimen is sufficient
+
+#### **Choosing the Right Algorithm**
+
+**Use `--algorithm greedy` when:**
+- You want one clear consensus sequence per specimen
+- Speed is prioritized over detailed variant detection
+- You prefer simpler output interpretation
+- Your dataset has well-separated sequences (targets vs. contaminants)
+
+**Use `--algorithm graph` (default) when:**
+- You want to detect sequence variants within specimens
+- You're willing to evaluate multiple consensus sequences per specimen
+- You need fine-grained discrimination between similar sequences
+- You want the most comprehensive analysis of sequence diversity
+- **Note**: Use `speconsense-summarize` after clustering to manage multiple variants per specimen. Key options include `--snp-merge-limit` for merging variants differing by few SNPs, `--variant-group-identity` for grouping similar variants, and `--max-variants`/`--variant-selection` for controlling which variants to output
+
+### Cluster Merging
+
+After initial clustering, Speconsense automatically merges clusters with identical or homopolymer-equivalent consensus sequences:
+
+**Default behavior (homopolymer-aware merging):**
+- Clusters with identical consensus sequences are automatically merged
+- Clusters with homopolymer-equivalent sequences are also merged (e.g., "AAA" vs "AAAAA" treated as identical)
+- Homopolymer length differences are ignored as they typically represent ONT sequencing artifacts
+- This helps eliminate redundant clusters that represent the same biological sequence but differ only in homopolymer lengths
+
+**Strict identity merging (`--disable-homopolymer-equivalence`):**
+- Only clusters with perfectly identical consensus sequences are merged
+- Use this flag when homopolymer differences may have biological significance
+- Results in more clusters but ensures no information loss from homopolymer variation
+
+This automatic merging step helps consolidate redundant clusters that were separated during initial clustering. The adjusted identity scoring with homopolymer normalization provides more accurate assessment of sequence similarity for merging decisions, especially for nanopore data where homopolymer length calling can be inconsistent.
+
+**SNP-based variant merging:** For more aggressive merging based on SNP thresholds (which creates IUPAC consensus sequences with ambiguity codes), use the `--snp-merge-limit` option in `speconsense-summarize` during post-processing. See the [Advanced Post-Processing](#advanced-post-processing) section.
+
+### Cluster Size Filtering
+
+Speconsense provides two complementary filters to control which clusters are output:
+
+**Absolute size filtering (`--min-size`, default: 5):**
+- Filters clusters by absolute number of sequences
+- Applied before merging identical/homopolymer-equivalent clusters
+- Set to 0 to disable and output all clusters regardless of size
+
+**Relative size filtering (`--min-cluster-ratio`, default: 0.2):**
+- Filters clusters based on size relative to the largest cluster
+- **Applied after merging** identical/homopolymer-equivalent clusters (post-merge sizes)
+- **Based on original cluster sizes**, not sampled sizes from `--max-sample-size`
+- Set to 0 to disable and keep all clusters that pass `--min-size`
+
+**Processing order:**
+1. Initial clustering produces raw clusters
+2. Filter by `--min-size` (absolute threshold)
+3. Merge identical/homopolymer-equivalent clusters
+4. Filter by `--min-cluster-ratio` (relative threshold, using post-merge sizes)
+5. Sample sequences for consensus generation if cluster > `--max-sample-size`
+
+This order ensures that filtering decisions are based on biological abundance (true cluster sizes after merging redundant variants) rather than technical parameters (sampling limits for consensus generation).
+
+**Deferred filtering strategy:**
+For maximum flexibility in detecting rare variants and contaminants, disable filtering in speconsense (`--min-size 0 --min-cluster-ratio 0`) and apply final quality thresholds using `--min-ric` in speconsense-summarize. This allows you to run expensive clustering once and experiment with different quality thresholds during post-processing. However, be aware that permissive filtering may allow more bioinformatic contamination through the pipeline. When using this approach, consider stricter filtering during upstream demultiplexing or perform careful manual review of low-abundance clusters.
+
+### Consensus Generation
+
+Consensus sequences are generated using SPOA (SIMD Partial Order Alignment) which efficiently handles the error profile of nanopore reads. For larger clusters, a random subset of reads (controlled by `--max-sample-size`) is used to generate the consensus.
+
+### Stability Assessment
+
+To evaluate the reliability of consensus sequences, Speconsense performs stability assessment by:
+1. Generating multiple consensus sequences from random subsets of the cluster
+2. Measuring the adjusted identity between each subsample consensus and the full consensus
+3. Converting identity scores to distance metrics for stability reporting
+4. Reporting the median and 95th percentile distances as stability metrics
+
+Sequences with higher than expected distance should be checked for bioinformatic contamination and/or underlying biological variation, as these may indicate mixed clusters or other issues with the data.
+
+**Adjusted Identity Scoring**: Speconsense uses the adjusted-identity algorithm with homopolymer normalization for more accurate sequence comparisons. This means that differences in homopolymer run lengths (e.g., AAA vs AAAAA) are treated as identical, which is particularly important for nanopore sequencing data where homopolymer length calling can be inconsistent.
+
+### Primer Trimming
+
+When a primers file is provided via `--primers`, Speconsense will identify and trim primer sequences from the 5' and 3' ends of consensus sequences, producing clean amplicon sequences for downstream analysis.
+
+**Automatic primer detection**: If `--primers` is not specified, Speconsense will automatically look for `primers.fasta` in the same directory as the input FASTQ file. If found, primer trimming will be enabled automatically.
+
+## Advanced Post-Processing
+
+The `speconsense-summarize` tool provides sophisticated options for managing multiple variants per specimen. This section covers advanced variant handling - for basic usage, see the [Usage](#usage) section above.
+
+### Variant Grouping and Selection
+
+When multiple variants exist per specimen, `speconsense-summarize` first groups similar variants together, then applies selection strategies within each group:
+
+**Variant Grouping:**
+```bash
+speconsense-summarize --variant-group-identity 0.9
+```
+- Uses **Hierarchical Agglomerative Clustering (HAC)** to group variants with sequence identity ≥ threshold
+- Default threshold is 0.9 (90% identity)
+- Variants within each group are considered similar enough to represent the same biological entity
+- Each group will contribute one primary variant plus additional variants based on selection strategy
+
+**Variant Selection (within each group):**
+
+When multiple variants exist per specimen, `speconsense-summarize` offers two strategies for selecting which variants to output from each group:
+
+**Size-based selection (default):**
+```bash
+speconsense-summarize --variant-selection size --max-variants 2
+```
+- Selects variants by cluster size (largest first)
+- Primary variant is always the largest cluster
+- Additional variants are selected in order of decreasing size
+- Best for identifying the most abundant sequence variants
+- Suitable when read count reflects biological abundance
+
+**Diversity-based selection:**
+```bash
+speconsense-summarize --variant-selection diversity --max-variants 2
+```
+- Uses a **maximum distance algorithm** to select variants that are most genetically different from each other
+- Primary variant is still the largest cluster
+- Additional variants are selected to maximize sequence diversity in the output
+- Iteratively selects the variant with the **maximum minimum distance** to all previously selected variants
+- Best for capturing the full range of genetic variation in your sample
+- Suitable when you want to detect distinct sequence types regardless of their abundance
+
+**Algorithm Details for Diversity Selection (within each group):**
+1. Primary variant = largest cluster within the group (by read count)
+2. For each additional variant slot in the group:
+   - Calculate the minimum sequence distance from each remaining candidate to all already-selected variants in this group
+   - Select the candidate with the largest minimum distance (farthest from all selected in this group)
+   - Repeat until max_variants reached for this group
+
+**Overall Process:**
+1. Group variants by sequence identity using HAC clustering
+2. For each group independently:
+   - Apply variant selection strategy (size or diversity)
+   - Output up to max_variants per group
+3. Final output contains representatives from all groups, ensuring both biological diversity (between groups) and appropriate sampling within each biological entity (within groups)
+
+This two-stage process ensures that distinct biological sequences are preserved as separate groups, while providing control over variant complexity within each group.
+
+### Additional Summarize Options
+
+**Quality Filtering:**
+```bash
+speconsense-summarize --min-ric 5
+```
+- Filters out consensus sequences with fewer than the specified number of Reads in Consensus (RiC)
+- Default is 3 - only sequences supported by at least 3 reads are processed
+- Higher values provide more stringent quality control but may exclude valid low-abundance variants
+
+**SNP-based Variant Merging:**
+```bash
+speconsense-summarize --snp-merge-limit 2
+```
+- **Occurs before variant grouping** - merges variants within each specimen that differ by ≤ N SNP positions
+- Uses a **greedy merging approach**: repeatedly finds the best pairwise merge (largest combined cluster size) until no valid merges remain
+- Creates **IUPAC consensus sequences** with ambiguity codes at polymorphic positions
+- Only merges variants with **identical primer sets** to maintain biological validity
+- Prevents merging if the result would exceed the SNP limit or contain complex indels
+- Helps consolidate very similar variants that likely represent the same biological sequence
+- **Note**: This is distinct from the automatic homopolymer-aware merging that occurs during the main clustering step in speconsense
+
+**Directory Control:**
+```bash
+speconsense-summarize --source /path/to/speconsense/output --summary-dir MyResults
+```
+- `--source`: Directory containing speconsense output files (default: clusters)
+- `--summary-dir`: Output directory name (default: `__Summary__`)
+
+### Processing Workflow Summary
+
+The complete speconsense-summarize workflow operates in this order:
+
+1. **Load sequences** with RiC filtering (`--min-ric`)
+2. **SNP-based merging** within each specimen (`--snp-merge-limit`)
+3. **HAC variant grouping** by sequence identity (`--variant-group-identity`)
+4. **Variant selection** within each group (`--max-variants`, `--variant-selection`)
+5. **Output generation** with full traceability and statistics
+
+### Enhanced Logging and Traceability
+
+Speconsense-summarize provides comprehensive logging to help users understand processing decisions:
+
+**Variant Analysis Logging:**
+- **Complete variant summaries** for every variant in each group, including those that are skipped
+- **Detailed difference categorization**: substitutions, single-nt indels, short (≤3nt) indels, and long indels
+- **IUPAC-aware comparisons**: treats ambiguity codes as matches (e.g., R matches A or G)
+- **Group context**: clearly shows which variants belong to each HAC clustering group
+- **Selection rationale**: explains why variants were included or excluded
+
+**Example log output:**
+```
+HAC clustering created 2 groups
+Group 1: ['sample-c3']
+Group 2: ['sample-c1', 'sample-c2']
+Processing Variants in Group 2
+Primary: sample-c1 (size=403, ric=403)
+Variant 1: (size=269, ric=269) - 1 short (<= 3nt) indel
+Variant 2: (size=180, ric=180) - 3 substitutions, 1 single-nt indel - skipping
+```
+
+**Traceability Features:**
+- **Merge history**: tracks which original clusters were combined during SNP merging
+- **File lineage**: maintains connection between final outputs and original speconsense clusters
+- **Read aggregation**: `FASTQ Files/` directory contains all reads that contributed to each final consensus
+- **Raw preservation**: `raw_clusters/` directory preserves original speconsense output with stability metrics
+
+This comprehensive logging allows users to understand exactly how the pipeline processed their data and make informed decisions about parameter tuning.
+
+## Full Command Line Options
+
+```
+usage: speconsense.py [-h] [--augment-input AUGMENT_INPUT] [--algorithm {graph,greedy}] [--min-identity MIN_IDENTITY]
+                     [--inflation INFLATION] [--min-size MIN_SIZE] [--min-cluster-ratio MIN_CLUSTER_RATIO]
+                     [--max-sample-size MAX_SAMPLE_SIZE] [--presample PRESAMPLE]
+                     [--k-nearest-neighbors K_NEAREST_NEIGHBORS] [--primers PRIMERS]
+                     [-O OUTPUT_DIR] [--stability-trials STABILITY_TRIALS] [--stability-sample STABILITY_SAMPLE]
+                     [--disable-stability] [--disable-homopolymer-equivalence]
+                     [--orient-mode {skip,keep-all,filter-failed}]
+                     [--log-level {DEBUG,INFO,WARNING,ERROR,CRITICAL}] [--version]
+                     input_file
+
+MCL-based clustering of nanopore amplicon reads
+
+positional arguments:
+  input_file            Input FASTQ file
+
+optional arguments:
+  -h, --help            show this help message and exit
+  --augment-input AUGMENT_INPUT
+                        Additional FASTQ/FASTA file with sequences recovered after primary demultiplexing
+  --algorithm {graph,greedy}
+                        Clustering algorithm to use (default: graph)
+  --min-identity MIN_IDENTITY
+                        Minimum sequence identity threshold (default: 0.85)
+  --inflation INFLATION
+                        MCL inflation parameter (default: 4.0)
+  --min-size MIN_SIZE   Minimum cluster size (default: 5, 0 to disable)
+  --min-cluster-ratio MIN_CLUSTER_RATIO
+                        Minimum size ratio between a cluster and the largest cluster (default: 0.2, 0 to disable)
+  --max-sample-size MAX_SAMPLE_SIZE
+                        Maximum cluster size for consensus (default: 500)
+  --presample PRESAMPLE
+                        Presample size for initial reads (default: 1000, 0 to disable)
+  --k-nearest-neighbors K_NEAREST_NEIGHBORS
+                        Number of nearest neighbors for graph construction (default: 5)
+  --primers PRIMERS     FASTA file containing primer sequences (default: looks for primers.fasta in input file directory)
+  -O OUTPUT_DIR, --output-dir OUTPUT_DIR
+                        Output directory for all files (default: clusters)
+  --stability-trials STABILITY_TRIALS
+                        Number of sampling trials to assess stability (default: 100)
+  --stability-sample STABILITY_SAMPLE
+                        Size of stability samples (default: 20)
+  --disable-stability   Disable stability assessment
+  --disable-homopolymer-equivalence
+                        Disable homopolymer equivalence in cluster merging (only merge identical sequences)
+  --orient-mode {skip,keep-all,filter-failed}
+                        Sequence orientation mode: skip (default, no orientation), keep-all (orient but keep failed),
+                        or filter-failed (orient and remove failed). Requires primers file with position annotations.
+  --log-level {DEBUG,INFO,WARNING,ERROR,CRITICAL}
+                        Set logging level (default: INFO)
+  --version             Show program's version number and exit
+```
 
 ## Specialized Workflows
 
