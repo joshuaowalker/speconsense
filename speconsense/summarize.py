@@ -40,6 +40,27 @@ IUPAC_CODES = {
     frozenset(['A', 'C', 'G', 'T']): 'N',
 }
 
+# IUPAC equivalencies for edlib alignment
+# This allows edlib to treat IUPAC ambiguity codes as matching their constituent bases
+IUPAC_EQUIV = [("Y", "C"), ("Y", "T"), ("R", "A"), ("R", "G"),
+               ("N", "A"), ("N", "C"), ("N", "G"), ("N", "T"),
+               ("W", "A"), ("W", "T"), ("M", "A"), ("M", "C"),
+               ("S", "C"), ("S", "G"), ("K", "G"), ("K", "T"),
+               ("B", "C"), ("B", "G"), ("B", "T"),
+               ("D", "A"), ("D", "G"), ("D", "T"),
+               ("H", "A"), ("H", "C"), ("H", "T"),
+               ("V", "A"), ("V", "C"), ("V", "G"), ]
+
+# Standard adjustment parameters for consistent sequence comparison
+# Used by both substitution distance calculation and adjusted identity distance
+STANDARD_ADJUSTMENT_PARAMS = AdjustmentParams(
+    normalize_homopolymers=True,    # Enable homopolymer normalization
+    handle_iupac_overlap=False,     # Disable IUPAC overlap - use standard IUPAC semantics (Y≠M)
+    normalize_indels=False,         # Disable indel normalization
+    end_skip_distance=0,            # No end trimming - sequences must match end-to-end
+    max_repeat_motif_length=1       # Single-base repeats for homopolymer normalization
+)
+
 
 class ConsensusInfo(NamedTuple):
     """Information about a consensus sequence from speconsense output."""
@@ -178,9 +199,9 @@ def calculate_substitution_distance(seq1: str, seq2: str) -> int:
     """
     if not seq1 or not seq2:
         return max(len(seq1), len(seq2))
-        
-    # Get alignment from edlib
-    result = edlib.align(seq1, seq2, task="path")
+
+    # Get alignment from edlib with IUPAC awareness
+    result = edlib.align(seq1, seq2, task="path", additionalEqualities=IUPAC_EQUIV)
     if result["editDistance"] == -1:
         return max(len(seq1), len(seq2))
         
@@ -188,16 +209,7 @@ def calculate_substitution_distance(seq1: str, seq2: str) -> int:
     alignment = edlib.getNiceAlignment(result, seq1, seq2)
     if not alignment or not alignment.get('query_aligned') or not alignment.get('target_aligned'):
         return result["editDistance"]
-        
-    # Configure custom adjustment parameters for homopolymer normalization only
-    custom_params = AdjustmentParams(
-        normalize_homopolymers=True,    # Enable homopolymer normalization
-        handle_iupac_overlap=False,     # Disable IUPAC overlap handling
-        normalize_indels=False,         # Disable indel normalization
-        end_skip_distance=0,            # Disable end trimming
-        max_repeat_motif_length=2       # Keep default motif length
-    )
-    
+
     # Create custom scoring format to distinguish indels from substitutions
     custom_format = ScoringFormat(
         match='|',
@@ -207,12 +219,12 @@ def calculate_substitution_distance(seq1: str, seq2: str) -> int:
         homopolymer_extension='=',
         end_trimmed='.'
     )
-    
-    # Calculate adjusted identity with custom format
+
+    # Calculate adjusted identity with standard parameters and custom format
     score_result = score_alignment(
-        alignment['query_aligned'], 
+        alignment['query_aligned'],
         alignment['target_aligned'],
-        adjustment_params=custom_params,
+        adjustment_params=STANDARD_ADJUSTMENT_PARAMS,
         scoring_format=custom_format
     )
     
@@ -311,8 +323,8 @@ def create_iupac_consensus(consensuses: List[str]) -> Tuple[Optional[str], int]:
     
     try:
         # Use the same alignment method as calculate_substitution_distance
-        # Get alignment from edlib first
-        result = edlib.align(seq1, seq2, task="path")
+        # Get alignment from edlib with IUPAC awareness
+        result = edlib.align(seq1, seq2, task="path", additionalEqualities=IUPAC_EQUIV)
         if result["editDistance"] == -1:
             logging.warning("Could not align sequences with edlib")
             return None, 0
@@ -389,8 +401,8 @@ def create_variant_summary(primary_seq: str, variant_seq: str) -> str:
         return "identical sequences"
     
     try:
-        # Get alignment from edlib
-        result = edlib.align(primary_seq, variant_seq, task="path")
+        # Get alignment from edlib with IUPAC awareness
+        result = edlib.align(primary_seq, variant_seq, task="path", additionalEqualities=IUPAC_EQUIV)
         if result["editDistance"] == -1:
             return "alignment failed"
         
@@ -454,7 +466,7 @@ def create_variant_summary(primary_seq: str, variant_seq: str) -> str:
             parts.append(f"{long_indels} long indel{'s' if long_indels != 1 else ''}")
         
         if not parts:
-            return "identical sequences (after alignment)"
+            return "identical sequences (IUPAC-compatible)"
         
         return ", ".join(parts)
         
@@ -466,12 +478,12 @@ def calculate_adjusted_identity_distance(seq1: str, seq2: str) -> float:
     """Calculate adjusted identity distance between two sequences."""
     if not seq1 or not seq2:
         return 1.0  # Maximum distance
-    
+
     if seq1 == seq2:
         return 0.0
-        
-    # Get alignment from edlib
-    result = edlib.align(seq1, seq2, task="path")
+
+    # Get alignment from edlib with IUPAC awareness
+    result = edlib.align(seq1, seq2, task="path", additionalEqualities=IUPAC_EQUIV)
     if result["editDistance"] == -1:
         return 1.0
         
@@ -479,13 +491,14 @@ def calculate_adjusted_identity_distance(seq1: str, seq2: str) -> float:
     alignment = edlib.getNiceAlignment(result, seq1, seq2)
     if not alignment or not alignment.get('query_aligned') or not alignment.get('target_aligned'):
         return 1.0
-        
-    # Use standard adjusted identity parameters
+
+    # Calculate adjusted identity using standard parameters
     score_result = score_alignment(
-        alignment['query_aligned'], 
-        alignment['target_aligned']
+        alignment['query_aligned'],
+        alignment['target_aligned'],
+        adjustment_params=STANDARD_ADJUSTMENT_PARAMS
     )
-    
+
     # Convert adjusted identity to distance
     return 1.0 - score_result.identity
 
