@@ -49,3 +49,6 @@ htmlcov/
 .Trashes
 ehthumbs.db
 Thumbs.db
+
+# Reference files (not part of project)
+msalign.py
