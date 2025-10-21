@@ -447,12 +447,14 @@ speconsense-summarize --snp-merge-limit 2
 ```bash
 speconsense-summarize --merge-min-size-ratio 0.1
 ```
-- Prevents merging clusters with very different sizes (e.g., dominant cluster + tiny contaminant)
+- Prevents merging clusters with very different sizes (e.g., well-supported variant + poorly-supported variant)
 - Ratio calculated as `smaller_size / larger_size` - must be ≥ threshold to merge
 - Example: `--merge-min-size-ratio 0.1` means smaller cluster must be ≥10% size of larger
 - Default is 0.0 (disabled) - all size combinations allowed
-- Useful for preventing weak clusters from introducing ambiguities into well-supported sequences
-- Applied during SNP-based merging step
+- **Use cases:**
+  - Prevent poorly-supported variants (low read count) from introducing ambiguities into well-supported sequences
+  - Avoid merging bioinformatic contamination from related specimens (e.g., same genus) that HAC grouped together due to sequence similarity
+- Applied during SNP-based merging step, before HAC grouping
 
 **Group Output Limiting:**
 ```bash
