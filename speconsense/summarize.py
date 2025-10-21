@@ -117,10 +117,6 @@ def parse_arguments():
                         dest="select_strategy", choices=["size", "diversity"], default="size",
                         help="Variant selection strategy: size or diversity (default: size)")
 
-    # Output options
-    parser.add_argument("--output-raw-variants", action="store_true",
-                        help="Output raw pre-merge sequences as additional .v* variants")
-
     parser.add_argument("--log-level", default="INFO",
                         choices=["DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL"],
                         help="Logging level")
@@ -731,13 +727,8 @@ def merge_group_with_msa(variants: List[ConsensusInfo], args) -> Tuple[List[Cons
                 }
                 all_traceability.update(traceability)
 
-                # If --output-raw-variants, include originals as additional variants
-                if hasattr(args, 'output_raw_variants') and args.output_raw_variants:
-                    # Sort originals by size
-                    raw_variants = sorted(subset_variants, key=lambda v: v.size, reverse=True)
-                    merged_results.extend([merged_consensus] + raw_variants)
-                else:
-                    merged_results.append(merged_consensus)
+                # Add merged consensus to results
+                merged_results.append(merged_consensus)
 
                 # Remove merged variants from remaining pool
                 for v in subset_variants:

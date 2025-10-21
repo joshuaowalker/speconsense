@@ -445,9 +445,6 @@ speconsense-summarize --merge-position-count 3 --merge-indel-length 3
 # Disable SNP merging (only merge identical sequences)
 speconsense-summarize --merge-snp false
 
-# Output raw pre-merge variants alongside merged consensus
-speconsense-summarize --output-raw-variants
-
 # Legacy parameter (still supported)
 speconsense-summarize --snp-merge-limit 2  # Equivalent to --merge-position-count 2
 ```
@@ -462,7 +459,6 @@ speconsense-summarize --snp-merge-limit 2  # Equivalent to --merge-position-coun
 - `--merge-indel-length N`: Maximum length of individual indels allowed (default: 0 = disabled)
 - `--merge-snp`: Enable/disable SNP merging (default: True)
 - `--merge-min-size-ratio R`: Minimum size ratio (smaller/larger) for merging clusters (default: 0.0 = disabled)
-- `--output-raw-variants`: Output raw pre-merge sequences as additional .v* variants
 - `--snp-merge-limit N`: Legacy parameter, equivalent to `--merge-position-count` (deprecated)
 
 **How it works:**
