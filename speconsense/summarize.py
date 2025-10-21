@@ -61,6 +61,11 @@ STANDARD_ADJUSTMENT_PARAMS = AdjustmentParams(
     max_repeat_motif_length=1       # Single-base repeats for homopolymer normalization
 )
 
+# Maximum number of variants to evaluate for MSA-based merging
+# Beyond this limit, subset evaluation becomes computationally impractical
+# (2^N subsets to evaluate - 2^10 = 1024 is manageable, 2^20 = 1M+ is not)
+MAX_MSA_MERGE_VARIANTS = 10
+
 
 class ConsensusInfo(NamedTuple):
     """Information about a consensus sequence from speconsense output."""
@@ -489,14 +494,22 @@ def analyze_msa_columns(aligned_seqs: List) -> dict:
     }
 
 
-def generate_subsets_by_total_size(variants: List[ConsensusInfo], args) -> List[Tuple[int, ...]]:
+def generate_subsets_with_driver(variants: List[ConsensusInfo], args) -> List[Tuple[int, ...]]:
     """
-    Generate subsets of variant indices in descending order by total cluster size.
+    Generate subsets of variant indices that all contain the driver (index 0).
+    Returns subsets in descending order by total cluster size.
 
-    Optimizations:
-    - Pre-filter by size ratio
-    - Start with largest subsets (r=N, then r=N-1, etc.)
-    - Early termination: first valid subset is optimal
+    This is much more efficient than generating all subsets because:
+    - Only generates subsets containing the driver
+    - Size ratio filtering already applied before this function
+    - Driver is always index 0 (the largest variant)
+
+    Args:
+        variants: List of variants where index 0 is the driver
+        args: Command-line arguments (unused but kept for compatibility)
+
+    Returns:
+        List of tuples of indices, sorted by total size descending
     """
     n = len(variants)
     sizes = [v.size for v in variants]
@@ -505,17 +518,13 @@ def generate_subsets_by_total_size(variants: List[ConsensusInfo], args) -> List[
     candidates = []
 
     # Generate from largest subsets to smallest
+    # For n variants, we generate subsets of size n, n-1, ..., 1
+    # All must include index 0 (the driver)
     for r in range(n, 0, -1):
-        for subset_indices in itertools.combinations(range(n), r):
-            # Pre-filter by size ratio if enabled
-            if args.merge_min_size_ratio > 0 and len(subset_indices) > 1:
-                subset_sizes = [sizes[i] for i in subset_indices]
-                min_size = min(subset_sizes)
-                max_size = max(subset_sizes)
-                size_ratio = min_size / max_size
-
-                if size_ratio < args.merge_min_size_ratio:
-                    continue  # Skip this subset
+        # Generate combinations of the OTHER variants (indices 1..n-1)
+        # Then add driver (index 0) to each
+        for other_indices in itertools.combinations(range(1, n), r - 1):
+            subset_indices = (0,) + other_indices  # Driver always included
 
             # Calculate total size
             total_size = sum(sizes[i] for i in subset_indices)
@@ -628,13 +637,15 @@ def create_consensus_from_msa(aligned_seqs: List, variants: List[ConsensusInfo])
 
 def merge_group_with_msa(variants: List[ConsensusInfo], args) -> Tuple[List[ConsensusInfo], Dict]:
     """
-    Find largest mergeable subset of variants using MSA-based evaluation.
+    Find largest mergeable subset of variants using MSA-based evaluation with driver-based approach.
 
     Algorithm:
-    1. Run SPOA MSA on all variants
-    2. Generate subsets in descending size order
-    3. Evaluate each subset for compatibility (SNP/indel limits)
-    4. Return first (largest) compatible subset as merged consensus
+    1. Iteratively select the largest unprocessed variant as the "driver"
+    2. Filter candidates by size ratio relative to driver (if --merge-min-size-ratio set)
+    3. Limit candidates to MAX_MSA_MERGE_VARIANTS per driver
+    4. Run SPOA MSA and evaluate subsets containing the driver
+    5. Merge the best compatible subset found
+    6. Remove merged variants and repeat with next driver
 
     Args:
         variants: List of ConsensusInfo from HAC group
@@ -648,62 +659,101 @@ def merge_group_with_msa(variants: List[ConsensusInfo], args) -> Tuple[List[Cons
     if len(variants) == 1:
         return variants, {}
 
-    logging.info(f"MSA-based merging of {len(variants)} variants")
+    # Sort variants by size (largest first) for driver selection
+    remaining_variants = sorted(variants, key=lambda v: v.size, reverse=True)
+    merged_results = []
+    all_traceability = {}
 
-    # Step 1: Run SPOA MSA on all variants
-    sequences = [v.sequence for v in variants]
-    aligned_seqs = run_spoa_msa(sequences)
+    while remaining_variants:
+        # Step 1: Select the largest variant as the driver
+        driver = remaining_variants[0]
+        driver_size = driver.size
 
-    logging.debug(f"Generated MSA with length {len(aligned_seqs[0].seq)}")
+        # Step 2: Filter candidates by size ratio (if enabled)
+        if args.merge_min_size_ratio > 0:
+            candidates = [v for v in remaining_variants
+                         if (v.size / driver_size) >= args.merge_min_size_ratio]
+            if len(candidates) < len(remaining_variants):
+                filtered_count = len(remaining_variants) - len(candidates)
+                logging.debug(f"Filtered out {filtered_count} variants with size ratio < {args.merge_min_size_ratio} relative to driver (size={driver_size})")
+        else:
+            candidates = remaining_variants
 
-    # Step 2: Generate subsets in descending size order
-    subsets_by_size = generate_subsets_by_total_size(variants, args)
+        # Step 3: Limit to MAX_MSA_MERGE_VARIANTS per driver
+        if len(candidates) > MAX_MSA_MERGE_VARIANTS:
+            logging.warning(f"Driver has {len(candidates)} merge candidates, limiting to largest {MAX_MSA_MERGE_VARIANTS}")
+            candidates = candidates[:MAX_MSA_MERGE_VARIANTS]
 
-    logging.debug(f"Evaluating {len(subsets_by_size)} candidate subsets")
+        # Single candidate - just pass through
+        if len(candidates) == 1:
+            merged_results.append(candidates[0])
+            remaining_variants.remove(candidates[0])
+            continue
 
-    # Step 3: Find first (largest) compatible subset
-    for subset_indices in subsets_by_size:
-        subset_variants = [variants[i] for i in subset_indices]
-        subset_aligned = [aligned_seqs[i] for i in subset_indices]
+        logging.info(f"Evaluating merge compatibility for driver (size={driver_size}) with {len(candidates)-1} candidates")
 
-        # Analyze MSA for this subset
-        variant_stats = analyze_msa_columns(subset_aligned)
+        # Step 4: Run SPOA MSA on candidates
+        sequences = [v.sequence for v in candidates]
+        aligned_seqs = run_spoa_msa(sequences)
 
-        # Check compatibility against merge limits
-        if is_compatible_subset(variant_stats, args):
-            logging.info(f"Found mergeable subset of {len(subset_indices)} variants: "
-                        f"{variant_stats['snp_count']} SNPs, "
-                        f"{variant_stats['indel_count']} indels")
+        logging.debug(f"Generated MSA with length {len(aligned_seqs[0].seq)}")
 
-            # Create merged consensus
-            merged_consensus = create_consensus_from_msa(
-                subset_aligned, subset_variants
-            )
+        # Step 5: Generate subsets containing the driver (index 0)
+        subsets_by_size = generate_subsets_with_driver(candidates, args)
 
-            # Track merge provenance
-            traceability = {
-                merged_consensus.sample_name: [v.sample_name for v in subset_variants]
-            }
+        logging.debug(f"Evaluating {len(subsets_by_size)} candidate subsets")
 
-            # If --output-raw-variants, include originals as additional variants
-            if hasattr(args, 'output_raw_variants') and args.output_raw_variants:
-                # Sort originals by size
-                raw_variants = sorted(subset_variants, key=lambda v: v.size, reverse=True)
-                return [merged_consensus] + raw_variants, traceability
+        # Step 6: Find first (largest) compatible subset
+        merged_this_round = False
+        for subset_indices in subsets_by_size:
+            subset_variants = [candidates[i] for i in subset_indices]
+            subset_aligned = [aligned_seqs[i] for i in subset_indices]
 
-            # Otherwise, continue merging remaining variants
-            remaining_indices = [i for i in range(len(variants)) if i not in subset_indices]
-            if remaining_indices:
-                remaining_variants = [variants[i] for i in remaining_indices]
-                remaining_merged, remaining_trace = merge_group_with_msa(remaining_variants, args)
-                traceability.update(remaining_trace)
-                return [merged_consensus] + remaining_merged, traceability
-            else:
-                return [merged_consensus], traceability
+            # Analyze MSA for this subset
+            variant_stats = analyze_msa_columns(subset_aligned)
 
-    # No compatible subsets found - return largest variant alone
-    logging.info(f"No mergeable subsets found, outputting {len(variants)} separate variants")
-    return variants, {}
+            # Check compatibility against merge limits
+            if is_compatible_subset(variant_stats, args):
+                # Only log "mergeable subset" message for actual merges (>1 variant)
+                if len(subset_indices) > 1:
+                    logging.info(f"Found mergeable subset of {len(subset_indices)} variants: "
+                                f"{variant_stats['snp_count']} SNPs, "
+                                f"{variant_stats['indel_count']} indels")
+
+                # Create merged consensus
+                merged_consensus = create_consensus_from_msa(
+                    subset_aligned, subset_variants
+                )
+
+                # Track merge provenance
+                traceability = {
+                    merged_consensus.sample_name: [v.sample_name for v in subset_variants]
+                }
+                all_traceability.update(traceability)
+
+                # If --output-raw-variants, include originals as additional variants
+                if hasattr(args, 'output_raw_variants') and args.output_raw_variants:
+                    # Sort originals by size
+                    raw_variants = sorted(subset_variants, key=lambda v: v.size, reverse=True)
+                    merged_results.extend([merged_consensus] + raw_variants)
+                else:
+                    merged_results.append(merged_consensus)
+
+                # Remove merged variants from remaining pool
+                for v in subset_variants:
+                    if v in remaining_variants:
+                        remaining_variants.remove(v)
+
+                merged_this_round = True
+                break
+
+        # If no merge found for this driver, keep it as-is and continue
+        if not merged_this_round:
+            logging.debug(f"No compatible merge found for driver (size={driver_size})")
+            merged_results.append(driver)
+            remaining_variants.remove(driver)
+
+    return merged_results, all_traceability
 
 
 def count_ambiguities_in_sequence(sequence: str) -> int:
