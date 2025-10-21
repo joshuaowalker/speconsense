@@ -99,26 +99,47 @@ def parse_arguments():
                         help=argparse.SUPPRESS)  # Hidden but functional
 
     # Group and selection phase parameters
-    parser.add_argument("--variant-group-identity", type=float, default=0.9,
+    parser.add_argument("--group-identity", "--variant-group-identity",
+                        dest="group_identity", type=float, default=0.9,
                         help="Identity threshold for variant grouping using HAC (default: 0.9)")
-    parser.add_argument("--max-variants", type=int, default=-1,
+    parser.add_argument("--select-max-variants", "--max-variants",
+                        dest="select_max_variants", type=int, default=-1,
                         help="Maximum number of additional variants to output per group (default: -1 = no limit)")
-    parser.add_argument("--max-groups", type=int, default=-1,
+    parser.add_argument("--select-max-groups", "--max-groups",
+                        dest="select_max_groups", type=int, default=-1,
                         help="Maximum number of groups to output per specimen (default: -1 = all groups)")
-    parser.add_argument("--variant-selection", choices=["size", "diversity"], default="size",
+    parser.add_argument("--select-strategy", "--variant-selection",
+                        dest="select_strategy", choices=["size", "diversity"], default="size",
                         help="Variant selection strategy: size or diversity (default: size)")
+
+    # Output options
+    parser.add_argument("--output-raw-variants", action="store_true",
+                        help="Output raw pre-merge sequences as additional .v* variants")
+
     parser.add_argument("--log-level", default="INFO",
                         choices=["DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL"],
                         help="Logging level")
 
     args = parser.parse_args()
 
-    # Handle backward compatibility for --snp-merge-limit
+    # Handle backward compatibility for deprecated parameters
+    import sys
     if args._snp_merge_limit_deprecated is not None:
-        import sys
         if '--snp-merge-limit' in sys.argv:
             logging.warning("--snp-merge-limit is deprecated, use --merge-position-count instead")
         args.merge_position_count = args._snp_merge_limit_deprecated
+
+    if '--variant-group-identity' in sys.argv:
+        logging.warning("--variant-group-identity is deprecated, use --group-identity instead")
+
+    if '--max-variants' in sys.argv:
+        logging.warning("--max-variants is deprecated, use --select-max-variants instead")
+
+    if '--max-groups' in sys.argv:
+        logging.warning("--max-groups is deprecated, use --select-max-groups instead")
+
+    if '--variant-selection' in sys.argv:
+        logging.warning("--variant-selection is deprecated, use --select-strategy instead")
 
     return args
 
@@ -344,6 +365,345 @@ def calculate_variant_distance(seq1: str, seq2: str) -> dict:
         'indel_count': len(indel_positions),
         'max_indel_length': max_indel_length
     }
+
+
+def run_spoa_msa(sequences: List[str]) -> List:
+    """
+    Run SPOA to create multiple sequence alignment.
+
+    Args:
+        sequences: List of DNA sequence strings
+
+    Returns:
+        List of SeqRecord objects with aligned sequences (including gaps)
+    """
+    from Bio.SeqRecord import SeqRecord
+    from Bio.Seq import Seq
+
+    with tempfile.NamedTemporaryFile(mode='w', suffix='.fasta', delete=False) as temp_input:
+        try:
+            # Write sequences to temporary file
+            records = [
+                SeqRecord(Seq(seq), id=f"seq{i}", description="")
+                for i, seq in enumerate(sequences)
+            ]
+            SeqIO.write(records, temp_input, "fasta")
+            temp_input.flush()
+
+            # Run SPOA with alignment output (-r 2)
+            result = subprocess.run(
+                ['spoa', temp_input.name, '-r', '2'],
+                capture_output=True,
+                text=True,
+                check=True
+            )
+
+            # Parse aligned sequences from SPOA output
+            aligned_sequences = []
+            lines = result.stdout.strip().split('\n')
+            current_id = None
+            current_seq = []
+
+            for line in lines:
+                if line.startswith('>'):
+                    if current_id is not None:
+                        # Skip consensus sequence (usually last)
+                        if not current_id.startswith('Consensus'):
+                            aligned_sequences.append(SeqRecord(
+                                Seq(''.join(current_seq)),
+                                id=current_id,
+                                description=""
+                            ))
+                    current_id = line[1:]
+                    current_seq = []
+                elif line.strip():
+                    current_seq.append(line.strip())
+
+            # Add last sequence (if not consensus)
+            if current_id is not None and not current_id.startswith('Consensus'):
+                aligned_sequences.append(SeqRecord(
+                    Seq(''.join(current_seq)),
+                    id=current_id,
+                    description=""
+                ))
+
+            return aligned_sequences
+
+        finally:
+            if os.path.exists(temp_input.name):
+                os.unlink(temp_input.name)
+
+
+def analyze_msa_columns(aligned_seqs: List) -> dict:
+    """
+    Analyze aligned sequences to count SNPs and indels.
+
+    Important: All gaps (including terminal gaps) count as variant positions
+    since variants within a group share the same primers.
+
+    Returns dict with:
+        'snp_count': number of positions with >1 non-gap base
+        'indel_count': number of positions with gaps mixed with bases
+        'max_indel_length': length of longest consecutive indel run
+    """
+    alignment_length = len(aligned_seqs[0].seq)
+
+    snp_positions = []
+    indel_positions = []
+
+    for col_idx in range(alignment_length):
+        column = [str(seq.seq[col_idx]) for seq in aligned_seqs]
+
+        # Separate bases from gaps (all gaps count, including terminal)
+        unique_bases = set(c for c in column if c != '-')
+        has_gap = '-' in column
+
+        # Skip all-gap columns (shouldn't happen with SPOA output)
+        if not unique_bases and has_gap:
+            continue
+
+        # SNP position: multiple different bases (ignoring gaps)
+        if len(unique_bases) > 1:
+            snp_positions.append(col_idx)
+
+        # Indel position: mix of gaps and bases
+        if has_gap and unique_bases:
+            indel_positions.append(col_idx)
+
+    # Calculate max indel length (consecutive indel positions)
+    max_indel_length = 0
+    if indel_positions:
+        current_run = 1
+        for i in range(1, len(indel_positions)):
+            if indel_positions[i] == indel_positions[i-1] + 1:
+                current_run += 1
+                max_indel_length = max(max_indel_length, current_run)
+            else:
+                current_run = 1
+        max_indel_length = max(max_indel_length, current_run)
+
+    return {
+        'snp_count': len(snp_positions),
+        'indel_count': len(indel_positions),
+        'max_indel_length': max_indel_length
+    }
+
+
+def generate_subsets_by_total_size(variants: List[ConsensusInfo], args) -> List[Tuple[int, ...]]:
+    """
+    Generate subsets of variant indices in descending order by total cluster size.
+
+    Optimizations:
+    - Pre-filter by size ratio
+    - Start with largest subsets (r=N, then r=N-1, etc.)
+    - Early termination: first valid subset is optimal
+    """
+    n = len(variants)
+    sizes = [v.size for v in variants]
+
+    # Build list of (total_size, subset_indices) tuples
+    candidates = []
+
+    # Generate from largest subsets to smallest
+    for r in range(n, 0, -1):
+        for subset_indices in itertools.combinations(range(n), r):
+            # Pre-filter by size ratio if enabled
+            if args.merge_min_size_ratio > 0 and len(subset_indices) > 1:
+                subset_sizes = [sizes[i] for i in subset_indices]
+                min_size = min(subset_sizes)
+                max_size = max(subset_sizes)
+                size_ratio = min_size / max_size
+
+                if size_ratio < args.merge_min_size_ratio:
+                    continue  # Skip this subset
+
+            # Calculate total size
+            total_size = sum(sizes[i] for i in subset_indices)
+            candidates.append((total_size, subset_indices))
+
+    # Sort by total size descending
+    candidates.sort(reverse=True, key=lambda x: x[0])
+
+    # Return just the subset indices
+    return [subset for _, subset in candidates]
+
+
+def is_compatible_subset(variant_stats: dict, args) -> bool:
+    """Check if variant statistics are within merge limits."""
+
+    # Check SNP limit
+    if variant_stats['snp_count'] > 0 and not args.merge_snp:
+        return False
+
+    # Check indel limits
+    if variant_stats['indel_count'] > 0:
+        if args.merge_indel_length == 0:
+            return False
+        if variant_stats['max_indel_length'] > args.merge_indel_length:
+            return False
+
+    # Check total position count
+    total_positions = variant_stats['snp_count'] + variant_stats['indel_count']
+    if total_positions > args.merge_position_count:
+        return False
+
+    return True
+
+
+def create_consensus_from_msa(aligned_seqs: List, variants: List[ConsensusInfo]) -> ConsensusInfo:
+    """
+    Generate consensus from MSA using size-weighted majority voting.
+
+    At each position:
+    - Weight each variant by cluster size
+    - Choose majority representation (base vs gap)
+    - For multiple bases, generate IUPAC code representing all variants
+
+    Important: All gaps (including terminal) count as variant positions
+    since variants share the same primers.
+
+    Args:
+        aligned_seqs: MSA sequences with gaps as '-'
+        variants: Original ConsensusInfo objects (for size weighting)
+
+    Returns:
+        ConsensusInfo with merged consensus sequence
+    """
+    consensus_seq = []
+    snp_count = 0
+    alignment_length = len(aligned_seqs[0].seq)
+
+    for col_idx in range(alignment_length):
+        column = [str(seq.seq[col_idx]) for seq in aligned_seqs]
+
+        # Weight each base/gap by cluster size
+        votes_with_size = [(base, variants[i].size) for i, base in enumerate(column)]
+
+        # Count size-weighted votes (EXACT match only, no IUPAC expansion)
+        votes = defaultdict(int)
+        for base, size in votes_with_size:
+            votes[base.upper()] += size
+
+        # Separate gap votes from base votes
+        gap_votes = votes.get('-', 0)
+        base_votes = {b: v for b, v in votes.items() if b != '-'}
+
+        # Determine if position should be included
+        total_base_votes = sum(base_votes.values())
+
+        if total_base_votes > gap_votes:
+            # Majority wants a base - include position
+            if len(base_votes) == 1:
+                # Single base - no ambiguity
+                consensus_seq.append(list(base_votes.keys())[0])
+            else:
+                # Multiple bases - generate IUPAC code
+                represented_bases = set(base_votes.keys())
+                iupac_code = IUPAC_CODES.get(frozenset(represented_bases), 'N')
+                consensus_seq.append(iupac_code)
+                snp_count += 1
+        # else: majority wants gap, omit position
+
+    # Create merged ConsensusInfo
+    consensus_sequence = ''.join(consensus_seq)
+    total_size = sum(v.size for v in variants)
+    total_ric = sum(v.ric for v in variants)
+    merged_ric_values = sorted([v.ric for v in variants], reverse=True)
+
+    # Use name from largest variant
+    largest_variant = max(variants, key=lambda v: v.size)
+
+    return ConsensusInfo(
+        sample_name=largest_variant.sample_name,
+        cluster_id=largest_variant.cluster_id,
+        sequence=consensus_sequence,
+        ric=total_ric,
+        size=total_size,
+        file_path=largest_variant.file_path,
+        snp_count=snp_count if snp_count > 0 else None,
+        primers=largest_variant.primers,
+        merged_ric=merged_ric_values
+    )
+
+
+def merge_group_with_msa(variants: List[ConsensusInfo], args) -> Tuple[List[ConsensusInfo], Dict]:
+    """
+    Find largest mergeable subset of variants using MSA-based evaluation.
+
+    Algorithm:
+    1. Run SPOA MSA on all variants
+    2. Generate subsets in descending size order
+    3. Evaluate each subset for compatibility (SNP/indel limits)
+    4. Return first (largest) compatible subset as merged consensus
+
+    Args:
+        variants: List of ConsensusInfo from HAC group
+        args: Command-line arguments with merge parameters
+
+    Returns:
+        (merged_variants, merge_traceability) where merged_variants is list
+        of merged ConsensusInfo objects, and traceability maps merged names
+        to original cluster names
+    """
+    if len(variants) == 1:
+        return variants, {}
+
+    logging.info(f"MSA-based merging of {len(variants)} variants")
+
+    # Step 1: Run SPOA MSA on all variants
+    sequences = [v.sequence for v in variants]
+    aligned_seqs = run_spoa_msa(sequences)
+
+    logging.debug(f"Generated MSA with length {len(aligned_seqs[0].seq)}")
+
+    # Step 2: Generate subsets in descending size order
+    subsets_by_size = generate_subsets_by_total_size(variants, args)
+
+    logging.debug(f"Evaluating {len(subsets_by_size)} candidate subsets")
+
+    # Step 3: Find first (largest) compatible subset
+    for subset_indices in subsets_by_size:
+        subset_variants = [variants[i] for i in subset_indices]
+        subset_aligned = [aligned_seqs[i] for i in subset_indices]
+
+        # Analyze MSA for this subset
+        variant_stats = analyze_msa_columns(subset_aligned)
+
+        # Check compatibility against merge limits
+        if is_compatible_subset(variant_stats, args):
+            logging.info(f"Found mergeable subset of {len(subset_indices)} variants: "
+                        f"{variant_stats['snp_count']} SNPs, "
+                        f"{variant_stats['indel_count']} indels")
+
+            # Create merged consensus
+            merged_consensus = create_consensus_from_msa(
+                subset_aligned, subset_variants
+            )
+
+            # Track merge provenance
+            traceability = {
+                merged_consensus.sample_name: [v.sample_name for v in subset_variants]
+            }
+
+            # If --output-raw-variants, include originals as additional variants
+            if hasattr(args, 'output_raw_variants') and args.output_raw_variants:
+                # Sort originals by size
+                raw_variants = sorted(subset_variants, key=lambda v: v.size, reverse=True)
+                return [merged_consensus] + raw_variants, traceability
+
+            # Otherwise, continue merging remaining variants
+            remaining_indices = [i for i in range(len(variants)) if i not in subset_indices]
+            if remaining_indices:
+                remaining_variants = [variants[i] for i in remaining_indices]
+                remaining_merged, remaining_trace = merge_group_with_msa(remaining_variants, args)
+                traceability.update(remaining_trace)
+                return [merged_consensus] + remaining_merged, traceability
+            else:
+                return [merged_consensus], traceability
+
+    # No compatible subsets found - return largest variant alone
+    logging.info(f"No mergeable subsets found, outputting {len(variants)} separate variants")
+    return variants, {}
 
 
 def count_ambiguities_in_sequence(sequence: str) -> int:
@@ -1087,29 +1447,28 @@ def write_output_files(final_consensus: List[ConsensusInfo],
             logging.warning(f"Could not copy log file: {e}")
 
 
-def process_single_specimen(file_consensuses: List[ConsensusInfo], 
+def process_single_specimen(file_consensuses: List[ConsensusInfo],
                            args) -> Tuple[List[ConsensusInfo], Dict[str, List[str]], Dict]:
     """
-    Process a single specimen file: merge variants, perform HAC clustering, and select final variants.
+    Process a single specimen file: HAC cluster, MSA-based merge per group, and select final variants.
     Returns final consensus list, merge traceability, and naming info for this specimen.
+
+    Architecture (Phase 3):
+    1. HAC clustering to separate variant groups (primary vs contaminants)
+    2. MSA-based merging within each group
+    3. Select representative variants per group
     """
     if not file_consensuses:
         return [], {}, {}
-    
+
     file_name = os.path.basename(file_consensuses[0].file_path)
     logging.info(f"Processing specimen from file: {file_name}")
-    
-    # Phase 1: Merge variants within this specimen file
-    merged_consensus, merge_traceability = merge_variants_within_specimen(file_consensuses, args)
-    
-    if not merged_consensus:
-        return [], merge_traceability, {}
-    
-    # Phase 2: HAC clustering to separate variant groups within this specimen (primary vs contaminants)
-    variant_groups = perform_hac_clustering(merged_consensus, args.variant_group_identity)
+
+    # Phase 1: HAC clustering to separate variant groups (moved before merging!)
+    variant_groups = perform_hac_clustering(file_consensuses, args.group_identity)
 
     # Filter to max groups if specified
-    if args.max_groups > 0 and len(variant_groups) > args.max_groups:
+    if args.select_max_groups > 0 and len(variant_groups) > args.select_max_groups:
         # Sort groups by size of largest member
         sorted_for_filtering = sorted(
             variant_groups.items(),
@@ -1117,37 +1476,46 @@ def process_single_specimen(file_consensuses: List[ConsensusInfo],
             reverse=True
         )
         # Keep only top N groups
-        variant_groups = dict(sorted_for_filtering[:args.max_groups])
-        logging.info(f"Filtered to top {args.max_groups} groups by size (from {len(sorted_for_filtering)} total groups)")
+        variant_groups = dict(sorted_for_filtering[:args.select_max_groups])
+        logging.info(f"Filtered to top {args.select_max_groups} groups by size (from {len(sorted_for_filtering)} total groups)")
+
+    # Phase 2: MSA-based merging within each group
+    merged_groups = {}
+    all_merge_traceability = {}
+
+    for group_id, group_members in variant_groups.items():
+        merged, traceability = merge_group_with_msa(group_members, args)
+        merged_groups[group_id] = merged
+        all_merge_traceability.update(traceability)
 
     # Phase 3: Select representative variants for each group in this specimen
     final_consensus = []
     naming_info = {}
 
     # Sort variant groups by size of largest member (descending)
-    sorted_groups = sorted(variant_groups.items(),
+    sorted_groups = sorted(merged_groups.items(),
                           key=lambda x: max(m.size for m in x[1]),
                           reverse=True)
-    
+
     for group_idx, (_, group_members) in enumerate(sorted_groups):
         # Log group context before variant selection
         final_group_name = group_idx + 1
         logging.info(f"Processing Variants in Group {final_group_name}")
-        
+
         # Select variants for this group
-        selected_variants = select_variants(group_members, args.max_variants, args.variant_selection)
-        
+        selected_variants = select_variants(group_members, args.select_max_variants, args.select_strategy)
+
         # Create naming for this group within this specimen
         group_naming = []
-        
+
         for variant_idx, variant in enumerate(selected_variants):
             if variant_idx == 0:
                 # Main variant gets local group number (1, 2, etc. within this specimen)
                 new_name = f"{variant.sample_name.split('-c')[0]}-{group_idx + 1}"
             else:
-                # Additional variants get .v suffix  
+                # Additional variants get .v suffix
                 new_name = f"{variant.sample_name.split('-c')[0]}-{group_idx + 1}.v{variant_idx}"
-            
+
             # Create new ConsensusInfo with updated name
             renamed_variant = ConsensusInfo(
                 sample_name=new_name,
@@ -1156,19 +1524,20 @@ def process_single_specimen(file_consensuses: List[ConsensusInfo],
                 ric=variant.ric,
                 size=variant.size,
                 file_path=variant.file_path,
-                snp_count=variant.snp_count,  # Preserve SNP count from original
-                primers=variant.primers  # Preserve primers
+                snp_count=variant.snp_count,  # Preserve SNP count from merging
+                primers=variant.primers,  # Preserve primers
+                merged_ric=variant.merged_ric  # Preserve merged_ric
             )
-            
+
             final_consensus.append(renamed_variant)
             group_naming.append((variant.sample_name, new_name))
-        
+
         naming_info[group_idx + 1] = group_naming
-    
-    logging.info(f"Processed {file_name}: {len(variant_groups)} groups -> {len(final_consensus)} final variants")
+
+    logging.info(f"Processed {file_name}: {len(merged_groups)} groups -> {len(final_consensus)} final variants")
     logging.info("")  # Empty line for readability between specimens
-    
-    return final_consensus, merge_traceability, naming_info
+
+    return final_consensus, all_merge_traceability, naming_info
 
 
 def merge_variants_within_specimen(file_consensuses: List[ConsensusInfo],

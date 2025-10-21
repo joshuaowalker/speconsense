@@ -125,8 +125,8 @@ speconsense-summarize --source /path/to/speconsense/output --summary-dir MyResul
 **Variant Detection and Haplotype Phasing:**
 
 Speconsense can detect and isolate sequence variants within specimens (aka "haplotype phasing"). The graph-based clustering algorithm excels at discriminating between variants, and `speconsense-summarize` provides sophisticated tools for managing multiple variants per specimen, including:
-- SNP-based variant merging with IUPAC ambiguity codes
-- Hierarchical variant grouping
+- MSA-based variant merging with IUPAC ambiguity codes and size-weighted consensus
+- Hierarchical variant grouping to separate contaminants from primary targets
 - Size-based or diversity-based variant selection strategies
 
 For detailed information on variant handling options, see the [Advanced Post-Processing](#advanced-post-processing) section below.
@@ -373,11 +373,12 @@ When multiple variants exist per specimen, `speconsense-summarize` first groups 
 
 **Variant Grouping:**
 ```bash
-speconsense-summarize --variant-group-identity 0.9
+speconsense-summarize --group-identity 0.9
 ```
 - Uses **Hierarchical Agglomerative Clustering (HAC)** to group variants with sequence identity ≥ threshold
 - Default threshold is 0.9 (90% identity)
 - Variants within each group are considered similar enough to represent the same biological entity
+- **Occurs before merging** to separate dissimilar sequences (e.g., contaminants from primary targets)
 - Each group will contribute one primary variant plus additional variants based on selection strategy
 
 **Variant Selection (within each group):**
@@ -386,18 +387,18 @@ When multiple variants exist per specimen, `speconsense-summarize` offers two st
 
 **Size-based selection (default):**
 ```bash
-speconsense-summarize --variant-selection size --max-variants 2
+speconsense-summarize --select-strategy size --select-max-variants 2
 ```
 - Selects variants by cluster size (largest first)
 - Primary variant is always the largest cluster
 - Additional variants are selected in order of decreasing size
 - Best for identifying the most abundant sequence variants
 - Suitable when read count reflects biological abundance
-- **Default**: `--max-variants=-1` (outputs all variants, no limit)
+- **Default**: `--select-max-variants=-1` (outputs all variants, no limit)
 
 **Diversity-based selection:**
 ```bash
-speconsense-summarize --variant-selection diversity --max-variants 2
+speconsense-summarize --select-strategy diversity --select-max-variants 2
 ```
 - Uses a **maximum distance algorithm** to select variants that are most genetically different from each other
 - Primary variant is still the largest cluster
@@ -411,13 +412,14 @@ speconsense-summarize --variant-selection diversity --max-variants 2
 2. For each additional variant slot in the group:
    - Calculate the minimum sequence distance from each remaining candidate to all already-selected variants in this group
    - Select the candidate with the largest minimum distance (farthest from all selected in this group)
-   - Repeat until max_variants reached for this group
+   - Repeat until select_max_variants reached for this group
 
 **Overall Process:**
 1. Group variants by sequence identity using HAC clustering
 2. For each group independently:
+   - Apply MSA-based merging to find largest compatible subsets
    - Apply variant selection strategy (size or diversity)
-   - Output up to max_variants per group
+   - Output up to select_max_variants per group
 3. Final output contains representatives from all groups, ensuring both biological diversity (between groups) and appropriate sampling within each biological entity (within groups)
 
 This two-stage process ensures that distinct biological sequences are preserved as separate groups, while providing control over variant complexity within each group.
@@ -443,18 +445,24 @@ speconsense-summarize --merge-position-count 3 --merge-indel-length 3
 # Disable SNP merging (only merge identical sequences)
 speconsense-summarize --merge-snp false
 
+# Output raw pre-merge variants alongside merged consensus
+speconsense-summarize --output-raw-variants
+
 # Legacy parameter (still supported)
 speconsense-summarize --snp-merge-limit 2  # Equivalent to --merge-position-count 2
 ```
-- **Occurs before variant grouping** - merges variants within each specimen that differ by small numbers of SNPs and/or indels
-- Uses a **greedy merging approach**: repeatedly finds the best pairwise merge (largest combined cluster size) until no valid merges remain
-- Creates **IUPAC consensus sequences** with ambiguity codes at polymorphic positions
+- **Occurs within each HAC group** - merges variants that differ by small numbers of SNPs and/or indels
+- Uses **MSA-based approach with SPOA**: evaluates all possible subsets to find the largest compatible group for merging
+- Creates **IUPAC consensus sequences** with size-weighted majority voting at polymorphic positions
+- **Order-independent**: produces identical results regardless of input order (unlike pairwise greedy approaches)
 - Only merges variants with **identical primer sets** to maintain biological validity
 
 **Merge Parameters:**
 - `--merge-position-count N`: Maximum total SNP + indel positions allowed (default: 2)
 - `--merge-indel-length N`: Maximum length of individual indels allowed (default: 0 = disabled)
 - `--merge-snp`: Enable/disable SNP merging (default: True)
+- `--merge-min-size-ratio R`: Minimum size ratio (smaller/larger) for merging clusters (default: 0.0 = disabled)
+- `--output-raw-variants`: Output raw pre-merge sequences as additional .v* variants
 - `--snp-merge-limit N`: Legacy parameter, equivalent to `--merge-position-count` (deprecated)
 
 **How it works:**
@@ -484,18 +492,18 @@ speconsense-summarize --merge-min-size-ratio 0.1
 - Default is 0.0 (disabled) - all size combinations allowed
 - **Use cases:**
   - Prevent poorly-supported variants (low read count) from introducing ambiguities into well-supported sequences
-  - Avoid merging bioinformatic contamination from related specimens (e.g., same genus) that HAC grouped together due to sequence similarity
-- Applied during SNP-based merging step, before HAC grouping
+  - Avoid merging weakly-supported bioinformatic artifacts into high-confidence sequences
+- Applied during MSA-based merging step, within each HAC group
 
 **Group Output Limiting:**
 ```bash
-speconsense-summarize --max-groups 2
+speconsense-summarize --select-max-groups 2
 ```
 - Limits output to top N groups per specimen (by size of largest member in each group)
 - Default is -1 (output all groups)
-- Applied after HAC clustering but before variant selection
+- Applied after HAC clustering but before MSA-based merging and variant selection
 - Useful for focusing on primary specimens and ignoring small contaminant groups
-- Example: `--max-groups=1` outputs only the largest variant group per specimen
+- Example: `--select-max-groups=1` outputs only the largest variant group per specimen
 
 **Directory Control:**
 ```bash
@@ -509,11 +517,13 @@ speconsense-summarize --source /path/to/speconsense/output --summary-dir MyResul
 The complete speconsense-summarize workflow operates in this order:
 
 1. **Load sequences** with RiC filtering (`--min-ric`)
-2. **Variant merging** within each specimen (`--merge-position-count`, `--merge-indel-length`, `--merge-snp`, `--merge-min-size-ratio`)
-3. **HAC variant grouping** by sequence identity (`--variant-group-identity`)
-4. **Group filtering** to limit output groups (`--max-groups`)
-5. **Variant selection** within each group (`--max-variants`, `--variant-selection`)
+2. **HAC variant grouping** by sequence identity to separate dissimilar sequences (`--group-identity`)
+3. **Group filtering** to limit output groups (`--select-max-groups`)
+4. **MSA-based variant merging** within each group (`--merge-position-count`, `--merge-indel-length`, `--merge-snp`, `--merge-min-size-ratio`)
+5. **Variant selection** within each group (`--select-max-variants`, `--select-strategy`)
 6. **Output generation** with full traceability and statistics
+
+**Key architectural change**: HAC grouping now occurs BEFORE merging to prevent inappropriate merging of dissimilar sequences (e.g., contaminants with primary targets). Merging is then applied independently within each group using MSA-based consensus generation.
 
 ### Enhanced Logging and Traceability
 
