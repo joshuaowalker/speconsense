@@ -392,6 +392,7 @@ speconsense-summarize --variant-selection size --max-variants 2
 - Additional variants are selected in order of decreasing size
 - Best for identifying the most abundant sequence variants
 - Suitable when read count reflects biological abundance
+- **Default**: `--max-variants=-1` (outputs all variants, no limit)
 
 **Diversity-based selection:**
 ```bash
@@ -442,6 +443,27 @@ speconsense-summarize --snp-merge-limit 2
 - Helps consolidate very similar variants that likely represent the same biological sequence
 - **Note**: This is distinct from the automatic homopolymer-aware merging that occurs during the main clustering step in speconsense
 
+**Merge Size Ratio Filtering:**
+```bash
+speconsense-summarize --merge-min-size-ratio 0.1
+```
+- Prevents merging clusters with very different sizes (e.g., dominant cluster + tiny contaminant)
+- Ratio calculated as `smaller_size / larger_size` - must be ≥ threshold to merge
+- Example: `--merge-min-size-ratio 0.1` means smaller cluster must be ≥10% size of larger
+- Default is 0.0 (disabled) - all size combinations allowed
+- Useful for preventing weak clusters from introducing ambiguities into well-supported sequences
+- Applied during SNP-based merging step
+
+**Group Output Limiting:**
+```bash
+speconsense-summarize --max-groups 2
+```
+- Limits output to top N groups per specimen (by size of largest member in each group)
+- Default is -1 (output all groups)
+- Applied after HAC clustering but before variant selection
+- Useful for focusing on primary specimens and ignoring small contaminant groups
+- Example: `--max-groups=1` outputs only the largest variant group per specimen
+
 **Directory Control:**
 ```bash
 speconsense-summarize --source /path/to/speconsense/output --summary-dir MyResults
@@ -454,10 +476,11 @@ speconsense-summarize --source /path/to/speconsense/output --summary-dir MyResul
 The complete speconsense-summarize workflow operates in this order:
 
 1. **Load sequences** with RiC filtering (`--min-ric`)
-2. **SNP-based merging** within each specimen (`--snp-merge-limit`)
+2. **SNP-based merging** within each specimen (`--snp-merge-limit`, `--merge-min-size-ratio`)
 3. **HAC variant grouping** by sequence identity (`--variant-group-identity`)
-4. **Variant selection** within each group (`--max-variants`, `--variant-selection`)
-5. **Output generation** with full traceability and statistics
+4. **Group filtering** to limit output groups (`--max-groups`)
+5. **Variant selection** within each group (`--max-variants`, `--variant-selection`)
+6. **Output generation** with full traceability and statistics
 
 ### Enhanced Logging and Traceability
 

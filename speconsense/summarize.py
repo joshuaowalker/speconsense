@@ -84,10 +84,14 @@ def parse_arguments():
                         help="Output directory for summary files (default: __Summary__)")
     parser.add_argument("--snp-merge-limit", type=int, default=2,
                         help="Maximum number of SNP positions (bp) allowed in merged consensus sequences (default: 2)")
+    parser.add_argument("--merge-min-size-ratio", type=float, default=0.0,
+                        help="Minimum size ratio (smaller/larger) for merging clusters (default: 0.0 = disabled)")
     parser.add_argument("--variant-group-identity", type=float, default=0.9,
                         help="Identity threshold for variant grouping using HAC (default: 0.9)")
-    parser.add_argument("--max-variants", type=int, default=2,
-                        help="Maximum number of additional variants to output per group (default: 2, -1 = no limit)")
+    parser.add_argument("--max-variants", type=int, default=-1,
+                        help="Maximum number of additional variants to output per group (default: -1 = no limit)")
+    parser.add_argument("--max-groups", type=int, default=-1,
+                        help="Maximum number of groups to output per specimen (default: -1 = all groups)")
     parser.add_argument("--variant-selection", choices=["size", "diversity"], default="size",
                         help="Variant selection strategy: size or diversity (default: size)")
     parser.add_argument("--log-level", default="INFO",
@@ -995,21 +999,33 @@ def process_single_specimen(file_consensuses: List[ConsensusInfo],
     logging.info(f"Processing specimen from file: {file_name}")
     
     # Phase 1: Merge variants within this specimen file
-    merged_consensus, merge_traceability = merge_variants_within_specimen(file_consensuses, args.snp_merge_limit)
+    merged_consensus, merge_traceability = merge_variants_within_specimen(file_consensuses, args)
     
     if not merged_consensus:
         return [], merge_traceability, {}
     
     # Phase 2: HAC clustering to separate variant groups within this specimen (primary vs contaminants)
     variant_groups = perform_hac_clustering(merged_consensus, args.variant_group_identity)
-    
+
+    # Filter to max groups if specified
+    if args.max_groups > 0 and len(variant_groups) > args.max_groups:
+        # Sort groups by size of largest member
+        sorted_for_filtering = sorted(
+            variant_groups.items(),
+            key=lambda x: max(m.size for m in x[1]),
+            reverse=True
+        )
+        # Keep only top N groups
+        variant_groups = dict(sorted_for_filtering[:args.max_groups])
+        logging.info(f"Filtered to top {args.max_groups} groups by size (from {len(sorted_for_filtering)} total groups)")
+
     # Phase 3: Select representative variants for each group in this specimen
     final_consensus = []
     naming_info = {}
-    
+
     # Sort variant groups by size of largest member (descending)
-    sorted_groups = sorted(variant_groups.items(), 
-                          key=lambda x: max(m.size for m in x[1]), 
+    sorted_groups = sorted(variant_groups.items(),
+                          key=lambda x: max(m.size for m in x[1]),
                           reverse=True)
     
     for group_idx, (_, group_members) in enumerate(sorted_groups):
@@ -1054,20 +1070,23 @@ def process_single_specimen(file_consensuses: List[ConsensusInfo],
     return final_consensus, merge_traceability, naming_info
 
 
-def merge_variants_within_specimen(file_consensuses: List[ConsensusInfo], 
-                                 snp_merge_limit: int) -> Tuple[List[ConsensusInfo], Dict[str, List[str]]]:
+def merge_variants_within_specimen(file_consensuses: List[ConsensusInfo],
+                                 args) -> Tuple[List[ConsensusInfo], Dict[str, List[str]]]:
     """
     Iteratively merge consensus sequences within a specimen using greedy approach.
     At each step, finds all valid pairwise merges, selects the one with largest clusters,
     and enforces that final SNP count doesn't exceed snp_merge_limit.
     """
+    snp_merge_limit = args.snp_merge_limit
+    merge_min_size_ratio = args.merge_min_size_ratio
+
     if snp_merge_limit <= 0 or len(file_consensuses) <= 1:
         if snp_merge_limit <= 0:
             logging.debug("Variant merging disabled for this specimen")
         return file_consensuses, {}
-    
+
     file_name = os.path.basename(file_consensuses[0].file_path)
-    logging.info(f"Merging {len(file_consensuses)} variants within {file_name} (SNP limit: {snp_merge_limit} bp)")
+    logging.info(f"Merging {len(file_consensuses)} variants within {file_name} (SNP limit: {snp_merge_limit} bp, size ratio: {merge_min_size_ratio})")
     
     # Create working list that we'll modify during iteration
     current_consensuses = list(file_consensuses)
@@ -1090,7 +1109,14 @@ def merge_variants_within_specimen(file_consensuses: List[ConsensusInfo],
                 if consensus_i.primers != consensus_j.primers:
                     logging.debug(f"Skipping merge: {consensus_i.sample_name} + {consensus_j.sample_name} -> incompatible primers: {consensus_i.primers} vs {consensus_j.primers}")
                     continue
-                
+
+                # Check size ratio if enabled
+                if merge_min_size_ratio > 0:
+                    size_ratio = min(consensus_i.size, consensus_j.size) / max(consensus_i.size, consensus_j.size)
+                    if size_ratio < merge_min_size_ratio:
+                        logging.debug(f"Skipping merge: {consensus_i.sample_name} + {consensus_j.sample_name} -> size ratio {size_ratio:.3f} < {merge_min_size_ratio}")
+                        continue
+
                 # Calculate substitution distance between the two sequences
                 dist = calculate_substitution_distance(consensus_i.sequence, consensus_j.sequence)
                 
