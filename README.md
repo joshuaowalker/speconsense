@@ -236,6 +236,7 @@ Consensus sequence headers contain metadata fields separated by spaces:
 - `ric=N` - **Reads in Consensus** - Number of reads actually used for consensus generation (may be less than size due to sampling limits)
 
 **Optional Fields:**
+- `merged_ric=N+N+...` - RiC values of clusters that were merged (largest-first, only present in merged variants from speconsense-summarize)
 - `snp=N` - Number of SNP positions with IUPAC ambiguity codes (only present in merged variants from speconsense-summarize)
 - `primers=list` - Comma-separated list of detected primer names (e.g., `primers=ITS1F,ITS4`)
 - `median_diff=X.X` - Median edit distance from stability assessment (debug files only)
@@ -247,7 +248,7 @@ Consensus sequence headers contain metadata fields separated by spaces:
 >sample-c1 size=50 ric=45 median_diff=2.1 p95_diff=4.8 primers=ITS1F,ITS4
 
 # Merged variant from speconsense-summarize (stability metrics removed):
->sample-1 size=95 ric=78 snp=2 primers=ITS1F,ITS4
+>sample-1 size=250 ric=250 merged_ric=100+89+61 snp=2 primers=ITS1F,ITS4
 ```
 
 **Notes:**
@@ -292,7 +293,7 @@ SpecConsense offers two clustering approaches with different characteristics:
 - You're willing to evaluate multiple consensus sequences per specimen
 - You need fine-grained discrimination between similar sequences
 - You want the most comprehensive analysis of sequence diversity
-- **Note**: Use `speconsense-summarize` after clustering to manage multiple variants per specimen. Key options include `--snp-merge-limit` for merging variants differing by few SNPs, `--variant-group-identity` for grouping similar variants, and `--max-variants`/`--variant-selection` for controlling which variants to output
+- **Note**: Use `speconsense-summarize` after clustering to manage multiple variants per specimen. Key options include `--merge-position-count` for merging variants differing by few SNPs/indels, `--variant-group-identity` for grouping similar variants, and `--max-variants`/`--variant-selection` for controlling which variants to output
 
 ### Cluster Merging
 
@@ -311,7 +312,7 @@ After initial clustering, Speconsense automatically merges clusters with identic
 
 This automatic merging step helps consolidate redundant clusters that were separated during initial clustering. The adjusted identity scoring with homopolymer normalization provides more accurate assessment of sequence similarity for merging decisions, especially for nanopore data where homopolymer length calling can be inconsistent.
 
-**SNP-based variant merging:** For more aggressive merging based on SNP thresholds (which creates IUPAC consensus sequences with ambiguity codes), use the `--snp-merge-limit` option in `speconsense-summarize` during post-processing. See the [Advanced Post-Processing](#advanced-post-processing) section.
+**Variant merging with IUPAC codes:** For more aggressive merging based on SNP and indel thresholds (which creates IUPAC consensus sequences with ambiguity codes), use the `--merge-position-count` and `--merge-indel-length` options in `speconsense-summarize` during post-processing. See the [Advanced Post-Processing](#advanced-post-processing) section.
 
 ### Cluster Size Filtering
 
@@ -431,17 +432,47 @@ speconsense-summarize --min-ric 5
 - Default is 3 - only sequences supported by at least 3 reads are processed
 - Higher values provide more stringent quality control but may exclude valid low-abundance variants
 
-**SNP-based Variant Merging:**
+**Variant Merging:**
 ```bash
-speconsense-summarize --snp-merge-limit 2
+# Basic SNP-only merging (default)
+speconsense-summarize --merge-position-count 2
+
+# Enable indel merging (up to 3bp indels)
+speconsense-summarize --merge-position-count 3 --merge-indel-length 3
+
+# Disable SNP merging (only merge identical sequences)
+speconsense-summarize --merge-snp false
+
+# Legacy parameter (still supported)
+speconsense-summarize --snp-merge-limit 2  # Equivalent to --merge-position-count 2
 ```
-- **Occurs before variant grouping** - merges variants within each specimen that differ by ≤ N SNP positions
+- **Occurs before variant grouping** - merges variants within each specimen that differ by small numbers of SNPs and/or indels
 - Uses a **greedy merging approach**: repeatedly finds the best pairwise merge (largest combined cluster size) until no valid merges remain
 - Creates **IUPAC consensus sequences** with ambiguity codes at polymorphic positions
 - Only merges variants with **identical primer sets** to maintain biological validity
-- Prevents merging if the result would exceed the SNP limit or contain complex indels
-- Helps consolidate very similar variants that likely represent the same biological sequence
-- **Note**: This is distinct from the automatic homopolymer-aware merging that occurs during the main clustering step in speconsense
+
+**Merge Parameters:**
+- `--merge-position-count N`: Maximum total SNP + indel positions allowed (default: 2)
+- `--merge-indel-length N`: Maximum length of individual indels allowed (default: 0 = disabled)
+- `--merge-snp`: Enable/disable SNP merging (default: True)
+- `--snp-merge-limit N`: Legacy parameter, equivalent to `--merge-position-count` (deprecated)
+
+**How it works:**
+- Counts SNPs and indels separately during alignment
+- Both must be within limits for merge to proceed
+- Example: `--merge-position-count 3 --merge-indel-length 2` allows merging sequences with:
+  - 3 SNPs + 0 indels ✓
+  - 2 SNPs + 1 indel (≤2bp) ✓
+  - 0 SNPs + 3 indels (each ≤2bp) ✓
+  - 2 SNPs + 2 indels (each ≤2bp) ✗ (total=4 > 3)
+  - 2 SNPs + 1 indel (3bp) ✗ (indel too long)
+
+**Merged consensus tracking:**
+- Merged sequences include `merged_ric` header field showing RiC values of merged clusters
+- Example: `>sample-1 size=250 ric=250 merged_ric=100+89+61 snp=2`
+- Helps trace which original clusters contributed to merged consensus
+
+**Note**: This is distinct from the automatic homopolymer-aware merging that occurs during the main clustering step in speconsense
 
 **Merge Size Ratio Filtering:**
 ```bash
@@ -478,7 +509,7 @@ speconsense-summarize --source /path/to/speconsense/output --summary-dir MyResul
 The complete speconsense-summarize workflow operates in this order:
 
 1. **Load sequences** with RiC filtering (`--min-ric`)
-2. **SNP-based merging** within each specimen (`--snp-merge-limit`, `--merge-min-size-ratio`)
+2. **Variant merging** within each specimen (`--merge-position-count`, `--merge-indel-length`, `--merge-snp`, `--merge-min-size-ratio`)
 3. **HAC variant grouping** by sequence identity (`--variant-group-identity`)
 4. **Group filtering** to limit output groups (`--max-groups`)
 5. **Variant selection** within each group (`--max-variants`, `--variant-selection`)

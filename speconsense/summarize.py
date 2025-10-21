@@ -72,6 +72,7 @@ class ConsensusInfo(NamedTuple):
     file_path: str
     snp_count: Optional[int] = None  # Number of SNPs from IUPAC consensus generation
     primers: Optional[List[str]] = None  # List of detected primer names
+    merged_ric: Optional[List[int]] = None  # RiC values of merged clusters
 
 
 def parse_arguments():
@@ -82,10 +83,22 @@ def parse_arguments():
                         help="Source directory containing Speconsense output (default: clusters)")
     parser.add_argument("--summary-dir", type=str, default="__Summary__",
                         help="Output directory for summary files (default: __Summary__)")
-    parser.add_argument("--snp-merge-limit", type=int, default=2,
-                        help="Maximum number of SNP positions (bp) allowed in merged consensus sequences (default: 2)")
+
+    # Merge phase parameters
+    parser.add_argument("--merge-snp", action="store_true", default=True,
+                        help="Enable SNP-based merging (default: True)")
+    parser.add_argument("--merge-indel-length", type=int, default=0,
+                        help="Maximum length of individual indels allowed in merging (default: 0 = disabled)")
+    parser.add_argument("--merge-position-count", type=int, default=2,
+                        help="Maximum total SNP+indel positions allowed in merging (default: 2)")
     parser.add_argument("--merge-min-size-ratio", type=float, default=0.0,
                         help="Minimum size ratio (smaller/larger) for merging clusters (default: 0.0 = disabled)")
+
+    # Backward compatibility: support old --snp-merge-limit parameter
+    parser.add_argument("--snp-merge-limit", type=int, dest="_snp_merge_limit_deprecated",
+                        help=argparse.SUPPRESS)  # Hidden but functional
+
+    # Group and selection phase parameters
     parser.add_argument("--variant-group-identity", type=float, default=0.9,
                         help="Identity threshold for variant grouping using HAC (default: 0.9)")
     parser.add_argument("--max-variants", type=int, default=-1,
@@ -97,7 +110,17 @@ def parse_arguments():
     parser.add_argument("--log-level", default="INFO",
                         choices=["DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL"],
                         help="Logging level")
-    return parser.parse_args()
+
+    args = parser.parse_args()
+
+    # Handle backward compatibility for --snp-merge-limit
+    if args._snp_merge_limit_deprecated is not None:
+        import sys
+        if '--snp-merge-limit' in sys.argv:
+            logging.warning("--snp-merge-limit is deprecated, use --merge-position-count instead")
+        args.merge_position_count = args._snp_merge_limit_deprecated
+
+    return args
 
 
 def setup_logging(log_level: str, log_file: str = None):
@@ -251,6 +274,76 @@ def calculate_substitution_distance(seq1: str, seq2: str) -> int:
     
     logging.debug(f"Substitution distance: {substitutions} substitutions")
     return substitutions
+
+
+def calculate_variant_distance(seq1: str, seq2: str) -> dict:
+    """
+    Calculate distance between sequences counting SNPs and indels separately.
+
+    Returns dict with:
+        'snp_count': int - number of substitution positions
+        'indel_count': int - number of indel positions
+        'max_indel_length': int - length of longest consecutive indel
+        'compatible': bool - whether sequences can be aligned
+    """
+    if not seq1 or not seq2:
+        return {'compatible': False}
+
+    # Get alignment from edlib with IUPAC awareness
+    result = edlib.align(seq1, seq2, task="path", additionalEqualities=IUPAC_EQUIV)
+    if result["editDistance"] == -1:
+        return {'compatible': False}
+
+    alignment = edlib.getNiceAlignment(result, seq1, seq2)
+    if not alignment or not alignment.get('query_aligned') or not alignment.get('target_aligned'):
+        return {'compatible': False}
+
+    # Create custom scoring format to distinguish indels from substitutions
+    custom_format = ScoringFormat(
+        match='|',
+        substitution='X',
+        indel_start='I',
+        indel_extension='-',
+        homopolymer_extension='=',
+        end_trimmed='.'
+    )
+
+    # Analyze alignment using adjusted_identity for scoring
+    score_result = score_alignment(
+        alignment['query_aligned'],
+        alignment['target_aligned'],
+        adjustment_params=STANDARD_ADJUSTMENT_PARAMS,
+        scoring_format=custom_format
+    )
+
+    # Count variant types
+    snp_count = score_result.score_aligned.count('X')
+    indel_starts = score_result.score_aligned.count('I')
+    indel_extensions = score_result.score_aligned.count('-')
+
+    # Calculate indel positions and max length
+    indel_positions = []
+    if indel_starts > 0 or indel_extensions > 0:
+        # Parse score_aligned to find indel runs
+        i = 0
+        while i < len(score_result.score_aligned):
+            if score_result.score_aligned[i] in ('I', '-'):
+                # Start of indel
+                start = i
+                while i < len(score_result.score_aligned) and score_result.score_aligned[i] in ('I', '-'):
+                    i += 1
+                indel_positions.append((start, i))
+            else:
+                i += 1
+
+    max_indel_length = max((end - start for start, end in indel_positions), default=0)
+
+    return {
+        'compatible': True,
+        'snp_count': snp_count,
+        'indel_count': len(indel_positions),
+        'max_indel_length': max_indel_length
+    }
 
 
 def count_ambiguities_in_sequence(sequence: str) -> int:
@@ -919,6 +1012,10 @@ def write_output_files(final_consensus: List[ConsensusInfo],
         with open(output_file, 'w') as f:
             # Clean header with size first, no length field
             header_parts = [f"size={consensus.size}", f"ric={consensus.ric}"]
+            if consensus.merged_ric and len(consensus.merged_ric) > 0:
+                # Sort largest-first and join
+                ric_values = sorted(consensus.merged_ric, reverse=True)
+                header_parts.append(f"merged_ric={'+'.join(str(r) for r in ric_values)}")
             if consensus.snp_count is not None and consensus.snp_count > 0:
                 header_parts.append(f"snp={consensus.snp_count}")
             if consensus.primers:
@@ -937,6 +1034,10 @@ def write_output_files(final_consensus: List[ConsensusInfo],
         for consensus in final_consensus:
             # Clean header with size first, no length field
             header_parts = [f"size={consensus.size}", f"ric={consensus.ric}"]
+            if consensus.merged_ric and len(consensus.merged_ric) > 0:
+                # Sort largest-first and join
+                ric_values = sorted(consensus.merged_ric, reverse=True)
+                header_parts.append(f"merged_ric={'+'.join(str(r) for r in ric_values)}")
             if consensus.snp_count is not None and consensus.snp_count > 0:
                 header_parts.append(f"snp={consensus.snp_count}")
             if consensus.primers:
@@ -1075,18 +1176,20 @@ def merge_variants_within_specimen(file_consensuses: List[ConsensusInfo],
     """
     Iteratively merge consensus sequences within a specimen using greedy approach.
     At each step, finds all valid pairwise merges, selects the one with largest clusters,
-    and enforces that final SNP count doesn't exceed snp_merge_limit.
+    and enforces that final position count doesn't exceed merge_position_count.
     """
-    snp_merge_limit = args.snp_merge_limit
+    merge_position_count = args.merge_position_count
     merge_min_size_ratio = args.merge_min_size_ratio
+    merge_snp = args.merge_snp
+    merge_indel_length = args.merge_indel_length
 
-    if snp_merge_limit <= 0 or len(file_consensuses) <= 1:
-        if snp_merge_limit <= 0:
+    if merge_position_count <= 0 or len(file_consensuses) <= 1:
+        if merge_position_count <= 0:
             logging.debug("Variant merging disabled for this specimen")
         return file_consensuses, {}
 
     file_name = os.path.basename(file_consensuses[0].file_path)
-    logging.info(f"Merging {len(file_consensuses)} variants within {file_name} (SNP limit: {snp_merge_limit} bp, size ratio: {merge_min_size_ratio})")
+    logging.info(f"Merging {len(file_consensuses)} variants within {file_name} (position limit: {merge_position_count}, indel limit: {merge_indel_length}, size ratio: {merge_min_size_ratio})")
     
     # Create working list that we'll modify during iteration
     current_consensuses = list(file_consensuses)
@@ -1117,22 +1220,39 @@ def merge_variants_within_specimen(file_consensuses: List[ConsensusInfo],
                         logging.debug(f"Skipping merge: {consensus_i.sample_name} + {consensus_j.sample_name} -> size ratio {size_ratio:.3f} < {merge_min_size_ratio}")
                         continue
 
-                # Calculate substitution distance between the two sequences
-                dist = calculate_substitution_distance(consensus_i.sequence, consensus_j.sequence)
-                
-                # Skip if sequences contain indels (dist == -1) or exceed SNP limit
-                if dist == -1:
-                    logging.debug(f"Skipping merge: {consensus_i.sample_name} + {consensus_j.sample_name} -> contains indels")
+                # Calculate variant distance between the two sequences
+                dist = calculate_variant_distance(consensus_i.sequence, consensus_j.sequence)
+
+                # Check compatibility
+                if not dist['compatible']:
+                    logging.debug(f"Skipping merge: {consensus_i.sample_name} + {consensus_j.sample_name} -> incompatible sequences")
                     continue
-                elif dist > snp_merge_limit:
-                    logging.debug(f"Skipping merge: {consensus_i.sample_name} + {consensus_j.sample_name} -> {dist} SNPs > {snp_merge_limit} limit")
+
+                # Check SNP limit
+                if dist['snp_count'] > 0 and not merge_snp:
+                    logging.debug(f"Skipping merge: {consensus_i.sample_name} + {consensus_j.sample_name} -> SNP merging disabled")
+                    continue
+
+                # Check indel limits
+                if dist['indel_count'] > 0:
+                    if merge_indel_length == 0:
+                        logging.debug(f"Skipping merge: {consensus_i.sample_name} + {consensus_j.sample_name} -> indel merging disabled")
+                        continue
+                    if dist['max_indel_length'] > merge_indel_length:
+                        logging.debug(f"Skipping merge: {consensus_i.sample_name} + {consensus_j.sample_name} -> max indel length {dist['max_indel_length']} > {merge_indel_length}")
+                        continue
+
+                # Check total position count
+                total_positions = dist['snp_count'] + dist['indel_count']
+                if total_positions > merge_position_count:
+                    logging.debug(f"Skipping merge: {consensus_i.sample_name} + {consensus_j.sample_name} -> {total_positions} positions > {merge_position_count}")
                     continue
                     
                 # Sequences are compatible - test actual IUPAC consensus creation
                 test_sequences = [consensus_i.sequence, consensus_j.sequence]
                 test_consensus, actual_snp_count = create_iupac_consensus(test_sequences)
-                
-                if test_consensus is not None and actual_snp_count <= snp_merge_limit:
+
+                if test_consensus is not None and actual_snp_count <= merge_position_count:
                     # Valid merge - store info for selection
                     combined_size = consensus_i.size + consensus_j.size
                     valid_merges.append({
@@ -1141,12 +1261,12 @@ def merge_variants_within_specimen(file_consensuses: List[ConsensusInfo],
                         'combined_size': combined_size,
                         'consensus_sequence': test_consensus,
                         'snp_count': actual_snp_count,
-                        'distance': dist
+                        'distance': total_positions
                     })
-                    logging.debug(f"Valid merge: {consensus_i.sample_name} + {consensus_j.sample_name} -> {actual_snp_count} SNPs, combined size {combined_size}")
+                    logging.debug(f"Valid merge: {consensus_i.sample_name} + {consensus_j.sample_name} -> {actual_snp_count} SNPs, {dist['indel_count']} indels, combined size {combined_size}")
                 else:
                     if test_consensus is not None:
-                        logging.debug(f"Rejected merge: {consensus_i.sample_name} + {consensus_j.sample_name} -> {actual_snp_count} SNPs > {snp_merge_limit} bp limit")
+                        logging.debug(f"Rejected merge: {consensus_i.sample_name} + {consensus_j.sample_name} -> {actual_snp_count} SNPs > {merge_position_count} position limit")
                     else:
                         logging.warning(f"IUPAC consensus creation failed for {consensus_i.sample_name} + {consensus_j.sample_name}")
         
@@ -1163,7 +1283,20 @@ def merge_variants_within_specimen(file_consensuses: List[ConsensusInfo],
         consensus_j = current_consensuses[j]
         
         logging.info(f"Performing merge: {consensus_i.sample_name} + {consensus_j.sample_name} -> {best_merge['snp_count']} SNPs, size {best_merge['combined_size']}")
-        
+
+        # Collect merged_ric values from both consensuses
+        merged_ric_values = []
+        if consensus_i.merged_ric:
+            merged_ric_values.extend(consensus_i.merged_ric)
+        else:
+            merged_ric_values.append(consensus_i.ric)
+        if consensus_j.merged_ric:
+            merged_ric_values.extend(consensus_j.merged_ric)
+        else:
+            merged_ric_values.append(consensus_j.ric)
+        # Sort largest-first
+        merged_ric_values = sorted(merged_ric_values, reverse=True)
+
         # Create merged consensus info
         merged_info = ConsensusInfo(
             sample_name=consensus_i.sample_name,  # Keep name from larger cluster
@@ -1173,7 +1306,8 @@ def merge_variants_within_specimen(file_consensuses: List[ConsensusInfo],
             size=best_merge['combined_size'],
             file_path=consensus_i.file_path,
             snp_count=best_merge['snp_count'] if best_merge['snp_count'] > 0 else None,
-            primers=consensus_i.primers  # Preserve primers (they must match due to compatibility check)
+            primers=consensus_i.primers,  # Preserve primers (they must match due to compatibility check)
+            merged_ric=merged_ric_values
         )
         
         # Update traceability
