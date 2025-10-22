@@ -477,7 +477,7 @@ def create_consensus_from_msa(aligned_seqs: List, variants: List[ConsensusInfo])
     consensus_sequence = ''.join(consensus_seq)
     total_size = sum(v.size for v in variants)
     total_ric = sum(v.ric for v in variants)
-    merged_ric_values = sorted([v.ric for v in variants], reverse=True)
+    merged_ric_values = sorted([v.ric for v in variants], reverse=True) if len(variants) > 1 else None
 
     # Use name from largest variant
     largest_variant = max(variants, key=lambda v: v.size)
@@ -1005,11 +1005,12 @@ def create_output_structure(groups: Dict[int, List[ConsensusInfo]],
     return final_consensus, naming_info
 
 
-def write_consensus_fastq(consensus: ConsensusInfo, 
+def write_consensus_fastq(consensus: ConsensusInfo,
                          merge_traceability: Dict[str, List[str]],
                          naming_info: Dict,
                          fastq_dir: str,
-                         fastq_lookup: Dict[str, List[str]]):
+                         fastq_lookup: Dict[str, List[str]],
+                         original_consensus_lookup: Dict[str, ConsensusInfo]):
     """Write FASTQ file for a consensus by concatenating existing FASTQ files."""
     import shutil
     
@@ -1041,11 +1042,17 @@ def write_consensus_fastq(consensus: ConsensusInfo,
             specimen_name = cluster_name.rsplit('-c', 1)[0]
             debug_files = fastq_lookup.get(specimen_name, [])
 
-            # Filter files that match this specific cluster
-            # Match the full pattern: {specimen}-c{cluster}-RiC{size}-{stage}.fastq
-            # Where stage can be: sampled, reads, untrimmed, etc.
-            # This prevents c1 from matching c10, c11, etc. and validates file structure
-            matching_files = [f for f in debug_files if f"{cluster_name}-RiC" in f]
+            # Get the original RiC value for this cluster
+            original_ric = original_consensus_lookup.get(cluster_name)
+            if not original_ric:
+                logging.warning(f"Could not find original consensus info for {cluster_name}")
+                continue
+
+            # Filter files that match this specific cluster with exact RiC value
+            # Match the full pattern: {specimen}-c{cluster}-RiC{exact_ric}-{stage}.fastq
+            # This prevents matching multiple RiC values for the same cluster
+            cluster_ric_pattern = f"{cluster_name}-RiC{original_ric.ric}-"
+            matching_files = [f for f in debug_files if cluster_ric_pattern in f]
 
             # Validate that matched files exist and log any issues
             for mf in matching_files:
@@ -1188,9 +1195,68 @@ def write_output_files(final_consensus: List[ConsensusInfo],
                       naming_info: Dict,
                       summary_folder: str,
                       temp_log_file: str = None,
-                      fastq_lookup: Dict[str, List[str]] = None):
-    """Write all output files including FASTQ files with reads from contributing clusters."""
-    
+                      fastq_lookup: Dict[str, List[str]] = None,
+                      consensus_list: List[ConsensusInfo] = None):
+    """Write all output files including FASTQ files with reads from contributing clusters.
+
+    Also writes .raw files for merged consensuses to show pre-merge variants.
+    """
+
+    # Build lookup dict from original sample_name to ConsensusInfo for .raw file generation
+    original_consensus_lookup = {}
+    if consensus_list:
+        for cons in consensus_list:
+            original_consensus_lookup[cons.sample_name] = cons
+
+    # Generate .raw file consensuses for merged variants
+    raw_file_consensuses = []
+    if consensus_list:
+        for consensus in final_consensus:
+            # Only create .raw files if this consensus was actually merged
+            if consensus.merged_ric and len(consensus.merged_ric) > 1:
+                # Find the original cluster name from naming_info
+                original_cluster_name = None
+                for group_naming in naming_info.values():
+                    for orig_name, final_name in group_naming:
+                        if final_name == consensus.sample_name:
+                            original_cluster_name = orig_name
+                            break
+                    if original_cluster_name:
+                        break
+
+                # Get contributing clusters from merge_traceability
+                if original_cluster_name and original_cluster_name in merge_traceability:
+                    contributing_clusters = merge_traceability[original_cluster_name]
+
+                    # Sort by size (descending) to match .raw1, .raw2 ordering
+                    contributing_infos = []
+                    for cluster_name in contributing_clusters:
+                        if cluster_name in original_consensus_lookup:
+                            contributing_infos.append(original_consensus_lookup[cluster_name])
+
+                    contributing_infos.sort(key=lambda x: x.size, reverse=True)
+
+                    # Create .raw file entries
+                    for raw_idx, raw_info in enumerate(contributing_infos, 1):
+                        raw_name = f"{consensus.sample_name}.raw{raw_idx}"
+
+                        # Create new ConsensusInfo with .raw name but original sequence/metadata
+                        raw_consensus = ConsensusInfo(
+                            sample_name=raw_name,
+                            cluster_id=raw_info.cluster_id,
+                            sequence=raw_info.sequence,
+                            ric=raw_info.ric,
+                            size=raw_info.size,
+                            file_path=raw_info.file_path,
+                            snp_count=None,  # Pre-merge, no SNPs from merging
+                            primers=raw_info.primers,
+                            merged_ric=None  # Pre-merge, not merged
+                        )
+                        raw_file_consensuses.append((raw_consensus, raw_info.sample_name))
+
+    # Combine final consensus and raw files for output
+    all_output_consensuses = list(final_consensus)  # Copy final consensus list
+
     # Write individual FASTA files (without stability metrics)
     for consensus in final_consensus:
         output_file = os.path.join(summary_folder, f"{consensus.sample_name}-RiC{consensus.ric}.fasta")
@@ -1211,11 +1277,48 @@ def write_output_files(final_consensus: List[ConsensusInfo],
     # Write FASTQ files for each final consensus containing all contributing reads
     fastq_dir = os.path.join(summary_folder, 'FASTQ Files')
     for consensus in final_consensus:
-        write_consensus_fastq(consensus, merge_traceability, naming_info, fastq_dir, fastq_lookup)
-    
+        write_consensus_fastq(consensus, merge_traceability, naming_info, fastq_dir, fastq_lookup, original_consensus_lookup)
+
+    # Write .raw files (individual FASTA and FASTQ for pre-merge variants)
+    for raw_consensus, original_cluster_name in raw_file_consensuses:
+        # Write individual FASTA file
+        output_file = os.path.join(summary_folder, f"{raw_consensus.sample_name}-RiC{raw_consensus.ric}.fasta")
+        with open(output_file, 'w') as f:
+            header_parts = [f"size={raw_consensus.size}", f"ric={raw_consensus.ric}"]
+            if raw_consensus.primers:
+                header_parts.append(f"primers={','.join(raw_consensus.primers)}")
+            f.write(f">{raw_consensus.sample_name} {' '.join(header_parts)}\n")
+            f.write(f"{raw_consensus.sequence}\n")
+
+        # Write FASTQ file by finding the original cluster's FASTQ
+        # Look for specimen name from original cluster name
+        if '-c' in original_cluster_name:
+            specimen_name = original_cluster_name.rsplit('-c', 1)[0]
+            debug_files = fastq_lookup.get(specimen_name, []) if fastq_lookup else []
+
+            # Filter files that match this specific cluster with exact RiC value
+            # Use the raw_consensus.ric which came from the original cluster
+            cluster_ric_pattern = f"{original_cluster_name}-RiC{raw_consensus.ric}-"
+            matching_files = [f for f in debug_files if cluster_ric_pattern in f]
+
+            if matching_files:
+                fastq_output_path = os.path.join(fastq_dir, f"{raw_consensus.sample_name}-RiC{raw_consensus.ric}.fastq")
+                try:
+                    import shutil
+                    with open(fastq_output_path, 'wb') as outf:
+                        for input_file in matching_files:
+                            if os.path.exists(input_file) and os.path.getsize(input_file) > 0:
+                                with open(input_file, 'rb') as inf:
+                                    shutil.copyfileobj(inf, outf)
+                    logging.debug(f"Wrote .raw FASTQ: {os.path.basename(fastq_output_path)}")
+                except Exception as e:
+                    logging.debug(f"Could not write .raw FASTQ for {raw_consensus.sample_name}: {e}")
+
     # Write combined summary.fasta (without stability metrics)
+    # Include both final consensus and .raw files for complete index
     summary_fasta_path = os.path.join(summary_folder, 'summary.fasta')
     with open(summary_fasta_path, 'w') as f:
+        # Write final consensus sequences
         for consensus in final_consensus:
             # Clean header with size first, no length field
             header_parts = [f"size={consensus.size}", f"ric={consensus.ric}"]
@@ -1229,6 +1332,14 @@ def write_output_files(final_consensus: List[ConsensusInfo],
                 header_parts.append(f"primers={','.join(consensus.primers)}")
             f.write(f">{consensus.sample_name} {' '.join(header_parts)}\n")
             f.write(f"{consensus.sequence}\n")
+
+        # Write .raw file sequences (pre-merge variants)
+        for raw_consensus, _ in raw_file_consensuses:
+            header_parts = [f"size={raw_consensus.size}", f"ric={raw_consensus.ric}"]
+            if raw_consensus.primers:
+                header_parts.append(f"primers={','.join(raw_consensus.primers)}")
+            f.write(f">{raw_consensus.sample_name} {' '.join(header_parts)}\n")
+            f.write(f"{raw_consensus.sequence}\n")
     
     # Write summary statistics
     summary_txt_path = os.path.join(summary_folder, 'summary.txt')
@@ -1425,7 +1536,7 @@ def main():
     fastq_lookup = build_fastq_lookup_table(args.source)
     
     # Write output files (reuse the same lookup table for efficiency)
-    write_output_files(all_final_consensus, all_merge_traceability, all_naming_info, args.summary_dir, temp_log_file.name, fastq_lookup)
+    write_output_files(all_final_consensus, all_merge_traceability, all_naming_info, args.summary_dir, temp_log_file.name, fastq_lookup, consensus_list)
     
     logging.info(f"Enhanced summarization completed successfully")
     logging.info(f"Final output: {len(all_final_consensus)} consensus sequences in {args.summary_dir}")
