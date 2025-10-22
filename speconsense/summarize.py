@@ -960,8 +960,7 @@ def create_output_structure(groups: Dict[int, List[ConsensusInfo]],
     """
     os.makedirs(summary_folder, exist_ok=True)
     os.makedirs(os.path.join(summary_folder, 'FASTQ Files'), exist_ok=True)
-    os.makedirs(os.path.join(summary_folder, 'raw_clusters'), exist_ok=True)
-    
+
     final_consensus = []
     naming_info = {}
     
@@ -1165,29 +1164,6 @@ def build_fastq_lookup_table(source_dir: str = ".") -> Dict[str, List[str]]:
     else:
         logging.debug("No FASTQ files found in cluster_debug directory")
     return dict(lookup)
-
-
-def copy_raw_cluster_fastq(base_name: str, raw_clusters_dir: str, fastq_lookup: Dict[str, List[str]]):
-    """Copy all cluster FASTQ files for a specimen using pre-built lookup table."""
-    import shutil
-    
-    debug_files = fastq_lookup.get(base_name, [])
-    
-    copied_count = 0
-    for source_fastq in debug_files:
-        dest_fastq = os.path.join(raw_clusters_dir, os.path.basename(source_fastq))
-        
-        try:
-            shutil.copy(source_fastq, dest_fastq)
-            copied_count += 1
-            logging.debug(f"Copied raw cluster FASTQ: {os.path.basename(source_fastq)}")
-        except Exception as e:
-            logging.warning(f"Could not copy FASTQ file {source_fastq}: {e}")
-    
-    if copied_count > 0:
-        logging.debug(f"Copied {copied_count} cluster FASTQ files for specimen {base_name}")
-    else:
-        logging.debug(f"No cluster FASTQ files found for specimen {base_name} in lookup table")
 
 
 def write_output_files(final_consensus: List[ConsensusInfo],
@@ -1489,7 +1465,7 @@ def main():
     
     logging.info("Starting enhanced speconsense summarization")
     logging.info("Note: Stability metrics (median_diff, p95_diff) will be dropped from final output")
-    logging.info("Original stability metrics are preserved in cluster_debug/ and raw_clusters/ for debugging")
+    logging.info("Original stability metrics are preserved in source cluster_debug/ for debugging")
     logging.info("Processing each specimen file independently to organize variants within specimens")
     
     # Load all consensus sequences
@@ -1530,8 +1506,7 @@ def main():
     # Create output directories
     os.makedirs(args.summary_dir, exist_ok=True)
     os.makedirs(os.path.join(args.summary_dir, 'FASTQ Files'), exist_ok=True)
-    os.makedirs(os.path.join(args.summary_dir, 'raw_clusters'), exist_ok=True)
-    
+
     # Build lookup table for FASTQ files to avoid repeated directory scanning
     fastq_lookup = build_fastq_lookup_table(args.source)
     
@@ -1545,27 +1520,6 @@ def main():
     if total_limited_merges > 0:
         logging.info(f"Note: {total_limited_merges} variant group(s) had >{MAX_MSA_MERGE_VARIANTS} variants (results potentially suboptimal)")
 
-    # Copy raw cluster files for traceability and debugging
-    # These files contain the original stability metrics (median_diff, p95_diff)
-    raw_clusters_dir = os.path.join(args.summary_dir, 'raw_clusters')
-    copied_files = set()  # Track unique FASTA files to avoid duplicates
-    copied_specimens = set()  # Track specimens to avoid duplicating FASTQ copies
-    
-    for consensus in consensus_list:
-        if os.path.exists(consensus.file_path) and consensus.file_path not in copied_files:
-            # Copy the FASTA file
-            shutil.copy(consensus.file_path, raw_clusters_dir)
-            copied_files.add(consensus.file_path)
-            logging.debug(f"Copied raw cluster FASTA: {os.path.basename(consensus.file_path)}")
-            
-            # Also copy all cluster FASTQ files for this specimen (only once per specimen)
-            base_name = os.path.basename(consensus.file_path).replace('-all.fasta', '')
-            if base_name not in copied_specimens:
-                copy_raw_cluster_fastq(base_name, raw_clusters_dir, fastq_lookup)
-                copied_specimens.add(base_name)
-    
-    logging.info(f"Copied {len(copied_files)} raw cluster FASTA files and cluster FASTQ files from {len(copied_specimens)} specimens to raw_clusters/")
-    
     # Clean up temporary log file
     try:
         os.unlink(temp_log_file.name)
