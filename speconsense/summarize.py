@@ -19,6 +19,7 @@ from Bio import SeqIO
 from adjusted_identity import score_alignment, AdjustmentParams, ScoringFormat
 import tempfile
 import subprocess
+from tqdm import tqdm
 
 
 # IUPAC nucleotide ambiguity codes mapping
@@ -208,22 +209,23 @@ def parse_consensus_header(header: str) -> Tuple[Optional[str], Optional[int], O
 def load_consensus_sequences(source_folder: str, min_ric: int) -> List[ConsensusInfo]:
     """Load all consensus sequences from speconsense output files."""
     consensus_list = []
-    
+
     # Find all consensus FASTA files matching the new naming pattern
     fasta_pattern = os.path.join(source_folder, "*-all.fasta")
-    
-    for fasta_file in sorted(glob.glob(fasta_pattern)):
-        logging.info(f"Processing consensus file: {fasta_file}")
-        
+    fasta_files = sorted(glob.glob(fasta_pattern))
+
+    for fasta_file in fasta_files:
+        logging.debug(f"Processing consensus file: {fasta_file}")
+
         with open(fasta_file, 'r') as f:
             for record in SeqIO.parse(f, "fasta"):
                 sample_name, ric, size, primers = parse_consensus_header(f">{record.description}")
-                
+
                 if sample_name and ric >= min_ric:
                     # Extract cluster ID from sample name (e.g., "sample-c1" -> "c1")
                     cluster_match = re.search(r'-c(\d+)$', sample_name)
                     cluster_id = cluster_match.group(0) if cluster_match else sample_name
-                    
+
                     consensus_info = ConsensusInfo(
                         sample_name=sample_name,
                         cluster_id=cluster_id,
@@ -235,8 +237,8 @@ def load_consensus_sequences(source_folder: str, min_ric: int) -> List[Consensus
                         primers=primers
                     )
                     consensus_list.append(consensus_info)
-    
-    logging.info(f"Loaded {len(consensus_list)} consensus sequences from {source_folder}")
+
+    logging.info(f"Loaded {len(consensus_list)} consensus sequences from {len(fasta_files)} files")
     return consensus_list
 
 
@@ -631,7 +633,7 @@ def create_consensus_from_msa(aligned_seqs: List, variants: List[ConsensusInfo])
     )
 
 
-def merge_group_with_msa(variants: List[ConsensusInfo], args) -> Tuple[List[ConsensusInfo], Dict]:
+def merge_group_with_msa(variants: List[ConsensusInfo], args) -> Tuple[List[ConsensusInfo], Dict, int]:
     """
     Find largest mergeable subset of variants using MSA-based evaluation with driver-based approach.
 
@@ -648,17 +650,19 @@ def merge_group_with_msa(variants: List[ConsensusInfo], args) -> Tuple[List[Cons
         args: Command-line arguments with merge parameters
 
     Returns:
-        (merged_variants, merge_traceability) where merged_variants is list
-        of merged ConsensusInfo objects, and traceability maps merged names
-        to original cluster names
+        (merged_variants, merge_traceability, limited_count) where:
+        - merged_variants is list of merged ConsensusInfo objects
+        - traceability maps merged names to original cluster names
+        - limited_count is number of times candidate limiting occurred
     """
     if len(variants) == 1:
-        return variants, {}
+        return variants, {}, 0
 
     # Sort variants by size (largest first) for driver selection
     remaining_variants = sorted(variants, key=lambda v: v.size, reverse=True)
     merged_results = []
     all_traceability = {}
+    limited_count = 0  # Track how many times we limited candidates
 
     while remaining_variants:
         # Step 1: Select the largest variant as the driver
@@ -677,8 +681,9 @@ def merge_group_with_msa(variants: List[ConsensusInfo], args) -> Tuple[List[Cons
 
         # Step 3: Limit to MAX_MSA_MERGE_VARIANTS per driver
         if len(candidates) > MAX_MSA_MERGE_VARIANTS:
-            logging.warning(f"Driver has {len(candidates)} merge candidates, limiting to largest {MAX_MSA_MERGE_VARIANTS}")
+            logging.debug(f"Driver has {len(candidates)} merge candidates, limiting to largest {MAX_MSA_MERGE_VARIANTS}")
             candidates = candidates[:MAX_MSA_MERGE_VARIANTS]
+            limited_count += 1
 
         # Single candidate - just pass through
         if len(candidates) == 1:
@@ -686,7 +691,7 @@ def merge_group_with_msa(variants: List[ConsensusInfo], args) -> Tuple[List[Cons
             remaining_variants.remove(candidates[0])
             continue
 
-        logging.info(f"Evaluating merge compatibility for driver (size={driver_size}) with {len(candidates)-1} candidates")
+        logging.debug(f"Evaluating merge compatibility for driver (size={driver_size}) with {len(candidates)-1} candidates")
 
         # Step 4: Run SPOA MSA on candidates
         sequences = [v.sequence for v in candidates]
@@ -744,7 +749,7 @@ def merge_group_with_msa(variants: List[ConsensusInfo], args) -> Tuple[List[Cons
             merged_results.append(driver)
             remaining_variants.remove(driver)
 
-    return merged_results, all_traceability
+    return merged_results, all_traceability, limited_count
 
 
 def count_ambiguities_in_sequence(sequence: str) -> int:
@@ -1010,9 +1015,9 @@ def perform_hac_clustering(consensus_list: List[ConsensusInfo],
     """
     if len(consensus_list) <= 1:
         return {0: consensus_list}
-    
-    logging.info(f"Performing HAC clustering with {variant_group_identity} identity threshold")
-    
+
+    logging.debug(f"Performing HAC clustering with {variant_group_identity} identity threshold")
+
     n = len(consensus_list)
     distance_threshold = 1.0 - variant_group_identity
     
@@ -1078,27 +1083,34 @@ def perform_hac_clustering(consensus_list: List[ConsensusInfo],
     for group_id, cluster_indices in enumerate(clusters):
         group_members = [consensus_list[idx] for idx in cluster_indices]
         groups[group_id] = group_members
-    
-    logging.info(f"HAC clustering created {len(groups)} groups")
+
+    logging.debug(f"HAC clustering created {len(groups)} groups")
     for group_id, group_members in groups.items():
         member_names = [m.sample_name for m in group_members]
         # Convert group_id to final naming (group 0 -> 1, group 1 -> 2, etc.)
         final_group_name = group_id + 1
-        logging.info(f"Group {final_group_name}: {member_names}")
-    
+        logging.debug(f"Group {final_group_name}: {member_names}")
+
     return groups
 
 
-def select_variants(group: List[ConsensusInfo], 
+def select_variants(group: List[ConsensusInfo],
                    max_variants: int,
-                   variant_selection: str) -> List[ConsensusInfo]:
+                   variant_selection: str,
+                   group_number: int = None) -> List[ConsensusInfo]:
     """
     Select variants from a group based on the specified strategy.
     Always includes the largest variant first.
     max_variants of -1 means no limit (return all variants).
-    
+
     Logs variant summaries for ALL variants in the group, including those
     that will be skipped in the final output.
+
+    Args:
+        group: List of ConsensusInfo to select from
+        max_variants: Maximum number of additional variants (-1 for no limit)
+        variant_selection: Selection strategy ("size" or "diversity")
+        group_number: Group number for logging prefix (optional)
     """
     # Sort by size, largest first
     sorted_group = sorted(group, key=lambda x: x.size, reverse=True)
@@ -1108,8 +1120,14 @@ def select_variants(group: List[ConsensusInfo],
     
     # The primary variant is always the largest
     primary_variant = sorted_group[0]
-    logging.info(f"Primary: {primary_variant.sample_name} (size={primary_variant.size}, ric={primary_variant.ric})")
-    
+
+    # Build prefix for logging
+    prefix = f"Group {group_number}: " if group_number is not None else ""
+
+    # Only log Primary when there are other variants to compare against
+    if len(sorted_group) > 1:
+        logging.info(f"{prefix}Primary: {primary_variant.sample_name} (size={primary_variant.size}, ric={primary_variant.ric})")
+
     # Handle no limit case
     if max_variants == -1:
         selected = sorted_group
@@ -1151,17 +1169,17 @@ def select_variants(group: List[ConsensusInfo],
     selected_secondary = selected[1:]  # Exclude primary variant
     for i, variant in enumerate(selected_secondary, 1):
         variant_summary = create_variant_summary(primary_variant.sequence, variant.sequence)
-        logging.info(f"Variant {i}: (size={variant.size}, ric={variant.ric}) - {variant_summary}")
-    
+        logging.info(f"{prefix}Variant {i}: (size={variant.size}, ric={variant.ric}) - {variant_summary}")
+
     # Log skipped variants
     selected_names = {variant.sample_name for variant in selected}
     skipped_variants = [v for v in sorted_group[1:] if v.sample_name not in selected_names]
-    
+
     for i, variant in enumerate(skipped_variants):
         # Calculate what the variant number would have been in the original sorted order
         original_position = next(j for j, v in enumerate(sorted_group) if v.sample_name == variant.sample_name)
         variant_summary = create_variant_summary(primary_variant.sequence, variant.sequence)
-        logging.info(f"Variant {original_position}: (size={variant.size}, ric={variant.ric}) - {variant_summary} - skipping")
+        logging.info(f"{prefix}Variant {original_position}: (size={variant.size}, ric={variant.ric}) - {variant_summary} - skipping")
     
     return selected
 
@@ -1188,7 +1206,7 @@ def create_output_structure(groups: Dict[int, List[ConsensusInfo]],
     
     for group_idx, (_, group_members) in enumerate(sorted_groups, 1):
         # Select variants for this group
-        selected_variants = select_variants(group_members, max_variants, variant_selection)
+        selected_variants = select_variants(group_members, max_variants, variant_selection, group_number=group_idx)
         
         # Create naming for this group
         group_naming = []
@@ -1489,10 +1507,10 @@ def write_output_files(final_consensus: List[ConsensusInfo],
 
 
 def process_single_specimen(file_consensuses: List[ConsensusInfo],
-                           args) -> Tuple[List[ConsensusInfo], Dict[str, List[str]], Dict]:
+                           args) -> Tuple[List[ConsensusInfo], Dict[str, List[str]], Dict, int]:
     """
     Process a single specimen file: HAC cluster, MSA-based merge per group, and select final variants.
-    Returns final consensus list, merge traceability, and naming info for this specimen.
+    Returns final consensus list, merge traceability, naming info, and limited_count for this specimen.
 
     Architecture (Phase 3):
     1. HAC clustering to separate variant groups (primary vs contaminants)
@@ -1500,7 +1518,7 @@ def process_single_specimen(file_consensuses: List[ConsensusInfo],
     3. Select representative variants per group
     """
     if not file_consensuses:
-        return [], {}, {}
+        return [], {}, {}, 0
 
     file_name = os.path.basename(file_consensuses[0].file_path)
     logging.info(f"Processing specimen from file: {file_name}")
@@ -1523,11 +1541,13 @@ def process_single_specimen(file_consensuses: List[ConsensusInfo],
     # Phase 2: MSA-based merging within each group
     merged_groups = {}
     all_merge_traceability = {}
+    total_limited_count = 0
 
     for group_id, group_members in variant_groups.items():
-        merged, traceability = merge_group_with_msa(group_members, args)
+        merged, traceability, limited_count = merge_group_with_msa(group_members, args)
         merged_groups[group_id] = merged
         all_merge_traceability.update(traceability)
+        total_limited_count += limited_count
 
     # Phase 3: Select representative variants for each group in this specimen
     final_consensus = []
@@ -1539,12 +1559,10 @@ def process_single_specimen(file_consensuses: List[ConsensusInfo],
                           reverse=True)
 
     for group_idx, (_, group_members) in enumerate(sorted_groups):
-        # Log group context before variant selection
         final_group_name = group_idx + 1
-        logging.info(f"Processing Variants in Group {final_group_name}")
 
         # Select variants for this group
-        selected_variants = select_variants(group_members, args.select_max_variants, args.select_strategy)
+        selected_variants = select_variants(group_members, args.select_max_variants, args.select_strategy, group_number=final_group_name)
 
         # Create naming for this group within this specimen
         group_naming = []
@@ -1575,10 +1593,10 @@ def process_single_specimen(file_consensuses: List[ConsensusInfo],
 
         naming_info[group_idx + 1] = group_naming
 
-    logging.info(f"Processed {file_name}: {len(merged_groups)} groups -> {len(final_consensus)} final variants")
+    logging.info(f"Processed {file_name}: {len(final_consensus)} final variants across {len(merged_groups)} groups")
     logging.info("")  # Empty line for readability between specimens
 
-    return final_consensus, all_merge_traceability, naming_info
+    return final_consensus, all_merge_traceability, naming_info, total_limited_count
 
 
 def merge_variants_within_specimen(file_consensuses: List[ConsensusInfo],
@@ -1773,17 +1791,20 @@ def main():
     all_final_consensus = []
     all_merge_traceability = {}
     all_naming_info = {}
-    
-    for file_path in sorted(file_groups.keys()):
+    total_limited_merges = 0
+
+    sorted_file_paths = sorted(file_groups.keys())
+    for file_path in tqdm(sorted_file_paths, desc="Processing specimens", unit="specimen"):
         file_consensuses = file_groups[file_path]
-        
-        final_consensus, merge_traceability, naming_info = process_single_specimen(
+
+        final_consensus, merge_traceability, naming_info, limited_count = process_single_specimen(
             file_consensuses, args
         )
-        
+
         all_final_consensus.extend(final_consensus)
         all_merge_traceability.update(merge_traceability)
-        
+        total_limited_merges += limited_count
+
         # Update naming info with unique keys per specimen
         file_name = os.path.basename(file_path)
         for group_id, group_naming in naming_info.items():
@@ -1803,7 +1824,11 @@ def main():
     
     logging.info(f"Enhanced summarization completed successfully")
     logging.info(f"Final output: {len(all_final_consensus)} consensus sequences in {args.summary_dir}")
-    
+
+    # Report if any merge evaluations were limited heuristically
+    if total_limited_merges > 0:
+        logging.info(f"Note: {total_limited_merges} merge evaluation(s) were performed heuristically due to computational limits")
+
     # Copy raw cluster files for traceability and debugging
     # These files contain the original stability metrics (median_diff, p95_diff)
     raw_clusters_dir = os.path.join(args.summary_dir, 'raw_clusters')
