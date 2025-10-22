@@ -364,19 +364,16 @@ def analyze_msa_columns(aligned_seqs: List) -> dict:
     }
 
 
-def generate_subsets_with_driver(variants: List[ConsensusInfo], args) -> List[Tuple[int, ...]]:
+def generate_all_subsets_by_size(variants: List[ConsensusInfo]) -> List[Tuple[int, ...]]:
     """
-    Generate subsets of variant indices that all contain the driver (index 0).
+    Generate all possible non-empty subsets of variant indices.
     Returns subsets in descending order by total cluster size.
 
-    This is much more efficient than generating all subsets because:
-    - Only generates subsets containing the driver
-    - Size ratio filtering already applied before this function
-    - Driver is always index 0 (the largest variant)
+    This exhaustive approach guarantees finding the globally optimal merge
+    when the number of variants is small (≤ MAX_MSA_MERGE_VARIANTS).
 
     Args:
-        variants: List of variants where index 0 is the driver
-        args: Command-line arguments (unused but kept for compatibility)
+        variants: List of variants to generate subsets from
 
     Returns:
         List of tuples of indices, sorted by total size descending
@@ -387,18 +384,11 @@ def generate_subsets_with_driver(variants: List[ConsensusInfo], args) -> List[Tu
     # Build list of (total_size, subset_indices) tuples
     candidates = []
 
-    # Generate from largest subsets to smallest
-    # For n variants, we generate subsets of size n, n-1, ..., 1
-    # All must include index 0 (the driver)
-    for r in range(n, 0, -1):
-        # Generate combinations of the OTHER variants (indices 1..n-1)
-        # Then add driver (index 0) to each
-        for other_indices in itertools.combinations(range(1, n), r - 1):
-            subset_indices = (0,) + other_indices  # Driver always included
-
-            # Calculate total size
-            total_size = sum(sizes[i] for i in subset_indices)
-            candidates.append((total_size, subset_indices))
+    # Generate all non-empty subsets
+    for r in range(n, 0, -1):  # From largest to smallest subset size
+        for indices in itertools.combinations(range(n), r):
+            total_size = sum(sizes[i] for i in indices)
+            candidates.append((total_size, indices))
 
     # Sort by total size descending
     candidates.sort(reverse=True, key=lambda x: x[0])
@@ -507,55 +497,52 @@ def create_consensus_from_msa(aligned_seqs: List, variants: List[ConsensusInfo])
 
 def merge_group_with_msa(variants: List[ConsensusInfo], args) -> Tuple[List[ConsensusInfo], Dict, int]:
     """
-    Find largest mergeable subset of variants using MSA-based evaluation with driver-based approach.
+    Find largest mergeable subset of variants using MSA-based evaluation with exhaustive search.
 
     Algorithm:
-    1. Iteratively select the largest unprocessed variant as the "driver"
-    2. Filter candidates by size ratio relative to driver (if --merge-min-size-ratio set)
-    3. Limit candidates to MAX_MSA_MERGE_VARIANTS per driver
-    4. Run SPOA MSA and evaluate subsets containing the driver
-    5. Merge the best compatible subset found
-    6. Remove merged variants and repeat with next driver
+    1. Process variants in batches of up to MAX_MSA_MERGE_VARIANTS
+    2. For each batch, run SPOA MSA once
+    3. Exhaustively evaluate ALL subsets by total size (descending)
+    4. Merge the best compatible subset found
+    5. Remove merged variants and repeat with remaining
+
+    This approach guarantees optimal results when N ≤ MAX_MSA_MERGE_VARIANTS.
+    For N > MAX, processes top MAX per round (potentially suboptimal globally).
 
     Args:
         variants: List of ConsensusInfo from HAC group
         args: Command-line arguments with merge parameters
 
     Returns:
-        (merged_variants, merge_traceability, limited_count) where:
+        (merged_variants, merge_traceability, potentially_suboptimal) where:
         - merged_variants is list of merged ConsensusInfo objects
         - traceability maps merged names to original cluster names
-        - limited_count is number of times candidate limiting occurred
+        - potentially_suboptimal is 1 if group had >MAX variants, 0 otherwise
     """
     if len(variants) == 1:
         return variants, {}, 0
 
-    # Sort variants by size (largest first) for driver selection
+    # Track if this group is potentially suboptimal (too many variants for global optimum)
+    potentially_suboptimal = 1 if len(variants) > MAX_MSA_MERGE_VARIANTS else 0
+
+    # Sort variants by size (largest first)
     remaining_variants = sorted(variants, key=lambda v: v.size, reverse=True)
     merged_results = []
     all_traceability = {}
-    limited_count = 0  # Track how many times we limited candidates
 
     while remaining_variants:
-        # Step 1: Select the largest variant as the driver
-        driver = remaining_variants[0]
-        driver_size = driver.size
+        # Take up to MAX_MSA_MERGE_VARIANTS candidates
+        candidates = remaining_variants[:MAX_MSA_MERGE_VARIANTS]
 
-        # Step 2: Filter candidates by size ratio (if enabled)
+        # Apply size ratio filter if enabled (relative to largest in batch)
         if args.merge_min_size_ratio > 0:
-            candidates = [v for v in remaining_variants
-                         if (v.size / driver_size) >= args.merge_min_size_ratio]
-            if len(candidates) < len(remaining_variants):
-                filtered_count = len(remaining_variants) - len(candidates)
-                logging.debug(f"Filtered out {filtered_count} variants with size ratio < {args.merge_min_size_ratio} relative to driver (size={driver_size})")
-        else:
-            candidates = remaining_variants
-
-        # Step 3: Limit to MAX_MSA_MERGE_VARIANTS per driver
-        if len(candidates) > MAX_MSA_MERGE_VARIANTS:
-            logging.debug(f"Driver has {len(candidates)} merge candidates, limiting to largest {MAX_MSA_MERGE_VARIANTS}")
-            candidates = candidates[:MAX_MSA_MERGE_VARIANTS]
-            limited_count += 1
+            largest_size = candidates[0].size
+            filtered_candidates = [v for v in candidates
+                                  if (v.size / largest_size) >= args.merge_min_size_ratio]
+            if len(filtered_candidates) < len(candidates):
+                filtered_count = len(candidates) - len(filtered_candidates)
+                logging.debug(f"Filtered out {filtered_count} variants with size ratio < {args.merge_min_size_ratio} relative to largest (size={largest_size})")
+                candidates = filtered_candidates
 
         # Single candidate - just pass through
         if len(candidates) == 1:
@@ -563,22 +550,22 @@ def merge_group_with_msa(variants: List[ConsensusInfo], args) -> Tuple[List[Cons
             remaining_variants.remove(candidates[0])
             continue
 
-        logging.debug(f"Evaluating merge compatibility for driver (size={driver_size}) with {len(candidates)-1} candidates")
+        logging.debug(f"Evaluating {len(candidates)} variants for merging (exhaustive subset search)")
 
-        # Step 4: Run SPOA MSA on candidates
+        # Run SPOA MSA on candidates
         sequences = [v.sequence for v in candidates]
         aligned_seqs = run_spoa_msa(sequences)
 
         logging.debug(f"Generated MSA with length {len(aligned_seqs[0].seq)}")
 
-        # Step 5: Generate subsets containing the driver (index 0)
-        subsets_by_size = generate_subsets_with_driver(candidates, args)
+        # Generate ALL subsets sorted by total size (exhaustive search)
+        all_subsets = generate_all_subsets_by_size(candidates)
 
-        logging.debug(f"Evaluating {len(subsets_by_size)} candidate subsets")
+        logging.debug(f"Evaluating {len(all_subsets)} candidate subsets")
 
-        # Step 6: Find first (largest) compatible subset
+        # Find first (largest) compatible subset
         merged_this_round = False
-        for subset_indices in subsets_by_size:
+        for subset_indices in all_subsets:
             subset_variants = [candidates[i] for i in subset_indices]
             subset_aligned = [aligned_seqs[i] for i in subset_indices]
 
@@ -615,13 +602,13 @@ def merge_group_with_msa(variants: List[ConsensusInfo], args) -> Tuple[List[Cons
                 merged_this_round = True
                 break
 
-        # If no merge found for this driver, keep it as-is and continue
+        # If no merge found, keep largest variant as-is and continue
         if not merged_this_round:
-            logging.debug(f"No compatible merge found for driver (size={driver_size})")
-            merged_results.append(driver)
-            remaining_variants.remove(driver)
+            logging.debug(f"No compatible merge found for largest variant (size={candidates[0].size})")
+            merged_results.append(candidates[0])
+            remaining_variants.remove(candidates[0])
 
-    return merged_results, all_traceability, limited_count
+    return merged_results, all_traceability, potentially_suboptimal
 
 
 def bases_match_with_iupac(base1: str, base2: str) -> bool:
@@ -1443,9 +1430,9 @@ def main():
     logging.info(f"Enhanced summarization completed successfully")
     logging.info(f"Final output: {len(all_final_consensus)} consensus sequences in {args.summary_dir}")
 
-    # Report if any merge evaluations were limited heuristically
+    # Report if any variant groups were potentially suboptimal due to size
     if total_limited_merges > 0:
-        logging.info(f"Note: {total_limited_merges} merge evaluation(s) were performed heuristically due to computational limits")
+        logging.info(f"Note: {total_limited_merges} variant group(s) had >{MAX_MSA_MERGE_VARIANTS} variants (results potentially suboptimal)")
 
     # Copy raw cluster files for traceability and debugging
     # These files contain the original stability metrics (median_diff, p95_diff)
