@@ -161,10 +161,9 @@ speconsense-summarize
 
 This will create a `__Summary__/` directory with:
 - `summary.fasta` - All final consensus sequences
-- Individual FASTA files per specimen
+- Individual FASTA files per specimen (including `.raw` files for merged variants)
 - `summary.txt` - Statistics and metrics
 - `FASTQ Files/` - Reads contributing to each consensus
-- `raw_clusters/` - Original clustering results for reference
 
 ## Output Files
 
@@ -194,10 +193,7 @@ When using `speconsense-summarize` for post-processing, creates `__Summary__/` d
 #### **FASTQ Files/** (aggregated reads for final consensus):
 - `{sample_name}-{group}-RiC{reads}.fastq` - all reads contributing to main consensus
 - `{sample_name}-{group}.v{variant}-RiC{reads}.fastq` - all reads contributing to variant consensus
-
-#### **raw_clusters/** (original speconsense numbering: `-c1`, `-c2`):
-- `{sample_name}-all.fasta` - original consensus files with stability metrics
-- `{sample_name}-c{cluster_num}-RiC{size}-reads.fastq` - individual cluster reads
+- `{sample_name}-{group}.raw{N}-RiC{reads}.fastq` - reads for pre-merge variant N (when variants were merged)
 
 ### Naming Convention Summary
 
@@ -205,26 +201,26 @@ When using `speconsense-summarize` for post-processing, creates `__Summary__/` d
 
 | **Namespace** | **Used In** | **Format** | **Purpose** |
 |---------------|-------------|------------|-------------|
-| **Original** | `raw_clusters/`, `cluster_debug/` | `-c1`, `-c2`, `-c3` | Preserves speconsense clustering results |
-| **Summarization** | Main output, `FASTQ Files/` | `-1`, `-1.v1`, `-2` | Post-processing groups and variants |
+| **Original** | Source `cluster_debug/` | `-c1`, `-c2`, `-c3` | Preserves speconsense clustering results |
+| **Summarization** | `__Summary__/`, `FASTQ Files/` | `-1`, `-1.v1`, `-2`, `.raw1` | Post-processing groups and variants |
 
 ### Example Directory Structure
 ```
 __Summary__/
-├── sample-1-RiC45.fasta                      # Main consensus (group 1)
-├── sample-1.v1-RiC23.fasta                  # Additional variant
+├── sample-1-RiC45.fasta                      # Main consensus (group 1, merged)
+├── sample-1.raw1-RiC30.fasta                # Pre-merge variant 1
+├── sample-1.raw2-RiC15.fasta                # Pre-merge variant 2
+├── sample-1.v1-RiC23.fasta                  # Additional variant (not merged)
 ├── sample-2-RiC30.fasta                     # Second organism group
 ├── summary.fasta                            # All sequences combined
 ├── summary.txt                              # Statistics
 ├── summarize_log.txt                        # Processing log
-├── FASTQ Files/                             # Reads for final consensus
-│   ├── sample-1-RiC45.fastq                 # All reads for main consensus
-│   ├── sample-1.v1-RiC23.fastq              # All reads for variant
-│   └── sample-2-RiC30.fastq                 # All reads for second group
-└── raw_clusters/                            # Original clustering results
-    ├── sample-all.fasta                     # Original consensus with stability metrics
-    ├── sample-c1-RiC500-reads.fastq         # Original cluster 1 reads
-    └── sample-c2-RiC300-reads.fastq         # Original cluster 2 reads
+└── FASTQ Files/                             # Reads for final consensus
+    ├── sample-1-RiC45.fastq                 # All reads for merged consensus
+    ├── sample-1.raw1-RiC30.fastq            # Reads for pre-merge variant 1
+    ├── sample-1.raw2-RiC15.fastq            # Reads for pre-merge variant 2
+    ├── sample-1.v1-RiC23.fastq              # Reads for additional variant
+    └── sample-2-RiC30.fastq                 # All reads for second group
 ```
 
 ### FASTA Header Metadata
@@ -293,7 +289,7 @@ SpecConsense offers two clustering approaches with different characteristics:
 - You're willing to evaluate multiple consensus sequences per specimen
 - You need fine-grained discrimination between similar sequences
 - You want the most comprehensive analysis of sequence diversity
-- **Note**: Use `speconsense-summarize` after clustering to manage multiple variants per specimen. Key options include `--merge-position-count` for merging variants differing by few SNPs/indels, `--variant-group-identity` for grouping similar variants, and `--max-variants`/`--variant-selection` for controlling which variants to output
+- **Note**: Use `speconsense-summarize` after clustering to manage multiple variants per specimen. Key options include `--merge-position-count` for merging variants differing by few SNPs/indels, `--group-identity` for grouping similar variants, and `--select-max-variants`/`--select-strategy` for controlling which variants to output
 
 ### Cluster Merging
 
@@ -544,10 +540,10 @@ Variant 2: (size=180, ric=180) - 3 substitutions, 1 single-nt indel - skipping
 ```
 
 **Traceability Features:**
-- **Merge history**: tracks which original clusters were combined during SNP merging
+- **Merge history**: tracks which original clusters were combined during variant merging
 - **File lineage**: maintains connection between final outputs and original speconsense clusters
 - **Read aggregation**: `FASTQ Files/` directory contains all reads that contributed to each final consensus
-- **Raw preservation**: `raw_clusters/` directory preserves original speconsense output with stability metrics
+- **Pre-merge preservation**: `.raw` files preserve individual pre-merge variants with their original sequences and reads
 
 This comprehensive logging allows users to understand exactly how the pipeline processed their data and make informed decisions about parameter tuning.
 

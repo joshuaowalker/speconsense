@@ -8,15 +8,12 @@ import shutil
 import argparse
 import itertools
 import logging
-import statistics
-from pathlib import Path
-from typing import List, Dict, Set, Tuple, Optional, NamedTuple
+from typing import List, Dict, Tuple, Optional, NamedTuple
 from collections import defaultdict
 
 import edlib
-import numpy as np
 from Bio import SeqIO
-from adjusted_identity import score_alignment, AdjustmentParams, ScoringFormat
+from adjusted_identity import score_alignment, AdjustmentParams
 import tempfile
 import subprocess
 from tqdm import tqdm
