@@ -417,9 +417,9 @@ class SpecimenClusterer:
         info_parts = [f"size={cluster_size}", f"ric={ric_size}"]
 
         if median_diff is not None:
-            info_parts.append(f"median_diff={median_diff:.1f}")
+            info_parts.append(f"p50diff={median_diff:.1f}")
         if p95_diff is not None:
-            info_parts.append(f"p95_diff={p95_diff:.1f}")
+            info_parts.append(f"p95diff={p95_diff:.1f}")
         if found_primers:
             info_parts.append(f"primers={','.join(found_primers)}")
         info_str = " ".join(info_parts)

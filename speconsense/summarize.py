@@ -75,7 +75,240 @@ class ConsensusInfo(NamedTuple):
     file_path: str
     snp_count: Optional[int] = None  # Number of SNPs from IUPAC consensus generation
     primers: Optional[List[str]] = None  # List of detected primer names
-    merged_ric: Optional[List[int]] = None  # RiC values of merged clusters
+    raw_ric: Optional[List[int]] = None  # RiC values of .raw source variants
+    p50_diff: Optional[float] = None  # Median edit distance from stability assessment
+    p95_diff: Optional[float] = None  # 95th percentile edit distance from stability
+
+
+# FASTA field customization support
+# Allows users to control which metadata fields appear in FASTA headers
+
+class FastaField:
+    """Base class for FASTA header field definitions."""
+
+    def __init__(self, name: str, description: str):
+        self.name = name  # Field name (matches field code for clarity)
+        self.description = description
+
+    def format_value(self, consensus: ConsensusInfo) -> Optional[str]:
+        """Format field value for this consensus. Returns None if not applicable."""
+        raise NotImplementedError
+
+
+class SizeField(FastaField):
+    def __init__(self):
+        super().__init__('size', 'Total reads across merged variants')
+
+    def format_value(self, consensus: ConsensusInfo) -> Optional[str]:
+        return f"size={consensus.size}"
+
+
+class RicField(FastaField):
+    def __init__(self):
+        super().__init__('ric', 'Reads in consensus')
+
+    def format_value(self, consensus: ConsensusInfo) -> Optional[str]:
+        return f"ric={consensus.ric}"
+
+
+class LengthField(FastaField):
+    def __init__(self):
+        super().__init__('length', 'Sequence length in bases')
+
+    def format_value(self, consensus: ConsensusInfo) -> Optional[str]:
+        return f"length={len(consensus.sequence)}"
+
+
+class RawRicField(FastaField):
+    def __init__(self):
+        super().__init__('rawric', 'RiC values of .raw source variants')
+
+    def format_value(self, consensus: ConsensusInfo) -> Optional[str]:
+        if consensus.raw_ric and len(consensus.raw_ric) > 0:
+            ric_values = sorted(consensus.raw_ric, reverse=True)
+            return f"rawric={'+'.join(str(r) for r in ric_values)}"
+        return None
+
+
+class SnpField(FastaField):
+    def __init__(self):
+        super().__init__('snp', 'Number of IUPAC ambiguity positions')
+
+    def format_value(self, consensus: ConsensusInfo) -> Optional[str]:
+        if consensus.snp_count is not None and consensus.snp_count > 0:
+            return f"snp={consensus.snp_count}"
+        return None
+
+
+class P50DiffField(FastaField):
+    def __init__(self):
+        super().__init__('p50diff', 'Median (p50) edit distance from stability')
+
+    def format_value(self, consensus: ConsensusInfo) -> Optional[str]:
+        if consensus.p50_diff is not None:
+            return f"p50diff={consensus.p50_diff:.1f}"
+        return None
+
+
+class P95DiffField(FastaField):
+    def __init__(self):
+        super().__init__('p95diff', '95th percentile edit distance')
+
+    def format_value(self, consensus: ConsensusInfo) -> Optional[str]:
+        if consensus.p95_diff is not None:
+            return f"p95diff={consensus.p95_diff:.1f}"
+        return None
+
+
+class PrimersField(FastaField):
+    def __init__(self):
+        super().__init__('primers', 'Detected primer names')
+
+    def format_value(self, consensus: ConsensusInfo) -> Optional[str]:
+        if consensus.primers:
+            return f"primers={','.join(consensus.primers)}"
+        return None
+
+
+class GroupField(FastaField):
+    def __init__(self):
+        super().__init__('group', 'Variant group number')
+
+    def format_value(self, consensus: ConsensusInfo) -> Optional[str]:
+        # Extract from sample_name (e.g., "...-1" or "...-2.v1")
+        match = re.search(r'-(\d+)(?:\.v\d+)?$', consensus.sample_name)
+        if match:
+            return f"group={match.group(1)}"
+        return None
+
+
+class VariantField(FastaField):
+    def __init__(self):
+        super().__init__('variant', 'Variant identifier within group')
+
+    def format_value(self, consensus: ConsensusInfo) -> Optional[str]:
+        # Extract from sample_name (e.g., "...-1.v1" -> "v1")
+        match = re.search(r'\.(v\d+)$', consensus.sample_name)
+        if match:
+            return f"variant={match.group(1)}"
+        return None  # Not a variant
+
+
+# Field registry - field name is the key (codes = names)
+FASTA_FIELDS = {
+    'size': SizeField(),
+    'ric': RicField(),
+    'length': LengthField(),
+    'rawric': RawRicField(),
+    'snp': SnpField(),
+    'p50diff': P50DiffField(),
+    'p95diff': P95DiffField(),
+    'primers': PrimersField(),
+    'group': GroupField(),
+    'variant': VariantField(),
+}
+
+# Preset definitions
+FASTA_FIELD_PRESETS = {
+    'default': ['size', 'ric', 'rawric', 'snp', 'primers'],
+    'minimal': ['size', 'ric'],
+    'qc': ['size', 'ric', 'length', 'p50diff', 'p95diff'],
+    'full': ['size', 'ric', 'length', 'rawric', 'snp', 'p50diff', 'p95diff', 'primers'],
+    'id-only': [],
+}
+
+
+def validate_field_registry():
+    """Validate that all preset fields exist in registry."""
+    for preset_name, field_names in FASTA_FIELD_PRESETS.items():
+        for field_name in field_names:
+            if field_name not in FASTA_FIELDS:
+                raise ValueError(f"Preset '{preset_name}' references unknown field '{field_name}'")
+
+
+# Validate at module load
+validate_field_registry()
+
+
+def parse_fasta_fields(spec: str) -> List[FastaField]:
+    """
+    Parse --fasta-fields specification into list of field objects.
+    Supports preset composition with union semantics.
+
+    Args:
+        spec: Comma-separated list of preset names and/or field names
+              Examples:
+                - "default" (single preset)
+                - "minimal,qc" (preset union)
+                - "size,ric,primers" (field list)
+                - "minimal,p50diff,p95diff" (preset + fields)
+
+    Returns:
+        List of FastaField objects in specified order, duplicates removed
+
+    Raises:
+        ValueError: If spec contains unknown preset or field names
+    """
+    spec = spec.strip().lower()
+    if not spec:
+        # Default to "default" preset if empty
+        spec = "default"
+
+    # Parse comma-separated items (can be presets or field names)
+    items = [item.strip() for item in spec.split(',')]
+
+    # Expand presets and collect all field names, preserving order
+    all_field_names = []
+    seen = set()  # Track duplicates
+
+    for item in items:
+        # Check if it's a preset
+        if item in FASTA_FIELD_PRESETS:
+            # Expand preset
+            for field_name in FASTA_FIELD_PRESETS[item]:
+                if field_name not in seen:
+                    all_field_names.append(field_name)
+                    seen.add(field_name)
+        elif item in FASTA_FIELDS:
+            # It's a field name
+            if item not in seen:
+                all_field_names.append(item)
+                seen.add(item)
+        else:
+            # Unknown item - provide helpful error
+            available_fields = ', '.join(sorted(FASTA_FIELDS.keys()))
+            available_presets = ', '.join(sorted(FASTA_FIELD_PRESETS.keys()))
+            raise ValueError(
+                f"Unknown preset or field name: '{item}'\n"
+                f"  Available presets: {available_presets}\n"
+                f"  Available fields: {available_fields}"
+            )
+
+    # Convert field names to field objects
+    fields = [FASTA_FIELDS[name] for name in all_field_names]
+
+    return fields
+
+
+def format_fasta_header(consensus: ConsensusInfo, fields: List[FastaField]) -> str:
+    """
+    Format FASTA header with specified fields.
+
+    Args:
+        consensus: Consensus information
+        fields: List of fields to include (in order)
+
+    Returns:
+        Formatted header line (without leading '>')
+    """
+    parts = [consensus.sample_name]
+
+    for field in fields:
+        value = field.format_value(consensus)
+        if value is not None:  # Skip fields that aren't applicable
+            parts.append(value)
+
+    return ' '.join(parts)
 
 
 def parse_arguments():
@@ -86,6 +319,14 @@ def parse_arguments():
                         help="Source directory containing Speconsense output (default: clusters)")
     parser.add_argument("--summary-dir", type=str, default="__Summary__",
                         help="Output directory for summary files (default: __Summary__)")
+    parser.add_argument("--fasta-fields", type=str, default="default",
+                        help="FASTA header fields to output. Can be: "
+                             "(1) a preset name (default, minimal, qc, full, id-only), "
+                             "(2) comma-separated field names (size, ric, length, rawric, "
+                             "snp, p50diff, p95diff, primers, group, variant), or "
+                             "(3) a combination of presets and fields (e.g., minimal,qc or "
+                             "minimal,p50diff,p95diff). Duplicates removed, order preserved "
+                             "left to right. Default: default")
 
     # Merge phase parameters
     parser.add_argument("--merge-snp", action="store_true", default=True,
@@ -171,16 +412,18 @@ def setup_logging(log_level: str, log_file: str = None):
     return None
 
 
-def parse_consensus_header(header: str) -> Tuple[Optional[str], Optional[int], Optional[int], Optional[List[str]]]:
+def parse_consensus_header(header: str) -> Tuple[Optional[str], Optional[int], Optional[int],
+                                                   Optional[List[str]], Optional[float], Optional[float]]:
     """
     Extract information from Speconsense consensus FASTA header.
-    
-    Note: Stability metrics (median_diff, p95_diff) are intentionally ignored
-    as they will be dropped from final output - they're debug info only.
+
+    Now includes optional stability metrics (p50diff, p95diff) for use in output headers.
+    Accepts both new field names (p50diff, p95diff) and legacy names (median_diff, p95_diff)
+    for backward compatibility during transition.
     """
     sample_match = re.match(r'>([^ ]+) (.+)', header)
     if not sample_match:
-        return None, None, None, None
+        return None, None, None, None, None, None
 
     sample_name = sample_match.group(1)
     info_string = sample_match.group(2)
@@ -197,10 +440,17 @@ def parse_consensus_header(header: str) -> Tuple[Optional[str], Optional[int], O
     primers_match = re.search(r'primers=([^,\s]+(?:,[^,\s]+)*)', info_string)
     primers = primers_match.group(1).split(',') if primers_match else None
 
-    # Note: median_diff and p95_diff are available in original files but
-    # are intentionally not extracted here as they will be dropped from final output
-    
-    return sample_name, ric, size, primers
+    # Extract stability metrics - accept both new (p50diff, p95diff) and legacy (median_diff, p95_diff) names
+    p50_diff_match = re.search(r'(?:p50diff|median_diff)=([\d.]+)', info_string)
+    p50_diff = float(p50_diff_match.group(1)) if p50_diff_match else None
+
+    p95_diff_match = re.search(r'p95diff=([\d.]+)', info_string)
+    if not p95_diff_match:
+        # Try legacy name
+        p95_diff_match = re.search(r'p95_diff=([\d.]+)', info_string)
+    p95_diff = float(p95_diff_match.group(1)) if p95_diff_match else None
+
+    return sample_name, ric, size, primers, p50_diff, p95_diff
 
 
 def load_consensus_sequences(source_folder: str, min_ric: int) -> List[ConsensusInfo]:
@@ -216,7 +466,7 @@ def load_consensus_sequences(source_folder: str, min_ric: int) -> List[Consensus
 
         with open(fasta_file, 'r') as f:
             for record in SeqIO.parse(f, "fasta"):
-                sample_name, ric, size, primers = parse_consensus_header(f">{record.description}")
+                sample_name, ric, size, primers, p50_diff, p95_diff = parse_consensus_header(f">{record.description}")
 
                 if sample_name and ric >= min_ric:
                     # Extract cluster ID from sample name (e.g., "sample-c1" -> "c1")
@@ -231,7 +481,10 @@ def load_consensus_sequences(source_folder: str, min_ric: int) -> List[Consensus
                         size=size,
                         file_path=fasta_file,
                         snp_count=None,  # No SNP info from original speconsense output
-                        primers=primers
+                        primers=primers,
+                        raw_ric=None,  # Not available in original speconsense output
+                        p50_diff=p50_diff,  # From stability assessment if available
+                        p95_diff=p95_diff   # From stability assessment if available
                     )
                     consensus_list.append(consensus_info)
 
@@ -474,7 +727,7 @@ def create_consensus_from_msa(aligned_seqs: List, variants: List[ConsensusInfo])
     consensus_sequence = ''.join(consensus_seq)
     total_size = sum(v.size for v in variants)
     total_ric = sum(v.ric for v in variants)
-    merged_ric_values = sorted([v.ric for v in variants], reverse=True) if len(variants) > 1 else None
+    raw_ric_values = sorted([v.ric for v in variants], reverse=True) if len(variants) > 1 else None
 
     # Use name from largest variant
     largest_variant = max(variants, key=lambda v: v.size)
@@ -488,7 +741,9 @@ def create_consensus_from_msa(aligned_seqs: List, variants: List[ConsensusInfo])
         file_path=largest_variant.file_path,
         snp_count=snp_count if snp_count > 0 else None,
         primers=largest_variant.primers,
-        merged_ric=merged_ric_values
+        raw_ric=raw_ric_values,
+        p50_diff=None,  # Merged sequence - original stability metrics don't apply
+        p95_diff=None
     )
 
 
@@ -990,7 +1245,10 @@ def create_output_structure(groups: Dict[int, List[ConsensusInfo]],
                 size=variant.size,
                 file_path=variant.file_path,
                 snp_count=variant.snp_count,  # Preserve SNP count from original
-                primers=variant.primers  # Preserve primers
+                primers=variant.primers,  # Preserve primers
+                raw_ric=variant.raw_ric,  # Preserve raw_ric
+                p50_diff=variant.p50_diff,  # Preserve stability metrics
+                p95_diff=variant.p95_diff
             )
             
             final_consensus.append(renamed_variant)
@@ -1114,11 +1372,15 @@ def write_specimen_data_files(specimen_consensus: List[ConsensusInfo],
                                summary_folder: str,
                                fastq_dir: str,
                                fastq_lookup: Dict[str, List[str]],
-                               original_consensus_lookup: Dict[str, ConsensusInfo]
+                               original_consensus_lookup: Dict[str, ConsensusInfo],
+                               fasta_fields: List[FastaField]
                                ) -> List[Tuple[ConsensusInfo, str]]:
     """
     Write individual FASTA and FASTQ files for a single specimen.
     Does NOT write summary files (summary.fasta, summary.txt).
+
+    Args:
+        fasta_fields: List of FastaField objects defining header format
 
     Returns:
         List of (raw_consensus, original_cluster_name) tuples for later use in summary.fasta
@@ -1127,7 +1389,7 @@ def write_specimen_data_files(specimen_consensus: List[ConsensusInfo],
     raw_file_consensuses = []
     for consensus in specimen_consensus:
         # Only create .raw files if this consensus was actually merged
-        if consensus.merged_ric and len(consensus.merged_ric) > 1:
+        if consensus.raw_ric and len(consensus.raw_ric) > 1:
             # Find the original cluster name from naming_info
             original_cluster_name = None
             for group_naming in naming_info.values():
@@ -1164,25 +1426,18 @@ def write_specimen_data_files(specimen_consensus: List[ConsensusInfo],
                         file_path=raw_info.file_path,
                         snp_count=None,  # Pre-merge, no SNPs from merging
                         primers=raw_info.primers,
-                        merged_ric=None  # Pre-merge, not merged
+                        raw_ric=None,  # Pre-merge, not merged
+                        p50_diff=raw_info.p50_diff,  # Preserve stability metrics
+                        p95_diff=raw_info.p95_diff
                     )
                     raw_file_consensuses.append((raw_consensus, raw_info.sample_name))
 
-    # Write individual FASTA files (without stability metrics)
+    # Write individual FASTA files with custom field formatting
     for consensus in specimen_consensus:
         output_file = os.path.join(summary_folder, f"{consensus.sample_name}-RiC{consensus.ric}.fasta")
         with open(output_file, 'w') as f:
-            # Clean header with size first, no length field
-            header_parts = [f"size={consensus.size}", f"ric={consensus.ric}"]
-            if consensus.merged_ric and len(consensus.merged_ric) > 0:
-                # Sort largest-first and join
-                ric_values = sorted(consensus.merged_ric, reverse=True)
-                header_parts.append(f"merged_ric={'+'.join(str(r) for r in ric_values)}")
-            if consensus.snp_count is not None and consensus.snp_count > 0:
-                header_parts.append(f"snp={consensus.snp_count}")
-            if consensus.primers:
-                header_parts.append(f"primers={','.join(consensus.primers)}")
-            f.write(f">{consensus.sample_name} {' '.join(header_parts)}\n")
+            header = format_fasta_header(consensus, fasta_fields)
+            f.write(f">{header}\n")
             f.write(f"{consensus.sequence}\n")
 
     # Write FASTQ files for each final consensus containing all contributing reads
@@ -1191,13 +1446,11 @@ def write_specimen_data_files(specimen_consensus: List[ConsensusInfo],
 
     # Write .raw files (individual FASTA and FASTQ for pre-merge variants)
     for raw_consensus, original_cluster_name in raw_file_consensuses:
-        # Write individual FASTA file
+        # Write individual FASTA file with custom field formatting
         output_file = os.path.join(summary_folder, f"{raw_consensus.sample_name}-RiC{raw_consensus.ric}.fasta")
         with open(output_file, 'w') as f:
-            header_parts = [f"size={raw_consensus.size}", f"ric={raw_consensus.ric}"]
-            if raw_consensus.primers:
-                header_parts.append(f"primers={','.join(raw_consensus.primers)}")
-            f.write(f">{raw_consensus.sample_name} {' '.join(header_parts)}\n")
+            header = format_fasta_header(raw_consensus, fasta_fields)
+            f.write(f">{header}\n")
             f.write(f"{raw_consensus.sequence}\n")
 
         # Write FASTQ file by finding the original cluster's FASTQ
@@ -1284,9 +1537,13 @@ def build_fastq_lookup_table(source_dir: str = ".") -> Dict[str, List[str]]:
 def write_output_files(final_consensus: List[ConsensusInfo],
                       all_raw_consensuses: List[Tuple[ConsensusInfo, str]],
                       summary_folder: str,
-                      temp_log_file: str = None):
+                      temp_log_file: str,
+                      fasta_fields: List[FastaField]):
     """
     Write summary files only. Individual data files already written per-specimen.
+
+    Args:
+        fasta_fields: List of FastaField objects defining header format
 
     Writes:
     - summary.fasta: Combined index of all sequences
@@ -1294,31 +1551,20 @@ def write_output_files(final_consensus: List[ConsensusInfo],
     - summarize_log.txt: Copy of processing log
     """
 
-    # Write combined summary.fasta (without stability metrics)
+    # Write combined summary.fasta with custom field formatting
     # Include both final consensus and .raw files for complete index
     summary_fasta_path = os.path.join(summary_folder, 'summary.fasta')
     with open(summary_fasta_path, 'w') as f:
         # Write final consensus sequences
         for consensus in final_consensus:
-            # Clean header with size first, no length field
-            header_parts = [f"size={consensus.size}", f"ric={consensus.ric}"]
-            if consensus.merged_ric and len(consensus.merged_ric) > 0:
-                # Sort largest-first and join
-                ric_values = sorted(consensus.merged_ric, reverse=True)
-                header_parts.append(f"merged_ric={'+'.join(str(r) for r in ric_values)}")
-            if consensus.snp_count is not None and consensus.snp_count > 0:
-                header_parts.append(f"snp={consensus.snp_count}")
-            if consensus.primers:
-                header_parts.append(f"primers={','.join(consensus.primers)}")
-            f.write(f">{consensus.sample_name} {' '.join(header_parts)}\n")
+            header = format_fasta_header(consensus, fasta_fields)
+            f.write(f">{header}\n")
             f.write(f"{consensus.sequence}\n")
 
         # Write .raw file sequences (pre-merge variants)
         for raw_consensus, _ in all_raw_consensuses:
-            header_parts = [f"size={raw_consensus.size}", f"ric={raw_consensus.ric}"]
-            if raw_consensus.primers:
-                header_parts.append(f"primers={','.join(raw_consensus.primers)}")
-            f.write(f">{raw_consensus.sample_name} {' '.join(header_parts)}\n")
+            header = format_fasta_header(raw_consensus, fasta_fields)
+            f.write(f">{header}\n")
             f.write(f"{raw_consensus.sequence}\n")
     
     # Write summary statistics
@@ -1442,7 +1688,9 @@ def process_single_specimen(file_consensuses: List[ConsensusInfo],
                 file_path=variant.file_path,
                 snp_count=variant.snp_count,  # Preserve SNP count from merging
                 primers=variant.primers,  # Preserve primers
-                merged_ric=variant.merged_ric  # Preserve merged_ric
+                raw_ric=variant.raw_ric,  # Preserve raw_ric
+                p50_diff=variant.p50_diff,  # Preserve stability metrics
+                p95_diff=variant.p95_diff
             )
 
             final_consensus.append(renamed_variant)
@@ -1459,17 +1707,24 @@ def process_single_specimen(file_consensuses: List[ConsensusInfo],
 def main():
     """Main function to process command line arguments and run the summarization."""
     args = parse_arguments()
-    
+
+    # Parse FASTA field specification early
+    try:
+        fasta_fields = parse_fasta_fields(args.fasta_fields)
+    except ValueError as e:
+        logging.error(f"Invalid --fasta-fields specification: {e}")
+        import sys
+        sys.exit(1)
+
     # Set up logging with temporary log file
     import tempfile
     temp_log_file = tempfile.NamedTemporaryFile(mode='w', suffix='.log', delete=False)
     temp_log_file.close()
-    
+
     setup_logging(args.log_level, temp_log_file.name)
-    
+
     logging.info("Starting enhanced speconsense summarization")
-    logging.info("Note: Stability metrics (median_diff, p95_diff) will be dropped from final output")
-    logging.info("Original stability metrics are preserved in source cluster_debug/ for debugging")
+    logging.info(f"FASTA fields: {args.fasta_fields}")
     logging.info("Processing each specimen file independently to organize variants within specimens")
     
     # Load all consensus sequences
@@ -1515,7 +1770,8 @@ def main():
             args.summary_dir,
             os.path.join(args.summary_dir, 'FASTQ Files'),
             fastq_lookup,
-            original_consensus_lookup
+            original_consensus_lookup,
+            fasta_fields
         )
 
         # Accumulate results for summary files
@@ -1535,7 +1791,8 @@ def main():
         all_final_consensus,
         all_raw_consensuses,
         args.summary_dir,
-        temp_log_file.name
+        temp_log_file.name,
+        fasta_fields
     )
     
     logging.info(f"Enhanced summarization completed successfully")
