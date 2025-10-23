@@ -166,6 +166,8 @@ When speconsense-summarize merges variants that differ by SNPs:
 
 This is why `ric` can exceed `--max-sample-size`: you need sufficient reads for **each haplotype** (e.g., 3 haplotypes × 50 reads each = 150 total), plus enough to detect the variants between them.
 
+**Important note:** While IUPAC merging works well for small numbers of SNPs, it loses phasing information with multiple SNPs. For mapping full diversity or phylogenetic analysis, use the `.raw` variant files instead. See the section "When IUPAC Codes Lose Information" below for details.
+
 ### Open Science and Reproducibility
 
 An important principle guiding this design is **sufficiency for reproduction**. The FASTQ file, combined with the published methodology on [protocols.io](https://dx.doi.org/10.17504/protocols.io.dm6gpbm88lzp/v4), should be sufficient for anyone to reproduce the FASTA consensus sequences.
@@ -188,6 +190,105 @@ Someone receiving your FASTA and FASTQ files could:
 
 This commitment to reproducibility is essential for community science and open mycology work.
 
+## When IUPAC Codes Lose Information
+
+While IUPAC ambiguity codes can represent variation, they come with an important limitation: they lose **phasing information** when multiple SNPs are merged. Understanding this limitation is critical for interpreting merged sequences and deciding when to use `.raw` variant files instead.
+
+### The Single SNP Case: Perfect Representation
+
+When merging variants that differ by a single SNP, IUPAC codes provide perfect representation:
+- Two variants with A and G at position 100 → merged sequence has **R** at position 100
+- The code R clearly and completely tells you: "both A and G alleles exist at this position"
+- No information is lost - you know exactly what variation exists
+
+### The Multiple SNP Case: Loss of Phasing
+
+When variants differ at **multiple positions**, IUPAC codes lose a critical piece of information: **which bases occur together** in the same DNA molecule. This is called "phasing" or "co-occurrence" information.
+
+**Example:**
+Imagine merging two variants that differ at 2 positions:
+- Variant 1: ...A...C...  (A at position 10, C at position 20)
+- Variant 2: ...G...T...  (G at position 10, T at position 20)
+
+The merged sequence becomes: ...R...Y... (R at position 10, Y at position 20)
+
+**The problem:** The ambiguous sequence suggests **four possible combinations**:
+1. A-C (variant 1 - actually exists ✓)
+2. A-T (phantom variant - doesn't exist ✗)
+3. G-C (phantom variant - doesn't exist ✗)
+4. G-T (variant 2 - actually exists ✓)
+
+You know there's variation at positions 10 and 20, but you've **lost the information** about which bases occur together. Two of the four possible combinations (A-T and G-C) are "phantom variants" that satisfy the ambiguous sequence but don't actually exist in your data.
+
+### The Combinatorial Explosion
+
+As the number of ambiguous positions grows, this problem becomes severe:
+
+```
+Example: 3 ambiguous positions (R, Y, W) representing 3 real variants
+
+Ambiguous positions:        M = 3
+Possible combinations:      2³ = 8 haplotypes
+Actual biological variants: N = 3 (what you actually sequenced)
+Phantom variants:           5 (= 8 - 3)
+
+The ambiguous sequence suggests 8 possible haplotypes,
+but only 3 of them actually exist in your specimen.
+```
+
+As M grows, the explosion accelerates:
+- **M=5 ambiguous positions** → 2⁵ = **32 possible combinations** (but you might have only 3-5 actual variants)
+- **M=7 ambiguous positions** → 2⁷ = **128 possible combinations** (but you might have only 3-5 actual variants)
+
+The merged sequence with IUPAC codes becomes an **imperfect summary** - it captures that variation exists at specific positions, but not how those variants are actually structured.
+
+### Why This Matters for Downstream Analysis
+
+This information loss has real consequences for biological analyses:
+
+**Database searching (BLAST):**
+- Searches may match phantom variants that don't exist in your specimen
+- Can lead to spurious taxonomic matches or inflated similarity scores
+
+**Diversity analysis:**
+- Merged sequences appear to represent 2^M possible variants
+- True diversity (N variants) is obscured and potentially inflated
+
+**Phylogenetic analysis:**
+- Cannot determine evolutionary relationships between actual haplotypes
+- Loses resolution for within-specimen variation
+
+**Mitigation strategies:**
+
+1. **Use `.raw` variant files** for analyses requiring accurate diversity representation. These preserve each actual variant as a separate sequence, maintaining complete phasing information.
+
+2. **Use lower `--merge-position-count` values** (default is 2). With `--merge-position-count=1`, only variants differing by a single SNP are merged, eliminating the phasing loss problem entirely. With `--merge-position-count=2`, the combinatorial explosion is limited to 2² = 4 possible combinations, which is often acceptable.
+
+### The Tradeoff
+
+Both approaches have value for different use cases:
+
+**Merged sequences with IUPAC codes:**
+- ✓ Compact representation (one sequence per specimen/group)
+- ✓ Shows that variation exists at specific positions
+- ✓ Easier to manage in databases and workflows
+- ✗ Loses phasing information
+- ✗ Creates phantom variant possibilities
+
+**Separate variants (.raw files):**
+- ✓ Perfect representation of actual biological diversity
+- ✓ Preserves complete phasing information
+- ✓ Accurate for phylogenetics and diversity studies
+- ✗ More sequences to manage
+- ✗ More complex search results and database entries
+
+**Speconsense provides both**, allowing you to choose the representation that best fits your analytical needs. For quick taxonomic identification, merged sequences work well. For mapping true within-specimen diversity or building phylogenies, use the `.raw` files.
+
+**Additionally**, the `--merge-position-count` parameter gives you fine-grained control over the tradeoff:
+- `--merge-position-count=1`: Only merge single-SNP variants (no phasing loss)
+- `--merge-position-count=2` (default): Merge up to 2 SNPs (4 combinations max)
+- `--merge-position-count=0`: No merging (all variants output separately with perfect phasing)
+
 ## Practical Implications
 
 ### When Should You Be Concerned?
@@ -208,23 +309,38 @@ In dominated merges, the weak variants have less support. You may want to confir
 
 ### Adjusting Your Workflow
 
-**If you want conservative merging:**
+**If you want conservative merging (minimal phasing loss):**
 ```bash
-# No SNP merging
+# No SNP merging - all variants output separately
 speconsense-summarize --merge-position-count 0
+
+# Single SNP only - no phasing loss at all, creates .raw files when merging occurs
+speconsense-summarize --merge-position-count 1
+
+# Default: up to 2 SNPs - limited phasing loss (4 combinations max)
+speconsense-summarize --merge-position-count 2
 
 # Higher quality threshold per haplotype
 speconsense-summarize --min-ric 20  # Only use variants with ric ≥ 20
 ```
 
-**If you want to capture variation:**
+**If you want to capture more variation (accept more phasing loss):**
 ```bash
-# More permissive SNP/indel merging
+# More permissive SNP/indel merging - useful for compact representation
+# but be aware of combinatorial explosion with multiple positions
 speconsense-summarize --merge-position-count 3 --merge-indel-length 2
 
 # Allow more variants per specimen
 speconsense-summarize --select-max-variants 3
 ```
+
+### Indel Merging: A Technical Limitation
+
+Unlike SNP merging (which preserves both alleles using IUPAC codes like R for A+G), indel merging faces a fundamental constraint: **IUPAC nucleotide codes cannot represent "gap + base" at the same position**. When variants differ by an indel, the merge algorithm must choose the **majority allele** and discard the minority variant's information at that position.
+
+For example, if merging two variants where one has `-` (gap) and another has `A` at position 50, the merged consensus will contain either `-` or `A` based on which variant has more supporting reads - it cannot preserve both states like SNP merging does.
+
+This information loss is one reason indel merging is **disabled by default** (`--merge-indel-length=0`). Enable it only when you're comfortable accepting the majority-rule approach for indel positions, or when indels represent sequencing artifacts rather than true biological variation.
 
 ## What About --max-sample-size?
 
@@ -298,13 +414,18 @@ It depends on your goals:
 - You want to represent within-specimen variation compactly
 - You're okay with IUPAC codes in your consensus
 - You want a single representative sequence per specimen
+- Variants differ by only 1-2 SNPs (minimal phasing loss)
+- **Tip**: Use `--merge-position-count=1` for zero phasing loss, or `--merge-position-count=2` (default) for acceptable tradeoff
 
 **No, don't merge if:**
 - You want clean, unambiguous sequences
 - You prefer separate consensuses for each haplotype
 - You'll handle variants downstream in your analysis
+- **You need to preserve phasing information** for diversity or phylogenetic studies
+- Variants differ by many SNPs (information loss becomes significant)
+- **Solution**: Use `--merge-position-count 0` to output all variants separately (or use `.raw` files when some merging is enabled)
 
-Use `--merge-position-count 0` to disable SNP merging entirely.
+The default (`--merge-position-count=2`) strikes a balance: it merges very similar variants while limiting phasing loss to at most 4 possible combinations.
 
 ## Summary
 
@@ -315,4 +436,4 @@ The `rawric` field addresses the RiC interpretation issue by:
 - Preserving all supporting evidence in FASTQ files
 - Supporting reproducibility by making the processing transparent
 
-This approach aligns with the philosophy of using IUPAC codes to represent **biological variation** (more information) rather than uncertainty (less information), while giving you the transparency to assess consensus quality accurately.
+This approach aligns with the philosophy of using IUPAC codes to represent **biological variation** rather than uncertainty. While IUPAC merging works well for small numbers of SNPs, it loses phasing information with multiple positions - which is why Speconsense provides both merged sequences (compact representation) and `.raw` files (complete diversity information), giving you the transparency to choose the representation that best fits your analytical needs.
