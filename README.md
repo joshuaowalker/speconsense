@@ -883,6 +883,10 @@ speconsense results/full/specimen_name.fastq --augment-input recovered.fastq
 **Typical workflow:**
 After primary demultiplexing, some sequences may remain unmatched due to sequencing errors, primer degradation, or edge cases in barcode detection. Mining tools like `specimine` can recover these sequences based on sequence composition or other characteristics, allowing them to be included in consensus generation and increase cluster support.
 
+### Testing with Synthetic Data
+
+For empirical testing of consensus quality, variant detection, contamination scenarios, and understanding toolchain behavior with controlled datasets, see [Testing with Speconsense-Synth](docs/synthetic-testing.md).
+
 ## Changelog
 
 See [CHANGELOG.md](CHANGELOG.md) for detailed version history.
