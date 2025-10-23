@@ -232,24 +232,31 @@ Consensus sequence headers contain metadata fields separated by spaces:
 - `ric=N` - **Reads in Consensus** - Number of reads actually used for consensus generation (may be less than size due to sampling limits)
 
 **Optional Fields:**
-- `merged_ric=N+N+...` - RiC values of clusters that were merged (largest-first, only present in merged variants from speconsense-summarize)
+- `rawric=N+N+...` - RiC values of .raw source variants (pre-merge, largest-first, only present in merged variants from speconsense-summarize)
 - `snp=N` - Number of SNP positions with IUPAC ambiguity codes (only present in merged variants from speconsense-summarize)
+- `length=N` - Sequence length in bases (available via --fasta-fields option)
 - `primers=list` - Comma-separated list of detected primer names (e.g., `primers=ITS1F,ITS4`)
-- `median_diff=X.X` - Median edit distance from stability assessment (debug files only)
-- `p95_diff=X.X` - 95th percentile edit distance from stability assessment (debug files only)
+- `p50diff=X.X` - Median (p50) edit distance from stability assessment (available via --fasta-fields qc preset)
+- `p95diff=X.X` - 95th percentile (p95) edit distance from stability assessment (available via --fasta-fields qc preset)
+- `group=N` - Variant group number (available via --fasta-fields option)
+- `variant=vN` - Variant identifier within group (available via --fasta-fields option, only for variants)
 
 **Example Headers:**
 ```
-# Simple consensus from speconsense:
->sample-c1 size=50 ric=45 median_diff=2.1 p95_diff=4.8 primers=ITS1F,ITS4
+# Simple consensus from speconsense (debug files):
+>sample-c1 size=50 ric=45 p50diff=2.1 p95diff=4.8 primers=ITS1F,ITS4
 
-# Merged variant from speconsense-summarize (stability metrics removed):
->sample-1 size=250 ric=250 merged_ric=100+89+61 snp=2 primers=ITS1F,ITS4
+# Merged variant from speconsense-summarize (default fields):
+>sample-1 size=250 ric=250 rawric=100+89+61 snp=2 primers=ITS1F,ITS4
+
+# With QC preset (--fasta-fields qc):
+>sample-1 size=250 ric=250 length=589 p50diff=0.0 p95diff=2.0
 ```
 
 **Notes:**
-- Length is not included (easily calculated from sequence)
-- Stability metrics (`median_diff`, `p95_diff`) are preserved in debug files but removed from final speconsense-summarize output
+- Use `--fasta-fields` option to customize which fields appear in output headers (see [Customizing FASTA Header Fields](#customizing-fasta-header-fields))
+- Stability metrics (`p50diff`, `p95diff`) are available in speconsense debug files and can be included in summarize output via `--fasta-fields qc`
+- Field name changes from earlier versions: `merged_ric` → `rawric`, `median_diff` → `p50diff`, `p95_diff` → `p95diff`
 - Variant merging only occurs between sequences with identical primer sets
 - SNP counts reflect IUPAC ambiguity positions in consensus sequences
 
@@ -420,6 +427,63 @@ speconsense-summarize --select-strategy diversity --select-max-variants 2
 
 This two-stage process ensures that distinct biological sequences are preserved as separate groups, while providing control over variant complexity within each group.
 
+### Customizing FASTA Header Fields
+
+Control which metadata fields appear in FASTA headers using the `--fasta-fields` option:
+
+**Presets:**
+```bash
+# Default preset (current behavior)
+speconsense-summarize --fasta-fields default
+# Output: >sample-1 size=638 ric=638 rawric=333+305 snp=1 primers=5'-ITS1F,3'-ITS4_RC
+
+# Minimal headers - just the essentials
+speconsense-summarize --fasta-fields minimal
+# Output: >sample-1 size=638 ric=638
+
+# QC preset - includes stability metrics and length
+speconsense-summarize --fasta-fields qc
+# Output: >sample-1 size=638 ric=638 length=589 p50diff=0.0 p95diff=2.0
+
+# Full metadata (all available fields)
+speconsense-summarize --fasta-fields full
+# Output: >sample-1 size=638 ric=638 length=589 rawric=333+305 snp=1 p50diff=0.0 p95diff=2.0 primers=...
+
+# ID only (no metadata)
+speconsense-summarize --fasta-fields id-only
+# Output: >sample-1
+```
+
+**Custom field selection:**
+```bash
+# Specify individual fields (comma-separated)
+speconsense-summarize --fasta-fields size,ric,primers
+
+# Combine presets and fields
+speconsense-summarize --fasta-fields minimal,p50diff,p95diff
+
+# Combine multiple presets
+speconsense-summarize --fasta-fields minimal,qc
+```
+
+**Available fields:**
+- `size` - Total reads across merged variants
+- `ric` - Reads in consensus
+- `length` - Sequence length in bases
+- `rawric` - RiC values of .raw source variants (only when merged)
+- `snp` - Number of IUPAC ambiguity positions (only when >0)
+- `p50diff` - Median stability difference (when available)
+- `p95diff` - 95th percentile stability difference (when available)
+- `primers` - Detected primer names (when detected)
+- `group` - Variant group number
+- `variant` - Variant identifier within group (only for variants)
+
+**Use cases:**
+- **Downstream tool compatibility**: Use `minimal` or `id-only` for tools expecting simple headers
+- **Quality control**: Use `qc` preset to include stability metrics for assessing consensus quality
+- **File size optimization**: Use `minimal` to reduce file size for large datasets
+- **Custom workflows**: Combine presets and fields for workflow-specific needs
+
 ### Additional Summarize Options
 
 **Quality Filtering:**
@@ -468,8 +532,8 @@ speconsense-summarize --snp-merge-limit 2  # Equivalent to --merge-position-coun
   - 2 SNPs + 1 indel (3bp) ✗ (indel too long)
 
 **Merged consensus tracking:**
-- Merged sequences include `merged_ric` header field showing RiC values of merged clusters
-- Example: `>sample-1 size=250 ric=250 merged_ric=100+89+61 snp=2`
+- Merged sequences include `rawric` header field showing RiC values of merged .raw variants
+- Example: `>sample-1 size=250 ric=250 rawric=100+89+61 snp=2`
 - Helps trace which original clusters contributed to merged consensus
 
 **Note**: This is distinct from the automatic homopolymer-aware merging that occurs during the main clustering step in speconsense
@@ -513,7 +577,7 @@ The complete speconsense-summarize workflow operates in this order:
 3. **Group filtering** to limit output groups (`--select-max-groups`)
 4. **MSA-based variant merging** within each group (`--merge-position-count`, `--merge-indel-length`, `--merge-snp`, `--merge-min-size-ratio`)
 5. **Variant selection** within each group (`--select-max-variants`, `--select-strategy`)
-6. **Output generation** with full traceability and statistics
+6. **Output generation** with customizable header fields (`--fasta-fields`) and full traceability
 
 **Key architectural change**: HAC grouping now occurs BEFORE merging to prevent inappropriate merging of dissimilar sequences (e.g., contaminants with primary targets). Merging is then applied independently within each group using MSA-based consensus generation.
 
@@ -600,6 +664,59 @@ optional arguments:
   --log-level {DEBUG,INFO,WARNING,ERROR,CRITICAL}
                         Set logging level (default: INFO)
   --version             Show program's version number and exit
+```
+
+### speconsense-summarize Options
+
+```
+usage: speconsense-summarize [-h] [--min-ric MIN_RIC] [--source SOURCE]
+                             [--summary-dir SUMMARY_DIR]
+                             [--fasta-fields FASTA_FIELDS] [--merge-snp]
+                             [--merge-indel-length MERGE_INDEL_LENGTH]
+                             [--merge-position-count MERGE_POSITION_COUNT]
+                             [--merge-min-size-ratio MERGE_MIN_SIZE_RATIO]
+                             [--group-identity GROUP_IDENTITY]
+                             [--select-max-variants SELECT_MAX_VARIANTS]
+                             [--select-max-groups SELECT_MAX_GROUPS]
+                             [--select-strategy {size,diversity}]
+                             [--log-level {DEBUG,INFO,WARNING,ERROR,CRITICAL}]
+
+Process Speconsense output with advanced variant handling.
+
+options:
+  -h, --help            show this help message and exit
+  --min-ric MIN_RIC     Minimum Reads in Consensus (RiC) threshold (default: 3)
+  --source SOURCE       Source directory containing Speconsense output (default: clusters)
+  --summary-dir SUMMARY_DIR
+                        Output directory for summary files (default: __Summary__)
+  --fasta-fields FASTA_FIELDS
+                        FASTA header fields to output. Can be: (1) a preset name (default,
+                        minimal, qc, full, id-only), (2) comma-separated field names (size,
+                        ric, length, rawric, snp, p50diff, p95diff, primers, group, variant),
+                        or (3) a combination of presets and fields (e.g., minimal,qc or
+                        minimal,p50diff,p95diff). Duplicates removed, order preserved left to
+                        right. Default: default
+  --merge-snp           Enable SNP-based merging (default: True)
+  --merge-indel-length MERGE_INDEL_LENGTH
+                        Maximum length of individual indels allowed in merging (default: 0 =
+                        disabled)
+  --merge-position-count MERGE_POSITION_COUNT
+                        Maximum total SNP+indel positions allowed in merging (default: 2)
+  --merge-min-size-ratio MERGE_MIN_SIZE_RATIO
+                        Minimum size ratio (smaller/larger) for merging clusters (default:
+                        0.0 = disabled)
+  --group-identity GROUP_IDENTITY, --variant-group-identity GROUP_IDENTITY
+                        Identity threshold for variant grouping using HAC (default: 0.9)
+  --select-max-variants SELECT_MAX_VARIANTS, --max-variants SELECT_MAX_VARIANTS
+                        Maximum number of additional variants to output per group (default:
+                        -1 = no limit)
+  --select-max-groups SELECT_MAX_GROUPS, --max-groups SELECT_MAX_GROUPS
+                        Maximum number of groups to output per specimen (default: -1 = all
+                        groups)
+  --select-strategy {size,diversity}, --variant-selection {size,diversity}
+                        Variant selection strategy: size or diversity (default: size)
+  --log-level {DEBUG,INFO,WARNING,ERROR,CRITICAL}
+                        Logging level
 ```
 
 ## Specialized Workflows
