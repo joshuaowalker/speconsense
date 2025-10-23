@@ -52,3 +52,10 @@ Thumbs.db
 
 # Reference files (not part of project)
 msalign.py
+
+# Development experiment logs (detailed experimental records)
+dev/
+*_SUMMARY.md
+*_ANALYSIS.md
+*_RESULTS.md
+EXPERIMENTAL_FINDINGS.md
