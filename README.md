@@ -163,6 +163,7 @@ This will create a `__Summary__/` directory with:
 - `summary.fasta` - All final consensus sequences
 - Individual FASTA files per specimen (including `.raw` files for merged variants)
 - `summary.txt` - Statistics and metrics
+- `quality_report.txt` - Prioritized list of sequences with potential quality concerns
 - `FASTQ Files/` - Reads contributing to each consensus
 
 ## Output Files
@@ -188,6 +189,7 @@ When using `speconsense-summarize` for post-processing, creates `__Summary__/` d
 - **Individual FASTA files**: `{sample_name}-{group}-RiC{reads}.fasta`, `{sample_name}-{group}.v{variant}-RiC{reads}.fasta`
 - **Combined file**: `summary.fasta` - all final consensus sequences
 - **Statistics**: `summary.txt` - sequence counts and metrics
+- **Quality report**: `quality_report.txt` - highlights sequences with potential quality concerns
 - **Log file**: `summarize_log.txt` - complete processing log
 
 #### **FASTQ Files/** (aggregated reads for final consensus):
@@ -214,6 +216,7 @@ __Summary__/
 ├── sample-2-RiC30.fasta                     # Second organism group
 ├── summary.fasta                            # All sequences combined
 ├── summary.txt                              # Statistics
+├── quality_report.txt                       # Quality assessment report
 ├── summarize_log.txt                        # Processing log
 └── FASTQ Files/                             # Reads for final consensus
     ├── sample-1-RiC45.fastq                 # All reads for merged consensus
@@ -264,7 +267,7 @@ Consensus sequence headers contain metadata fields separated by spaces:
 
 ### Clustering Methods
 
-SpecConsense offers two clustering approaches with different characteristics:
+Speconsense offers two clustering approaches with different characteristics:
 
 #### **Graph-based clustering with Markov Clustering (MCL)** - Default and recommended
 - Constructs a similarity graph between reads and applies the Markov Clustering algorithm to identify clusters
@@ -483,6 +486,85 @@ speconsense-summarize --fasta-fields minimal,qc
 - **Quality control**: Use `qc` preset to include stability metrics for assessing consensus quality
 - **File size optimization**: Use `minimal` to reduce file size for large datasets
 - **Custom workflows**: Combine presets and fields for workflow-specific needs
+
+### Quality Assessment and Reporting
+
+Speconsense-summarize automatically generates a `quality_report.txt` file to help prioritize manual review of sequences with potential quality concerns. This is particularly valuable for high-throughput workflows where human time for manual inspection is limited.
+
+**Report Generation:**
+- Created automatically in the summary output directory
+- No configuration required - generated regardless of `--fasta-fields` settings
+- Focuses exclusively on sequences that may need review (no "excellent" sequences listed)
+
+**What the Report Includes:**
+
+**1. Elevated Variation (High Priority Section):**
+- Sequences where p50diff > 0 or p95diff > 0
+- Includes both unmerged sequences and merged sequences with problematic components
+- Sorted by (p50diff, p95diff) descending for easy prioritization
+- p50diff > 0 indicates **systematic heterogeneity** - more than half of stability trials produced variant consensuses
+- p95diff > 0 (with p50diff = 0) indicates **outlier variation** - only worst 5% of trials showed variation
+
+**2. Small Components (Lower Priority Section):**
+- Merged sequences where at least one component had RiC < 21
+- Small components lack stability metrics (too few reads for subsampling)
+- May represent low-abundance variants or contamination
+
+**Understanding Stability Metrics:**
+
+Stability assessment works by:
+1. Generating 100 consensus sequences from random subsets of the cluster (20 reads each)
+2. Measuring edit distance between each subsample consensus and the full consensus
+3. Reporting median (p50diff) and 95th percentile (p95diff) distances
+
+**Key points about distance calculation:**
+- Uses homopolymer normalization - differences like AAA vs AAAAA don't count as variation
+- Therefore, elevated metrics indicate **substitutions or indels**, not homopolymer issues
+- p50diff > 0 is much more concerning than p95diff > 0
+- Both metrics = 0 indicates excellent consensus stability
+
+**For Merged Sequences:**
+- Merged sequences themselves don't have stability metrics (can't subsample IUPAC consensus)
+- Report shows stability of the **worst component** (.raw file) that was merged
+- Only included if: (A) a component has elevated variation, OR (B) a component is too small (RiC < 21)
+
+**Example Report Entry:**
+```
+Type    Sequence                                              RiC    p50diff  p95diff  Notes
+------------------------------------------------------------------------------------------------
+        specimen-1                                            450        2.1      4.8  Consensus instability
+MERGED  specimen-2                                            320        1.5      3.2  raw1: p50=1.5, p95=3.2 (RiC=180)
+        specimen-3                                            215        0.0      2.0  Outlier variation
+```
+
+**Recommended Actions:**
+
+**For p50diff > 0 (HIGH PRIORITY):**
+- Review cluster using `cluster_debug/` FASTQ files in source directory
+- Check for biological variation (multiple true variants) vs bioinformatic contamination
+- Consider stricter clustering parameters (`--min-identity` or `--inflation` in speconsense)
+- May require manual curation or re-demultiplexing
+
+**For p95diff > 0 only (outlier variation):**
+- Review if sequence is critical for your analysis
+- Often acceptable - may just be rare sequencing errors
+- Consider the biological context and downstream use case
+
+**For Merged with Small Components:**
+- Review whether small components should have been filtered earlier
+- Consider adjusting `--min-size` or `--min-cluster-ratio` in speconsense
+- Consider stricter `--min-ric` threshold in speconsense-summarize
+- Check if small components represent real low-abundance variants (sensical by themselves)
+
+**Workflow Integration:**
+
+The quality report is designed for efficient triage:
+1. Scan from top to bottom - most critical issues appear first
+2. Focus on HIGH PRIORITY sequences with p50diff > 0
+3. Use component information to decide whether to review .raw files
+4. Defer small component issues to lower priority unless critical to analysis
+
+For high-throughput workflows (e.g., 100K sequences/year), this prioritization ensures human review time focuses on the most actionable quality issues.
 
 ### Additional Summarize Options
 

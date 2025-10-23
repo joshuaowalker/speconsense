@@ -164,7 +164,7 @@ When speconsense-summarize merges variants that differ by SNPs:
 - It's **summarizing multiple variants** into one sequence using IUPAC codes
 - More reads are needed to confidently call both alleles
 
-This is why `rawric` can exceed `--max-sample-size`: you need sufficient reads for **each haplotype** (e.g., 3 haplotypes × 50 reads each = 150 total), plus enough to detect the variants between them.
+This is why `ric` can exceed `--max-sample-size`: you need sufficient reads for **each haplotype** (e.g., 3 haplotypes × 50 reads each = 150 total), plus enough to detect the variants between them.
 
 ### Open Science and Reproducibility
 

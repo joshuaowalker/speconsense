@@ -1534,6 +1534,263 @@ def build_fastq_lookup_table(source_dir: str = ".") -> Dict[str, List[str]]:
     return dict(lookup)
 
 
+def write_quality_report(final_consensus: List[ConsensusInfo],
+                        all_raw_consensuses: List[Tuple[ConsensusInfo, str]],
+                        summary_folder: str):
+    """
+    Write quality report highlighting sequences with potential concerns.
+
+    Focuses on:
+    - Sequences with elevated stability metrics (p50diff > 0 or p95diff > 0)
+    - Merged sequences where components have quality issues
+
+    Report prioritizes by (p50diff, p95diff) descending to surface the most
+    actionable quality issues first.
+
+    Args:
+        final_consensus: List of final consensus sequences
+        all_raw_consensuses: List of (raw_consensus, original_name) tuples
+        summary_folder: Output directory for report
+    """
+    from datetime import datetime
+
+    quality_report_path = os.path.join(summary_folder, 'quality_report.txt')
+
+    # Build .raw lookup: map merged sequence names to their .raw components
+    raw_lookup = {}
+    for raw_cons, original_name in all_raw_consensuses:
+        # Extract base name (remove .raw1, .raw2, etc.)
+        base_match = re.match(r'(.+?)\.raw\d+$', raw_cons.sample_name)
+        if base_match:
+            base_name = base_match.group(1)
+            if base_name not in raw_lookup:
+                raw_lookup[base_name] = []
+            raw_lookup[base_name].append(raw_cons)
+
+    # Separate sequences by type and quality
+    unmerged_with_variation = []
+    merged_with_variation = []
+    merged_with_small_components = []
+    total_with_stability = 0
+    total_merged = 0
+    total_without_stability = 0
+
+    for cons in final_consensus:
+        # Check if merged (has SNP count)
+        is_merged = cons.snp_count is not None and cons.snp_count > 0
+
+        if is_merged:
+            total_merged += 1
+            # Get component raw sequences
+            raw_components = raw_lookup.get(cons.sample_name, [])
+
+            # Check for variation in components
+            has_variation = False
+            has_small_component = False
+            worst_p50 = 0
+            worst_p95 = 0
+            worst_component = None
+            smallest_component = None
+            smallest_ric = float('inf')
+
+            for raw in raw_components:
+                # Track stability metrics
+                if raw.p50_diff is not None or raw.p95_diff is not None:
+                    total_with_stability += 1
+                    p50 = raw.p50_diff if raw.p50_diff else 0
+                    p95 = raw.p95_diff if raw.p95_diff else 0
+
+                    if p50 > 0 or p95 > 0:
+                        has_variation = True
+                        if (p50, p95) > (worst_p50, worst_p95):
+                            worst_p50 = p50
+                            worst_p95 = p95
+                            worst_component = raw
+                else:
+                    total_without_stability += 1
+
+                # Track small components (RiC < 21)
+                if raw.ric < 21:
+                    has_small_component = True
+                    if raw.ric < smallest_ric:
+                        smallest_ric = raw.ric
+                        smallest_component = raw
+
+            # Categorize merged sequence
+            if has_variation:
+                merged_with_variation.append((cons, worst_component, worst_p50, worst_p95))
+            elif has_small_component:
+                merged_with_small_components.append((cons, smallest_component))
+        else:
+            # Unmerged sequence
+            has_p50 = cons.p50_diff is not None
+            has_p95 = cons.p95_diff is not None
+
+            if has_p50 or has_p95:
+                total_with_stability += 1
+                if (cons.p50_diff and cons.p50_diff > 0) or (cons.p95_diff and cons.p95_diff > 0):
+                    unmerged_with_variation.append(cons)
+            else:
+                total_without_stability += 1
+
+    # Combine and sort all elevated variation (unmerged + merged)
+    # Create unified list with sort keys
+    all_elevated = []
+
+    for cons in unmerged_with_variation:
+        p50 = cons.p50_diff if cons.p50_diff else 0
+        p95 = cons.p95_diff if cons.p95_diff else 0
+        all_elevated.append(('unmerged', cons, p50, p95, None))
+
+    for cons, worst_comp, p50, p95 in merged_with_variation:
+        all_elevated.append(('merged', cons, p50, p95, worst_comp))
+
+    # Sort by (p50, p95) descending
+    all_elevated.sort(key=lambda x: (x[2], x[3]), reverse=True)
+
+    # Sort small component merged sequences by RiC descending
+    merged_with_small_components.sort(key=lambda x: x[0].ric, reverse=True)
+
+    # Count statistics
+    high_priority_count = sum(1 for item in all_elevated if item[2] > 0)
+    outlier_count = sum(1 for item in all_elevated if item[2] == 0 and item[3] > 0)
+
+    # Write report
+    with open(quality_report_path, 'w') as f:
+        # Header
+        f.write("=" * 80 + "\n")
+        f.write("QUALITY REPORT - speconsense-summarize\n")
+        f.write(f"Generated: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n")
+        f.write(f"Source: {summary_folder}\n")
+        f.write("=" * 80 + "\n\n")
+
+        # Summary section
+        f.write("SUMMARY\n")
+        f.write("-" * 80 + "\n")
+        f.write(f"Total sequences analyzed: {len(final_consensus)}\n")
+        f.write(f"  With stability metrics:    {total_with_stability} ({100*total_with_stability/len(final_consensus):.1f}%)\n")
+        f.write(f"  Merged sequences:           {total_merged} ({100*total_merged/len(final_consensus):.1f}%)\n")
+        f.write(f"  Too small for stability:   {total_without_stability} ({100*total_without_stability/len(final_consensus):.1f}%)\n")
+        f.write("\n")
+
+        f.write("Quality concerns:\n")
+        f.write(f"  Elevated variation:                 {len(all_elevated)} sequences\n")
+        f.write(f"    - HIGH PRIORITY (p50diff > 0):    {high_priority_count} sequences\n")
+        f.write(f"    - Outlier (p95diff > 0 only):     {outlier_count} sequences\n")
+        f.write(f"  Merged with small components:       {len(merged_with_small_components)} sequences\n")
+        f.write("\n")
+
+        # Elevated variation section (unmerged + merged with variation)
+        if all_elevated:
+            f.write("=" * 80 + "\n")
+            f.write("ELEVATED VARIATION (HIGH PRIORITY)\n")
+            f.write("=" * 80 + "\n\n")
+            f.write("Sequences with p50diff > 0 or p95diff > 0.\n")
+            f.write("Merged sequences evaluated by worst component stability.\n\n")
+
+            f.write(f"{'Type':<7s} {'Sequence':<53s} {'RiC':>6s} {'p50diff':>8s} {'p95diff':>8s}  {'Notes':<30s}\n")
+            f.write("-" * 120 + "\n")
+
+            for seq_type, cons, p50, p95, worst_comp in all_elevated:
+                p50_str = f"{p50:.1f}" if p50 is not None else "N/A"
+                p95_str = f"{p95:.1f}" if p95 is not None else "N/A"
+
+                if seq_type == 'unmerged':
+                    type_label = ""
+                    if p50 > 0:
+                        notes = "Consensus instability"
+                    else:
+                        notes = "Outlier variation"
+                else:
+                    type_label = "MERGED"
+                    # Show worst component info
+                    if worst_comp:
+                        raw_name = worst_comp.sample_name.split('.')[-1]  # Get .raw1, .raw2, etc.
+                        notes = f"{raw_name}: p50={worst_comp.p50_diff if worst_comp.p50_diff else 0:.1f}, p95={worst_comp.p95_diff if worst_comp.p95_diff else 0:.1f} (RiC={worst_comp.ric})"
+                    else:
+                        notes = "Component has variation"
+
+                f.write(f"{type_label:<7s} {cons.sample_name:<53s} {cons.ric:6d} {p50_str:>8s} {p95_str:>8s}  {notes:<30s}\n")
+
+            f.write("\n")
+        else:
+            f.write("=" * 80 + "\n")
+            f.write("ELEVATED VARIATION (HIGH PRIORITY)\n")
+            f.write("=" * 80 + "\n\n")
+            f.write("No sequences with elevated stability metrics detected.\n")
+            f.write("All sequences show excellent consensus stability.\n\n")
+
+        # Merged sequences with small components section
+        if merged_with_small_components:
+            f.write("=" * 80 + "\n")
+            f.write("MERGED SEQUENCES WITH SMALL COMPONENTS (lower concern)\n")
+            f.write("=" * 80 + "\n\n")
+            f.write("At least one component too small for stability metrics (RiC < 21).\n\n")
+
+            f.write(f"{'Sequence':<60s} {'RiC':>6s} {'SNPs':>5s}  {'Small Components':<40s}\n")
+            f.write("-" * 120 + "\n")
+
+            for cons, small_comp in merged_with_small_components:
+                snp_str = f"{cons.snp_count}" if cons.snp_count is not None else "N/A"
+
+                # Get all small components for this sequence
+                raw_components = raw_lookup.get(cons.sample_name, [])
+                small_comps = [r for r in raw_components if r.ric < 21]
+
+                # Format small components
+                if small_comps:
+                    small_comps.sort(key=lambda x: x.ric)  # Smallest first
+                    comp_strs = []
+                    for raw in small_comps:
+                        raw_name = raw.sample_name.split('.')[-1]  # Get .raw1, .raw2, etc.
+                        comp_strs.append(f"{raw_name} (RiC={raw.ric})")
+                    components = ", ".join(comp_strs)
+                else:
+                    components = "N/A"
+
+                f.write(f"{cons.sample_name:<60s} {cons.ric:6d} {snp_str:>5s}  {components:<40s}\n")
+
+            f.write("\n")
+
+        # Interpretation guide
+        f.write("=" * 80 + "\n")
+        f.write("INTERPRETATION GUIDE\n")
+        f.write("=" * 80 + "\n\n")
+
+        f.write("ELEVATED VARIATION SECTION:\n")
+        f.write("  p50diff > 0 (HIGH PRIORITY):\n")
+        f.write("    - More than half of stability trials produced variant consensuses\n")
+        f.write("    - Indicates unresolved heterogeneity or mixed sequences in cluster\n")
+        f.write("    - ACTION: Review cluster using cluster_debug FASTQ files\n")
+        f.write("    - CONSIDER: Stricter clustering parameters or manual curation\n\n")
+
+        f.write("  p50diff = 0, p95diff > 0 (outlier):\n")
+        f.write("    - Median trials stable, but worst 5% showed variation\n")
+        f.write("    - May indicate rare substitutions or indels\n")
+        f.write("    - ACTION: Review if sequence is critical; often acceptable\n\n")
+
+        f.write("  MERGED sequences in this section:\n")
+        f.write("    - At least one component has elevated variation\n")
+        f.write("    - Shown with worst component's stability metrics\n")
+        f.write("    - ACTION: Review .raw variant files to assess merge appropriateness\n\n")
+
+        f.write("SMALL COMPONENTS SECTION:\n")
+        f.write("  - Merged sequences with at least one component RiC < 21\n")
+        f.write("  - Small components lack stability metrics (too few reads)\n")
+        f.write("  - May represent low-abundance variants or contamination\n")
+        f.write("  - ACTION: Consider if small components should have been filtered\n")
+        f.write("  - CONSIDER: Adjusting --min-size or --min-ric thresholds in speconsense\n")
+
+    logging.info(f"Quality report written to: {quality_report_path}")
+    if all_elevated:
+        logging.info(f"  {high_priority_count} HIGH priority sequence(s) require review (p50diff > 0)")
+        logging.info(f"  {outlier_count} sequence(s) with outlier variation (p95diff > 0 only)")
+    else:
+        logging.info("  All sequences show excellent consensus stability")
+    if merged_with_small_components:
+        logging.info(f"  {len(merged_with_small_components)} merged sequence(s) with small components")
+
+
 def write_output_files(final_consensus: List[ConsensusInfo],
                       all_raw_consensuses: List[Tuple[ConsensusInfo, str]],
                       summary_folder: str,
@@ -1794,7 +2051,14 @@ def main():
         temp_log_file.name,
         fasta_fields
     )
-    
+
+    # Write quality report
+    write_quality_report(
+        all_final_consensus,
+        all_raw_consensuses,
+        args.summary_dir
+    )
+
     logging.info(f"Enhanced summarization completed successfully")
     logging.info(f"Final output: {len(all_final_consensus)} consensus sequences in {args.summary_dir}")
 
