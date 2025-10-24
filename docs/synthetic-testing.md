@@ -2,6 +2,30 @@
 
 This guide explains how to use `speconsense-synth` for empirical testing of consensus quality, variant detection, and understanding the behavior of the Nanopore + Specimux + Speconsense toolchain.
 
+## Quick Reference
+
+**Key Thresholds (based on current empirical testing):**
+- **Modern chemistry (1-2% error)**: N≥3 for reliable consensus (≥99.5% identity)
+- **Conservative/older chemistry (5-10%)**: N≥4 for reliable consensus at 5% error
+- **Contamination detection**: N≥50 for 10% sensitivity, N≥100 for 5% sensitivity
+- **Stability metrics**: N≥20 for meaningful p50diff/p95diff calculations
+- **Use MCL for field samples**: Greedy silently masks <20% contamination
+- **Small clusters (≤4 reads)**: Usually sequencing error artifacts
+
+**Algorithm Selection:**
+- **MCL (graph-based, default)**: Detects contamination when ≥5 minority reads present; safer for real specimens
+- **Greedy**: Faster but creates franken-consensus at ~50% contamination or silently masks <20% contamination
+
+**Important Caveat:** These findings come from limited in silico testing with fungal ITS sequences (500-600bp) and synthetic error models. Real-world patterns are still emerging. Many default parameters are intentionally conservative pending broader validation. See [Limitations of Empirical Findings](#limitations-of-empirical-findings) below.
+
+## Glossary
+
+- **RiC (Reads in Cluster)**: The number of unique reads supporting a consensus sequence. Higher RiC generally means more confident consensus and better contamination detection sensitivity.
+- **Franken-consensus**: An artifactual sequence created when reads from multiple biological sources are incorrectly merged into one cluster. Usually has elevated p50diff as a warning signal.
+- **p50diff / p95diff**: Stability metrics measuring edit distance variation across 100 subsampled consensuses. Low values (0-2) indicate stable, homogeneous read pools. Higher values suggest mixed populations or high error rates.
+- **Error artifacts**: Small clusters (typically ≤4 reads) formed by random sequencing errors during clustering, not representing real biological variants.
+- **Silent masking**: When an algorithm (especially greedy) creates a perfect majority consensus while completely ignoring a minority population, with no warning signals (p50diff=0).
+
 ## What is Speconsense-Synth?
 
 `speconsense-synth` is a synthetic read generator that creates simulated Oxford Nanopore reads from reference sequences with controlled error rates. It allows you to generate test datasets where you know the ground truth, enabling systematic exploration of how the bioinformatics pipeline handles different scenarios.
@@ -36,35 +60,35 @@ To design realistic synthetic tests, it's important to understand typical error 
 
 ### Current Technology (R10.4.1 + V14 Chemistry)
 
-Modern Oxford Nanopore technology achieves:
-- **Raw read accuracy**: ~99% (marketed as "Q20+ chemistry")
-- **Overall error rate**: ~1% per base
-- **With UMI-based error correction**: Up to 99.99% accuracy (0.01% error rate)
+Modern Oxford Nanopore technology achieves [1,2]:
+- **Raw read accuracy**: 98.7-99.4% (marketed as "Q20+ chemistry")
+- **Overall error rate**: ~0.6-1.3% per base
+- **Modal accuracy**: >99% for most reads
 
 For **realistic testing with modern chemistry**, use error rates of **0.01-0.02** (1-2%).
 
 ### Older Technology (R9.4 and Earlier)
 
-Historical Nanopore sequencing had higher error rates:
-- **R9.4 chemistry**: 85-94% accuracy (average 92%), meaning **6-8% error rate**
-- **2019-era MinION**: 6-7% error rate with high-accuracy basecalling
-- **Default Q10 filtering**: Automatically discards sequences with >10% error rate
+Historical Nanopore sequencing had higher error rates [3]:
+- **R9.4 chemistry**: ~92-97% accuracy, meaning **3-8% error rate**
+- **GC-dependent variation**: Low-GC regions ~6% error, high-GC regions ~8% error
+- **Modal accuracy**: ~96.8% (Q15), compared to R10.4's ~99.2% (Q21)
 
 For **conservative testing or older data**, use error rates of **0.05-0.10** (5-10%).
 
 ### Error Type Distribution
 
-Nanopore errors are not evenly distributed across error types:
-- **Deletions**: Most common (~51% of errors), overall rate 3-4%
-- **Insertions**: ~22% of errors, overall rate 2-4.5%
-- **Substitutions**: ~27% of errors, overall rate 2.5-4%
+Nanopore errors are not evenly distributed across error types [3]:
+- **Deletions**: Most common, accounting for 1.6-2.7% of bases
+- **Mismatches (substitutions)**: 1.2-2.2% of bases
+- **Insertions**: 1.1-2.4% of bases
 
-**Important patterns**:
+**Important patterns** [3]:
 - Homopolymer regions and short tandem repeats cause ~50% of all sequencing errors
 - GC content affects error rates: low-GC regions ~6%, high-GC regions ~8%
-- Deletions significantly outnumber other error types
+- Deletions consistently outnumber other error types
 
-**Note**: `speconsense-synth` currently distributes error types equally (⅓ each: insertion, deletion, substitution). This is simpler than reality but provides a reasonable first approximation for testing. Real Nanopore data will have more deletions and position-specific biases.
+**Note**: `speconsense-synth` currently distributes error types equally (⅓ each: insertion, deletion, substitution) and uniformly across read positions. This is simpler than reality but provides a reasonable first approximation for testing. Real Nanopore data will have more deletions, position-specific biases, and quality degradation at read ends.
 
 ### Implications for Testing
 
@@ -113,12 +137,12 @@ grep "^>" test_10pct/reads_10pct-all.fasta
 - **10% error rate**: Higher stability metrics, potential for spurious variant clusters
 
 **Observed in practice**:
-Using real fungal ITS sequences with N=200 reads:
+Using real fungal ITS sequences with N=200 reads in silico:
 - **1-2% error** (modern R10.4.1 chemistry): 100% consensus identity, p50diff=0, p95diff=0
 - **5% error** (conservative/older chemistry): 99.85% consensus identity, p50diff=0, p95diff=1
 - **10% error** (stress test): 99.85% consensus identity, p50diff=0, p95diff=1
 
-Even at 10% error rate, consensus quality remains above the 99.5% biological match threshold. Modern error rates (1-2%) produce essentially perfect consensus sequences.
+Even at 10% error rate, consensus quality remains above the 99.5% biological match threshold in our testing. Modern error rates (1-2%) produce essentially perfect consensus sequences for these test cases.
 
 **Interpretation**:
 - Low p50diff values (0-1) indicate the consensus is stable across subsampling
@@ -188,14 +212,14 @@ speconsense-summarize --source mcl_2pct --summary-dir mcl_2pct_summary --min-ric
 - **Algorithm comparison**: MCL may produce more granular variants; greedy may merge more aggressively
 - **SNP merging**: `speconsense-summarize` may merge the two variants if they differ by ≤2 SNPs (controlled by `--merge-position-count`)
 
-**Observed in practice**:
+**Observed in in silico testing**:
 Testing with closely-related *Amanita* variants (99.5% identity, 3 SNPs apart) at 2% error:
 - **MCL**: Successfully separates both variants (100% identity to each reference). Additional small clusters (size ≤4) are sequencing error artifacts, NOT biological intermediates from mixing.
 - **Greedy**: Algorithm behavior depends on mixing ratio:
   - 50/50 mix: Creates a franken-consensus (see Example 4 for details)
   - Unequal ratios: May separate or merge depending on distance threshold
 
-**Key finding on artifacts**: When examining clusters with `--min-cluster-ratio 0`, ALL small clusters (≤4 reads) were sequencing error artifacts, clearly matching one parent variant or the other (~99% to one, ~92% to the other). None showed intermediate identity suggesting biological mixing.
+**Key finding on artifacts**: When examining clusters with `--min-cluster-ratio 0` in our in silico testing, all small clusters (≤4 reads) were sequencing error artifacts, clearly matching one parent variant or the other (~99% to one, ~92% to the other). None showed intermediate identity suggesting biological mixing.
 
 **Interpretation**:
 - Intermediate variants with small size (RiC <20) are likely artifacts from error-driven mixing
@@ -263,33 +287,33 @@ done
 
 **Observed in practice**:
 
-Testing with *Russula* sp. ITS sequence (599 bp) using granular N stepping from 1 to 100:
+In silico testing with *Russula* sp. ITS sequence (599 bp) using granular N stepping from 1 to 100:
 
 **Modern chemistry (1-2% error):**
 - **N=1:** No consensus (cannot cluster single read)
 - **N=2:** 99.33% identity (just below threshold)
 - **N=3:** 99.83% identity ✓ (crosses 99.5% threshold)
-- **N≥4:** 100% identity (perfect consensus)
+- **N≥4:** 100% identity (perfect consensus in tested cases)
 
 **Older chemistry (5% error):**
 - **N=1:** No consensus
 - **N=2:** 96.56% identity (poor quality)
 - **N=3:** 99.00% identity (close but below threshold)
 - **N=4:** 99.67% identity ✓ (crosses 99.5% threshold)
-- **N≥7:** 100% identity consistently
+- **N≥7:** 100% identity consistently in tests
 
 **Extreme error (10%):**
 - **N≤15:** No consensus (clustering fails, reads too divergent)
 - **N=20:** 91.08% identity (consensus generated but poor quality)
 - **N=30:** 97.84% identity (approaching threshold)
 - **N=40:** 99.83% identity ✓ (crosses 99.5% threshold)
-- **N≥50:** 100% identity
+- **N≥50:** 100% identity in tested cases
 
-**Key finding:** With modern ONT chemistry (1-2% error), **as few as 3-4 reads** can produce a reliable consensus (≥99.5% identity). This is much lower than previous estimates based on stability metrics.
+**Key finding:** With modern ONT chemistry (1-2% error), **as few as 3-4 reads** can produce a reliable consensus (≥99.5% identity) in our testing with fungal ITS sequences. This is much lower than previous estimates based on stability metrics, though these results need validation with other sequence types.
 
 **Read depth for different purposes:**
 
-Reliable consensus and other quality metrics have **different read depth requirements**:
+Reliable consensus and other quality metrics have **different read depth requirements** (based on our fungal ITS testing):
 
 | Purpose | Minimum N | Reason |
 |---------|-----------|--------|
@@ -404,7 +428,7 @@ speconsense contam_50_50.fastq --algorithm greedy -o greedy_50_50 --min-size 0 -
 
 **Observed in practice**:
 
-Testing contamination scenarios reveals distinct algorithm behaviors and critical detection limits:
+In silico testing of contamination scenarios reveals distinct algorithm behaviors and critical detection limits:
 
 **1. Distantly-related contamination (e.g., different genera at ~65% identity)**:
 - MCL detects cleanly at all tested ratios (95/5, 90/10, 80/20)
@@ -413,7 +437,7 @@ Testing contamination scenarios reveals distinct algorithm behaviors and critica
 - Greedy behavior varies by ratio (see below)
 
 **2. Closely-related contamination (~92% identity, same genus)**:
-This is the challenging "worst case" scenario revealing critical algorithm differences:
+This is the challenging "worst case" scenario revealing critical algorithm differences in our testing:
 
 **MCL Algorithm (graph-based):**
 - ✓ Successfully detects both variants at all contamination levels **when minority has ≥5 reads**
@@ -515,6 +539,101 @@ This experiment helps you:
 4. Understand when contamination is masked (greedy at low levels, MCL below ~5 minority reads)
 5. Evaluate whether small variants are real biology or contamination
 
+## Limitations of Empirical Findings
+
+The empirical findings presented in this guide represent **initial exploratory in silico research** based on limited synthetic testing. The landscape of variant detection, contamination patterns, and consensus quality is **actively evolving** as we accumulate more real-world data.
+
+### Scope of Current Testing
+
+**Test sequences used**:
+- Primarily fungal ITS sequences from real ONT barcoding runs
+- Sequence lengths: 500-600bp (typical for ITS region)
+- Test organisms: *Russula* sp., *Amanita* sp., *Pleurotus* sp.
+- Sample size: Small number of reference sequences (3-5 sequences per experiment type)
+- Replication: Single-seed in silico tests for most findings, limited cross-validation
+
+**Experimental parameters:**
+- Error rates: 1%, 2%, 5%, 10% (synthetic, uniformly distributed)
+- Read depths: Granular testing from N=2 to N=400
+- Contamination ratios: 50/50, 80/20, 90/10, 95/5
+- Sequence divergences tested: 99.5% identity (closely related), 92% identity (same genus), 65% identity (different genera)
+
+### What These Findings Can and Cannot Tell You
+
+**What is supported by current in silico testing:**
+- ✓ Relative performance of MCL vs greedy algorithms on fungal ITS sequences
+- ✓ General trends in read depth requirements for modern chemistry error rates
+- ✓ Qualitative contamination detection patterns (when detected vs masked)
+- ✓ Approximate thresholds for error artifact cluster sizes (≤4 reads)
+- ✓ Demonstration that very low read counts (N=3-4) can produce reliable consensus with modern chemistry
+
+**What requires further validation:**
+- ⚠ Exact threshold values (e.g., "≥5 minority reads", "≤4 = artifacts") may vary with sequence type
+- ⚠ Applicability to non-ITS regions (different lengths, structures, or conservation patterns)
+- ⚠ Behavior with real systematic Nanopore errors (homopolymer runs, GC bias) vs synthetic random errors
+- ⚠ Applicability to non-fungal organisms (bacterial 16S, animal COI, etc.)
+- ⚠ Edge cases and failure modes not yet encountered
+- ⚠ Optimal parameter combinations for specific use cases
+
+### Why Default Parameters Are Conservative
+
+Given the limited empirical validation to date, **default parameters in Speconsense are intentionally balanced** between sensitivity and specificity:
+
+**Key defaults and their rationale:**
+- `--min-size 5` (speconsense): Filters small clusters at the empirically-observed artifact threshold (≤4 reads)
+- `--min-ric 3` (speconsense-summarize): Matches the minimum N for reliable consensus shown in testing
+- `--min-cluster-ratio 0.2` (speconsense): Filters clusters smaller than 20% of the largest cluster to remove minor contaminants
+- MCL as default algorithm: More computationally expensive but safer for contamination detection than greedy
+
+**Rationale:**
+- Real biological data is more complex than in silico testing captures
+- Systematic errors (homopolymer issues, GC bias) may create different artifact patterns than random errors
+- Defaults aim to balance **avoiding false variants** with maintaining reasonable sensitivity
+- As real-world patterns emerge from large-scale deployment, parameters may be adjusted where justified
+
+**Evolving recommendations:**
+- The guidelines in this document represent **current best understanding** based on limited experiments
+- Thresholds and recommendations will be updated as more data becomes available
+- Users applying this pipeline to novel sequence types or organisms should validate findings independently
+- Consider synthetic testing with your own reference sequences to calibrate parameters
+
+### Variability and Reproducibility
+
+**Stochastic variation:**
+- Most findings based on single-seed experiments (seed=42)
+- Some variation expected across different random seeds
+- Claims of "100% identity" or "always artifacts" should be interpreted as "in tested cases"
+
+**Biological variation:**
+- Real specimens may have within-specimen heterogeneity not modeled in synthetic tests
+- Mixed infections, heterozygosity, or somatic variation could create patterns different from contamination
+- Field-collected specimens have more complex error profiles than synthetic data
+
+**Reproducibility:**
+- All in silico examples are reproducible with provided commands and seed values
+- Results validated on macOS/Linux platforms
+
+### Recommended Validation for Production Use
+
+If applying Speconsense to a new organism group or sequence type:
+
+1. **Generate synthetic tests** with your reference sequences using this guide
+2. **Validate key thresholds**: Test whether N≥3 consensus quality and ≤4 artifact patterns hold
+3. **Calibrate contamination detection**: Test with known mixed samples if available
+4. **Cross-validate with Sanger**: Sequence a subset of specimens with Sanger to confirm consensus accuracy
+5. **Start conservative**: Use default parameters initially, then relax based on observed patterns
+6. **Monitor over time**: Track variant patterns across hundreds of specimens to identify systematic issues
+
+### Long-term Perspective
+
+**This is the beginning, not the end:** The definitive answers about variant authenticity, optimal filtering thresholds, and contamination patterns will only emerge as we:
+- Process thousands of specimens with known biology
+- Observe recurring patterns across diverse datasets
+- Validate computational results against orthogonal methods (Sanger, morphology, ecology)
+- Accumulate failure cases and edge conditions
+
+**Adaptive approach:** As real-world evidence accumulates, parameters and recommendations will be updated. This guide represents a **snapshot of current understanding** to help users get started with informed expectations, not a final specification.
+
 ## Interpreting Results
 
 ### Understanding Stability Metrics
@@ -560,7 +679,7 @@ Use these criteria to distinguish real biology from bioinformatic artifacts:
 
 ### Understanding Contamination Detection Patterns
 
-Synthetic testing reveals important patterns about how contamination is detected (or missed) depending on algorithm choice, contamination level, and read depth.
+In silico synthetic testing with fungal ITS sequences reveals important patterns about how contamination is detected (or missed) depending on algorithm choice, contamination level, and read depth. While these patterns are based on limited testing (see [Limitations of Empirical Findings](#limitations-of-empirical-findings)), they provide useful guidance for interpreting real data.
 
 **When contamination is detected:**
 - **Multiple clusters from single specimen**: Clear indication of contamination or biological heterogeneity
@@ -625,6 +744,7 @@ Remember that `speconsense-synth` is a simplified model:
 
 **What it cannot model**:
 - **Systematic errors**: Real Nanopore errors are not random (homopolymer biases, GC effects, position-specific errors)
+- **Read-end quality degradation**: Real Nanopore reads often have contiguous low-quality regions, particularly at read ends, rather than uniformly distributed errors
 - **Chimeric reads**: PCR artifacts joining two templates
 - **Heteroduplexes**: DNA strands from different sources annealing together
 - **Biological complexity**: Mixed infections, heterozygosity, within-specimen variation
@@ -645,3 +765,11 @@ After exploring these synthetic scenarios, you can:
 For more on variant merging and phasing limitations, see [Understanding RiC and Merging](understanding-ric-and-merging.md).
 
 For information on customizing output fields in FASTA headers, see [Customizing FASTA Headers](customizing-fasta-headers.md).
+
+## References
+
+[1] Wang Y, Zhao Y, Bollas A, Wang Y, Au KF. The newest Oxford Nanopore R10.4.1 full-length 16S rRNA sequencing enables the accurate resolution of species-level microbial community profiling. *Appl Environ Microbiol*. 2023 Oct 31;89(10):e0060523. doi: 10.1128/aem.00605-23. PMID: 37796026; PMCID: PMC10617388.
+
+[2] Oxford Nanopore Technologies. Nanopore sequencing accuracy. Available at: https://nanoporetech.com/platform/accuracy
+
+[3] Delahaye C, Nicolas J. Sequencing DNA with nanopores: Troubles and biases. *PLoS One*. 2021 Oct 1;16(10):e0257521. doi: 10.1371/journal.pone.0257521. PMID: 34597327; PMCID: PMC8486125.
