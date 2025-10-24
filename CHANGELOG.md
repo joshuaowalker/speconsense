@@ -5,6 +5,66 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.4.0] - 2025-10-23
+
+### Added
+- **Quality assessment reporting** - Automatic generation of `quality_report.txt` for prioritized review of sequences with potential quality concerns
+  - Identifies sequences with elevated variation (p50diff > 0 or p95diff > 0)
+  - Highlights merged sequences with small components (RiC < 21)
+  - Prioritizes issues from high to low severity for efficient triage
+- **Customizable FASTA header fields** - New `--fasta-fields` option in speconsense-summarize for controlling metadata in output headers
+  - Presets: `default`, `minimal`, `qc`, `full`, `id-only`
+  - Custom field selection: specify individual fields (e.g., `size,ric,primers`)
+  - Support for combining presets and fields
+- **MSA-based variant merging** - Exhaustive subset evaluation approach for order-independent variant merging
+  - Finds largest compatible subsets of variants for merging
+  - Creates IUPAC consensus sequences with size-weighted majority voting
+  - Ensures reproducible results regardless of input order
+- **Indel support in variant merging** - New `--merge-indel-length` parameter to allow merging variants with short indels
+  - Separate control for SNP count (`--merge-position-count`) and indel length limits
+  - Both constraints must be satisfied for merging to proceed
+- **.raw files for merged variants** - Pre-merge variant sequences preserved with original sequences and reads
+  - Full traceability from final merged outputs to original clusters
+  - `rawric` header field tracks contribution from each .raw component
+- **Synthetic testing documentation** - Comprehensive guide for testing with speconsense-synth
+  - Empirical findings on consensus quality, variant detection, and contamination scenarios
+  - Quick reference for common testing patterns
+  - Citations and limitations sections
+- **Incremental output writing** - Performance optimization that writes output files as soon as they're ready
+  - Reduces memory footprint for large datasets
+  - Provides faster feedback during long processing runs
+
+### Changed
+- **Field name updates** - Standardized naming conventions for FASTA header fields
+  - `merged_ric` → `rawric`
+  - `median_diff` → `p50diff`
+  - `p95_diff` → `p95diff`
+- **Enhanced variant merging architecture** - HAC grouping now occurs before merging to prevent inappropriate merging of dissimilar sequences
+  - Merging applied independently within each HAC group
+  - Prevents contaminants from merging with primary targets
+- **Improved logging** - Enhanced clarity in speconsense-summarize processing logs
+  - Complete variant summaries including skipped variants
+  - Detailed difference categorization (substitutions, single-nt indels, short indels, long indels)
+  - Clear group context and selection rationale
+- **Documentation reorganization** - Converted proposal documents to permanent user documentation
+  - IUPAC phasing limitations and merging controls documented
+  - Enhanced README with comprehensive guidance on all features
+
+### Removed
+- **Legacy code cleanup** - Removed deprecated pairwise merging approach
+- **Simplified output structure** - Removed `raw_clusters/` directory from summary output (replaced by .raw files)
+- **Parameter consolidation** - Removed `--output-raw-variants` parameter (raw files now generated automatically)
+
+### Fixed
+- **FASTQ consistency** - Fixed bugs in FASTQ file handling for merged variants
+  - Proper aggregation of reads from all merged components
+  - Consistent file naming and metadata
+
+### Documentation
+- **Updated README** - Comprehensive documentation of new features and parameter changes
+- **Field name migration** - All examples and documentation updated to use new standardized field names
+- **Enhanced user guides** - Detailed explanations of quality reporting, variant merging, and customization options
+
 ## [0.3.5] - 2025-10-19
 
 ### Fixed

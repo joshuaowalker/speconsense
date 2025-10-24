@@ -887,6 +887,16 @@ After primary demultiplexing, some sequences may remain unmatched due to sequenc
 
 For empirical testing of consensus quality, variant detection, contamination scenarios, and understanding toolchain behavior with controlled datasets, see [Testing with Speconsense-Synth](docs/synthetic-testing.md).
 
+## Future Enhancements
+
+The following features are under consideration for future development:
+
+- **Background contamination detection tool**: A utility to identify contamination patterns affecting multiple specimens within the same sequencing run, helping to distinguish systematic contamination from genuine biological sequences
+
+- **Scalability improvements**: Algorithm enhancements to enable graph-based clustering to efficiently handle datasets with hundreds of thousands of sequences while maintaining accuracy
+
+These features are being explored based on user feedback. Implementation timelines and feasibility are still being evaluated.
+
 ## Changelog
 
 See [CHANGELOG.md](CHANGELOG.md) for detailed version history.
