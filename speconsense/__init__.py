@@ -5,7 +5,7 @@ A Python tool for experimental clustering and consensus generation as an alterna
 in the fungal DNA barcoding pipeline.
 """
 
-__version__ = "0.4.1"
+__version__ = "0.4.2"
 __author__ = "Josh Walker"
 __email__ = "joshowalker@yahoo.com"
 

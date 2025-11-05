@@ -515,9 +515,9 @@ def run_spoa_msa(sequences: List[str]) -> List:
             SeqIO.write(records, temp_input, "fasta")
             temp_input.flush()
 
-            # Run SPOA with alignment output (-r 2)
+            # Run SPOA with alignment output (-r 2) and global alignment mode (-l 1)
             result = subprocess.run(
-                ['spoa', temp_input.name, '-r', '2'],
+                ['spoa', temp_input.name, '-r', '2', '-l', '1'],
                 capture_output=True,
                 text=True,
                 check=True

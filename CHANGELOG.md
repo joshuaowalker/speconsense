@@ -5,6 +5,14 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.4.2] - 2025-11-05
+
+### Fixed
+- **MSA alignment mode in speconsense-summarize** - Fixed SPOA to use global alignment mode (`-l 1`) instead of default local alignment
+  - Corrects handling of terminal SNPs which were incorrectly treated as indels under local alignment
+  - Restores consistency with previous edlib-based global alignment behavior
+  - Terminal position differences (e.g., A vs G at position 1) now properly merge as IUPAC ambiguity codes (e.g., 'R')
+
 ## [0.4.1] - 2025-11-05
 
 ### Changed
