@@ -175,8 +175,8 @@ class GroupField(FastaField):
         super().__init__('group', 'Variant group number')
 
     def format_value(self, consensus: ConsensusInfo) -> Optional[str]:
-        # Extract from sample_name (e.g., "...-1" or "...-2.v1")
-        match = re.search(r'-(\d+)(?:\.v\d+)?$', consensus.sample_name)
+        # Extract from sample_name (e.g., "...-1.v1" or "...-2.v1.raw1")
+        match = re.search(r'-(\d+)\.v\d+(?:\.raw\d+)?$', consensus.sample_name)
         if match:
             return f"group={match.group(1)}"
         return None
@@ -187,11 +187,11 @@ class VariantField(FastaField):
         super().__init__('variant', 'Variant identifier within group')
 
     def format_value(self, consensus: ConsensusInfo) -> Optional[str]:
-        # Extract from sample_name (e.g., "...-1.v1" -> "v1")
-        match = re.search(r'\.(v\d+)$', consensus.sample_name)
+        # Extract from sample_name (e.g., "...-1.v1" -> "v1" or "...-1.v1.raw1" -> "v1")
+        match = re.search(r'\.(v\d+)(?:\.raw\d+)?$', consensus.sample_name)
         if match:
             return f"variant={match.group(1)}"
-        return None  # Not a variant
+        return None
 
 
 # Field registry - field name is the key (codes = names)
@@ -348,7 +348,7 @@ def parse_arguments():
                         help="Identity threshold for variant grouping using HAC (default: 0.9)")
     parser.add_argument("--select-max-variants", "--max-variants",
                         dest="select_max_variants", type=int, default=-1,
-                        help="Maximum number of additional variants to output per group (default: -1 = no limit)")
+                        help="Maximum total variants to output per group (default: -1 = no limit, 0 also means no limit)")
     parser.add_argument("--select-max-groups", "--max-groups",
                         dest="select_max_groups", type=int, default=-1,
                         help="Maximum number of groups to output per specimen (default: -1 = all groups)")
@@ -1119,14 +1119,14 @@ def select_variants(group: List[ConsensusInfo],
     """
     Select variants from a group based on the specified strategy.
     Always includes the largest variant first.
-    max_variants of -1 means no limit (return all variants).
+    max_variants of 0 or -1 means no limit (return all variants).
 
     Logs variant summaries for ALL variants in the group, including those
     that will be skipped in the final output.
 
     Args:
         group: List of ConsensusInfo to select from
-        max_variants: Maximum number of additional variants (-1 for no limit)
+        max_variants: Maximum total variants per group (0 or -1 for no limit)
         variant_selection: Selection strategy ("size" or "diversity")
         group_number: Group number for logging prefix (optional)
     """
@@ -1146,22 +1146,22 @@ def select_variants(group: List[ConsensusInfo],
     if len(sorted_group) > 1:
         logging.info(f"{prefix}Primary: {primary_variant.sample_name} (size={primary_variant.size}, ric={primary_variant.ric})")
 
-    # Handle no limit case
-    if max_variants == -1:
+    # Handle no limit case (0 or -1 means unlimited)
+    if max_variants <= 0:
         selected = sorted_group
-    elif len(group) <= max_variants + 1:  # +1 for main variant
+    elif len(group) <= max_variants:
         selected = sorted_group
     else:
         # Always include the largest (main) variant
         selected = [primary_variant]
         candidates = sorted_group[1:]
-        
+
         if variant_selection == "size":
-            # Select by size
-            selected.extend(candidates[:max_variants])
+            # Select by size (max_variants - 1 because we already have primary)
+            selected.extend(candidates[:max_variants - 1])
         else:  # diversity
             # Select by diversity (maximum distance from already selected)
-            while len(selected) < max_variants + 1 and candidates:
+            while len(selected) < max_variants and candidates:
                 best_candidate = None
                 best_min_distance = -1
                 
@@ -1229,12 +1229,8 @@ def create_output_structure(groups: Dict[int, List[ConsensusInfo]],
         group_naming = []
         
         for variant_idx, variant in enumerate(selected_variants):
-            if variant_idx == 0:
-                # Main variant gets simple numeric suffix
-                new_name = f"{variant.sample_name.split('-c')[0]}-{group_idx}"
-            else:
-                # Additional variants get .v suffix
-                new_name = f"{variant.sample_name.split('-c')[0]}-{group_idx}.v{variant_idx}"
+            # All variants get .v suffix (primary is .v1, additional are .v2, .v3, etc.)
+            new_name = f"{variant.sample_name.split('-c')[0]}-{group_idx}.v{variant_idx + 1}"
             
             # Create new ConsensusInfo with updated name
             renamed_variant = ConsensusInfo(
@@ -1928,12 +1924,8 @@ def process_single_specimen(file_consensuses: List[ConsensusInfo],
         group_naming = []
 
         for variant_idx, variant in enumerate(selected_variants):
-            if variant_idx == 0:
-                # Main variant gets local group number (1, 2, etc. within this specimen)
-                new_name = f"{variant.sample_name.split('-c')[0]}-{group_idx + 1}"
-            else:
-                # Additional variants get .v suffix
-                new_name = f"{variant.sample_name.split('-c')[0]}-{group_idx + 1}.v{variant_idx}"
+            # All variants get .v suffix (primary is .v1, additional are .v2, .v3, etc.)
+            new_name = f"{variant.sample_name.split('-c')[0]}-{group_idx + 1}.v{variant_idx + 1}"
 
             # Create new ConsensusInfo with updated name
             renamed_variant = ConsensusInfo(

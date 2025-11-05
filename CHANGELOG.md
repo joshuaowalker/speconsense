@@ -5,6 +5,23 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.4.1] - 2025-11-05
+
+### Changed
+- **Variant naming convention** - Primary variants now receive `.v1` suffix for consistency with additional variants
+  - Previous: `sample-1`, `sample-1.v1`, `sample-1.v2`
+  - New: `sample-1.v1`, `sample-1.v2`, `sample-1.v3`
+  - Applies to all output files (FASTA, FASTQ) and raw files (`.v1.raw1`, `.v1.raw2`)
+- **`--select-max-variants` parameter semantics** - Now includes primary variant in total count
+  - Previous behavior: specified number of *additional* variants beyond primary
+  - New behavior: specified *total* number of variants including primary
+  - Both 0 and -1 are treated as unlimited (output all variants)
+- **Regex patterns updated** - GroupField and VariantField extractors now correctly handle `.raw` suffix in new naming scheme
+
+### Documentation
+- **Updated README** - All examples now reflect new `.v1` suffix for primary variants
+- **Updated CLAUDE.md** - Documented new summarization namespace format: `-1.v1`, `-1.v2`, `-2.v1`
+
 ## [0.4.0] - 2025-10-23
 
 ### Added

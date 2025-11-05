@@ -109,7 +109,7 @@ pytest -m "not slow"
 - `__Summary__/` directory with processed outputs
 - Dual namespace system:
   - Original clustering: `-c1`, `-c2`, `-c3` format
-  - Summarization: `-1`, `-1.v1`, `-2` format for groups and variants
+  - Summarization: `-1.v1`, `-1.v2`, `-2.v1` format for groups and variants
 
 ### IUPAC Ambiguity Code Handling
 

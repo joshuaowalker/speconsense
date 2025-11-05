@@ -185,17 +185,16 @@ For each specimen, Speconsense generates:
 
 When using `speconsense-summarize` for post-processing, creates `__Summary__/` directory with:
 
-#### **Main Output Files** (summarization numbering: `-1`, `-1.v1`, `-2`):
-- **Individual FASTA files**: `{sample_name}-{group}-RiC{reads}.fasta`, `{sample_name}-{group}.v{variant}-RiC{reads}.fasta`
+#### **Main Output Files** (summarization numbering: `-1.v1`, `-1.v2`, `-2.v1`):
+- **Individual FASTA files**: `{sample_name}-{group}.v{variant}-RiC{reads}.fasta` (all variants including primary)
 - **Combined file**: `summary.fasta` - all final consensus sequences
 - **Statistics**: `summary.txt` - sequence counts and metrics
 - **Quality report**: `quality_report.txt` - highlights sequences with potential quality concerns
 - **Log file**: `summarize_log.txt` - complete processing log
 
 #### **FASTQ Files/** (aggregated reads for final consensus):
-- `{sample_name}-{group}-RiC{reads}.fastq` - all reads contributing to main consensus
 - `{sample_name}-{group}.v{variant}-RiC{reads}.fastq` - all reads contributing to variant consensus
-- `{sample_name}-{group}.raw{N}-RiC{reads}.fastq` - reads for pre-merge variant N (when variants were merged)
+- `{sample_name}-{group}.v{variant}.raw{N}-RiC{reads}.fastq` - reads for pre-merge variant N (when variants were merged)
 
 ### Naming Convention Summary
 
@@ -204,26 +203,26 @@ When using `speconsense-summarize` for post-processing, creates `__Summary__/` d
 | **Namespace** | **Used In** | **Format** | **Purpose** |
 |---------------|-------------|------------|-------------|
 | **Original** | Source `cluster_debug/` | `-c1`, `-c2`, `-c3` | Preserves speconsense clustering results |
-| **Summarization** | `__Summary__/`, `FASTQ Files/` | `-1`, `-1.v1`, `-2`, `.raw1` | Post-processing groups and variants |
+| **Summarization** | `__Summary__/`, `FASTQ Files/` | `-1.v1`, `-1.v2`, `-2.v1`, `.raw1` | Post-processing groups and variants |
 
 ### Example Directory Structure
 ```
 __Summary__/
-├── sample-1-RiC45.fasta                      # Main consensus (group 1, merged)
-├── sample-1.raw1-RiC30.fasta                # Pre-merge variant 1
-├── sample-1.raw2-RiC15.fasta                # Pre-merge variant 2
-├── sample-1.v1-RiC23.fasta                  # Additional variant (not merged)
-├── sample-2-RiC30.fasta                     # Second organism group
+├── sample-1.v1-RiC45.fasta                  # Primary variant (group 1, merged)
+├── sample-1.v1.raw1-RiC30.fasta             # Pre-merge variant 1
+├── sample-1.v1.raw2-RiC15.fasta             # Pre-merge variant 2
+├── sample-1.v2-RiC23.fasta                  # Additional variant (not merged)
+├── sample-2.v1-RiC30.fasta                  # Second organism group, primary variant
 ├── summary.fasta                            # All sequences combined
 ├── summary.txt                              # Statistics
 ├── quality_report.txt                       # Quality assessment report
 ├── summarize_log.txt                        # Processing log
 └── FASTQ Files/                             # Reads for final consensus
-    ├── sample-1-RiC45.fastq                 # All reads for merged consensus
-    ├── sample-1.raw1-RiC30.fastq            # Reads for pre-merge variant 1
-    ├── sample-1.raw2-RiC15.fastq            # Reads for pre-merge variant 2
-    ├── sample-1.v1-RiC23.fastq              # Reads for additional variant
-    └── sample-2-RiC30.fastq                 # All reads for second group
+    ├── sample-1.v1-RiC45.fastq              # All reads for merged consensus
+    ├── sample-1.v1.raw1-RiC30.fastq         # Reads for pre-merge variant 1
+    ├── sample-1.v1.raw2-RiC15.fastq         # Reads for pre-merge variant 2
+    ├── sample-1.v2-RiC23.fastq              # Reads for additional variant
+    └── sample-2.v1-RiC30.fastq              # All reads for second group
 ```
 
 ### FASTA Header Metadata
