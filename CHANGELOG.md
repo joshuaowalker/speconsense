@@ -5,6 +5,37 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.5.0] - 2025-11-06
+
+### Added
+- **Homopolymer-aware variant merging** - MSA-based merging now distinguishes structural indels from homopolymer length differences
+  - Analyzes SPOA alignment to classify each indel column as structural or homopolymer
+  - Homopolymer indels (e.g., AAA vs AAAA) are ignored when checking merge compatibility by default
+  - Structural indels (true insertions/deletions) count against merge limits
+  - Matches adjusted-identity semantics used throughout the pipeline
+  - Enables more aggressive merging of biologically equivalent sequences while preserving structural variation
+- **`--disable-homopolymer-equivalence` option** - Allows strict identity merging when homopolymer length variation should be preserved
+  - Treats all indels (both homopolymer and structural) as blocking merges
+  - Useful for applications where homopolymer length variation is biologically significant
+
+### Changed
+- **Enhanced merge logging** - Merge messages now distinguish between structural indels and homopolymer indels
+  - Example: "Found mergeable subset of 2 variants: 2 SNPs, 1 homopolymer indels"
+  - Provides clearer insight into why sequences are being merged
+- **Improved edge case handling** - Homopolymer detection now requires strict flanking base agreement
+  - Adjacent indel columns cannot validate each other as homopolymer context
+  - All sequences must agree on the flanking base (not just any sequence)
+  - Correctly distinguishes SNP+indel combinations from true homopolymer indels
+
+### Documentation
+- **Comprehensive README updates** - Added detailed documentation of homopolymer-aware merging
+  - How homopolymer vs structural indel classification works
+  - Default behavior and strict mode examples
+  - Position counting examples with various parameter combinations
+  - Integration with overall workflow
+- **Updated CLAUDE.md** - Reflects current post-processing architecture with homopolymer-aware merging
+- **Command-line reference** - Added `--disable-homopolymer-equivalence` to usage documentation
+
 ## [0.4.3] - 2025-11-05
 
 ### Changed

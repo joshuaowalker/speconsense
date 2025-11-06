@@ -337,6 +337,8 @@ def parse_arguments():
                         help="Maximum total SNP+indel positions allowed in merging (default: 2)")
     parser.add_argument("--merge-min-size-ratio", type=float, default=0.0,
                         help="Minimum size ratio (smaller/larger) for merging clusters (default: 0.0 = disabled)")
+    parser.add_argument("--disable-homopolymer-equivalence", action="store_true",
+                        help="Disable homopolymer equivalence in merging (treat AAA vs AAAA as different)")
 
     # Backward compatibility: support old --snp-merge-limit parameter
     parser.add_argument("--snp-merge-limit", type=int, dest="_snp_merge_limit_deprecated",
@@ -559,22 +561,116 @@ def run_spoa_msa(sequences: List[str]) -> List:
                 os.unlink(temp_input.name)
 
 
+def calculate_max_consecutive(positions: List[int]) -> int:
+    """
+    Calculate the maximum length of consecutive positions in a sorted list.
+
+    Args:
+        positions: List of position indices (assumed sorted)
+
+    Returns:
+        Maximum length of consecutive run, or 0 if list is empty
+    """
+    if not positions:
+        return 0
+
+    max_length = 1
+    current_run = 1
+
+    for i in range(1, len(positions)):
+        if positions[i] == positions[i-1] + 1:
+            current_run += 1
+            max_length = max(max_length, current_run)
+        else:
+            current_run = 1
+
+    return max_length
+
+
+def is_homopolymer_indel_column(aligned_seqs: List, col_idx: int) -> bool:
+    """
+    Check if an indel column represents a homopolymer length difference.
+
+    A column is a homopolymer indel if:
+    1. All non-gap bases in the column are the same base (e.g., all 'A')
+    2. Adjacent columns have ALL non-gap bases matching that same base
+
+    The stricter requirement (all sequences must agree on flanking base) correctly
+    distinguishes true homopolymer indels from SNP+indel combinations.
+
+    Example:
+        True homopolymer:  ATAAA-GC vs ATAAAAGC (all sequences have A flanking gap)
+        SNP+indel:         ATAA-GC vs ATG-AGC   (A vs G flanking gap - NOT homopolymer)
+
+    This matches the semantics of adjusted-identity homopolymer normalization,
+    where AAA and AAAA are considered equivalent.
+
+    Args:
+        aligned_seqs: List of aligned sequences (from SPOA)
+        col_idx: Column index to check
+
+    Returns:
+        True if this is a homopolymer length difference, False otherwise
+    """
+    column = [str(seq.seq[col_idx]) for seq in aligned_seqs]
+    bases_in_column = set(c for c in column if c != '-')
+
+    # Must have exactly one type of base (all A's, or all G's, etc.)
+    if len(bases_in_column) != 1:
+        return False
+
+    base = list(bases_in_column)[0]
+    alignment_length = len(aligned_seqs[0].seq)
+
+    # Check if adjacent columns have ALL non-gap bases matching this base
+    # This confirms all sequences agree on homopolymer context
+    # IMPORTANT: Adjacent column must not itself be an indel column
+
+    # Check previous column
+    if col_idx > 0:
+        prev_column = [str(seq.seq[col_idx - 1]) for seq in aligned_seqs]
+        prev_bases = set(c for c in prev_column if c != '-')
+        prev_has_gap = '-' in prev_column
+        # Must have all matching bases AND not be an indel column itself
+        if prev_bases == {base} and not prev_has_gap:
+            return True
+
+    # Check next column
+    if col_idx < alignment_length - 1:
+        next_column = [str(seq.seq[col_idx + 1]) for seq in aligned_seqs]
+        next_bases = set(c for c in next_column if c != '-')
+        next_has_gap = '-' in next_column
+        # Must have all matching bases AND not be an indel column itself
+        if next_bases == {base} and not next_has_gap:
+            return True
+
+    return False
+
+
 def analyze_msa_columns(aligned_seqs: List) -> dict:
     """
     Analyze aligned sequences to count SNPs and indels.
+
+    Distinguishes between structural indels (real insertions/deletions) and
+    homopolymer indels (length differences in homopolymer runs like AAA vs AAAA).
 
     Important: All gaps (including terminal gaps) count as variant positions
     since variants within a group share the same primers.
 
     Returns dict with:
         'snp_count': number of positions with >1 non-gap base
-        'indel_count': number of positions with gaps mixed with bases
-        'max_indel_length': length of longest consecutive indel run
+        'structural_indel_count': number of structural indel positions
+        'structural_indel_length': length of longest consecutive structural indel run
+        'homopolymer_indel_count': number of homopolymer indel positions
+        'homopolymer_indel_length': length of longest consecutive homopolymer indel run
+        'indel_count': total indel positions (for backward compatibility)
+        'max_indel_length': max consecutive indel length (for backward compatibility)
     """
     alignment_length = len(aligned_seqs[0].seq)
 
     snp_positions = []
-    indel_positions = []
+    structural_indel_positions = []
+    homopolymer_indel_positions = []
 
     for col_idx in range(alignment_length):
         column = [str(seq.seq[col_idx]) for seq in aligned_seqs]
@@ -592,25 +688,29 @@ def analyze_msa_columns(aligned_seqs: List) -> dict:
             snp_positions.append(col_idx)
 
         # Indel position: mix of gaps and bases
+        # Classify as homopolymer or structural
         if has_gap and unique_bases:
-            indel_positions.append(col_idx)
-
-    # Calculate max indel length (consecutive indel positions)
-    max_indel_length = 0
-    if indel_positions:
-        current_run = 1
-        for i in range(1, len(indel_positions)):
-            if indel_positions[i] == indel_positions[i-1] + 1:
-                current_run += 1
-                max_indel_length = max(max_indel_length, current_run)
+            if is_homopolymer_indel_column(aligned_seqs, col_idx):
+                homopolymer_indel_positions.append(col_idx)
             else:
-                current_run = 1
-        max_indel_length = max(max_indel_length, current_run)
+                structural_indel_positions.append(col_idx)
+
+    # Calculate max consecutive lengths
+    max_structural_indel_length = calculate_max_consecutive(structural_indel_positions)
+    max_homopolymer_indel_length = calculate_max_consecutive(homopolymer_indel_positions)
+
+    # Combined indel metrics for backward compatibility
+    all_indel_positions = structural_indel_positions + homopolymer_indel_positions
+    max_indel_length = calculate_max_consecutive(sorted(all_indel_positions))
 
     return {
         'snp_count': len(snp_positions),
-        'indel_count': len(indel_positions),
-        'max_indel_length': max_indel_length
+        'structural_indel_count': len(structural_indel_positions),
+        'structural_indel_length': max_structural_indel_length,
+        'homopolymer_indel_count': len(homopolymer_indel_positions),
+        'homopolymer_indel_length': max_homopolymer_indel_length,
+        'indel_count': len(all_indel_positions),  # Backward compatibility
+        'max_indel_length': max_indel_length  # Backward compatibility
     }
 
 
@@ -648,21 +748,41 @@ def generate_all_subsets_by_size(variants: List[ConsensusInfo]) -> List[Tuple[in
 
 
 def is_compatible_subset(variant_stats: dict, args) -> bool:
-    """Check if variant statistics are within merge limits."""
+    """
+    Check if variant statistics are within merge limits.
+
+    By default, homopolymer indels are ignored (treated as compatible) to match
+    adjusted-identity homopolymer normalization semantics where AAA ≈ AAAA.
+    Only structural indels count against the limits.
+
+    When --disable-homopolymer-equivalence is set, homopolymer indels are treated
+    the same as structural indels and count against merge limits.
+    """
 
     # Check SNP limit
     if variant_stats['snp_count'] > 0 and not args.merge_snp:
         return False
 
+    # Determine which indels to count based on homopolymer equivalence setting
+    if args.disable_homopolymer_equivalence:
+        # Count both structural and homopolymer indels
+        indel_count = variant_stats['structural_indel_count'] + variant_stats['homopolymer_indel_count']
+        indel_length = max(variant_stats['structural_indel_length'],
+                          variant_stats['homopolymer_indel_length'])
+    else:
+        # Only count structural indels (homopolymer indels ignored)
+        indel_count = variant_stats['structural_indel_count']
+        indel_length = variant_stats['structural_indel_length']
+
     # Check indel limits
-    if variant_stats['indel_count'] > 0:
+    if indel_count > 0:
         if args.merge_indel_length == 0:
             return False
-        if variant_stats['max_indel_length'] > args.merge_indel_length:
+        if indel_length > args.merge_indel_length:
             return False
 
     # Check total position count
-    total_positions = variant_stats['snp_count'] + variant_stats['indel_count']
+    total_positions = variant_stats['snp_count'] + indel_count
     if total_positions > args.merge_position_count:
         return False
 
@@ -828,9 +948,17 @@ def merge_group_with_msa(variants: List[ConsensusInfo], args) -> Tuple[List[Cons
             if is_compatible_subset(variant_stats, args):
                 # Only log "mergeable subset" message for actual merges (>1 variant)
                 if len(subset_indices) > 1:
-                    logging.info(f"Found mergeable subset of {len(subset_indices)} variants: "
-                                f"{variant_stats['snp_count']} SNPs, "
-                                f"{variant_stats['indel_count']} indels")
+                    # Build detailed variant description
+                    parts = []
+                    if variant_stats['snp_count'] > 0:
+                        parts.append(f"{variant_stats['snp_count']} SNPs")
+                    if variant_stats['structural_indel_count'] > 0:
+                        parts.append(f"{variant_stats['structural_indel_count']} structural indels")
+                    if variant_stats['homopolymer_indel_count'] > 0:
+                        parts.append(f"{variant_stats['homopolymer_indel_count']} homopolymer indels")
+
+                    variant_desc = ", ".join(parts) if parts else "identical sequences"
+                    logging.info(f"Found mergeable subset of {len(subset_indices)} variants: {variant_desc}")
 
                 # Create merged consensus
                 merged_consensus = create_consensus_from_msa(

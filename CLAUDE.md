@@ -81,10 +81,12 @@ pytest -m "not slow"
 ### Post-Processing Pipeline (speconsense-summarize)
 
 1. Load sequences with RiC filtering
-2. SNP-based merging within each specimen (creates IUPAC consensus sequences)
-3. HAC variant grouping by sequence identity
+2. HAC variant grouping by sequence identity (separates dissimilar sequences)
+3. Homopolymer-aware MSA-based merging within each group (creates IUPAC consensus sequences)
 4. Variant selection within each group (size-based or diversity-based)
 5. Output generation with full traceability
+
+Note: HAC grouping occurs BEFORE merging (since 0.4.0) to prevent inappropriate merging of dissimilar sequences (e.g., contaminants with primary targets). Homopolymer-aware merging (since 0.5.0) distinguishes structural indels from homopolymer length differences.
 
 ### External Dependencies
 

@@ -603,28 +603,72 @@ speconsense-summarize --snp-merge-limit 2  # Equivalent to --merge-position-coun
 - Only merges variants with **identical primer sets** to maintain biological validity
 
 **Merge Parameters:**
-- `--merge-position-count N`: Maximum total SNP + indel positions allowed (default: 2)
-- `--merge-indel-length N`: Maximum length of individual indels allowed (default: 0 = disabled)
+- `--merge-position-count N`: Maximum total SNP + structural indel positions allowed (default: 2)
+- `--merge-indel-length N`: Maximum length of individual structural indels allowed (default: 0 = disabled)
 - `--merge-snp`: Enable/disable SNP merging (default: True)
 - `--merge-min-size-ratio R`: Minimum size ratio (smaller/larger) for merging clusters (default: 0.0 = disabled)
+- `--disable-homopolymer-equivalence`: Treat homopolymer length differences as structural indels (default: disabled, meaning homopolymer equivalence is enabled)
 - `--snp-merge-limit N`: Legacy parameter, equivalent to `--merge-position-count` (deprecated)
 
+**Homopolymer-Aware Merging (Default Behavior):**
+
+By default, speconsense-summarize uses **homopolymer-aware merging** that distinguishes between structural indels (true insertions/deletions) and homopolymer length differences (e.g., AAA vs AAAA). This matches the semantics of adjusted-identity alignment used throughout the pipeline.
+
 **How it works:**
-- Counts SNPs and indels separately during alignment
-- Both must be within limits for merge to proceed
-- Example: `--merge-position-count 3 --merge-indel-length 2` allows merging sequences with:
-  - 3 SNPs + 0 indels ✓
-  - 2 SNPs + 1 indel (≤2bp) ✓
-  - 0 SNPs + 3 indels (each ≤2bp) ✓
-  - 2 SNPs + 2 indels (each ≤2bp) ✗ (total=4 > 3)
-  - 2 SNPs + 1 indel (3bp) ✗ (indel too long)
+- Analyzes SPOA multiple sequence alignment to classify each indel column
+- **Homopolymer indel**: All non-gap bases are the same, and all sequences agree on that base in adjacent columns
+  - Example: `ATA-AAGC` vs `ATAAAAGC` → homopolymer (all have A's flanking the gap)
+- **Structural indel**: True insertion/deletion, or indel adjacent to SNP
+  - Example: `CTAA-GC` vs `CTG-AGC` → structural (A vs G flanking the gap)
+- **Homopolymer indels are ignored** when checking merge compatibility (treated as equivalent)
+- **Structural indels count** against `--merge-position-count` and `--merge-indel-length` limits
+
+**Default behavior examples:**
+- Sequences differing only by homopolymer length (AAA vs AAAA): **Merge** ✓
+- Sequences with 2 SNPs + 5 homopolymer indels: **Merge** ✓ (only SNPs count)
+- Sequences with 1 structural indel: **Blocked** (default `--merge-indel-length=0`)
+
+**Strict identity merging (`--disable-homopolymer-equivalence`):**
+```bash
+speconsense-summarize --disable-homopolymer-equivalence
+```
+- Treats homopolymer length differences as structural indels
+- All indels (both homopolymer and structural) count against merge limits
+- Only sequences identical (or differing by SNPs if `--merge-snp` enabled) can merge
+- Use when you want to preserve homopolymer length variation as distinct variants
+
+**Example comparison:**
+```bash
+# Default (homopolymer equivalence enabled)
+# Variants: ATAAAGC (3 A's) vs ATAAAAGC (4 A's)
+speconsense-summarize
+# Result: Merge ✓ (homopolymer difference ignored)
+
+# Strict mode (homopolymer equivalence disabled)
+speconsense-summarize --disable-homopolymer-equivalence
+# Result: Do not merge (treated as structural indel)
+```
+
+**Position counting examples:**
+
+With default settings (`--merge-position-count 2 --merge-indel-length 0`):
+- 2 SNPs + 0 structural indels + 10 homopolymer indels ✓ (only structural counted)
+- 0 SNPs + 1 structural indel + 5 homopolymer indels ✗ (structural indel blocked)
+- 1 SNP + 1 structural indel (≤2bp) ✗ (indel blocked by length limit)
+
+With indels enabled (`--merge-position-count 3 --merge-indel-length 2`):
+- 3 SNPs + 0 structural indels + any homopolymer indels ✓
+- 2 SNPs + 1 structural indel (≤2bp) + any homopolymer indels ✓
+- 0 SNPs + 3 structural indels (each ≤2bp) + any homopolymer indels ✓
+- 2 SNPs + 2 structural indels (each ≤2bp) ✗ (total=4 > 3)
+- 2 SNPs + 1 structural indel (3bp) ✗ (indel too long)
 
 **Merged consensus tracking:**
 - Merged sequences include `rawric` header field showing RiC values of merged .raw variants
 - Example: `>sample-1 size=250 ric=250 rawric=100+89+61 snp=2`
 - Helps trace which original clusters contributed to merged consensus
 
-**Note**: This is distinct from the automatic homopolymer-aware merging that occurs during the main clustering step in speconsense
+**Note**: Homopolymer-aware merging in speconsense-summarize complements the automatic homopolymer-equivalent cluster merging that occurs during the main clustering step in speconsense
 
 **Merge Size Ratio Filtering:**
 ```bash
@@ -663,11 +707,14 @@ The complete speconsense-summarize workflow operates in this order:
 1. **Load sequences** with RiC filtering (`--min-ric`)
 2. **HAC variant grouping** by sequence identity to separate dissimilar sequences (`--group-identity`)
 3. **Group filtering** to limit output groups (`--select-max-groups`)
-4. **MSA-based variant merging** within each group (`--merge-position-count`, `--merge-indel-length`, `--merge-snp`, `--merge-min-size-ratio`)
+4. **Homopolymer-aware MSA-based variant merging** within each group (`--merge-position-count`, `--merge-indel-length`, `--merge-snp`, `--merge-min-size-ratio`, `--disable-homopolymer-equivalence`)
 5. **Variant selection** within each group (`--select-max-variants`, `--select-strategy`)
 6. **Output generation** with customizable header fields (`--fasta-fields`) and full traceability
 
-**Key architectural change**: HAC grouping now occurs BEFORE merging to prevent inappropriate merging of dissimilar sequences (e.g., contaminants with primary targets). Merging is then applied independently within each group using MSA-based consensus generation.
+**Key architectural features**:
+- HAC grouping occurs BEFORE merging to prevent inappropriate merging of dissimilar sequences (e.g., contaminants with primary targets)
+- Merging is applied independently within each group using MSA-based consensus generation
+- Homopolymer-aware merging by default (AAA ≈ AAAA) to match pipeline-wide adjusted-identity semantics
 
 ### Enhanced Logging and Traceability
 
@@ -677,6 +724,7 @@ Speconsense-summarize provides comprehensive logging to help users understand pr
 - **Complete variant summaries** for every variant in each group, including those that are skipped
 - **Detailed difference categorization**: substitutions, single-nt indels, short (≤3nt) indels, and long indels
 - **IUPAC-aware comparisons**: treats ambiguity codes as matches (e.g., R matches A or G)
+- **Homopolymer-aware merge reporting**: distinguishes structural indels from homopolymer indels
 - **Group context**: clearly shows which variants belong to each HAC clustering group
 - **Selection rationale**: explains why variants were included or excluded
 
@@ -685,6 +733,7 @@ Speconsense-summarize provides comprehensive logging to help users understand pr
 HAC clustering created 2 groups
 Group 1: ['sample-c3']
 Group 2: ['sample-c1', 'sample-c2']
+Found mergeable subset of 2 variants: 2 SNPs, 1 homopolymer indels
 Processing Variants in Group 2
 Primary: sample-c1 (size=403, ric=403)
 Variant 1: (size=269, ric=269) - 1 short (<= 3nt) indel
@@ -763,6 +812,7 @@ usage: speconsense-summarize [-h] [--min-ric MIN_RIC] [--source SOURCE]
                              [--merge-indel-length MERGE_INDEL_LENGTH]
                              [--merge-position-count MERGE_POSITION_COUNT]
                              [--merge-min-size-ratio MERGE_MIN_SIZE_RATIO]
+                             [--disable-homopolymer-equivalence]
                              [--group-identity GROUP_IDENTITY]
                              [--select-max-variants SELECT_MAX_VARIANTS]
                              [--select-max-groups SELECT_MAX_GROUPS]
@@ -786,13 +836,17 @@ options:
                         right. Default: default
   --merge-snp           Enable SNP-based merging (default: True)
   --merge-indel-length MERGE_INDEL_LENGTH
-                        Maximum length of individual indels allowed in merging (default: 0 =
-                        disabled)
+                        Maximum length of individual structural indels allowed in merging
+                        (default: 0 = disabled)
   --merge-position-count MERGE_POSITION_COUNT
-                        Maximum total SNP+indel positions allowed in merging (default: 2)
+                        Maximum total SNP+structural indel positions allowed in merging
+                        (default: 2)
   --merge-min-size-ratio MERGE_MIN_SIZE_RATIO
                         Minimum size ratio (smaller/larger) for merging clusters (default:
                         0.0 = disabled)
+  --disable-homopolymer-equivalence
+                        Disable homopolymer equivalence in merging (treat AAA vs AAAA as
+                        different)
   --group-identity GROUP_IDENTITY, --variant-group-identity GROUP_IDENTITY
                         Identity threshold for variant grouping using HAC (default: 0.9)
   --select-max-variants SELECT_MAX_VARIANTS, --max-variants SELECT_MAX_VARIANTS

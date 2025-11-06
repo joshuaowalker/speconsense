@@ -4,8 +4,8 @@ Validate consistency of speconsense-summarize output.
 
 Checks:
 1. RiC values in FASTA headers match actual read counts in FASTQ files
-2. For merged consensuses, merged_ric values sum to total ric
-3. For .raw files, parent consensus has matching merged_ric components
+2. For merged consensuses, rawric values sum to total ric
+3. For .raw files, parent consensus has matching rawric components
 4. All expected .raw files exist for merged consensuses
 """
 
@@ -18,7 +18,7 @@ from pathlib import Path
 
 def parse_fasta_header(header_line):
     """Parse FASTA header to extract metadata."""
-    # Format: >sample_name size=N ric=N [merged_ric=N+N+...] [snp=N] [primers=...]
+    # Format: >sample_name size=N ric=N [rawric=N+N+...] [snp=N] [primers=...]
     match = re.match(r'>(\S+)\s+(.+)', header_line)
     if not match:
         return None
@@ -38,11 +38,13 @@ def parse_fasta_header(header_line):
     if ric_match:
         metadata['ric'] = int(ric_match.group(1))
 
-    # Extract merged_ric if present
-    merged_ric_match = re.search(r'merged_ric=([\d+]+)', metadata_str)
-    if merged_ric_match:
-        ric_values = [int(x) for x in merged_ric_match.group(1).split('+')]
-        metadata['merged_ric'] = ric_values
+    # Extract rawric if present (also check old merged_ric for backward compatibility)
+    rawric_match = re.search(r'rawric=([\d+]+)', metadata_str)
+    if not rawric_match:
+        rawric_match = re.search(r'merged_ric=([\d+]+)', metadata_str)
+    if rawric_match:
+        ric_values = [int(x) for x in rawric_match.group(1).split('+')]
+        metadata['rawric'] = ric_values
 
     # Extract snp if present
     snp_match = re.search(r'snp=(\d+)', metadata_str)
@@ -91,7 +93,7 @@ def validate_dataset(summary_dir):
     # Categorize sequences
     final_consensus = [s for s in sequences if '.raw' not in s['sample_name']]
     raw_files = [s for s in sequences if '.raw' in s['sample_name']]
-    merged_consensus = [s for s in final_consensus if 'merged_ric' in s]
+    merged_consensus = [s for s in final_consensus if 'rawric' in s]
 
     print(f"  {len(final_consensus)} final consensus sequences")
     print(f"  {len(merged_consensus)} merged consensus sequences")
@@ -152,54 +154,54 @@ def validate_dataset(summary_dir):
     print()
 
     print("=" * 70)
-    print("CHECK 2: merged_ric values sum to total ric")
+    print("CHECK 2: rawric values sum to total ric")
     print("=" * 70)
 
     merged_sum_errors = []
     for seq in merged_consensus:
         ric = seq['ric']
-        merged_ric = seq['merged_ric']
-        merged_sum = sum(merged_ric)
+        rawric = seq['rawric']
+        merged_sum = sum(rawric)
 
         if merged_sum != ric:
-            merged_sum_errors.append((seq['sample_name'], ric, merged_ric, merged_sum))
+            merged_sum_errors.append((seq['sample_name'], ric, rawric, merged_sum))
 
     if merged_sum_errors:
-        print(f"❌ ERROR: {len(merged_sum_errors)} merged_ric sum mismatches!")
-        for name, ric, merged_ric, merged_sum in merged_sum_errors[:10]:
-            print(f"    {name}: ric={ric}, merged_ric={'+'.join(map(str, merged_ric))}={merged_sum}")
+        print(f"❌ ERROR: {len(merged_sum_errors)} rawric sum mismatches!")
+        for name, ric, rawric, merged_sum in merged_sum_errors[:10]:
+            print(f"    {name}: ric={ric}, rawric={'+'.join(map(str, rawric))}={merged_sum}")
         if len(merged_sum_errors) > 10:
             print(f"    ... and {len(merged_sum_errors) - 10} more")
-        errors.append(f"{len(merged_sum_errors)} merged_ric sum mismatches")
+        errors.append(f"{len(merged_sum_errors)} rawric sum mismatches")
     else:
-        print(f"✅ PASS: All {len(merged_consensus)} merged consensuses have correct merged_ric sums")
+        print(f"✅ PASS: All {len(merged_consensus)} merged consensuses have correct rawric sums")
 
     print()
 
     print("=" * 70)
-    print("CHECK 3: .raw files match merged_ric components")
+    print("CHECK 3: .raw files match rawric components")
     print("=" * 70)
 
     raw_component_errors = []
     for seq in merged_consensus:
         parent_name = seq['sample_name']
-        merged_ric = sorted(seq['merged_ric'], reverse=True)
+        rawric = sorted(seq['rawric'], reverse=True)
 
         # Get .raw files for this parent
         raw_files_for_parent = sorted(raw_by_parent.get(parent_name, []),
                                       key=lambda x: x['ric'], reverse=True)
 
-        if len(raw_files_for_parent) != len(merged_ric):
+        if len(raw_files_for_parent) != len(rawric):
             raw_component_errors.append(
-                f"{parent_name}: has {len(merged_ric)} merged_ric components but {len(raw_files_for_parent)} .raw files"
+                f"{parent_name}: has {len(rawric)} rawric components but {len(raw_files_for_parent)} .raw files"
             )
             continue
 
-        # Check each .raw file's ric matches merged_ric component
-        for raw_file, expected_ric in zip(raw_files_for_parent, merged_ric):
+        # Check each .raw file's ric matches rawric component
+        for raw_file, expected_ric in zip(raw_files_for_parent, rawric):
             if raw_file['ric'] != expected_ric:
                 raw_component_errors.append(
-                    f"{raw_file['sample_name']}: ric={raw_file['ric']}, expected {expected_ric} from parent merged_ric"
+                    f"{raw_file['sample_name']}: ric={raw_file['ric']}, expected {expected_ric} from parent rawric"
                 )
 
     if raw_component_errors:
@@ -221,16 +223,16 @@ def validate_dataset(summary_dir):
     missing_raw_files = []
     for seq in merged_consensus:
         parent_name = seq['sample_name']
-        merged_ric = seq['merged_ric']
+        rawric = seq['rawric']
 
-        if len(merged_ric) <= 1:
-            # Should not have merged_ric if only 1 component
-            missing_raw_files.append(f"{parent_name}: merged_ric has only {len(merged_ric)} component(s)")
+        if len(rawric) <= 1:
+            # Should not have rawric if only 1 component
+            missing_raw_files.append(f"{parent_name}: rawric has only {len(rawric)} component(s)")
             continue
 
         raw_files_for_parent = raw_by_parent.get(parent_name, [])
         if len(raw_files_for_parent) == 0:
-            missing_raw_files.append(f"{parent_name}: has merged_ric={merged_ric} but no .raw files")
+            missing_raw_files.append(f"{parent_name}: has rawric={rawric} but no .raw files")
 
     if missing_raw_files:
         print(f"❌ ERROR: {len(missing_raw_files)} merged consensuses missing .raw files!")
@@ -249,7 +251,7 @@ def validate_dataset(summary_dir):
     print("=" * 70)
 
     unexpected_raw_files = []
-    non_merged = [s for s in final_consensus if 'merged_ric' not in s]
+    non_merged = [s for s in final_consensus if 'rawric' not in s]
     for seq in non_merged:
         name = seq['sample_name']
         if name in raw_by_parent:
