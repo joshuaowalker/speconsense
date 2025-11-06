@@ -5,6 +5,21 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.4.3] - 2025-11-05
+
+### Changed
+- **Reorganized .raw variant file locations** - Improved output directory structure for better organization
+  - `.raw` FASTA files now in `variants/` subdirectory instead of main `__Summary__/` directory
+  - `.raw` FASTQ files now in `variants/FASTQ Files/` instead of main `FASTQ Files/` directory
+  - `summary.fasta` now contains only final consensus sequences (excludes .raw pre-merge variants)
+  - Final consensus FASTA files remain in main `__Summary__/` directory
+  - Final consensus FASTQ files remain in main `FASTQ Files/` directory
+  - Cleaner separation between final outputs and traceability files
+
+### Documentation
+- **Updated README** - All directory structure examples and descriptions reflect new `variants/` organization
+- **Updated output file descriptions** - Clear documentation of where each file type is located
+
 ## [0.4.2] - 2025-11-05
 
 ### Fixed

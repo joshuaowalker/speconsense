@@ -160,11 +160,12 @@ speconsense-summarize
 ```
 
 This will create a `__Summary__/` directory with:
-- `summary.fasta` - All final consensus sequences
-- Individual FASTA files per specimen (including `.raw` files for merged variants)
+- `summary.fasta` - All final consensus sequences (merged variants only)
+- Individual FASTA files per specimen
 - `summary.txt` - Statistics and metrics
 - `quality_report.txt` - Prioritized list of sequences with potential quality concerns
-- `FASTQ Files/` - Reads contributing to each consensus
+- `FASTQ Files/` - Reads contributing to each final consensus
+- `variants/` - Pre-merge variant FASTA and FASTQ files (for merged sequences)
 
 ## Output Files
 
@@ -186,15 +187,19 @@ For each specimen, Speconsense generates:
 When using `speconsense-summarize` for post-processing, creates `__Summary__/` directory with:
 
 #### **Main Output Files** (summarization numbering: `-1.v1`, `-1.v2`, `-2.v1`):
-- **Individual FASTA files**: `{sample_name}-{group}.v{variant}-RiC{reads}.fasta` (all variants including primary)
-- **Combined file**: `summary.fasta` - all final consensus sequences
+- **Individual FASTA files**: `{sample_name}-{group}.v{variant}-RiC{reads}.fasta` (all final consensus variants)
+- **Combined file**: `summary.fasta` - all final consensus sequences (merged variants only, excludes .raw files)
 - **Statistics**: `summary.txt` - sequence counts and metrics
 - **Quality report**: `quality_report.txt` - highlights sequences with potential quality concerns
 - **Log file**: `summarize_log.txt` - complete processing log
 
 #### **FASTQ Files/** (aggregated reads for final consensus):
-- `{sample_name}-{group}.v{variant}-RiC{reads}.fastq` - all reads contributing to variant consensus
-- `{sample_name}-{group}.v{variant}.raw{N}-RiC{reads}.fastq` - reads for pre-merge variant N (when variants were merged)
+- `{sample_name}-{group}.v{variant}-RiC{reads}.fastq` - all reads contributing to final variant consensus
+
+#### **variants/** (pre-merge variant files for traceability):
+- `{sample_name}-{group}.v{variant}.raw{N}-RiC{reads}.fasta` - FASTA for pre-merge variant N (when variants were merged)
+- **FASTQ Files/**:
+  - `{sample_name}-{group}.v{variant}.raw{N}-RiC{reads}.fastq` - reads for pre-merge variant N
 
 ### Naming Convention Summary
 
@@ -203,26 +208,28 @@ When using `speconsense-summarize` for post-processing, creates `__Summary__/` d
 | **Namespace** | **Used In** | **Format** | **Purpose** |
 |---------------|-------------|------------|-------------|
 | **Original** | Source `cluster_debug/` | `-c1`, `-c2`, `-c3` | Preserves speconsense clustering results |
-| **Summarization** | `__Summary__/`, `FASTQ Files/` | `-1.v1`, `-1.v2`, `-2.v1`, `.raw1` | Post-processing groups and variants |
+| **Summarization** | `__Summary__/`, `FASTQ Files/`, `variants/` | `-1.v1`, `-1.v2`, `-2.v1`, `.raw1` | Post-processing groups and variants |
 
 ### Example Directory Structure
 ```
 __Summary__/
 ├── sample-1.v1-RiC45.fasta                  # Primary variant (group 1, merged)
-├── sample-1.v1.raw1-RiC30.fasta             # Pre-merge variant 1
-├── sample-1.v1.raw2-RiC15.fasta             # Pre-merge variant 2
 ├── sample-1.v2-RiC23.fasta                  # Additional variant (not merged)
 ├── sample-2.v1-RiC30.fasta                  # Second organism group, primary variant
-├── summary.fasta                            # All sequences combined
+├── summary.fasta                            # All final consensus sequences (excludes .raw)
 ├── summary.txt                              # Statistics
 ├── quality_report.txt                       # Quality assessment report
 ├── summarize_log.txt                        # Processing log
-└── FASTQ Files/                             # Reads for final consensus
-    ├── sample-1.v1-RiC45.fastq              # All reads for merged consensus
-    ├── sample-1.v1.raw1-RiC30.fastq         # Reads for pre-merge variant 1
-    ├── sample-1.v1.raw2-RiC15.fastq         # Reads for pre-merge variant 2
-    ├── sample-1.v2-RiC23.fastq              # Reads for additional variant
-    └── sample-2.v1-RiC30.fastq              # All reads for second group
+├── FASTQ Files/                             # Reads for final consensus
+│   ├── sample-1.v1-RiC45.fastq              # All reads for merged consensus
+│   ├── sample-1.v2-RiC23.fastq              # Reads for additional variant
+│   └── sample-2.v1-RiC30.fastq              # All reads for second group
+└── variants/                                # Pre-merge variant files (for traceability)
+    ├── sample-1.v1.raw1-RiC30.fasta         # Pre-merge variant 1 FASTA
+    ├── sample-1.v1.raw2-RiC15.fasta         # Pre-merge variant 2 FASTA
+    └── FASTQ Files/                         # Pre-merge variant FASTQ files
+        ├── sample-1.v1.raw1-RiC30.fastq     # Reads for pre-merge variant 1
+        └── sample-1.v1.raw2-RiC15.fastq     # Reads for pre-merge variant 2
 ```
 
 ### FASTA Header Metadata
@@ -688,7 +695,7 @@ Variant 2: (size=180, ric=180) - 3 substitutions, 1 single-nt indel - skipping
 - **Merge history**: tracks which original clusters were combined during variant merging
 - **File lineage**: maintains connection between final outputs and original speconsense clusters
 - **Read aggregation**: `FASTQ Files/` directory contains all reads that contributed to each final consensus
-- **Pre-merge preservation**: `.raw` files preserve individual pre-merge variants with their original sequences and reads
+- **Pre-merge preservation**: `variants/` directory contains `.raw` files that preserve individual pre-merge variants with their original sequences and reads
 
 This comprehensive logging allows users to understand exactly how the pipeline processed their data and make informed decisions about parameter tuning.
 

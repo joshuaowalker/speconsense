@@ -1212,6 +1212,8 @@ def create_output_structure(groups: Dict[int, List[ConsensusInfo]],
     """
     os.makedirs(summary_folder, exist_ok=True)
     os.makedirs(os.path.join(summary_folder, 'FASTQ Files'), exist_ok=True)
+    os.makedirs(os.path.join(summary_folder, 'variants'), exist_ok=True)
+    os.makedirs(os.path.join(summary_folder, 'variants', 'FASTQ Files'), exist_ok=True)
 
     final_consensus = []
     naming_info = {}
@@ -1443,7 +1445,7 @@ def write_specimen_data_files(specimen_consensus: List[ConsensusInfo],
     # Write .raw files (individual FASTA and FASTQ for pre-merge variants)
     for raw_consensus, original_cluster_name in raw_file_consensuses:
         # Write individual FASTA file with custom field formatting
-        output_file = os.path.join(summary_folder, f"{raw_consensus.sample_name}-RiC{raw_consensus.ric}.fasta")
+        output_file = os.path.join(summary_folder, 'variants', f"{raw_consensus.sample_name}-RiC{raw_consensus.ric}.fasta")
         with open(output_file, 'w') as f:
             header = format_fasta_header(raw_consensus, fasta_fields)
             f.write(f">{header}\n")
@@ -1461,7 +1463,7 @@ def write_specimen_data_files(specimen_consensus: List[ConsensusInfo],
             matching_files = [f for f in debug_files if cluster_ric_pattern in f]
 
             if matching_files:
-                fastq_output_path = os.path.join(fastq_dir, f"{raw_consensus.sample_name}-RiC{raw_consensus.ric}.fastq")
+                fastq_output_path = os.path.join(summary_folder, 'variants', 'FASTQ Files', f"{raw_consensus.sample_name}-RiC{raw_consensus.ric}.fastq")
                 try:
                     with open(fastq_output_path, 'wb') as outf:
                         for input_file in matching_files:
@@ -1805,7 +1807,7 @@ def write_output_files(final_consensus: List[ConsensusInfo],
     """
 
     # Write combined summary.fasta with custom field formatting
-    # Include both final consensus and .raw files for complete index
+    # Include only final consensus sequences (not .raw pre-merge variants)
     summary_fasta_path = os.path.join(summary_folder, 'summary.fasta')
     with open(summary_fasta_path, 'w') as f:
         # Write final consensus sequences
@@ -1813,12 +1815,6 @@ def write_output_files(final_consensus: List[ConsensusInfo],
             header = format_fasta_header(consensus, fasta_fields)
             f.write(f">{header}\n")
             f.write(f"{consensus.sequence}\n")
-
-        # Write .raw file sequences (pre-merge variants)
-        for raw_consensus, _ in all_raw_consensuses:
-            header = format_fasta_header(raw_consensus, fasta_fields)
-            f.write(f">{header}\n")
-            f.write(f"{raw_consensus.sequence}\n")
     
     # Write summary statistics
     summary_txt_path = os.path.join(summary_folder, 'summary.txt')
@@ -1990,6 +1986,8 @@ def main():
     # Create output directories before processing
     os.makedirs(args.summary_dir, exist_ok=True)
     os.makedirs(os.path.join(args.summary_dir, 'FASTQ Files'), exist_ok=True)
+    os.makedirs(os.path.join(args.summary_dir, 'variants'), exist_ok=True)
+    os.makedirs(os.path.join(args.summary_dir, 'variants', 'FASTQ Files'), exist_ok=True)
 
     # Build lookup tables once before processing loop
     fastq_lookup = build_fastq_lookup_table(args.source)
