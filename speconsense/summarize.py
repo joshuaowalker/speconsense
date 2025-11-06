@@ -1642,7 +1642,11 @@ def build_fastq_lookup_table(source_dir: str = ".") -> Dict[str, List[str]]:
     import re
 
     lookup = defaultdict(list)
-    
+
+    # Initialize variables before conditional block
+    debug_files = []
+    selected_stage = None
+
     # Scan cluster_debug directory once to build lookup table
     cluster_debug_path = os.path.join(source_dir, "cluster_debug")
     if os.path.exists(cluster_debug_path):
@@ -1651,8 +1655,6 @@ def build_fastq_lookup_table(source_dir: str = ".") -> Dict[str, List[str]]:
         stage_priority = ['sampled', 'reads', 'untrimmed']
 
         # Try each stage type in priority order until we find files
-        debug_files = []
-        selected_stage = None
         for stage in stage_priority:
             debug_files = glob.glob(os.path.join(cluster_debug_path, f"*-{stage}.fastq"))
             if debug_files:

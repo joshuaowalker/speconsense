@@ -670,6 +670,47 @@ With indels enabled (`--merge-position-count 3 --merge-indel-length 2`):
 
 **Note**: Homopolymer-aware merging in speconsense-summarize complements the automatic homopolymer-equivalent cluster merging that occurs during the main clustering step in speconsense
 
+**Understanding MSA-Based Merge Evaluation:**
+
+A key architectural feature of speconsense-summarize is that **all sequences within a HAC group are aligned together by SPOA first**, creating a single multi-sequence alignment (MSA) that provides biological and evolutionary context for all subsequent merge decisions within that group.
+
+**Why this matters:**
+
+When evaluating whether two sequences can merge, the algorithm doesn't perform a simple pairwise alignment. Instead, it examines how those sequences align within the context of all other sequences in their HAC group. This shared alignment context can reveal that apparent structural differences are actually homopolymer length variations relative to the majority pattern.
+
+**Example:**
+
+Consider two sequences (c4 and c9) from the same HAC group. When aligned in isolation, they appear incompatible:
+
+```
+Pairwise alignment (c4 vs c9 only):
+c4: ..504..GTAAATT..242..AG
+c9: ..504..G-GTACT..242..AA
+```
+
+This pairwise alignment shows 4 SNPs + 1 structural indel, making them incompatible for merging with default parameters.
+
+However, when aligned with all sequences in their HAC group, a different picture emerges:
+
+```
+Multi-sequence alignment (c1, c2, c4, c5, c7, c8, c9):
+c1: ..153..AAA..57..AGC..151..CTCTT..131..A-GTAAATT.TCA..213..TCAG..21..AA
+c2: ..153..ATA..57..AAC..151..CTCTT..131..A-GTAAATT.TCA..213..TCAG..21..AA
+c4: ..153..AAA..57..AGC..151..CTCTT..131..A-GTAAATT.TCA..213..TCAG..21..AG
+c5: ..153..AAA..57..AGC..151..C---T..131..A-GTAAATT.TCA..213..TCAG..21..AA
+c7: ..153..AAA..57..AGC..151..CTCTT..131..A-GT-ACTT.T-A..213..TCAG..21..AA
+c8: ..153..AAA..57..AGC..151..CTCTT..131..A-GTAAATT.TCA..213..TAGG..21..AA
+c9: ..153..AAA..57..AGC..151..CTCTT..131..AGGT-AC-T.TCA..213..TCAG..21..AA
+```
+
+In this multi-sequence context, the majority pattern (seen in c1, c2, c4, c5, c8) is `A-GTAAATT` in the critical region around position 131. The c9 sequence (`AGGT-AC-T`) differs from c4, but the gaps occur at different positions in the homopolymer-rich region. The multi-sequence alignment reveals that c9's differences are better explained as homopolymer length variations (extra G's and different gap placements in poly-A and poly-T regions) rather than true structural changes. This results in only 2 SNPs + 3 homopolymer indels, making them compatible for merging.
+
+This biological interpretation, informed by the evolutionary context of multiple related sequences, produces more accurate merge decisions than pairwise comparisons alone.
+
+**Practical implication:**
+
+Merge decisions depend on the complete HAC group composition, not just the sequences being evaluated. Two sequences that appear incompatible in isolation may merge when analyzed in their full biological context, and vice versa. This is by design—the multi-sequence context provides more accurate biological interpretation of sequence variation.
+
 **Merge Size Ratio Filtering:**
 ```bash
 speconsense-summarize --merge-min-size-ratio 0.1
