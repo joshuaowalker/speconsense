@@ -561,89 +561,111 @@ def run_spoa_msa(sequences: List[str]) -> List:
                 os.unlink(temp_input.name)
 
 
-def calculate_max_consecutive(positions: List[int]) -> int:
+def identify_indel_events(aligned_seqs: List, alignment_length: int) -> List[Tuple[int, int]]:
     """
-    Calculate the maximum length of consecutive positions in a sorted list.
+    Identify consecutive runs of indel columns (events).
+
+    An indel event is a maximal consecutive run of columns containing gaps.
+    Each event represents a single biological insertion or deletion.
 
     Args:
-        positions: List of position indices (assumed sorted)
+        aligned_seqs: List of aligned sequences from SPOA
+        alignment_length: Length of the alignment
 
     Returns:
-        Maximum length of consecutive run, or 0 if list is empty
+        List of (start_col, end_col) tuples, where end_col is inclusive
     """
-    if not positions:
-        return 0
+    events = []
+    in_event = False
+    start_col = None
 
-    max_length = 1
-    current_run = 1
+    for col_idx in range(alignment_length):
+        column = [str(seq.seq[col_idx]) for seq in aligned_seqs]
+        has_gap = '-' in column
+        has_bases = any(c != '-' for c in column)
 
-    for i in range(1, len(positions)):
-        if positions[i] == positions[i-1] + 1:
-            current_run += 1
-            max_length = max(max_length, current_run)
+        # Indel column: mix of gaps and bases
+        if has_gap and has_bases:
+            if not in_event:
+                # Start new event
+                in_event = True
+                start_col = col_idx
         else:
-            current_run = 1
+            # Not an indel column (either all gaps or all bases)
+            if in_event:
+                # End current event
+                events.append((start_col, col_idx - 1))
+                in_event = False
 
-    return max_length
+    # Handle event that extends to end of alignment
+    if in_event:
+        events.append((start_col, alignment_length - 1))
+
+    return events
 
 
-def is_homopolymer_indel_column(aligned_seqs: List, col_idx: int) -> bool:
+def is_homopolymer_event(aligned_seqs: List, start_col: int, end_col: int) -> bool:
     """
-    Check if an indel column represents a homopolymer length difference.
+    Classify a complete indel event as homopolymer or structural.
 
-    A column is a homopolymer indel if:
-    1. All non-gap bases in the column are the same base (e.g., all 'A')
-    2. Adjacent columns have ALL non-gap bases matching that same base
+    An event is homopolymer if:
+    1. All bases in the event region (across all sequences, all columns) are identical
+    2. At least one flanking solid column has all sequences showing the same base
 
-    The stricter requirement (all sequences must agree on flanking base) correctly
-    distinguishes true homopolymer indels from SNP+indel combinations.
+    This matches adjusted-identity semantics where AAA ≈ AAAA.
 
-    Example:
-        True homopolymer:  ATAAA-GC vs ATAAAAGC (all sequences have A flanking gap)
-        SNP+indel:         ATAA-GC vs ATG-AGC   (A vs G flanking gap - NOT homopolymer)
-
-    This matches the semantics of adjusted-identity homopolymer normalization,
-    where AAA and AAAA are considered equivalent.
+    Examples:
+        Homopolymer:  ATAAA--GC vs ATAAAAGC  (event has all A's, flanked by A)
+        Structural:   ATAA-GC vs ATG-AGC     (event has A, flanked by A vs G)
+        Structural:   ATC--GC vs ATCATGC     (event has A and T - not homopolymer)
 
     Args:
-        aligned_seqs: List of aligned sequences (from SPOA)
-        col_idx: Column index to check
+        aligned_seqs: List of aligned sequences from SPOA
+        start_col: First column of the indel event (inclusive)
+        end_col: Last column of the indel event (inclusive)
 
     Returns:
-        True if this is a homopolymer length difference, False otherwise
+        True if homopolymer event, False if structural
     """
-    column = [str(seq.seq[col_idx]) for seq in aligned_seqs]
-    bases_in_column = set(c for c in column if c != '-')
+    # Extract all bases from the event region (excluding gaps)
+    bases_in_event = set()
+    for col_idx in range(start_col, end_col + 1):
+        column = [str(seq.seq[col_idx]) for seq in aligned_seqs]
+        bases_in_event.update(c for c in column if c != '-')
 
-    # Must have exactly one type of base (all A's, or all G's, etc.)
-    if len(bases_in_column) != 1:
+    # Must have exactly one base type across the entire event
+    if len(bases_in_event) != 1:
         return False
 
-    base = list(bases_in_column)[0]
+    event_base = list(bases_in_event)[0]
     alignment_length = len(aligned_seqs[0].seq)
 
-    # Check if adjacent columns have ALL non-gap bases matching this base
-    # This confirms all sequences agree on homopolymer context
-    # IMPORTANT: Adjacent column must not itself be an indel column
+    # Check flanking columns for matching homopolymer context
+    # A valid flanking column must:
+    # 1. Not be an indel column (all sequences have bases, no gaps)
+    # 2. All bases match the event base
 
-    # Check previous column
-    if col_idx > 0:
-        prev_column = [str(seq.seq[col_idx - 1]) for seq in aligned_seqs]
-        prev_bases = set(c for c in prev_column if c != '-')
-        prev_has_gap = '-' in prev_column
-        # Must have all matching bases AND not be an indel column itself
-        if prev_bases == {base} and not prev_has_gap:
+    # Check left flank
+    if start_col > 0:
+        left_col = start_col - 1
+        left_column = [str(seq.seq[left_col]) for seq in aligned_seqs]
+        left_bases = set(c for c in left_column if c != '-')
+        left_has_gap = '-' in left_column
+
+        if not left_has_gap and left_bases == {event_base}:
             return True
 
-    # Check next column
-    if col_idx < alignment_length - 1:
-        next_column = [str(seq.seq[col_idx + 1]) for seq in aligned_seqs]
-        next_bases = set(c for c in next_column if c != '-')
-        next_has_gap = '-' in next_column
-        # Must have all matching bases AND not be an indel column itself
-        if next_bases == {base} and not next_has_gap:
+    # Check right flank
+    if end_col < alignment_length - 1:
+        right_col = end_col + 1
+        right_column = [str(seq.seq[right_col]) for seq in aligned_seqs]
+        right_bases = set(c for c in right_column if c != '-')
+        right_has_gap = '-' in right_column
+
+        if not right_has_gap and right_bases == {event_base}:
             return True
 
+    # No valid homopolymer flanking found
     return False
 
 
@@ -654,62 +676,66 @@ def analyze_msa_columns(aligned_seqs: List) -> dict:
     Distinguishes between structural indels (real insertions/deletions) and
     homopolymer indels (length differences in homopolymer runs like AAA vs AAAA).
 
+    Uses event-based classification: consecutive indel columns are grouped into
+    events, and each complete event is classified as homopolymer or structural.
+
     Important: All gaps (including terminal gaps) count as variant positions
     since variants within a group share the same primers.
 
     Returns dict with:
         'snp_count': number of positions with >1 non-gap base
-        'structural_indel_count': number of structural indel positions
-        'structural_indel_length': length of longest consecutive structural indel run
-        'homopolymer_indel_count': number of homopolymer indel positions
-        'homopolymer_indel_length': length of longest consecutive homopolymer indel run
-        'indel_count': total indel positions (for backward compatibility)
-        'max_indel_length': max consecutive indel length (for backward compatibility)
+        'structural_indel_count': number of structural indel events
+        'structural_indel_length': length of longest structural indel event
+        'homopolymer_indel_count': number of homopolymer indel events
+        'homopolymer_indel_length': length of longest homopolymer indel event
+        'indel_count': total indel events (for backward compatibility)
+        'max_indel_length': max indel event length (for backward compatibility)
     """
     alignment_length = len(aligned_seqs[0].seq)
 
-    snp_positions = []
-    structural_indel_positions = []
-    homopolymer_indel_positions = []
-
+    # Step 1: Count SNPs (unchanged logic)
+    snp_count = 0
     for col_idx in range(alignment_length):
         column = [str(seq.seq[col_idx]) for seq in aligned_seqs]
-
-        # Separate bases from gaps (all gaps count, including terminal)
         unique_bases = set(c for c in column if c != '-')
-        has_gap = '-' in column
-
-        # Skip all-gap columns (shouldn't happen with SPOA output)
-        if not unique_bases and has_gap:
-            continue
 
         # SNP position: multiple different bases (ignoring gaps)
         if len(unique_bases) > 1:
-            snp_positions.append(col_idx)
+            snp_count += 1
 
-        # Indel position: mix of gaps and bases
-        # Classify as homopolymer or structural
-        if has_gap and unique_bases:
-            if is_homopolymer_indel_column(aligned_seqs, col_idx):
-                homopolymer_indel_positions.append(col_idx)
-            else:
-                structural_indel_positions.append(col_idx)
+    # Step 2: Identify indel events (consecutive runs of indel columns)
+    indel_events = identify_indel_events(aligned_seqs, alignment_length)
 
-    # Calculate max consecutive lengths
-    max_structural_indel_length = calculate_max_consecutive(structural_indel_positions)
-    max_homopolymer_indel_length = calculate_max_consecutive(homopolymer_indel_positions)
+    # Step 3: Classify each event as homopolymer or structural
+    structural_events = []
+    homopolymer_events = []
 
-    # Combined indel metrics for backward compatibility
-    all_indel_positions = structural_indel_positions + homopolymer_indel_positions
-    max_indel_length = calculate_max_consecutive(sorted(all_indel_positions))
+    for start_col, end_col in indel_events:
+        if is_homopolymer_event(aligned_seqs, start_col, end_col):
+            homopolymer_events.append((start_col, end_col))
+        else:
+            structural_events.append((start_col, end_col))
+
+    # Step 4: Calculate statistics
+    # Count is number of events (not columns)
+    structural_indel_count = len(structural_events)
+    homopolymer_indel_count = len(homopolymer_events)
+
+    # Length is the size of the longest event
+    structural_indel_length = max((end - start + 1 for start, end in structural_events), default=0)
+    homopolymer_indel_length = max((end - start + 1 for start, end in homopolymer_events), default=0)
+
+    # Backward compatibility: total events and max length
+    total_indel_count = structural_indel_count + homopolymer_indel_count
+    max_indel_length = max(structural_indel_length, homopolymer_indel_length)
 
     return {
-        'snp_count': len(snp_positions),
-        'structural_indel_count': len(structural_indel_positions),
-        'structural_indel_length': max_structural_indel_length,
-        'homopolymer_indel_count': len(homopolymer_indel_positions),
-        'homopolymer_indel_length': max_homopolymer_indel_length,
-        'indel_count': len(all_indel_positions),  # Backward compatibility
+        'snp_count': snp_count,
+        'structural_indel_count': structural_indel_count,
+        'structural_indel_length': structural_indel_length,
+        'homopolymer_indel_count': homopolymer_indel_count,
+        'homopolymer_indel_length': homopolymer_indel_length,
+        'indel_count': total_indel_count,  # Backward compatibility
         'max_indel_length': max_indel_length  # Backward compatibility
     }
 

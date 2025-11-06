@@ -9,7 +9,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 - **Homopolymer-aware variant merging** - MSA-based merging now distinguishes structural indels from homopolymer length differences
-  - Analyzes SPOA alignment to classify each indel column as structural or homopolymer
+  - Analyzes SPOA alignment to classify each indel event (consecutive run) as structural or homopolymer
   - Homopolymer indels (e.g., AAA vs AAAA) are ignored when checking merge compatibility by default
   - Structural indels (true insertions/deletions) count against merge limits
   - Matches adjusted-identity semantics used throughout the pipeline
@@ -17,6 +17,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **`--disable-homopolymer-equivalence` option** - Allows strict identity merging when homopolymer length variation should be preserved
   - Treats all indels (both homopolymer and structural) as blocking merges
   - Useful for applications where homopolymer length variation is biologically significant
+
+### Fixed
+- **Indel event counting** - Corrected `--merge-position-count` to count indel events instead of indel columns
+  - Previously: A 3bp deletion counted as 3 positions, incorrectly limiting merging
+  - Now: Each consecutive indel run counts as 1 event, matching documented behavior
+  - Example: `--merge-position-count 3` now correctly allows up to 3 indel events (of any length ≤ `--merge-indel-length`)
+  - Event-based approach groups consecutive indel columns, then classifies each complete event as homopolymer or structural
 
 ### Changed
 - **Enhanced merge logging** - Merge messages now distinguish between structural indels and homopolymer indels
