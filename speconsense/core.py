@@ -20,7 +20,11 @@ from Bio import SeqIO
 from Bio.Seq import reverse_complement
 from tqdm import tqdm
 
-__version__ = "0.3.3"
+try:
+    from speconsense import __version__
+except ImportError:
+    # Fallback for when running as a script directly (e.g., in tests)
+    __version__ = "dev"
 
 # IUPAC nucleotide ambiguity codes mapping
 # Maps sets of nucleotides to their corresponding IUPAC code
