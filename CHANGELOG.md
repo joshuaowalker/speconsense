@@ -24,6 +24,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - Now: Each consecutive indel run counts as 1 event, matching documented behavior
   - Example: `--merge-position-count 3` now correctly allows up to 3 indel events (of any length ≤ `--merge-indel-length`)
   - Event-based approach groups consecutive indel columns, then classifies each complete event as homopolymer or structural
+- **SNP detection** - Fixed to exclude alignment columns containing gaps
+  - Previously: Columns with gaps and multiple bases (e.g., `['-', 'G', 'A']`) were incorrectly counted as both SNPs and indels
+  - Now: SNPs are only columns with multiple different bases and NO gaps
+  - Columns with gaps are exclusively classified as indels
 
 ### Changed
 - **Enhanced merge logging** - Merge messages now distinguish between structural indels and homopolymer indels

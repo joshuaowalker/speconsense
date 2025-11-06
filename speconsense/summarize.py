@@ -693,14 +693,16 @@ def analyze_msa_columns(aligned_seqs: List) -> dict:
     """
     alignment_length = len(aligned_seqs[0].seq)
 
-    # Step 1: Count SNPs (unchanged logic)
+    # Step 1: Count SNPs
     snp_count = 0
     for col_idx in range(alignment_length):
         column = [str(seq.seq[col_idx]) for seq in aligned_seqs]
         unique_bases = set(c for c in column if c != '-')
+        has_gap = '-' in column
 
-        # SNP position: multiple different bases (ignoring gaps)
-        if len(unique_bases) > 1:
+        # SNP position: multiple different bases with NO gaps
+        # Columns with gaps are indels, not SNPs
+        if len(unique_bases) > 1 and not has_gap:
             snp_count += 1
 
     # Step 2: Identify indel events (consecutive runs of indel columns)
