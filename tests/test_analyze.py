@@ -21,7 +21,7 @@ from speconsense.analyze import (
     parse_consensus_header,
     find_cluster_files,
     load_consensus_sequences,
-    align_read_to_consensus,
+    extract_alignments_from_msa,
     analyze_cluster,
     ClusterInfo
 )
@@ -66,32 +66,79 @@ def test_parse_consensus_header_no_cluster_number():
         assert "cluster number" in str(e).lower()
 
 
-def test_align_read_to_consensus_perfect_match():
-    """Test alignment of identical read and consensus."""
-    consensus = "ACGTACGTACGT"
-    read = "ACGTACGTACGT"
+def test_extract_alignments_from_msa_perfect_match():
+    """Test MSA extraction with perfect match."""
+    with tempfile.NamedTemporaryFile(mode='w', delete=False, suffix='.fasta') as f:
+        # MSA with consensus and one perfect match
+        f.write(">Consensus\n")
+        f.write("ACGTACGTACGT\n")
+        f.write(">read1\n")
+        f.write("ACGTACGTACGT\n")
+        f.flush()
+        msa_file = f.name
 
-    alignment = align_read_to_consensus(read, consensus, "read1")
+    try:
+        alignments, consensus = extract_alignments_from_msa(msa_file)
 
-    assert alignment.read_id == "read1"
-    assert alignment.edit_distance == 0
-    assert alignment.read_length == 12
-    assert alignment.num_insertions == 0
-    assert alignment.num_deletions == 0
-    assert alignment.num_substitutions == 0
+        assert consensus == "ACGTACGTACGT"
+        assert len(alignments) == 1
+        assert alignments[0].read_id == "read1"
+        assert alignments[0].edit_distance == 0
+        assert alignments[0].read_length == 12
+        assert alignments[0].num_insertions == 0
+        assert alignments[0].num_deletions == 0
+        assert alignments[0].num_substitutions == 0
+    finally:
+        os.unlink(msa_file)
 
 
-def test_align_read_to_consensus_with_errors():
-    """Test alignment with various error types."""
-    consensus = "ACGTACGTACGT"
-    # Introduce errors: substitution at pos 2, deletion at pos 6, insertion after pos 8
-    read = "ACTTACGTAACGT"  # C->T substitution, missing G, extra A
+def test_extract_alignments_from_msa_with_errors():
+    """Test MSA extraction with various error types."""
+    with tempfile.NamedTemporaryFile(mode='w', delete=False, suffix='.fasta') as f:
+        # MSA with consensus and reads with different error types
+        # Consensus: ACGTACGT (8 bases)
+        # read1: substitution at position 2 (G->T)
+        # read2: deletion at position 4 (A missing)
+        # read3: insertion after position 4 (extra A)
+        f.write(">Consensus\n")
+        f.write("ACGTA-CGT\n")  # Consensus has gap for read3's insertion
+        f.write(">read1\n")
+        f.write("ACGTT-CGT\n")  # Substitution at pos 4: A->T
+        f.write(">read2\n")
+        f.write("ACGT--CGT\n")  # Deletion at pos 4: A missing
+        f.write(">read3\n")
+        f.write("ACGTAACGT\n")  # Insertion after pos 4: extra A
+        f.flush()
+        msa_file = f.name
 
-    alignment = align_read_to_consensus(read, consensus, "read2")
+    try:
+        alignments, consensus = extract_alignments_from_msa(msa_file)
 
-    assert alignment.read_id == "read2"
-    assert alignment.edit_distance > 0
-    assert alignment.read_length == len(read)
+        assert consensus == "ACGTACGT"
+        assert len(alignments) == 3
+
+        # read1: 1 substitution
+        assert alignments[0].read_id == "read1"
+        assert alignments[0].edit_distance == 1
+        assert alignments[0].num_substitutions == 1
+        assert alignments[0].num_insertions == 0
+        assert alignments[0].num_deletions == 0
+
+        # read2: 1 deletion
+        assert alignments[1].read_id == "read2"
+        assert alignments[1].edit_distance == 1
+        assert alignments[1].num_deletions == 1
+        assert alignments[1].num_insertions == 0
+        assert alignments[1].num_substitutions == 0
+
+        # read3: 1 insertion
+        assert alignments[2].read_id == "read3"
+        assert alignments[2].edit_distance == 1
+        assert alignments[2].num_insertions == 1
+        assert alignments[2].num_deletions == 0
+        assert alignments[2].num_substitutions == 0
+    finally:
+        os.unlink(msa_file)
 
 
 def test_find_cluster_files():
@@ -193,6 +240,25 @@ def test_analyze_cluster_integration():
         with open(reads_file, 'w') as f:
             SeqIO.write(reads, f, 'fastq')
 
+        # Create MSA file
+        msa_file = os.path.join(tmpdir, 'test-msa.fasta')
+        with open(msa_file, 'w') as f:
+            # Consensus
+            f.write(">Consensus\n")
+            f.write("ACGTACGTACGTACGTACGT\n")
+            # read1: perfect match
+            f.write(">read1\n")
+            f.write("ACGTACGTACGTACGTACGT\n")
+            # read2: perfect match
+            f.write(">read2\n")
+            f.write("ACGTACGTACGTACGTACGT\n")
+            # read3: substitution at pos 2 (G->T)
+            f.write(">read3\n")
+            f.write("ACTTACGTACGTACGTACGT\n")
+            # read4: deletion at pos 15 (T missing)
+            f.write(">read4\n")
+            f.write("ACGTACGTACGTACG-ACGT\n")
+
         # Create ClusterInfo
         cluster_info = ClusterInfo(
             sample_name='test-c1',
@@ -202,7 +268,8 @@ def test_analyze_cluster_integration():
             ric=4,
             size=4,
             p50_diff=0.0,
-            p95_diff=1.0
+            p95_diff=1.0,
+            msa_file=msa_file
         )
 
         # Analyze cluster
@@ -230,19 +297,20 @@ def test_analyze_cluster_integration():
 
 
 def test_analyze_cluster_missing_file():
-    """Test that analyze_cluster handles missing reads file gracefully."""
+    """Test that analyze_cluster handles missing MSA file gracefully."""
     cluster_info = ClusterInfo(
         sample_name='test-c1',
         cluster_num=1,
         consensus_seq="ACGT",
         reads_file="/nonexistent/file.fastq",
         ric=10,
-        size=10
+        size=10,
+        msa_file="/nonexistent/msa.fasta"  # Missing MSA file
     )
 
     stats, alignments = analyze_cluster(cluster_info)
 
-    # Should return None for stats and empty list for alignments
+    # Should return None for stats and empty list for alignments when MSA is missing
     assert stats is None
     assert alignments == []
 
@@ -269,13 +337,30 @@ def test_cluster_error_rate_calculation():
         with open(reads_file, 'w') as f:
             SeqIO.write(reads, f, 'fastq')
 
+        # Create MSA file
+        msa_file = os.path.join(tmpdir, 'test-msa.fasta')
+        with open(msa_file, 'w') as f:
+            # Consensus
+            f.write(">Consensus\n")
+            f.write("A" * 100 + "\n")
+            # read1: perfect match
+            f.write(">read1\n")
+            f.write("A" * 100 + "\n")
+            # read2: 2 substitutions (positions 0 and 99)
+            f.write(">read2\n")
+            f.write("C" + "A" * 98 + "G\n")
+            # read3: 5 substitutions (positions 0-4)
+            f.write(">read3\n")
+            f.write("CCCCC" + "A" * 95 + "\n")
+
         cluster_info = ClusterInfo(
             sample_name='test-c1',
             cluster_num=1,
             consensus_seq=consensus_seq,
             reads_file=reads_file,
             ric=3,
-            size=3
+            size=3,
+            msa_file=msa_file
         )
 
         stats, alignments = analyze_cluster(cluster_info)
@@ -296,8 +381,8 @@ if __name__ == '__main__':
     test_parse_consensus_header_basic()
     test_parse_consensus_header_with_stability()
     test_parse_consensus_header_no_cluster_number()
-    test_align_read_to_consensus_perfect_match()
-    test_align_read_to_consensus_with_errors()
+    test_extract_alignments_from_msa_perfect_match()
+    test_extract_alignments_from_msa_with_errors()
     test_find_cluster_files()
     test_load_consensus_sequences()
     test_analyze_cluster_integration()

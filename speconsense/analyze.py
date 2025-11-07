@@ -18,7 +18,6 @@ import logging
 from typing import List, Dict, Tuple, Optional, NamedTuple
 from collections import defaultdict, Counter
 
-import edlib
 from Bio import SeqIO
 import numpy as np
 from scipy.optimize import curve_fit
@@ -39,6 +38,7 @@ class ClusterInfo(NamedTuple):
     size: int  # Total cluster size (from header)
     p50_diff: Optional[float] = None
     p95_diff: Optional[float] = None
+    msa_file: Optional[str] = None  # Path to MSA file (if available)
 
 
 class ErrorPosition(NamedTuple):
@@ -165,6 +165,43 @@ def find_cluster_files(output_dir: str, use_sampled: bool = False) -> Dict[Tuple
     return cluster_files
 
 
+def find_msa_files(output_dir: str) -> Dict[Tuple[str, int], str]:
+    """
+    Find all MSA FASTA files in the output directory.
+
+    Args:
+        output_dir: Path to speconsense output directory
+
+    Returns:
+        Dict mapping (sample_base_name, cluster_num) to MSA file path
+    """
+    cluster_debug_dir = os.path.join(output_dir, 'cluster_debug')
+    if not os.path.exists(cluster_debug_dir):
+        logging.warning(f"cluster_debug directory not found: {cluster_debug_dir}")
+        return {}
+
+    # Pattern for MSA files: {sample}-c{N}-RiC{M}-msa.fasta
+    pattern = os.path.join(cluster_debug_dir, '*-c*-RiC*-msa.fasta')
+
+    msa_files = {}
+    for file_path in glob.glob(pattern):
+        basename = os.path.basename(file_path)
+
+        # Extract sample name and cluster number
+        # Pattern: {sample}-c{num}-RiC{ric}-msa.fasta
+        match = re.match(r'(.+)-c(\d+)-RiC\d+-msa\.fasta$', basename)
+        if not match:
+            logging.warning(f"Cannot parse MSA file name: {basename}")
+            continue
+
+        sample_name = match.group(1)
+        cluster_num = int(match.group(2))
+
+        msa_files[(sample_name, cluster_num)] = file_path
+
+    return msa_files
+
+
 def load_consensus_sequences(output_dir: str) -> Dict[Tuple[str, int], ClusterInfo]:
     """
     Load consensus sequences from speconsense output FASTA files.
@@ -215,131 +252,135 @@ def load_consensus_sequences(output_dir: str) -> Dict[Tuple[str, int], ClusterIn
     return consensus_map
 
 
-def align_read_to_consensus(read_seq: str, consensus_seq: str, read_id: str) -> ReadAlignment:
+def extract_alignments_from_msa(msa_file: str) -> Tuple[List[ReadAlignment], str]:
     """
-    Align a read to its consensus sequence and extract error characteristics.
+    Extract read alignments from an MSA file.
+
+    The MSA contains aligned sequences where the consensus has header containing "Consensus".
+    This function compares each read to the consensus at each aligned position.
+
+    Error classification:
+    - Both '-': Not an error (read doesn't cover this position)
+    - Read '-', consensus base: Deletion (missing base in read)
+    - Read base, consensus '-': Insertion (extra base in read)
+    - Different bases: Substitution
+    - Same base: Match (not an error)
 
     Args:
-        read_seq: Read sequence
-        consensus_seq: Consensus sequence
-        read_id: Read identifier
+        msa_file: Path to MSA FASTA file
 
     Returns:
-        ReadAlignment with error statistics
+        Tuple of (list of ReadAlignment objects, consensus sequence without gaps)
     """
-    # Perform alignment with edlib
-    result = edlib.align(
-        read_seq,
-        consensus_seq,
-        mode='NW',  # Global alignment
-        task='path'  # Get full alignment path
-    )
+    # Parse MSA file
+    records = list(SeqIO.parse(msa_file, 'fasta'))
 
-    if result['editDistance'] == -1:
-        # Alignment failed
-        logging.warning(f"Alignment failed for read {read_id}")
-        return ReadAlignment(
-            read_id=read_id,
-            read_length=len(read_seq),
-            edit_distance=-1,
-            num_insertions=0,
-            num_deletions=0,
-            num_substitutions=0,
-            error_positions=[],
-            alignment_cigar=''
-        )
+    if not records:
+        logging.warning(f"No sequences found in MSA file: {msa_file}")
+        return [], ""
 
-    # Parse CIGAR string to count error types
-    cigar = result.get('cigar', '')
-    edit_distance = result['editDistance']
+    # Find consensus sequence
+    consensus_record = None
+    read_records = []
 
-    # Count error types from CIGAR
-    # CIGAR format: M (match/mismatch), I (insertion to ref), D (deletion from ref), X (mismatch), = (match)
-    insertions = cigar.count('I') if cigar else 0
-    deletions = cigar.count('D') if cigar else 0
+    for record in records:
+        if 'Consensus' in record.description or 'Consensus' in record.id:
+            consensus_record = record
+        else:
+            read_records.append(record)
 
-    # For substitutions, we need to count X operations (or infer from distance - indels)
-    # edlib uses: = (match), X (mismatch), I (insertion), D (deletion)
-    substitutions = cigar.count('X') if 'X' in cigar else 0
+    if consensus_record is None:
+        logging.warning(f"No consensus sequence found in MSA file: {msa_file}")
+        return [], ""
 
-    # If using simple CIGAR (only I/D/M), estimate substitutions
-    if substitutions == 0 and cigar.count('M') > 0:
-        # Estimate: total distance - insertions - deletions
-        substitutions = max(0, edit_distance - insertions - deletions)
+    consensus_aligned = str(consensus_record.seq).upper()
+    msa_length = len(consensus_aligned)
 
-    # Extract error positions from alignment
-    error_positions = extract_error_positions(result, consensus_seq)
-
-    return ReadAlignment(
-        read_id=read_id,
-        read_length=len(read_seq),
-        edit_distance=edit_distance,
-        num_insertions=insertions,
-        num_deletions=deletions,
-        num_substitutions=substitutions,
-        error_positions=error_positions,
-        alignment_cigar=cigar
-    )
-
-
-def extract_error_positions(alignment_result: dict, consensus_seq: str) -> List[ErrorPosition]:
-    """
-    Extract positions in the consensus where errors occur, with error types.
-
-    Args:
-        alignment_result: edlib alignment result dictionary
-        consensus_seq: Consensus sequence
-
-    Returns:
-        List of ErrorPosition objects with position and error type
-    """
-    cigar = alignment_result.get('cigar', '')
-    if not cigar:
-        return []
-
-    error_positions = []
+    # Build mapping from MSA position to consensus position (excluding gaps)
+    msa_to_consensus_pos = {}
     consensus_pos = 0
+    for msa_pos in range(msa_length):
+        if consensus_aligned[msa_pos] != '-':
+            msa_to_consensus_pos[msa_pos] = consensus_pos
+            consensus_pos += 1
 
-    # Parse CIGAR operations
-    i = 0
-    while i < len(cigar):
-        # Count consecutive digits
-        num_str = ''
-        while i < len(cigar) and cigar[i].isdigit():
-            num_str += cigar[i]
-            i += 1
+    # Get consensus without gaps for return value
+    consensus_ungapped = consensus_aligned.replace('-', '')
 
-        if i >= len(cigar):
-            break
+    # Process each read
+    alignments = []
 
-        count = int(num_str) if num_str else 1
-        op = cigar[i]
+    for read_record in read_records:
+        read_aligned = str(read_record.seq).upper()
 
-        if op == '=' or op == 'M':
-            # Match - advance position
-            if op == 'M':
-                # M could be match or mismatch; assume some are errors
-                # For more precise analysis, would need to compare sequences directly
-                pass
-            consensus_pos += count
-        elif op == 'X':
-            # Substitution (mismatch)
-            for j in range(count):
-                error_positions.append(ErrorPosition(consensus_pos, 'sub'))
-                consensus_pos += 1
-        elif op == 'D':
-            # Deletion from reference (gap in read)
-            for j in range(count):
+        if len(read_aligned) != msa_length:
+            logging.warning(f"Read {read_record.id} length mismatch with MSA length")
+            continue
+
+        # Compare read to consensus at each position
+        error_positions = []
+        num_insertions = 0
+        num_deletions = 0
+        num_substitutions = 0
+
+        for msa_pos in range(msa_length):
+            read_base = read_aligned[msa_pos]
+            cons_base = consensus_aligned[msa_pos]
+
+            # Skip if both are gaps (read doesn't cover this position)
+            if read_base == '-' and cons_base == '-':
+                continue
+
+            # Get consensus position for error reporting
+            if cons_base != '-':
+                consensus_pos = msa_to_consensus_pos[msa_pos]
+            else:
+                # For insertions (cons has gap), attribute to current consensus position
+                # Find the previous non-gap position in consensus
+                prev_msa_pos = msa_pos - 1
+                while prev_msa_pos >= 0 and consensus_aligned[prev_msa_pos] == '-':
+                    prev_msa_pos -= 1
+
+                if prev_msa_pos >= 0:
+                    consensus_pos = msa_to_consensus_pos[prev_msa_pos]
+                else:
+                    consensus_pos = 0
+
+            # Classify error type
+            if read_base == '-' and cons_base != '-':
+                # Deletion (missing base in read)
                 error_positions.append(ErrorPosition(consensus_pos, 'del'))
-                consensus_pos += 1
-        elif op == 'I':
-            # Insertion to reference (gap in consensus)
-            # Attribute to current consensus position
-            error_positions.append(ErrorPosition(consensus_pos, 'ins'))
+                num_deletions += 1
+            elif read_base != '-' and cons_base == '-':
+                # Insertion (extra base in read)
+                error_positions.append(ErrorPosition(consensus_pos, 'ins'))
+                num_insertions += 1
+            elif read_base != cons_base:
+                # Substitution (different bases)
+                error_positions.append(ErrorPosition(consensus_pos, 'sub'))
+                num_substitutions += 1
+            # else: match, no error
 
-        i += 1
+        # Calculate edit distance and read length
+        edit_distance = num_insertions + num_deletions + num_substitutions
+        read_length = len(read_aligned.replace('-', ''))  # Length without gaps
 
-    return error_positions
+        # Create alignment object
+        alignment = ReadAlignment(
+            read_id=read_record.id,
+            read_length=read_length,
+            edit_distance=edit_distance,
+            num_insertions=num_insertions,
+            num_deletions=num_deletions,
+            num_substitutions=num_substitutions,
+            error_positions=error_positions,
+            alignment_cigar=''  # CIGAR not available from MSA
+        )
+        alignments.append(alignment)
+
+    return alignments, consensus_ungapped
+
+
 
 
 def detect_contiguous_error_regions(error_positions: List[ErrorPosition], consensus_length: int, window_size: int = 50) -> bool:
@@ -780,10 +821,10 @@ def analyze_all_cluster_positions(
 
 def analyze_cluster(cluster_info: ClusterInfo) -> Tuple[ClusterStats, List[ReadAlignment]]:
     """
-    Analyze all reads in a cluster against their consensus.
+    Analyze all reads in a cluster against their consensus using MSA.
 
     Args:
-        cluster_info: Cluster information including reads file and consensus
+        cluster_info: Cluster information including MSA file and consensus
 
     Returns:
         Tuple of (cluster statistics, list of read alignments)
@@ -792,23 +833,44 @@ def analyze_cluster(cluster_info: ClusterInfo) -> Tuple[ClusterStats, List[ReadA
         logging.warning(f"Reads file not found: {cluster_info.reads_file}")
         return None, []
 
+    # Require MSA file
+    if not cluster_info.msa_file or not os.path.exists(cluster_info.msa_file):
+        logging.error(f"MSA file not found for {cluster_info.sample_name}: {cluster_info.msa_file}")
+        logging.error(f"  This tool requires MSA files generated by speconsense.")
+        logging.error(f"  Please re-run speconsense on your data to generate MSA files.")
+        return None, []
+
     consensus_seq = cluster_info.consensus_seq
-    alignments = []
     total_reads_in_file = 0
 
-    # Read and align all reads
+    # Count total reads in cluster file
     for record in SeqIO.parse(cluster_info.reads_file, 'fastq'):
         total_reads_in_file += 1
-        alignment = align_read_to_consensus(
-            str(record.seq),
-            consensus_seq,
-            record.id
-        )
-        if alignment.edit_distance >= 0:  # Skip failed alignments
-            alignments.append(alignment)
+
+    # Extract alignments from MSA
+    logging.debug(f"Using MSA for {cluster_info.sample_name}: {cluster_info.msa_file}")
+    alignments, consensus_from_msa = extract_alignments_from_msa(cluster_info.msa_file)
+
+    # Verify consensus matches
+    if consensus_from_msa and consensus_from_msa != consensus_seq:
+        # Show detailed mismatch information
+        logging.warning(f"Consensus mismatch for {cluster_info.sample_name}:")
+        logging.warning(f"  MSA consensus:      length={len(consensus_from_msa)}, "
+                      f"start={consensus_from_msa[:50]}..., end=...{consensus_from_msa[-50:]}")
+        logging.warning(f"  Expected consensus: length={len(consensus_seq)}, "
+                      f"start={consensus_seq[:50]}..., end=...{consensus_seq[-50:]}")
+
+        # Check if one is a substring of the other (primer trimming issue?)
+        if consensus_from_msa in consensus_seq:
+            logging.warning(f"  → MSA consensus is a substring of expected (primers may have been trimmed from MSA)")
+        elif consensus_seq in consensus_from_msa:
+            logging.warning(f"  → Expected consensus is a substring of MSA (primers may not be trimmed from MSA)")
+
+        # Use consensus from MSA as it's the one that was actually aligned
+        consensus_seq = consensus_from_msa
 
     if not alignments:
-        logging.warning(f"No successful alignments for {cluster_info.sample_name}")
+        logging.warning(f"No alignments found in MSA for {cluster_info.sample_name}")
         return None, []
 
     # Calculate statistics
@@ -1614,11 +1676,31 @@ def main():
         return 1
     logging.info(f"Found {len(cluster_files)} cluster files")
 
-    # Match consensus sequences with their reads files
+    # Find MSA files (required)
+    logging.info("Finding MSA files...")
+    msa_files = find_msa_files(args.output_dir)
+    if not msa_files:
+        logging.error("No MSA files found")
+        logging.error("This tool requires MSA files generated by speconsense.")
+        logging.error("Please re-run speconsense on your data to generate MSA files.")
+        return 1
+    logging.info(f"Found {len(msa_files)} MSA files")
+
+    # Match consensus sequences with their reads files and MSA files
     clusters_to_analyze = []
     for key, reads_file in cluster_files.items():
         if key in consensus_map:
-            cluster_info = consensus_map[key]._replace(reads_file=reads_file)
+            # Get MSA file (required)
+            msa_file = msa_files.get(key, None)
+            if not msa_file:
+                logging.warning(f"Skipping cluster {key} - no MSA file found")
+                continue
+
+            # Update cluster info with reads file and MSA file
+            cluster_info = consensus_map[key]._replace(
+                reads_file=reads_file,
+                msa_file=msa_file
+            )
 
             # Apply RiC filter
             if cluster_info.ric >= args.min_ric:

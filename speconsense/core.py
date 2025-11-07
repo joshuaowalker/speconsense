@@ -212,23 +212,28 @@ class SpecimenClusterer:
 
     def assess_cluster_stability(self, cluster: Set[str],
                                  num_trials: int = 100,
-                                 sample_size: int = 20) -> Tuple[str, Optional[float], Optional[float]]:
-        """Assess cluster stability through subsampling."""
+                                 sample_size: int = 20) -> Tuple[str, Optional[float], Optional[float], Optional[str]]:
+        """Assess cluster stability through subsampling.
+
+        Returns:
+            Tuple of (consensus, median_diff, p95_diff, msa) where msa is the full MSA output
+        """
         # If stability assessment is disabled, return consensus with no stability metrics
         if self.disable_stability:
             full_seqs = [self.sequences[seq_id] for seq_id in cluster]
-            full_consensus = self.run_spoa(full_seqs)
-            return full_consensus, None, None
+            full_consensus, msa = self.run_spoa(full_seqs)
+            return full_consensus, None, None, msa
 
         # If cluster is too small for proper sampling, return just the consensus
         if len(cluster) < sample_size + 1:
-            return self.run_spoa([self.sequences[seq_id] for seq_id in cluster]), None, None
+            consensus, msa = self.run_spoa([self.sequences[seq_id] for seq_id in cluster])
+            return consensus, None, None, msa
 
         # Generate full cluster consensus
         full_seqs = [self.sequences[seq_id] for seq_id in cluster]
-        full_consensus = self.run_spoa(full_seqs)
+        full_consensus, msa = self.run_spoa(full_seqs)
         if not full_consensus:
-            return "", None, None
+            return "", None, None, msa
 
         # Determine the number of trials to run
         # If the number of possible combinations is small, run each combination once
@@ -268,7 +273,7 @@ class SpecimenClusterer:
             if combinations:  # Use pre-generated combinations
                 for combo in combinations:
                     sampled_seqs = [self.sequences[seq_id] for seq_id in combo]
-                    trial_consensus = self.run_spoa(sampled_seqs)
+                    trial_consensus, _ = self.run_spoa(sampled_seqs)  # Ignore MSA from trials
 
                     if trial_consensus:
                         diff = self.calculate_consensus_distance(full_consensus, trial_consensus)
@@ -278,7 +283,7 @@ class SpecimenClusterer:
                 for _ in range(actual_trials):
                     sampled_ids = random.sample(list(cluster), sample_size)
                     sampled_seqs = [self.sequences[seq_id] for seq_id in sampled_ids]
-                    trial_consensus = self.run_spoa(sampled_seqs)
+                    trial_consensus, _ = self.run_spoa(sampled_seqs)  # Ignore MSA from trials
 
                     if trial_consensus:
                         diff = self.calculate_consensus_distance(full_consensus, trial_consensus)
@@ -295,7 +300,7 @@ class SpecimenClusterer:
             percentile_95 = None
             logging.warning("No valid trials completed for stability assessment")
 
-        return full_consensus, median_diff, percentile_95
+        return full_consensus, median_diff, percentile_95, msa
 
     def merge_similar_clusters(self, clusters: List[Set[str]]) -> List[Set[str]]:
         """
@@ -340,7 +345,13 @@ class SpecimenClusterer:
                 else:
                     sampled_seqs = [self.sequences[seq_id] for seq_id in cluster]
 
-                consensus = self.run_spoa(sampled_seqs)
+                consensus, _ = self.run_spoa(sampled_seqs)  # Ignore MSA for merging
+
+                # Skip empty clusters (can occur when all sequences are filtered out)
+                if consensus is None:
+                    logging.warning(f"Cluster {i} produced no consensus (empty cluster), skipping")
+                    pbar.update(1)
+                    continue
 
                 # Trim primers before comparison to merge clusters that differ only in primer regions
                 # The trimmed consensus is used only for comparison and discarded after merging
@@ -412,8 +423,9 @@ class SpecimenClusterer:
                             p95_diff: Optional[float] = None,
                             actual_size: Optional[int] = None,
                             consensus_fasta_handle = None,
-                            sampled_ids: Optional[Set[str]] = None) -> None:
-        """Write cluster files: reads FASTQ and consensus FASTA/FASTG."""
+                            sampled_ids: Optional[Set[str]] = None,
+                            msa: Optional[str] = None) -> None:
+        """Write cluster files: reads FASTQ, MSA, and consensus FASTA/FASTG."""
         cluster_size = len(cluster)
         ric_size = min(actual_size or cluster_size, self.max_sample_size)
 
@@ -440,6 +452,12 @@ class SpecimenClusterer:
             with open(sampled_file, 'w') as f:
                 for seq_id in sampled_ids:
                     SeqIO.write(self.records[seq_id], f, "fastq")
+
+        # Write MSA (multiple sequence alignment) to debug directory
+        if msa is not None:
+            msa_file = os.path.join(self.debug_dir, f"{self.sample_name}-c{cluster_num}-RiC{ric_size}-msa.fasta")
+            with open(msa_file, 'w') as f:
+                f.write(msa)
 
         # Write untrimmed consensus to debug directory
         with open(os.path.join(self.debug_dir, f"{self.sample_name}-c{cluster_num}-RiC{ric_size}-untrimmed.fasta"),
@@ -658,7 +676,7 @@ class SpecimenClusterer:
                         sampled_ids = cluster
 
                     # Generate consensus
-                    consensus, median_diff, p95_diff = self.assess_cluster_stability(
+                    consensus, median_diff, p95_diff, msa = self.assess_cluster_stability(
                         sampled_ids,
                         num_trials=getattr(self, 'num_trials', 100),
                         sample_size=getattr(self, 'stability_sample', 20)
@@ -684,7 +702,8 @@ class SpecimenClusterer:
                             p95_diff=p95_diff,
                             actual_size=actual_size,
                             consensus_fasta_handle=consensus_fasta_handle,
-                            sampled_ids=sampled_ids
+                            sampled_ids=sampled_ids,
+                            msa=msa
                         )
 
     def _create_id_mapping(self) -> None:
@@ -707,10 +726,15 @@ class SpecimenClusterer:
 
         return 1.0 - (result["editDistance"] / max(len(seq1), len(seq2)))
 
-    def run_spoa(self, sequences: List[str]) -> Optional[str]:
-        """Run SPOA to generate consensus sequence."""
+    def run_spoa(self, sequences: List[str]) -> Tuple[Optional[str], Optional[str]]:
+        """Run SPOA to generate consensus sequence and MSA.
+
+        Returns:
+            Tuple of (consensus_sequence, msa_fasta) where msa_fasta includes all
+            aligned sequences and the consensus
+        """
         if not sequences:
-            return None
+            return None, None
 
         try:
             # Create temporary input file
@@ -723,7 +747,7 @@ class SpecimenClusterer:
             cmd = [
                 "spoa",
                 temp_input,
-                "-r", "0",  # Result mode 0: consensus only
+                "-r", "2",  # Result mode 2: MSA + consensus (consensus is last)
                 "-l", "1",  # Global alignment mode
                 "-m", "5",  # Match score
                 "-n", "-4",  # Mismatch penalty
@@ -741,28 +765,38 @@ class SpecimenClusterer:
             # Clean up input file
             os.unlink(temp_input)
 
-            # Parse SPOA output for consensus sequence
+            # Parse SPOA output - capture both MSA and consensus
+            msa_output = result.stdout
             consensus = None
+            current_seq = []
+            is_consensus = False
             for line in result.stdout.split('\n'):
-                if not line.startswith('>') and line.strip():
-                    consensus = line.strip()
-                    break
+                if line.startswith('>'):
+                    # Check if this is the consensus sequence
+                    is_consensus = 'Consensus' in line
+                    current_seq = []
+                elif line.strip() and is_consensus:
+                    current_seq.append(line.strip())
+            # Extract the consensus sequence and remove gaps
+            # (consensus is part of MSA so will have gaps, but we want ungapped sequence)
+            if current_seq:
+                consensus = ''.join(current_seq).replace('-', '')
 
             if not consensus:
                 logging.warning("SPOA did not generate consensus sequence")
-                return sequences[0]  # Fall back to first sequence
+                return sequences[0], msa_output  # Fall back to first sequence
 
-            return consensus
+            return consensus, msa_output
 
         except subprocess.CalledProcessError as e:
             logging.error(f"SPOA failed with return code {e.returncode}")
             logging.error(f"Command: {' '.join(cmd)}")
             logging.error(f"Stderr: {e.stderr}")
-            return sequences[0]  # Fall back to first sequence
+            return sequences[0], None  # Fall back to first sequence
 
         except Exception as e:
             logging.error(f"Error running SPOA: {str(e)}")
-            return sequences[0]  # Fall back to first sequence
+            return sequences[0], None  # Fall back to first sequence
 
     def load_primers(self, primer_file: str) -> None:
         """Load primers from FASTA file with position awareness."""
