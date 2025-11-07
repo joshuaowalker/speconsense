@@ -31,6 +31,8 @@ dependencies = [
     "numpy>=1.20.0",
     "biopython>=1.79",
     "tqdm>=4.62.0",
+    "scipy>=1.7.0",
+    "matplotlib>=3.3.0",
     "adjusted-identity @ git+https://github.com/joshuaowalker/adjusted-identity.git",
 ]
 
@@ -43,6 +45,7 @@ Issues = "https://github.com/joshuaowalker/speconsense/issues"
 speconsense = "speconsense.cli:main"
 speconsense-summarize = "speconsense.summarize:main"
 speconsense-synth = "speconsense.synth:main"
+speconsense-analyze = "speconsense.analyze:main"
 
 [tool.setuptools.packages.find]
 where = ["."]
