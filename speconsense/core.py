@@ -2,6 +2,7 @@
 
 from collections import defaultdict
 import argparse
+import json
 import logging
 import os
 import random
@@ -12,6 +13,7 @@ import tempfile
 import math
 import itertools
 from typing import List, Set, Tuple, Optional, Dict, Any
+from datetime import datetime
 
 import edlib
 from adjusted_identity import score_alignment, AdjustmentParams
@@ -80,6 +82,60 @@ class SpecimenClusterer:
         os.makedirs(self.output_dir, exist_ok=True)
         self.debug_dir = os.path.join(self.output_dir, "cluster_debug")
         os.makedirs(self.debug_dir, exist_ok=True)
+
+        # Initialize attributes that may be set later
+        self.num_trials = None
+        self.stability_sample = None
+        self.input_file = None
+        self.augment_input = None
+        self.algorithm = None
+        self.orient_mode = None
+        self.primers_file = None
+
+    def write_metadata(self) -> None:
+        """Write run metadata to JSON file for use by post-processing tools."""
+        metadata = {
+            "version": __version__,
+            "timestamp": datetime.now().isoformat(),
+            "sample_name": self.sample_name,
+            "parameters": {
+                "algorithm": self.algorithm,
+                "min_identity": self.min_identity,
+                "inflation": self.inflation,
+                "min_size": self.min_size,
+                "min_cluster_ratio": self.min_cluster_ratio,
+                "max_sample_size": self.max_sample_size,
+                "presample_size": self.presample_size,
+                "k_nearest_neighbors": self.k_nearest_neighbors,
+                "disable_stability": self.disable_stability,
+                "disable_homopolymer_equivalence": self.disable_homopolymer_equivalence,
+                "stability_trials": self.num_trials,
+                "stability_sample": self.stability_sample,
+                "orient_mode": self.orient_mode,
+            },
+            "input_file": self.input_file,
+            "augment_input": self.augment_input,
+        }
+
+        # Add primer information if loaded
+        if hasattr(self, 'primers') and self.primers:
+            metadata["primers_file"] = self.primers_file
+            metadata["primers"] = {}
+
+            # Store primer sequences (avoid duplicates from RC versions)
+            seen_primers = set()
+            for primer_name, primer_seq in self.primers:
+                # Skip RC versions (they end with _RC)
+                if not primer_name.endswith('_RC') and primer_name not in seen_primers:
+                    metadata["primers"][primer_name] = primer_seq
+                    seen_primers.add(primer_name)
+
+        # Write metadata file
+        metadata_file = os.path.join(self.debug_dir, f"{self.sample_name}-metadata.json")
+        with open(metadata_file, 'w') as f:
+            json.dump(metadata, f, indent=2)
+
+        logging.info(f"Wrote run metadata to {metadata_file}")
 
     def add_sequences(self, records: List[SeqIO.SeqRecord],
                       augment_records: Optional[List[SeqIO.SeqRecord]] = None) -> None:
@@ -1226,8 +1282,13 @@ def main():
         output_dir=args.output_dir
     )
 
+    # Set additional attributes for metadata
     clusterer.num_trials = args.stability_trials
     clusterer.stability_sample = args.stability_sample
+    clusterer.input_file = os.path.abspath(args.input_file)
+    clusterer.augment_input = os.path.abspath(args.augment_input) if args.augment_input else None
+    clusterer.algorithm = args.algorithm
+    clusterer.orient_mode = args.orient_mode
 
     # Read primary sequences
     logging.info(f"Reading sequences from {args.input_file}")
@@ -1271,36 +1332,42 @@ def main():
     clusterer.add_sequences(records, augment_records)
 
     if args.primers:
+        clusterer.primers_file = os.path.abspath(args.primers)
         clusterer.load_primers(args.primers)
     else:
         # Look for primers.fasta in the same directory as the input file
         input_dir = os.path.dirname(os.path.abspath(args.input_file))
         auto_primer_path = os.path.join(input_dir, "primers.fasta")
-        
+
         if os.path.exists(auto_primer_path):
             logging.info(f"Found primers.fasta in input directory: {auto_primer_path}")
+            clusterer.primers_file = os.path.abspath(auto_primer_path)
             clusterer.load_primers(auto_primer_path)
         else:
             logging.warning("No primer file specified and primers.fasta not found in input directory. Primer trimming will be disabled.")
+            clusterer.primers_file = None
     
     # Handle sequence orientation based on mode
     if args.orient_mode != "skip":
         if hasattr(clusterer, 'forward_primers') and hasattr(clusterer, 'reverse_primers'):
             failed_sequences = clusterer.orient_sequences()
-            
+
             # Filter failed sequences if requested
             if args.orient_mode == "filter-failed" and failed_sequences:
                 logging.info(f"Filtering out {len(failed_sequences)} sequences with failed orientation")
-                
+
                 # Remove failed sequences from clusterer
                 for seq_id in failed_sequences:
                     del clusterer.sequences[seq_id]
                     del clusterer.records[seq_id]
-                
+
                 remaining = len(clusterer.sequences)
                 logging.info(f"Continuing with {remaining} successfully oriented sequences")
         else:
             logging.warning(f"--orient-mode={args.orient_mode} specified but no primers with position information loaded")
+
+    # Write metadata file for use by post-processing tools
+    clusterer.write_metadata()
 
     clusterer.cluster(algorithm=args.algorithm)
     print()

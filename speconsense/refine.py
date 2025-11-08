@@ -13,6 +13,7 @@ making outlier detection more reliable than per-cluster analysis.
 
 import argparse
 import glob
+import json
 import logging
 import os
 import sys
@@ -22,6 +23,7 @@ from typing import List, Tuple, Set, Optional, Dict
 import numpy as np
 from tqdm import tqdm
 from Bio import SeqIO
+import edlib
 
 # Import analysis functions from analyze module
 from speconsense.analyze import (
@@ -109,6 +111,37 @@ def setup_logging(log_level: str):
         level=getattr(logging, log_level),
         format='%(asctime)s - %(levelname)s - %(message)s'
     )
+
+
+def read_metadata(input_dir: str, sample_name: str) -> Optional[Dict]:
+    """
+    Read metadata file for a sample.
+
+    Args:
+        input_dir: Speconsense output directory
+        sample_name: Sample name (e.g., 'sample1-c1')
+
+    Returns:
+        Metadata dictionary or None if not found
+    """
+    # Extract base sample name (remove cluster suffix if present)
+    # sample_name might be like "sample1-c1" but metadata is for "sample1"
+    base_name = sample_name.split('-c')[0] if '-c' in sample_name else sample_name
+
+    metadata_file = os.path.join(input_dir, 'cluster_debug', f'{base_name}-metadata.json')
+
+    if not os.path.exists(metadata_file):
+        logging.debug(f"Metadata file not found: {metadata_file}")
+        return None
+
+    try:
+        with open(metadata_file, 'r') as f:
+            metadata = json.load(f)
+        logging.debug(f"Loaded metadata from {metadata_file}")
+        return metadata
+    except Exception as e:
+        logging.warning(f"Failed to read metadata file {metadata_file}: {e}")
+        return None
 
 
 def compute_global_statistics(
@@ -335,11 +368,82 @@ def run_spoa(sequences: List[str], max_sample_size: int = 100) -> Tuple[Optional
         os.unlink(temp_file)
 
 
+def trim_primers(sequence: str, primers: Dict[str, str]) -> Tuple[str, List[str]]:
+    """
+    Trim primers from start and end of sequence.
+
+    Args:
+        sequence: Sequence to trim
+        primers: Dict mapping primer names to sequences
+
+    Returns:
+        Tuple of (trimmed_sequence, [found_primers])
+    """
+    if not primers:
+        return sequence, []
+
+    # Convert primer dict to list of tuples (matching core.py format)
+    primer_list = list(primers.items())
+
+    found_primers = []
+    trimmed_seq = sequence
+
+    # Look for primer at 5' end
+    best_start_dist = float('inf')
+    best_start_primer = None
+    best_start_end = None
+
+    for primer_name, primer_seq in primer_list:
+        k = len(primer_seq) // 4  # Allow ~25% errors
+        search_region = sequence[:len(primer_seq) * 2]
+
+        result = edlib.align(primer_seq, search_region, task="path", mode="HW", k=k)
+
+        if result["editDistance"] != -1:
+            dist = result["editDistance"]
+            if dist < best_start_dist:
+                best_start_dist = dist
+                best_start_primer = primer_name
+                best_start_end = result["locations"][0][1] + 1
+
+    if best_start_primer:
+        logging.debug(f"Found {best_start_primer} at 5' end (dist={best_start_dist})")
+        found_primers.append(f"5'-{best_start_primer}")
+        trimmed_seq = trimmed_seq[best_start_end:]
+
+    # Look for primer at 3' end
+    best_end_dist = float('inf')
+    best_end_primer = None
+    best_end_start = None
+
+    for primer_name, primer_seq in primer_list:
+        k = len(primer_seq) // 4  # Allow ~25% errors
+        search_region = sequence[-len(primer_seq) * 2:]
+
+        result = edlib.align(primer_seq, search_region, task="path", mode="HW", k=k)
+
+        if result["editDistance"] != -1:
+            dist = result["editDistance"]
+            if dist < best_end_dist:
+                best_end_dist = dist
+                best_end_primer = primer_name
+                base_pos = len(trimmed_seq) - len(search_region)
+                best_end_start = base_pos + result["locations"][0][0]
+
+    if best_end_primer:
+        logging.debug(f"Found {best_end_primer} at 3' end (dist={best_end_dist})")
+        found_primers.append(f"3'-{best_end_primer}")
+        trimmed_seq = trimmed_seq[:best_end_start]
+
+    return trimmed_seq, found_primers
+
+
 def refine_cluster(
     cluster_info: ClusterInfo,
     outlier_read_ids: Set[str],
     output_dir: str,
-    max_sample_size: int = 100
+    max_sample_size: int = 100,
+    metadata: Optional[Dict] = None
 ) -> Tuple[Optional[str], int, int]:
     """
     Refine a single cluster by removing outliers and regenerating consensus.
@@ -348,11 +452,18 @@ def refine_cluster(
         cluster_info: Original cluster information
         outlier_read_ids: Set of read IDs to remove
         output_dir: Directory for refined output
-        max_sample_size: Maximum reads to use for consensus
+        max_sample_size: Maximum reads to use for consensus (can be overridden by metadata)
+        metadata: Optional metadata dict containing primers and other parameters
 
     Returns:
         Tuple of (consensus_sequence, num_reads_kept, num_reads_removed)
     """
+    # Use max_sample_size from metadata if available
+    if metadata and 'parameters' in metadata:
+        params = metadata['parameters']
+        if 'max_sample_size' in params and params['max_sample_size'] is not None:
+            max_sample_size = params['max_sample_size']
+            logging.debug(f"Using max_sample_size={max_sample_size} from metadata")
     # Load all reads from cluster file
     all_reads = list(SeqIO.parse(cluster_info.reads_file, 'fastq'))
 
@@ -417,7 +528,7 @@ def refine_cluster(
         with open(msa_file, 'w') as f:
             f.write(msa)
 
-    # Write untrimmed consensus (we're not doing primer trimming in this version)
+    # Write untrimmed consensus
     untrimmed_filename = f"{cluster_info.sample_name}-RiC{ric}-untrimmed.fasta"
     untrimmed_file = os.path.join(cluster_debug_dir, untrimmed_filename)
 
@@ -427,7 +538,27 @@ def refine_cluster(
     with open(untrimmed_file, 'w') as f:
         f.write(f"{header}\n{consensus}\n")
 
-    return consensus, num_kept, num_removed
+    # Perform primer trimming if primers are available in metadata
+    trimmed_consensus = consensus
+    if metadata and 'primers' in metadata and metadata['primers']:
+        primers = metadata['primers']
+        trimmed_consensus, found_primers = trim_primers(consensus, primers)
+
+        # Write trimmed consensus to main output file
+        output_filename = f"{cluster_info.sample_name}.fasta"
+        output_file = os.path.join(output_dir, output_filename)
+        with open(output_file, 'a') as f:  # Append mode for multiple clusters per sample
+            f.write(f"{header}\n{trimmed_consensus}\n")
+
+        logging.debug(f"Trimmed {cluster_info.sample_name}: {len(consensus)} -> {len(trimmed_consensus)} bp, found primers: {found_primers}")
+    else:
+        # No primers available, just copy untrimmed consensus to output
+        output_filename = f"{cluster_info.sample_name}.fasta"
+        output_file = os.path.join(output_dir, output_filename)
+        with open(output_file, 'a') as f:
+            f.write(f"{header}\n{consensus}\n")
+
+    return trimmed_consensus, num_kept, num_removed
 
 
 def main():
@@ -480,6 +611,29 @@ def main():
         logging.error("Please re-run speconsense on your data to generate MSA files.")
         return 1
     logging.info(f"Found {len(msa_files)} MSA files")
+
+    # Load metadata for each sample
+    logging.info("Loading run metadata...")
+    metadata_cache = {}  # Cache metadata by base sample name
+    sample_names = set()
+    for key in consensus_map.keys():
+        sample_name, cluster_num = key
+        # Extract base name (without cluster number)
+        base_name = sample_name.split('-c')[0] if '-c' in sample_name else sample_name
+        sample_names.add(base_name)
+
+    for base_name in sample_names:
+        metadata = read_metadata(args.input_dir, base_name)
+        if metadata:
+            metadata_cache[base_name] = metadata
+            logging.debug(f"Loaded metadata for sample: {base_name}")
+        else:
+            logging.debug(f"No metadata found for sample: {base_name}")
+
+    if metadata_cache:
+        logging.info(f"Loaded metadata for {len(metadata_cache)} samples")
+    else:
+        logging.warning("No metadata files found - will use default parameters")
 
     # Match consensus sequences with their reads files and MSA files
     clusters_to_analyze = []
@@ -622,12 +776,17 @@ def main():
             cluster_info_obj, alignments = cluster_info
             outlier_ids = cluster_outliers.get(cluster_info_obj, set())
 
+            # Get metadata for this cluster's sample
+            base_name = cluster_info_obj.sample_name.split('-c')[0] if '-c' in cluster_info_obj.sample_name else cluster_info_obj.sample_name
+            cluster_metadata = metadata_cache.get(base_name, None)
+
             # Refine the cluster
             consensus, num_kept, num_removed = refine_cluster(
                 cluster_info_obj,
                 outlier_ids,
                 args.output_dir,
-                max_sample_size=100  # Match speconsense default
+                max_sample_size=100,  # Default, will be overridden by metadata if available
+                metadata=cluster_metadata
             )
 
             total_reads_kept += num_kept
