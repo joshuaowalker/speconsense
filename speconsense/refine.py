@@ -84,6 +84,13 @@ def parse_arguments():
     )
 
     parser.add_argument(
+        '--min-alt-freq',
+        type=float,
+        default=0.20,
+        help="Minimum alternative allele frequency for variant detection (default: 0.20)"
+    )
+
+    parser.add_argument(
         '--use-sampled',
         action='store_true',
         help="Use sampled reads (*-sampled.fastq) instead of full cluster (*-reads.fastq)"
@@ -829,6 +836,117 @@ def main():
         logging.info(f"    Total reads kept: {total_reads_kept:,}")
         logging.info(f"    Total reads removed: {total_reads_removed:,}")
         logging.info(f"    Sample FASTA files written: {len(samples)}")
+
+        # STEP 5: Variant position analysis on refined clusters
+        logging.info("\nSTEP 5: Analyzing variant positions in refined clusters...")
+
+        # Import additional functions
+        from speconsense.analyze import (
+            analyze_positional_variation,
+            calculate_min_coverage_for_variant_detection,
+            is_variant_position_with_composition,
+            extract_alignments_from_msa
+        )
+
+        # Re-load refined MSA files and consensus sequences
+        refined_msa_files = find_msa_files(args.output_dir)
+        refined_consensus_map = load_consensus_sequences(args.output_dir)
+
+        if not refined_msa_files or not refined_consensus_map:
+            logging.warning("  No refined MSA files found - skipping variant analysis")
+        else:
+            # Calculate minimum coverage threshold
+            min_coverage = calculate_min_coverage_for_variant_detection(
+                min_alt_freq=args.min_alt_freq if hasattr(args, 'min_alt_freq') else 0.20,
+                global_error_rate=global_stats['read_p95_error_rate'],
+                confidence_sigma=3.0
+            )
+
+            logging.info(f"  Minimum coverage for variant detection: {min_coverage} reads")
+            logging.info(f"  Minimum alternative allele frequency: {args.min_alt_freq if hasattr(args, 'min_alt_freq') else 0.20:.1%}")
+
+            # Analyze each refined cluster
+            all_variant_positions = []
+
+            for key in refined_consensus_map.keys():
+                if key not in refined_msa_files:
+                    continue
+
+                cluster_info = refined_consensus_map[key]
+                msa_file = refined_msa_files[key]
+
+                # Skip low-coverage clusters
+                if cluster_info.ric < min_coverage:
+                    continue
+
+                # Extract alignments from MSA
+                alignments, consensus = extract_alignments_from_msa(msa_file)
+
+                if not alignments:
+                    continue
+
+                # Analyze positional variation with composition tracking
+                position_stats = analyze_positional_variation(
+                    alignments,
+                    consensus,
+                    global_stats['read_p95_error_rate'],
+                    msa_file=msa_file
+                )
+
+                # Identify variant positions
+                for pos_stat in position_stats:
+                    is_variant, variant_bases, reason = is_variant_position_with_composition(
+                        pos_stat,
+                        global_stats['read_p95_error_rate'],
+                        min_alt_freq=args.min_alt_freq if hasattr(args, 'min_alt_freq') else 0.20,
+                        confidence_sigma=3.0
+                    )
+
+                    if is_variant:
+                        all_variant_positions.append({
+                            'sample_name': cluster_info.sample_name,
+                            'cluster_num': cluster_info.cluster_num,
+                            'position': pos_stat.position,
+                            'coverage': pos_stat.coverage,
+                            'variant_bases': variant_bases,
+                            'base_composition': pos_stat.base_composition,
+                            'error_rate': pos_stat.error_rate,
+                            'is_homopolymer': pos_stat.is_homopolymer,
+                            'reason': reason
+                        })
+
+            # Report variant positions
+            logging.info(f"\n  Variant Position Detection Results:")
+            logging.info(f"    Total variant positions found: {len(all_variant_positions)}")
+
+            if all_variant_positions:
+                # Filter for high-priority variants (internal, non-homopolymer)
+                high_priority_variants = [
+                    v for v in all_variant_positions
+                    if not v['is_homopolymer']
+                    and v['position'] >= 20
+                ]
+
+                logging.info(f"    High-priority variants (non-HP, internal): {len(high_priority_variants)}")
+
+                if high_priority_variants:
+                    # Sort by error rate (highest first)
+                    high_priority_variants.sort(key=lambda x: x['error_rate'], reverse=True)
+
+                    logging.info(f"\n  Top 20 high-priority variant positions:")
+                    for i, v in enumerate(high_priority_variants[:20], 1):
+                        cluster_id = f"{v['sample_name']}"
+                        comp = v['base_composition']
+                        sorted_comp = sorted(comp.items(), key=lambda x: x[1], reverse=True)
+                        comp_str = ', '.join([f"{b}:{c}" for b, c in sorted_comp[:3]])
+
+                        logging.info(
+                            f"    {i}. {cluster_id} pos {v['position']}: "
+                            f"{v['error_rate']*100:.1f}% error, "
+                            f"cov={v['coverage']}, "
+                            f"bases=[{comp_str}], "
+                            f"variants={v['variant_bases']}"
+                        )
 
     logging.info("\n" + "="*80)
     logging.info("Refinement completed successfully!")

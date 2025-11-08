@@ -523,6 +523,7 @@ class PositionStats(NamedTuple):
     is_homopolymer: bool
     gc_content: float
     nucleotide: str
+    base_composition: Dict[str, int]  # {A: 50, C: 3, G: 45, T: 2, '-': 0}
 
 
 class ClusterPositionStats(NamedTuple):
@@ -544,7 +545,8 @@ class ClusterPositionStats(NamedTuple):
 def analyze_positional_variation(
     alignments: List[ReadAlignment],
     consensus_seq: str,
-    overall_error_rate: float
+    overall_error_rate: float,
+    msa_file: Optional[str] = None
 ) -> List[PositionStats]:
     """
     Analyze error rates at each position in the consensus sequence.
@@ -557,6 +559,7 @@ def analyze_positional_variation(
         alignments: List of read alignments
         consensus_seq: Consensus sequence
         overall_error_rate: Overall error rate for binomial test
+        msa_file: Optional path to MSA file for base composition analysis
 
     Returns:
         List of PositionStats for each consensus position
@@ -566,6 +569,13 @@ def analyze_positional_variation(
     # Build error frequency matrix
     # For each position: [sub_count, ins_count, del_count, total_coverage]
     error_matrix = np.zeros((consensus_len, 4), dtype=int)
+
+    # Build base composition matrix
+    # Initialize composition tracking for each position
+    base_composition_matrix = [
+        {'A': 0, 'C': 0, 'G': 0, 'T': 0, '-': 0}
+        for _ in range(consensus_len)
+    ]
 
     for alignment in alignments:
         # Count this read as coverage for all positions
@@ -583,6 +593,59 @@ def analyze_positional_variation(
                     error_matrix[pos, 1] += 1
                 elif error_pos.error_type == 'del':
                     error_matrix[pos, 2] += 1
+
+    # Parse MSA to get base composition if available
+    if msa_file and os.path.exists(msa_file):
+        try:
+            # Parse MSA file
+            records = list(SeqIO.parse(msa_file, 'fasta'))
+
+            # Find consensus sequence in MSA
+            consensus_record = None
+            read_records = []
+
+            for record in records:
+                if 'Consensus' in record.description or 'Consensus' in record.id:
+                    consensus_record = record
+                else:
+                    read_records.append(record)
+
+            if consensus_record:
+                consensus_aligned = str(consensus_record.seq).upper()
+
+                # Build mapping from MSA position to consensus position
+                msa_to_consensus_pos = {}
+                consensus_pos = 0
+                for msa_pos in range(len(consensus_aligned)):
+                    if consensus_aligned[msa_pos] != '-':
+                        msa_to_consensus_pos[msa_pos] = consensus_pos
+                        consensus_pos += 1
+
+                # Extract base at each consensus position from each read
+                for read_record in read_records:
+                    read_aligned = str(read_record.seq).upper()
+
+                    if len(read_aligned) != len(consensus_aligned):
+                        continue
+
+                    # Track what base each read has at each consensus position
+                    for msa_pos in range(len(consensus_aligned)):
+                        cons_base = consensus_aligned[msa_pos]
+                        read_base = read_aligned[msa_pos]
+
+                        # Only track at consensus positions (not insertion columns)
+                        if cons_base != '-' and msa_pos in msa_to_consensus_pos:
+                            cons_pos = msa_to_consensus_pos[msa_pos]
+
+                            # Normalize base
+                            if read_base in ['A', 'C', 'G', 'T', '-']:
+                                base_composition_matrix[cons_pos][read_base] += 1
+                            else:
+                                # Treat N or other ambiguous as gap
+                                base_composition_matrix[cons_pos]['-'] += 1
+
+        except Exception as e:
+            logging.warning(f"Failed to parse MSA for base composition: {e}")
 
     # Calculate statistics for each position
     position_stats = []
@@ -612,6 +675,9 @@ def analyze_positional_variation(
         gc_content = calculate_local_gc(consensus_seq, pos, window=10)
         nucleotide = consensus_seq[pos] if pos < len(consensus_seq) else 'N'
 
+        # Get base composition for this position
+        base_comp = base_composition_matrix[pos].copy()
+
         position_stats.append(PositionStats(
             position=pos,
             coverage=coverage,
@@ -623,7 +689,8 @@ def analyze_positional_variation(
             p_value=p_value,
             is_homopolymer=is_homopolymer,
             gc_content=gc_content,
-            nucleotide=nucleotide
+            nucleotide=nucleotide,
+            base_composition=base_comp
         ))
 
     # Apply FDR correction
@@ -648,10 +715,134 @@ def analyze_positional_variation(
             p_value=adjusted_p_values[i],  # Use adjusted p-value (q-value)
             is_homopolymer=stats.is_homopolymer,
             gc_content=stats.gc_content,
-            nucleotide=stats.nucleotide
+            nucleotide=stats.nucleotide,
+            base_composition=stats.base_composition
         ))
 
     return position_stats_with_fdr
+
+
+def calculate_min_coverage_for_variant_detection(
+    min_alt_freq: float,
+    global_error_rate: float,
+    confidence_sigma: float = 3.0
+) -> int:
+    """
+    Calculate minimum coverage needed to distinguish variant from random error.
+
+    Uses statistical threshold: k_alt > μ + c×σ where k_alt = n × f_alt
+
+    Args:
+        min_alt_freq: Minimum alternative allele frequency (e.g., 0.20 for 20%)
+        global_error_rate: Global error rate (e.g., 0.05 for 5%)
+        confidence_sigma: Confidence level in standard deviations (default: 3.0)
+
+    Returns:
+        Minimum coverage required for reliable variant detection
+    """
+    p = global_error_rate
+    f = min_alt_freq
+    c = confidence_sigma
+
+    # Avoid division by zero or invalid cases
+    if f <= p:
+        # Cannot distinguish if alternative frequency <= error rate
+        return 10000  # Effectively infinite
+
+    # Solve: n × f > n × p + c × √(n × p × (1-p))
+    # Squaring: n² × (f - p)² > c² × n × p × (1-p)
+    # n > c² × p × (1-p) / (f - p)²
+    min_n = (c**2 * p * (1 - p)) / ((f - p)**2)
+
+    return int(np.ceil(min_n))
+
+
+def is_variant_position_with_composition(
+    position_stats: PositionStats,
+    global_error_rate: float,
+    min_alt_freq: float = 0.20,
+    confidence_sigma: float = 3.0
+) -> Tuple[bool, List[str], str]:
+    """
+    Identify variant positions using composition analysis and statistical thresholds.
+
+    This function determines if a position shows systematic variation (true biological
+    variant) rather than scattered sequencing errors.
+
+    Criteria for variant detection:
+    1. Coverage must meet statistical minimum for the given min_alt_freq
+    2. At least one alternative allele must have frequency ≥ min_alt_freq
+    3. Alternative allele count must exceed random error threshold (μ + c×σ)
+
+    Args:
+        position_stats: Position statistics including base composition
+        global_error_rate: Global error rate (e.g., 0.05 for 5%)
+        min_alt_freq: Minimum alternative allele frequency (default: 0.20 for 20%)
+        confidence_sigma: Confidence level for statistical test (default: 3.0)
+
+    Returns:
+        Tuple of (is_variant, variant_bases, reason)
+        - is_variant: True if this position requires cluster separation
+        - variant_bases: List of alternative bases with freq ≥ min_alt_freq (e.g., ['G', 'T'])
+        - reason: Explanation of decision for logging/debugging
+    """
+    n = position_stats.coverage
+    p = global_error_rate
+    base_composition = position_stats.base_composition
+
+    # Step 1: Check minimum coverage
+    min_n = calculate_min_coverage_for_variant_detection(
+        min_alt_freq, p, confidence_sigma
+    )
+
+    if n < min_n:
+        return False, [], f"Insufficient coverage ({n} < {min_n} required)"
+
+    # Step 2: Analyze base composition
+    if not base_composition or sum(base_composition.values()) == 0:
+        return False, [], "No composition data available"
+
+    sorted_bases = sorted(
+        base_composition.items(),
+        key=lambda x: x[1],
+        reverse=True
+    )
+
+    if len(sorted_bases) < 2:
+        return False, [], "No alternative alleles observed"
+
+    consensus_base = sorted_bases[0][0]
+    consensus_count = sorted_bases[0][1]
+
+    # Step 3: Check each alternative allele
+    variant_bases = []
+    variant_details = []
+
+    # Calculate error threshold for this coverage
+    mu = n * p
+    sigma = np.sqrt(n * p * (1 - p))
+    count_threshold = mu + confidence_sigma * sigma
+
+    for base, count in sorted_bases[1:]:
+        f_alt = count / n if n > 0 else 0
+
+        # Must meet frequency threshold
+        if f_alt < min_alt_freq:
+            continue
+
+        # Must exceed statistical threshold for count
+        if count > count_threshold:
+            variant_bases.append(base)
+            variant_details.append(f"{base}:{count}/{n}({f_alt:.1%})")
+
+    if variant_bases:
+        return True, variant_bases, f"Variant alleles: {', '.join(variant_details)}"
+
+    # High error count but no systematic pattern (scattered errors)
+    if position_stats.error_count > count_threshold:
+        return False, [], f"Errors scattered across {len([b for b, c in sorted_bases[1:] if c > 0])} bases, no systematic variant"
+
+    return False, [], "No variants detected"
 
 
 class WindowStats(NamedTuple):
