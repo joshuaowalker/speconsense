@@ -570,6 +570,10 @@ def analyze_positional_variation(
     # For each position: [sub_count, ins_count, del_count, total_coverage]
     error_matrix = np.zeros((consensus_len, 4), dtype=int)
 
+    # Track which reads have errors at each position (for binomial test)
+    # Set of read indices with at least one error at each position
+    reads_with_errors = [set() for _ in range(consensus_len)]
+
     # Build base composition matrix
     # Initialize composition tracking for each position
     base_composition_matrix = [
@@ -577,7 +581,7 @@ def analyze_positional_variation(
         for _ in range(consensus_len)
     ]
 
-    for alignment in alignments:
+    for read_idx, alignment in enumerate(alignments):
         # Count this read as coverage for all positions
         # (assuming full-length alignments; could be refined with alignment bounds)
         for pos in range(consensus_len):
@@ -593,6 +597,9 @@ def analyze_positional_variation(
                     error_matrix[pos, 1] += 1
                 elif error_pos.error_type == 'del':
                     error_matrix[pos, 2] += 1
+
+                # Track that this read has an error at this position
+                reads_with_errors[pos].add(read_idx)
 
     # Parse MSA to get base composition if available
     if msa_file and os.path.exists(msa_file):
@@ -657,13 +664,19 @@ def analyze_positional_variation(
         del_count = error_matrix[pos, 2]
         coverage = error_matrix[pos, 3]
 
+        # Total error events (can exceed coverage if multiple insertions per read)
         error_count = sub_count + ins_count + del_count
         error_rate = error_count / coverage if coverage > 0 else 0.0
+
+        # For binomial test, use number of reads with errors (not total error events)
+        # This ensures k <= n for the binomial distribution
+        num_reads_with_errors = len(reads_with_errors[pos])
 
         # Binomial test: is this position's error rate significantly different from overall?
         # Using one-tailed test since we're interested in high error rates
         if coverage > 0:
-            result = binomtest(error_count, coverage, overall_error_rate, alternative='greater')
+            # Use num_reads_with_errors for binomial test (k <= n guaranteed)
+            result = binomtest(num_reads_with_errors, coverage, overall_error_rate, alternative='greater')
             p_value = result.pvalue
         else:
             p_value = 1.0
