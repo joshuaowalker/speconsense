@@ -107,26 +107,62 @@ def setup_logging(log_level: str):
     )
 
 
-def compute_global_statistics(all_cluster_stats: List[ClusterStats]) -> dict:
+def compute_global_statistics(
+    all_cluster_stats: List[ClusterStats],
+    all_cluster_alignments: List[Tuple[ClusterInfo, List[ReadAlignment]]]
+) -> dict:
     """
     Compute global error statistics across all clusters.
 
+    Computes statistics at two levels:
+    1. Cluster-level: mean/median across cluster mean error rates
+    2. Read-level: percentiles from ALL individual read error rates
+
+    Args:
+        all_cluster_stats: Cluster-level statistics
+        all_cluster_alignments: Individual read alignments for all clusters
+
     Returns dictionary with global thresholds and distributions.
     """
-    # Collect all error rates
-    all_error_rates = [stats.mean_error_rate for stats in all_cluster_stats]
+    # Cluster-level statistics
+    cluster_error_rates = [stats.mean_error_rate for stats in all_cluster_stats]
+    cluster_edit_distances = [stats.mean_edit_distance for stats in all_cluster_stats]
 
-    # Collect all edit distances from cluster statistics
-    all_mean_edit_distances = [stats.mean_edit_distance for stats in all_cluster_stats]
+    # Read-level statistics: collect ALL individual read error rates
+    all_read_error_rates = []
+    all_read_edit_distances = []
+
+    for cluster_info, alignments in all_cluster_alignments:
+        consensus_length = len(cluster_info.consensus_seq)
+        if consensus_length == 0:
+            continue
+
+        for alignment in alignments:
+            # Calculate per-read error rate
+            error_rate = alignment.edit_distance / consensus_length
+            all_read_error_rates.append(error_rate)
+            all_read_edit_distances.append(alignment.edit_distance)
 
     global_stats = {
-        'mean_error_rate': np.mean(all_error_rates),
-        'median_error_rate': np.median(all_error_rates),
-        'std_error_rate': np.std(all_error_rates),
-        'p95_error_rate': np.percentile(all_error_rates, 95),
-        'p99_error_rate': np.percentile(all_error_rates, 99),
-        'mean_edit_distance': np.mean(all_mean_edit_distances),
-        'p95_edit_distance': np.percentile(all_mean_edit_distances, 95),
+        # Cluster-level statistics
+        'cluster_mean_error_rate': np.mean(cluster_error_rates),
+        'cluster_median_error_rate': np.median(cluster_error_rates),
+        'cluster_std_error_rate': np.std(cluster_error_rates),
+
+        # Read-level statistics (for outlier detection)
+        'read_mean_error_rate': np.mean(all_read_error_rates),
+        'read_median_error_rate': np.median(all_read_error_rates),
+        'read_std_error_rate': np.std(all_read_error_rates),
+        'read_p95_error_rate': np.percentile(all_read_error_rates, 95),
+        'read_p99_error_rate': np.percentile(all_read_error_rates, 99),
+
+        # Edit distance statistics
+        'mean_edit_distance': np.mean(cluster_edit_distances),
+        'p95_edit_distance': np.percentile(cluster_edit_distances, 95),
+
+        # Counts
+        'num_clusters': len(all_cluster_stats),
+        'num_reads': len(all_read_error_rates),
     }
 
     return global_stats
@@ -255,18 +291,25 @@ def main():
         return 1
 
     # Compute global statistics
-    global_stats = compute_global_statistics(all_cluster_stats)
+    global_stats = compute_global_statistics(all_cluster_stats, all_cluster_alignments)
 
     logging.info("\nGlobal Error Statistics:")
-    logging.info(f"  Mean error rate: {global_stats['mean_error_rate']*100:.2f}%")
-    logging.info(f"  Median error rate: {global_stats['median_error_rate']*100:.2f}%")
-    logging.info(f"  Std dev error rate: {global_stats['std_error_rate']*100:.2f}%")
-    logging.info(f"  P95 error rate: {global_stats['p95_error_rate']*100:.2f}%")
-    logging.info(f"  P99 error rate: {global_stats['p99_error_rate']*100:.2f}%")
+    logging.info(f"  Analyzed {global_stats['num_clusters']:,} clusters with {global_stats['num_reads']:,} total reads")
+    logging.info(f"\n  Cluster-level statistics (mean of cluster means):")
+    logging.info(f"    Mean error rate: {global_stats['cluster_mean_error_rate']*100:.2f}%")
+    logging.info(f"    Median error rate: {global_stats['cluster_median_error_rate']*100:.2f}%")
+    logging.info(f"    Std dev: {global_stats['cluster_std_error_rate']*100:.2f}%")
+    logging.info(f"\n  Read-level statistics (all individual reads):")
+    logging.info(f"    Mean error rate: {global_stats['read_mean_error_rate']*100:.2f}%")
+    logging.info(f"    Median error rate: {global_stats['read_median_error_rate']*100:.2f}%")
+    logging.info(f"    Std dev: {global_stats['read_std_error_rate']*100:.2f}%")
+    logging.info(f"    P95: {global_stats['read_p95_error_rate']*100:.2f}%")
+    logging.info(f"    P99: {global_stats['read_p99_error_rate']*100:.2f}%")
 
     # STEP 2: Identify outlier reads
     logging.info("\nSTEP 2: Identifying outlier reads...")
-    outlier_threshold = global_stats['p95_error_rate']
+    outlier_threshold = global_stats['read_p95_error_rate']
+    logging.info(f"  Using read-level P95 threshold: {outlier_threshold*100:.2f}%")
 
     total_reads = 0
     total_outliers = 0
