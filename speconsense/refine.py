@@ -12,12 +12,13 @@ making outlier detection more reliable than per-cluster analysis.
 """
 
 import argparse
+import glob
 import logging
 import os
 import sys
 import subprocess
 import tempfile
-from typing import List, Tuple, Set, Optional
+from typing import List, Tuple, Set, Optional, Dict
 import numpy as np
 from tqdm import tqdm
 from Bio import SeqIO
@@ -171,6 +172,46 @@ def compute_global_statistics(
     return global_stats
 
 
+def map_msa_ids_to_read_ids(cluster_info: ClusterInfo, alignments: List[ReadAlignment]) -> Dict[str, str]:
+    """
+    Map MSA sequence IDs (seq0, seq1, etc.) to actual read IDs.
+
+    The MSA uses generic seq0, seq1, ... IDs. We need to map these back to the
+    actual read IDs from the sampled FASTQ file that was used to generate the MSA.
+
+    Args:
+        cluster_info: Cluster metadata
+        alignments: Read alignments from MSA (with seq0, seq1, ... IDs)
+
+    Returns:
+        Dict mapping MSA ID (e.g., 'seq0') to actual read ID
+    """
+    # Find the sampled FASTQ file
+    # Pattern: {sample_name}-RiC{N}-sampled.fastq
+    cluster_debug_dir = os.path.dirname(cluster_info.reads_file)
+    sampled_pattern = os.path.join(cluster_debug_dir, f"{cluster_info.sample_name}-RiC*-sampled.fastq")
+
+    sampled_files = glob.glob(sampled_pattern)
+
+    if not sampled_files:
+        # No sampled file means all reads were used (cluster size <= max_sample_size)
+        # In this case, use the reads file directly
+        sampled_file = cluster_info.reads_file
+    else:
+        sampled_file = sampled_files[0]
+
+    # Load sampled reads in order
+    sampled_reads = list(SeqIO.parse(sampled_file, 'fastq'))
+
+    # Create mapping: seq0 -> first read ID, seq1 -> second read ID, etc.
+    msa_to_read_id = {}
+    for i, read in enumerate(sampled_reads):
+        msa_id = f"seq{i}"
+        msa_to_read_id[msa_id] = read.id
+
+    return msa_to_read_id
+
+
 def identify_outlier_reads(
     cluster_info: ClusterInfo,
     alignments: List[ReadAlignment],
@@ -185,8 +226,11 @@ def identify_outlier_reads(
         global_threshold: Global error rate threshold (e.g., p95)
 
     Returns:
-        Tuple of (keep_read_ids, outlier_read_ids)
+        Tuple of (keep_read_ids, outlier_read_ids) using actual read IDs
     """
+    # Map MSA IDs (seq0, seq1, ...) to actual read IDs
+    msa_to_read_id = map_msa_ids_to_read_ids(cluster_info, alignments)
+
     keep_reads = []
     outlier_reads = []
 
@@ -195,10 +239,13 @@ def identify_outlier_reads(
     for alignment in alignments:
         error_rate = alignment.edit_distance / consensus_length if consensus_length > 0 else 0
 
+        # Get actual read ID (not seqN)
+        actual_read_id = msa_to_read_id.get(alignment.read_id, alignment.read_id)
+
         if error_rate <= global_threshold:
-            keep_reads.append(alignment.read_id)
+            keep_reads.append(actual_read_id)
         else:
-            outlier_reads.append(alignment.read_id)
+            outlier_reads.append(actual_read_id)
 
     return keep_reads, outlier_reads
 
@@ -314,6 +361,12 @@ def refine_cluster(
 
     num_kept = len(filtered_reads)
     num_removed = len(all_reads) - num_kept
+
+    # Debug logging
+    if num_removed > 0:
+        logging.debug(f"{cluster_info.sample_name}: Removed {num_removed}/{len(all_reads)} reads (outlier_ids={len(outlier_read_ids)})")
+    elif len(outlier_read_ids) > 0:
+        logging.warning(f"{cluster_info.sample_name}: {len(outlier_read_ids)} outlier IDs provided but no reads removed! First outlier ID: {list(outlier_read_ids)[0] if outlier_read_ids else 'none'}, First read ID: {all_reads[0].id if all_reads else 'none'}")
 
     if num_kept == 0:
         logging.warning(f"Cluster {cluster_info.sample_name} has no reads after filtering!")
@@ -510,7 +563,7 @@ def main():
 
         if outlier_reads:
             clusters_with_outliers += 1
-            logging.debug(f"{cluster_info.sample_name}: {len(outlier_reads)}/{len(alignments)} outliers")
+            logging.debug(f"{cluster_info.sample_name}: {len(outlier_reads)}/{len(alignments)} outliers, IDs={list(outlier_reads)[:3]}...")
 
     logging.info(f"\nOutlier Detection Results:")
     logging.info(f"  Total reads: {total_reads:,}")
