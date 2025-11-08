@@ -15,9 +15,12 @@ import argparse
 import logging
 import os
 import sys
-from typing import List, Tuple
+import subprocess
+import tempfile
+from typing import List, Tuple, Set, Optional
 import numpy as np
 from tqdm import tqdm
+from Bio import SeqIO
 
 # Import analysis functions from analyze module
 from speconsense.analyze import (
@@ -200,6 +203,180 @@ def identify_outlier_reads(
     return keep_reads, outlier_reads
 
 
+def run_spoa(sequences: List[str], max_sample_size: int = 100) -> Tuple[Optional[str], Optional[str]]:
+    """
+    Run SPOA to generate consensus sequence and MSA.
+
+    Args:
+        sequences: List of sequences to align
+        max_sample_size: Maximum number of sequences to use
+
+    Returns:
+        Tuple of (consensus_sequence, msa_fasta) or (None, None) on failure
+    """
+    if not sequences:
+        return None, None
+
+    # Sample if too many sequences
+    if len(sequences) > max_sample_size:
+        import random
+        sequences = random.sample(sequences, max_sample_size)
+
+    # Write sequences to temporary file
+    with tempfile.NamedTemporaryFile(mode='w', delete=False, suffix='.fasta') as f:
+        for i, seq in enumerate(sequences):
+            f.write(f">seq{i}\n{seq}\n")
+        temp_file = f.name
+
+    try:
+        # Run SPOA with MSA output
+        result = subprocess.run(
+            ['spoa', temp_file, '-r', '2'],  # -r 2: output MSA + consensus
+            capture_output=True,
+            text=True,
+            check=True
+        )
+
+        # Parse output to extract consensus and MSA
+        lines = result.stdout.strip().split('\n')
+        if not lines:
+            return None, None
+
+        # Find consensus (last sequence with header containing "Consensus")
+        consensus = None
+        msa_lines = []
+        current_seq = []
+        current_header = None
+
+        for line in lines:
+            if line.startswith('>'):
+                # Save previous sequence
+                if current_header is not None:
+                    seq_str = ''.join(current_seq)
+                    msa_lines.append(current_header)
+                    msa_lines.append(seq_str)
+
+                    if 'Consensus' in current_header:
+                        consensus = seq_str.replace('-', '')  # Remove gaps from consensus
+
+                # Start new sequence
+                current_header = line
+                current_seq = []
+            else:
+                current_seq.append(line.strip())
+
+        # Don't forget last sequence
+        if current_header is not None:
+            seq_str = ''.join(current_seq)
+            msa_lines.append(current_header)
+            msa_lines.append(seq_str)
+
+            if 'Consensus' in current_header:
+                consensus = seq_str.replace('-', '')
+
+        msa = '\n'.join(msa_lines) if msa_lines else None
+
+        return consensus, msa
+
+    except subprocess.CalledProcessError as e:
+        logging.error(f"SPOA failed: {e}")
+        return None, None
+    except FileNotFoundError:
+        logging.error("SPOA not found in PATH. Please install SPOA.")
+        return None, None
+    finally:
+        os.unlink(temp_file)
+
+
+def refine_cluster(
+    cluster_info: ClusterInfo,
+    outlier_read_ids: Set[str],
+    output_dir: str,
+    max_sample_size: int = 100
+) -> Tuple[Optional[str], int, int]:
+    """
+    Refine a single cluster by removing outliers and regenerating consensus.
+
+    Args:
+        cluster_info: Original cluster information
+        outlier_read_ids: Set of read IDs to remove
+        output_dir: Directory for refined output
+        max_sample_size: Maximum reads to use for consensus
+
+    Returns:
+        Tuple of (consensus_sequence, num_reads_kept, num_reads_removed)
+    """
+    # Load all reads from cluster file
+    all_reads = list(SeqIO.parse(cluster_info.reads_file, 'fastq'))
+
+    # Filter out outliers
+    filtered_reads = [r for r in all_reads if r.id not in outlier_read_ids]
+
+    num_kept = len(filtered_reads)
+    num_removed = len(all_reads) - num_kept
+
+    if num_kept == 0:
+        logging.warning(f"Cluster {cluster_info.sample_name} has no reads after filtering!")
+        return None, 0, num_removed
+
+    # Create output directories
+    cluster_debug_dir = os.path.join(output_dir, 'cluster_debug')
+    os.makedirs(cluster_debug_dir, exist_ok=True)
+
+    # Determine RiC (size after filtering)
+    ric = min(num_kept, max_sample_size)
+
+    # Write filtered reads file
+    reads_filename = f"{cluster_info.sample_name}-RiC{ric}-reads.fastq"
+    reads_file = os.path.join(cluster_debug_dir, reads_filename)
+    with open(reads_file, 'w') as f:
+        SeqIO.write(filtered_reads, f, 'fastq')
+
+    # Sample reads if necessary
+    if num_kept > max_sample_size:
+        import random
+        sampled_reads = random.sample(filtered_reads, max_sample_size)
+
+        # Write sampled reads
+        sampled_filename = f"{cluster_info.sample_name}-RiC{ric}-sampled.fastq"
+        sampled_file = os.path.join(cluster_debug_dir, sampled_filename)
+        with open(sampled_file, 'w') as f:
+            SeqIO.write(sampled_reads, f, 'fastq')
+
+        consensus_reads = sampled_reads
+    else:
+        consensus_reads = filtered_reads
+
+    # Extract sequences for SPOA
+    sequences = [str(r.seq) for r in consensus_reads]
+
+    # Generate consensus and MSA
+    consensus, msa = run_spoa(sequences, max_sample_size)
+
+    if consensus is None:
+        logging.warning(f"Failed to generate consensus for {cluster_info.sample_name}")
+        return None, num_kept, num_removed
+
+    # Write MSA file
+    if msa:
+        msa_filename = f"{cluster_info.sample_name}-RiC{ric}-msa.fasta"
+        msa_file = os.path.join(cluster_debug_dir, msa_filename)
+        with open(msa_file, 'w') as f:
+            f.write(msa)
+
+    # Write untrimmed consensus (we're not doing primer trimming in this version)
+    untrimmed_filename = f"{cluster_info.sample_name}-RiC{ric}-untrimmed.fasta"
+    untrimmed_file = os.path.join(cluster_debug_dir, untrimmed_filename)
+
+    # Create header with metadata (no stability metrics)
+    header = f">{cluster_info.sample_name} size={num_kept} ric={ric}"
+
+    with open(untrimmed_file, 'w') as f:
+        f.write(f"{header}\n{consensus}\n")
+
+    return consensus, num_kept, num_removed
+
+
 def main():
     """Main entry point for speconsense-refine."""
     args = parse_arguments()
@@ -315,6 +492,9 @@ def main():
     total_outliers = 0
     clusters_with_outliers = 0
 
+    # Store outliers for each cluster
+    cluster_outliers = {}  # Maps cluster_info to set of outlier read IDs
+
     for cluster_info, alignments in tqdm(all_cluster_alignments, desc="Finding outliers", unit="cluster"):
         keep_reads, outlier_reads = identify_outlier_reads(
             cluster_info,
@@ -324,6 +504,9 @@ def main():
 
         total_reads += len(alignments)
         total_outliers += len(outlier_reads)
+
+        # Store outliers for this cluster
+        cluster_outliers[cluster_info] = set(outlier_reads)
 
         if outlier_reads:
             clusters_with_outliers += 1
@@ -366,16 +549,77 @@ def main():
                 logging.info(f"    {i}. {cluster_id} pos {ps.position}: {ps.error_rate*100:.1f}% error")
 
     # TODO: STEP 4: Subdivide clusters based on high-priority variant positions
-    # TODO: STEP 5: Write refined clusters to output directory
+    # (Will implement variant-based subdivision in future version)
 
+    # STEP 5: Refine clusters by removing outliers and regenerating consensus
     if args.dry_run:
         logging.info("\nDRY RUN: Analysis complete, no files written")
     else:
-        logging.info("\nTODO: Write refined cluster files")
-        # Will implement cluster writing in future commits
+        logging.info("\nSTEP 4: Refining clusters...")
+        logging.info(f"  Removing outliers and regenerating consensus sequences")
+
+        # Track refinement results
+        refined_consensus_seqs = []  # List of (sample_name, consensus_seq, ric, size)
+        total_reads_kept = 0
+        total_reads_removed = 0
+        clusters_failed = 0
+
+        # Refine each cluster
+        for cluster_info in tqdm(all_cluster_alignments, desc="Refining clusters", unit="cluster"):
+            cluster_info_obj, alignments = cluster_info
+            outlier_ids = cluster_outliers.get(cluster_info_obj, set())
+
+            # Refine the cluster
+            consensus, num_kept, num_removed = refine_cluster(
+                cluster_info_obj,
+                outlier_ids,
+                args.output_dir,
+                max_sample_size=100  # Match speconsense default
+            )
+
+            total_reads_kept += num_kept
+            total_reads_removed += num_removed
+
+            if consensus:
+                refined_consensus_seqs.append((
+                    cluster_info_obj.sample_name,
+                    consensus,
+                    min(num_kept, 100),  # RiC
+                    num_kept  # Size
+                ))
+            else:
+                clusters_failed += 1
+
+        # Write combined consensus FASTA files (one per sample)
+        logging.info(f"\n  Writing refined consensus sequences...")
+
+        # Group by sample base name
+        from collections import defaultdict
+        samples = defaultdict(list)
+
+        for sample_name, consensus, ric, size in refined_consensus_seqs:
+            # Extract base sample name (before first '-c')
+            base_name = sample_name.split('-c')[0] if '-c' in sample_name else sample_name
+            samples[base_name].append((sample_name, consensus, ric, size))
+
+        # Write one FASTA file per sample
+        for base_name, consensus_list in samples.items():
+            output_fasta = os.path.join(args.output_dir, f"{base_name}-all.fasta")
+
+            with open(output_fasta, 'w') as f:
+                for sample_name, consensus, ric, size in consensus_list:
+                    header = f">{sample_name} size={size} ric={ric}"
+                    f.write(f"{header}\n{consensus}\n")
+
+        logging.info(f"\n  Refinement Results:")
+        logging.info(f"    Clusters refined: {len(refined_consensus_seqs)}")
+        logging.info(f"    Clusters failed: {clusters_failed}")
+        logging.info(f"    Total reads kept: {total_reads_kept:,}")
+        logging.info(f"    Total reads removed: {total_reads_removed:,}")
+        logging.info(f"    Sample FASTA files written: {len(samples)}")
 
     logging.info("\n" + "="*80)
-    logging.info("Refinement analysis completed successfully!")
+    logging.info("Refinement completed successfully!")
     logging.info("="*80)
 
     return 0
