@@ -63,7 +63,8 @@ class SpecimenClusterer:
                  k_nearest_neighbors: int = 20,
                  sample_name: str = "sample",
                  disable_homopolymer_equivalence: bool = False,
-                 output_dir: str = "clusters"):
+                 output_dir: str = "clusters",
+                 mean_error_rate: Optional[float] = None):
         self.min_identity = min_identity
         self.inflation = inflation
         self.min_size = min_size
@@ -74,10 +75,17 @@ class SpecimenClusterer:
         self.sample_name = sample_name
         self.disable_homopolymer_equivalence = disable_homopolymer_equivalence
         self.output_dir = output_dir
+        self.mean_error_rate = mean_error_rate
         self.sequences = {}  # id -> sequence string
         self.records = {}  # id -> SeqRecord object
         self.id_map = {}  # short_id -> original_id
         self.rev_id_map = {}  # original_id -> short_id
+
+        # Calculate outlier threshold from mean error rate
+        self.outlier_threshold = None
+        if mean_error_rate is not None:
+            OUTLIER_THRESHOLD_MULTIPLIER = 3.0
+            self.outlier_threshold = mean_error_rate * OUTLIER_THRESHOLD_MULTIPLIER
 
         # Create output directory and debug subdirectory
         os.makedirs(self.output_dir, exist_ok=True)
@@ -107,6 +115,8 @@ class SpecimenClusterer:
                 "presample_size": self.presample_size,
                 "k_nearest_neighbors": self.k_nearest_neighbors,
                 "disable_homopolymer_equivalence": self.disable_homopolymer_equivalence,
+                "mean_error_rate": self.mean_error_rate,
+                "outlier_threshold": self.outlier_threshold,
                 "orient_mode": self.orient_mode,
             },
             "input_file": self.input_file,
@@ -653,6 +663,33 @@ class SpecimenClusterer:
                     if consensus and msa:
                         mean_var, median_var, p95_var = self.calculate_read_variance(msa, consensus)
 
+                    # Optional: Remove outlier reads and regenerate consensus
+                    if (self.outlier_threshold is not None and consensus and msa and
+                        p95_var is not None and p95_var > self.outlier_threshold):
+
+                        # Identify outliers
+                        keep_ids, outlier_ids = self.identify_outlier_reads(
+                            msa, consensus, sampled_ids, self.outlier_threshold
+                        )
+
+                        if outlier_ids:
+                            logging.info(f"Cluster {i}: Removing {len(outlier_ids)}/{len(sampled_ids)} outlier reads "
+                                       f"(P95 variance {p95_var*100:.1f}% > threshold {self.outlier_threshold*100:.1f}%), "
+                                       f"regenerating consensus")
+
+                            # Update sampled_ids to exclude outliers
+                            sampled_ids = keep_ids
+
+                            # Regenerate consensus with filtered reads
+                            sampled_seqs = [self.sequences[seq_id] for seq_id in sampled_ids]
+                            consensus, msa = self.run_spoa(sampled_seqs)
+
+                            # Recalculate variance
+                            if consensus and msa:
+                                mean_var, median_var, p95_var = self.calculate_read_variance(msa, consensus)
+                                logging.info(f"Cluster {i}: After outlier removal, "
+                                           f"P95 variance reduced to {p95_var*100:.1f}%")
+
                     # For merged homopolymer-equivalent clusters, the consensus is already correct
                     # (we use the consensus from the larger cluster during merging)
 
@@ -769,6 +806,69 @@ class SpecimenClusterer:
         except Exception as e:
             logging.error(f"Error running SPOA: {str(e)}")
             return sequences[0], None  # Fall back to first sequence
+
+    def identify_outlier_reads(self, msa_string: str, consensus_seq: str, sampled_ids: Set[str],
+                              threshold: float) -> Tuple[Set[str], Set[str]]:
+        """Identify outlier reads that exceed error rate threshold.
+
+        Args:
+            msa_string: MSA in FASTA format from SPOA
+            consensus_seq: Ungapped consensus sequence
+            sampled_ids: Set of read IDs that were sampled (in order written to SPOA)
+            threshold: Error rate threshold (e.g., mean × 3.0)
+
+        Returns:
+            Tuple of (keep_ids, outlier_ids) where both are sets of actual read IDs
+        """
+        if not msa_string or not consensus_seq:
+            return sampled_ids, set()
+
+        try:
+            # Write MSA to temporary file for parsing
+            with tempfile.NamedTemporaryFile(mode='w', delete=False, suffix='.fasta') as f:
+                f.write(msa_string)
+                temp_msa_file = f.name
+
+            try:
+                # Extract alignments from MSA
+                alignments, _, _ = extract_alignments_from_msa(temp_msa_file)
+
+                if not alignments:
+                    logging.debug(f"No alignments found in MSA for outlier detection")
+                    return sampled_ids, set()
+
+                # Map MSA IDs (seq0, seq1, ...) to actual read IDs
+                # SPOA writes sequences in the order they were provided
+                sampled_list = list(sampled_ids)
+                msa_to_read_id = {f"seq{i}": sampled_list[i] for i in range(len(sampled_list))}
+
+                keep_ids = set()
+                outlier_ids = set()
+
+                consensus_length = len(consensus_seq)
+                if consensus_length == 0:
+                    return sampled_ids, set()
+
+                for alignment in alignments:
+                    error_rate = alignment.edit_distance / consensus_length
+
+                    # Get actual read ID
+                    actual_read_id = msa_to_read_id.get(alignment.read_id, alignment.read_id)
+
+                    if error_rate <= threshold:
+                        keep_ids.add(actual_read_id)
+                    else:
+                        outlier_ids.add(actual_read_id)
+
+                return keep_ids, outlier_ids
+
+            finally:
+                # Clean up temporary file
+                os.unlink(temp_msa_file)
+
+        except Exception as e:
+            logging.warning(f"Failed to identify outlier reads: {e}")
+            return sampled_ids, set()
 
     def calculate_read_variance(self, msa_string: str, consensus_seq: str) -> Tuple[Optional[float], Optional[float], Optional[float]]:
         """Calculate per-read variance (edit distance to consensus) from MSA.
@@ -1211,6 +1311,10 @@ def main():
                         help="Minimum size ratio between a cluster and the largest cluster (default: 0.2, 0 to disable)")
     parser.add_argument("--max-sample-size", type=int, default=500,
                         help="Maximum cluster size for consensus (default: 500)")
+    parser.add_argument("--mean-error-rate", type=float, default=None,
+                        help="Estimated mean read-to-consensus error rate (e.g., 0.013 for 1.3%%). "
+                             "When set, outlier reads exceeding threshold (mean × 3.0) will be removed "
+                             "and consensus regenerated. Leave unset to disable outlier removal.")
     parser.add_argument("--presample", type=int, default=1000,
                         help="Presample size for initial reads (default: 1000, 0 to disable)")
     parser.add_argument("--k-nearest-neighbors", type=int, default=5,
@@ -1248,8 +1352,14 @@ def main():
         k_nearest_neighbors=args.k_nearest_neighbors,
         sample_name=sample,
         disable_homopolymer_equivalence=args.disable_homopolymer_equivalence,
-        output_dir=args.output_dir
+        output_dir=args.output_dir,
+        mean_error_rate=args.mean_error_rate
     )
+
+    # Log outlier removal configuration if enabled
+    if args.mean_error_rate is not None:
+        logging.info(f"Outlier removal enabled: mean_error_rate={args.mean_error_rate*100:.2f}%, "
+                    f"threshold={clusterer.outlier_threshold*100:.2f}%")
 
     # Set additional attributes for metadata
     clusterer.input_file = os.path.abspath(args.input_file)
