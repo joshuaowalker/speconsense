@@ -22,6 +22,9 @@ from Bio import SeqIO
 from Bio.Seq import reverse_complement
 from tqdm import tqdm
 
+# Import analysis functions for variance calculation
+from speconsense.analyze import extract_alignments_from_msa
+
 try:
     from speconsense import __version__
 except ImportError:
@@ -58,7 +61,6 @@ class SpecimenClusterer:
                  max_sample_size: int = 500,
                  presample_size: int = 1000,
                  k_nearest_neighbors: int = 20,
-                 disable_stability: bool = False,
                  sample_name: str = "sample",
                  disable_homopolymer_equivalence: bool = False,
                  output_dir: str = "clusters"):
@@ -69,7 +71,6 @@ class SpecimenClusterer:
         self.max_sample_size = max_sample_size
         self.presample_size = presample_size
         self.k_nearest_neighbors = k_nearest_neighbors
-        self.disable_stability = disable_stability
         self.sample_name = sample_name
         self.disable_homopolymer_equivalence = disable_homopolymer_equivalence
         self.output_dir = output_dir
@@ -84,8 +85,6 @@ class SpecimenClusterer:
         os.makedirs(self.debug_dir, exist_ok=True)
 
         # Initialize attributes that may be set later
-        self.num_trials = None
-        self.stability_sample = None
         self.input_file = None
         self.augment_input = None
         self.algorithm = None
@@ -107,10 +106,7 @@ class SpecimenClusterer:
                 "max_sample_size": self.max_sample_size,
                 "presample_size": self.presample_size,
                 "k_nearest_neighbors": self.k_nearest_neighbors,
-                "disable_stability": self.disable_stability,
                 "disable_homopolymer_equivalence": self.disable_homopolymer_equivalence,
-                "stability_trials": self.num_trials,
-                "stability_sample": self.stability_sample,
                 "orient_mode": self.orient_mode,
             },
             "input_file": self.input_file,
@@ -266,98 +262,6 @@ class SpecimenClusterer:
             logging.error(f"Stderr: {e.stderr}")
             raise
 
-    def assess_cluster_stability(self, cluster: Set[str],
-                                 num_trials: int = 100,
-                                 sample_size: int = 20) -> Tuple[str, Optional[float], Optional[float], Optional[str]]:
-        """Assess cluster stability through subsampling.
-
-        Returns:
-            Tuple of (consensus, median_diff, p95_diff, msa) where msa is the full MSA output
-        """
-        # If stability assessment is disabled, return consensus with no stability metrics
-        if self.disable_stability:
-            full_seqs = [self.sequences[seq_id] for seq_id in cluster]
-            full_consensus, msa = self.run_spoa(full_seqs)
-            return full_consensus, None, None, msa
-
-        # If cluster is too small for proper sampling, return just the consensus
-        if len(cluster) < sample_size + 1:
-            consensus, msa = self.run_spoa([self.sequences[seq_id] for seq_id in cluster])
-            return consensus, None, None, msa
-
-        # Generate full cluster consensus
-        full_seqs = [self.sequences[seq_id] for seq_id in cluster]
-        full_consensus, msa = self.run_spoa(full_seqs)
-        if not full_consensus:
-            return "", None, None, msa
-
-        # Determine the number of trials to run
-        # If the number of possible combinations is small, run each combination once
-        # otherwise run the specified number of random trials
-        total_combinations = math.comb(len(cluster), sample_size)
-        if total_combinations <= num_trials:
-            # Enumerate all combinations
-            if total_combinations <= 10000:  # Practical limit for combinations
-                all_ids = list(cluster)
-                combinations = []
-
-                def generate_combinations(start, current_combination):
-                    if len(current_combination) == sample_size:
-                        combinations.append(current_combination.copy())
-                        return
-                    for i in range(start, len(all_ids)):
-                        current_combination.append(all_ids[i])
-                        generate_combinations(i + 1, current_combination)
-                        current_combination.pop()
-
-                generate_combinations(0, [])
-                actual_trials = total_combinations
-                trial_mode = "exhaustive"
-            else:
-                # Too many combinations, revert to random sampling
-                combinations = None
-                actual_trials = num_trials
-                trial_mode = "random"
-        else:
-            combinations = None
-            actual_trials = num_trials
-            trial_mode = "random"
-
-        # Run stability trials and collect differences
-        differences = []
-        with tqdm(total=actual_trials, desc="Assessing cluster stability") as pbar:
-            if combinations:  # Use pre-generated combinations
-                for combo in combinations:
-                    sampled_seqs = [self.sequences[seq_id] for seq_id in combo]
-                    trial_consensus, _ = self.run_spoa(sampled_seqs)  # Ignore MSA from trials
-
-                    if trial_consensus:
-                        diff = self.calculate_consensus_distance(full_consensus, trial_consensus)
-                        differences.append(diff)
-                    pbar.update(1)
-            else:  # Use random sampling
-                for _ in range(actual_trials):
-                    sampled_ids = random.sample(list(cluster), sample_size)
-                    sampled_seqs = [self.sequences[seq_id] for seq_id in sampled_ids]
-                    trial_consensus, _ = self.run_spoa(sampled_seqs)  # Ignore MSA from trials
-
-                    if trial_consensus:
-                        diff = self.calculate_consensus_distance(full_consensus, trial_consensus)
-                        differences.append(diff)
-                    pbar.update(1)
-
-        if differences:
-            median_diff = statistics.median(differences)
-            percentile_95 = np.percentile(differences, 95)
-            logging.info(f"Stability assessment completed: median_diff={median_diff:.1f}, "
-                         f"p95_diff={percentile_95:.1f} ({len(differences)} {trial_mode} trials)")
-        else:
-            median_diff = None
-            percentile_95 = None
-            logging.warning("No valid trials completed for stability assessment")
-
-        return full_consensus, median_diff, percentile_95, msa
-
     def merge_similar_clusters(self, clusters: List[Set[str]]) -> List[Set[str]]:
         """
         Merge clusters whose consensus sequences are identical or homopolymer-equivalent.
@@ -475,23 +379,32 @@ class SpecimenClusterer:
     def write_cluster_files(self, cluster_num: int, cluster: Set[str],
                             consensus: str, trimmed_consensus: Optional[str] = None,
                             found_primers: Optional[List[str]] = None,
-                            median_diff: Optional[float] = None,
-                            p95_diff: Optional[float] = None,
+                            mean_var: Optional[float] = None,
+                            median_var: Optional[float] = None,
+                            p95_var: Optional[float] = None,
                             actual_size: Optional[int] = None,
                             consensus_fasta_handle = None,
                             sampled_ids: Optional[Set[str]] = None,
                             msa: Optional[str] = None) -> None:
-        """Write cluster files: reads FASTQ, MSA, and consensus FASTA/FASTG."""
+        """Write cluster files: reads FASTQ, MSA, and consensus FASTA.
+
+        Variance metrics measure per-read edit distance to consensus:
+        - Low variance: good clustering and accurate consensus
+        - High variance: may indicate read errors OR imperfect clustering/consensus
+        """
         cluster_size = len(cluster)
         ric_size = min(actual_size or cluster_size, self.max_sample_size)
 
         # Create info string with size first
         info_parts = [f"size={cluster_size}", f"ric={ric_size}"]
 
-        if median_diff is not None:
-            info_parts.append(f"p50diff={median_diff:.1f}")
-        if p95_diff is not None:
-            info_parts.append(f"p95diff={p95_diff:.1f}")
+        # Add variance metrics (as percentages for readability)
+        if mean_var is not None:
+            info_parts.append(f"var_mean={mean_var*100:.1f}")
+        if median_var is not None:
+            info_parts.append(f"var_med={median_var*100:.1f}")
+        if p95_var is not None:
+            info_parts.append(f"var_p95={p95_var*100:.1f}")
         if found_primers:
             info_parts.append(f"primers={','.join(found_primers)}")
         info_str = " ".join(info_parts)
@@ -731,12 +644,14 @@ class SpecimenClusterer:
                     else:
                         sampled_ids = cluster
 
-                    # Generate consensus
-                    consensus, median_diff, p95_diff, msa = self.assess_cluster_stability(
-                        sampled_ids,
-                        num_trials=getattr(self, 'num_trials', 100),
-                        sample_size=getattr(self, 'stability_sample', 20)
-                    )
+                    # Generate consensus and MSA
+                    sampled_seqs = [self.sequences[seq_id] for seq_id in sampled_ids]
+                    consensus, msa = self.run_spoa(sampled_seqs)
+
+                    # Calculate per-read variance from MSA
+                    mean_var, median_var, p95_var = None, None, None
+                    if consensus and msa:
+                        mean_var, median_var, p95_var = self.calculate_read_variance(msa, consensus)
 
                     # For merged homopolymer-equivalent clusters, the consensus is already correct
                     # (we use the consensus from the larger cluster during merging)
@@ -754,8 +669,9 @@ class SpecimenClusterer:
                             consensus=consensus,
                             trimmed_consensus=trimmed_consensus,
                             found_primers=found_primers,
-                            median_diff=median_diff,
-                            p95_diff=p95_diff,
+                            mean_var=mean_var,
+                            median_var=median_var,
+                            p95_var=p95_var,
                             actual_size=actual_size,
                             consensus_fasta_handle=consensus_fasta_handle,
                             sampled_ids=sampled_ids,
@@ -853,6 +769,66 @@ class SpecimenClusterer:
         except Exception as e:
             logging.error(f"Error running SPOA: {str(e)}")
             return sequences[0], None  # Fall back to first sequence
+
+    def calculate_read_variance(self, msa_string: str, consensus_seq: str) -> Tuple[Optional[float], Optional[float], Optional[float]]:
+        """Calculate per-read variance (edit distance to consensus) from MSA.
+
+        Variance measures the difference between individual reads and the consensus sequence.
+        In well-clustered data with accurate consensus, this approximates the sequencing error rate.
+        High variance may indicate either high sequencing error OR imperfect clustering/consensus.
+
+        Args:
+            msa_string: MSA in FASTA format (string) generated by SPOA
+            consensus_seq: Ungapped consensus sequence
+
+        Returns:
+            Tuple of (mean_variance, median_variance, p95_variance) as fractions (0.0-1.0)
+            Returns (None, None, None) if MSA cannot be parsed or has no valid reads
+        """
+        if not msa_string or not consensus_seq:
+            return None, None, None
+
+        try:
+            # Write MSA to temporary file for parsing
+            with tempfile.NamedTemporaryFile(mode='w', delete=False, suffix='.fasta') as f:
+                f.write(msa_string)
+                temp_msa_file = f.name
+
+            try:
+                # Extract alignments from MSA
+                alignments, msa_consensus, _ = extract_alignments_from_msa(temp_msa_file)
+
+                if not alignments:
+                    logging.debug(f"No alignments found in MSA")
+                    return None, None, None
+
+                # Calculate variance (edit distance / consensus length) for each read
+                consensus_length = len(consensus_seq)
+                if consensus_length == 0:
+                    return None, None, None
+
+                variances = []
+                for alignment in alignments:
+                    variance = alignment.edit_distance / consensus_length
+                    variances.append(variance)
+
+                if not variances:
+                    return None, None, None
+
+                # Calculate statistics
+                mean_var = np.mean(variances)
+                median_var = np.median(variances)
+                p95_var = np.percentile(variances, 95)
+
+                return mean_var, median_var, p95_var
+
+            finally:
+                # Clean up temporary file
+                os.unlink(temp_msa_file)
+
+        except Exception as e:
+            logging.warning(f"Failed to calculate read variance from MSA: {e}")
+            return None, None, None
 
     def load_primers(self, primer_file: str) -> None:
         """Load primers from FASTA file with position awareness."""
@@ -1242,12 +1218,6 @@ def main():
     parser.add_argument("--primers", help="FASTA file containing primer sequences (default: looks for primers.fasta in input file directory)")
     parser.add_argument("-O", "--output-dir", default="clusters",
                         help="Output directory for all files (default: clusters)")
-    parser.add_argument("--stability-trials", type=int, default=100,
-                        help="Number of sampling trials to assess stability (default: 100)")
-    parser.add_argument("--stability-sample", type=int, default=20,
-                        help="Size of stability samples (default: 20)")
-    parser.add_argument("--disable-stability", action="store_true",
-                        help="Disable stability assessment")
     parser.add_argument("--disable-homopolymer-equivalence", action="store_true",
                         help="Disable homopolymer equivalence in cluster merging (only merge identical sequences)")
     parser.add_argument("--orient-mode", choices=["skip", "keep-all", "filter-failed"], default="skip",
@@ -1276,15 +1246,12 @@ def main():
         max_sample_size=args.max_sample_size,
         presample_size=args.presample,
         k_nearest_neighbors=args.k_nearest_neighbors,
-        disable_stability=args.disable_stability,
         sample_name=sample,
         disable_homopolymer_equivalence=args.disable_homopolymer_equivalence,
         output_dir=args.output_dir
     )
 
     # Set additional attributes for metadata
-    clusterer.num_trials = args.stability_trials
-    clusterer.stability_sample = args.stability_sample
     clusterer.input_file = os.path.abspath(args.input_file)
     clusterer.augment_input = os.path.abspath(args.augment_input) if args.augment_input else None
     clusterer.algorithm = args.algorithm
