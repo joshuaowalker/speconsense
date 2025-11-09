@@ -76,8 +76,13 @@ class ConsensusInfo(NamedTuple):
     snp_count: Optional[int] = None  # Number of SNPs from IUPAC consensus generation
     primers: Optional[List[str]] = None  # List of detected primer names
     raw_ric: Optional[List[int]] = None  # RiC values of .raw source variants
-    p50_diff: Optional[float] = None  # Median edit distance from stability assessment
-    p95_diff: Optional[float] = None  # 95th percentile edit distance from stability
+    p50_diff: Optional[float] = None  # Median edit distance from stability assessment (legacy)
+    p95_diff: Optional[float] = None  # 95th percentile edit distance from stability (legacy)
+    var_mean: Optional[float] = None  # Mean per-read variance (edit distance / consensus length)
+    var_median: Optional[float] = None  # Median per-read variance
+    var_p95: Optional[float] = None  # P95 per-read variance
+    has_variants: Optional[bool] = None  # Whether variant positions were detected
+    num_variants: Optional[int] = None  # Number of variant positions detected
 
 
 # FASTA field customization support
@@ -170,6 +175,56 @@ class PrimersField(FastaField):
         return None
 
 
+class MeanVarField(FastaField):
+    def __init__(self):
+        super().__init__('var_mean', 'Mean per-read variance (percentage)')
+
+    def format_value(self, consensus: ConsensusInfo) -> Optional[str]:
+        if consensus.var_mean is not None:
+            return f"var_mean={consensus.var_mean*100:.1f}"
+        return None
+
+
+class MedianVarField(FastaField):
+    def __init__(self):
+        super().__init__('var_med', 'Median per-read variance (percentage)')
+
+    def format_value(self, consensus: ConsensusInfo) -> Optional[str]:
+        if consensus.var_median is not None:
+            return f"var_med={consensus.var_median*100:.1f}"
+        return None
+
+
+class P95VarField(FastaField):
+    def __init__(self):
+        super().__init__('var_p95', 'P95 per-read variance (percentage)')
+
+    def format_value(self, consensus: ConsensusInfo) -> Optional[str]:
+        if consensus.var_p95 is not None:
+            return f"var_p95={consensus.var_p95*100:.1f}"
+        return None
+
+
+class HasVariantsField(FastaField):
+    def __init__(self):
+        super().__init__('has_variants', 'Whether variant positions were detected')
+
+    def format_value(self, consensus: ConsensusInfo) -> Optional[str]:
+        if consensus.has_variants is not None:
+            return f"has_variants={'true' if consensus.has_variants else 'false'}"
+        return None
+
+
+class NumVariantsField(FastaField):
+    def __init__(self):
+        super().__init__('num_variants', 'Number of variant positions detected')
+
+    def format_value(self, consensus: ConsensusInfo) -> Optional[str]:
+        if consensus.num_variants is not None and consensus.num_variants > 0:
+            return f"num_variants={consensus.num_variants}"
+        return None
+
+
 class GroupField(FastaField):
     def __init__(self):
         super().__init__('group', 'Variant group number')
@@ -203,6 +258,11 @@ FASTA_FIELDS = {
     'snp': SnpField(),
     'p50diff': P50DiffField(),
     'p95diff': P95DiffField(),
+    'var_mean': MeanVarField(),
+    'var_med': MedianVarField(),
+    'var_p95': P95VarField(),
+    'has_variants': HasVariantsField(),
+    'num_variants': NumVariantsField(),
     'primers': PrimersField(),
     'group': GroupField(),
     'variant': VariantField(),
@@ -212,8 +272,8 @@ FASTA_FIELDS = {
 FASTA_FIELD_PRESETS = {
     'default': ['size', 'ric', 'rawric', 'snp', 'primers'],
     'minimal': ['size', 'ric'],
-    'qc': ['size', 'ric', 'length', 'p50diff', 'p95diff'],
-    'full': ['size', 'ric', 'length', 'rawric', 'snp', 'p50diff', 'p95diff', 'primers'],
+    'qc': ['size', 'ric', 'length', 'var_mean', 'var_med', 'var_p95', 'has_variants', 'num_variants'],
+    'full': ['size', 'ric', 'length', 'rawric', 'snp', 'var_mean', 'var_med', 'var_p95', 'has_variants', 'num_variants', 'primers'],
     'id-only': [],
 }
 
@@ -415,17 +475,24 @@ def setup_logging(log_level: str, log_file: str = None):
 
 
 def parse_consensus_header(header: str) -> Tuple[Optional[str], Optional[int], Optional[int],
-                                                   Optional[List[str]], Optional[float], Optional[float]]:
+                                                   Optional[List[str]], Optional[float], Optional[float],
+                                                   Optional[float], Optional[float], Optional[float],
+                                                   Optional[bool], Optional[int]]:
     """
     Extract information from Speconsense consensus FASTA header.
 
-    Now includes optional stability metrics (p50diff, p95diff) for use in output headers.
-    Accepts both new field names (p50diff, p95diff) and legacy names (median_diff, p95_diff)
-    for backward compatibility during transition.
+    Supports both old stability metrics (p50diff, p95diff) and new variance metrics
+    (var_mean, var_med, var_p95) for backward compatibility.
+
+    Also parses variant detection flags (has_variants, num_variants).
+
+    Returns:
+        Tuple of (sample_name, ric, size, primers, p50_diff, p95_diff,
+                  var_mean, var_median, var_p95, has_variants, num_variants)
     """
     sample_match = re.match(r'>([^ ]+) (.+)', header)
     if not sample_match:
-        return None, None, None, None, None, None
+        return None, None, None, None, None, None, None, None, None, None, None
 
     sample_name = sample_match.group(1)
     info_string = sample_match.group(2)
@@ -442,7 +509,8 @@ def parse_consensus_header(header: str) -> Tuple[Optional[str], Optional[int], O
     primers_match = re.search(r'primers=([^,\s]+(?:,[^,\s]+)*)', info_string)
     primers = primers_match.group(1).split(',') if primers_match else None
 
-    # Extract stability metrics - accept both new (p50diff, p95diff) and legacy (median_diff, p95_diff) names
+    # Extract legacy stability metrics (for backward compatibility)
+    # Accept both new (p50diff, p95diff) and legacy (median_diff, p95_diff) names
     p50_diff_match = re.search(r'(?:p50diff|median_diff)=([\d.]+)', info_string)
     p50_diff = float(p50_diff_match.group(1)) if p50_diff_match else None
 
@@ -452,7 +520,24 @@ def parse_consensus_header(header: str) -> Tuple[Optional[str], Optional[int], O
         p95_diff_match = re.search(r'p95_diff=([\d.]+)', info_string)
     p95_diff = float(p95_diff_match.group(1)) if p95_diff_match else None
 
-    return sample_name, ric, size, primers, p50_diff, p95_diff
+    # Extract new variance metrics (percentages in headers, convert to fractions)
+    var_mean_match = re.search(r'var_mean=([\d.]+)', info_string)
+    var_mean = float(var_mean_match.group(1)) / 100.0 if var_mean_match else None
+
+    var_med_match = re.search(r'var_med=([\d.]+)', info_string)
+    var_median = float(var_med_match.group(1)) / 100.0 if var_med_match else None
+
+    var_p95_match = re.search(r'var_p95=([\d.]+)', info_string)
+    var_p95 = float(var_p95_match.group(1)) / 100.0 if var_p95_match else None
+
+    # Extract variant detection flags
+    has_variants_match = re.search(r'has_variants=(true|false)', info_string)
+    has_variants = (has_variants_match.group(1) == 'true') if has_variants_match else None
+
+    num_variants_match = re.search(r'num_variants=(\d+)', info_string)
+    num_variants = int(num_variants_match.group(1)) if num_variants_match else None
+
+    return sample_name, ric, size, primers, p50_diff, p95_diff, var_mean, var_median, var_p95, has_variants, num_variants
 
 
 def load_consensus_sequences(source_folder: str, min_ric: int) -> List[ConsensusInfo]:
@@ -468,7 +553,8 @@ def load_consensus_sequences(source_folder: str, min_ric: int) -> List[Consensus
 
         with open(fasta_file, 'r') as f:
             for record in SeqIO.parse(f, "fasta"):
-                sample_name, ric, size, primers, p50_diff, p95_diff = parse_consensus_header(f">{record.description}")
+                sample_name, ric, size, primers, p50_diff, p95_diff, var_mean, var_median, var_p95, has_variants, num_variants = \
+                    parse_consensus_header(f">{record.description}")
 
                 if sample_name and ric >= min_ric:
                     # Extract cluster ID from sample name (e.g., "sample-c1" -> "c1")
@@ -485,8 +571,13 @@ def load_consensus_sequences(source_folder: str, min_ric: int) -> List[Consensus
                         snp_count=None,  # No SNP info from original speconsense output
                         primers=primers,
                         raw_ric=None,  # Not available in original speconsense output
-                        p50_diff=p50_diff,  # From stability assessment if available
-                        p95_diff=p95_diff   # From stability assessment if available
+                        p50_diff=p50_diff,  # From stability assessment if available (legacy)
+                        p95_diff=p95_diff,  # From stability assessment if available (legacy)
+                        var_mean=var_mean,  # From variance calculation if available
+                        var_median=var_median,  # From variance calculation if available
+                        var_p95=var_p95,  # From variance calculation if available
+                        has_variants=has_variants,  # From variant detection if available
+                        num_variants=num_variants  # From variant detection if available
                     )
                     consensus_list.append(consensus_info)
 
@@ -891,7 +982,12 @@ def create_consensus_from_msa(aligned_seqs: List, variants: List[ConsensusInfo])
         primers=largest_variant.primers,
         raw_ric=raw_ric_values,
         p50_diff=None,  # Merged sequence - original stability metrics don't apply
-        p95_diff=None
+        p95_diff=None,
+        var_mean=largest_variant.var_mean,  # Preserve variance from largest variant
+        var_median=largest_variant.var_median,
+        var_p95=largest_variant.var_p95,
+        has_variants=largest_variant.has_variants,  # Preserve variant flags from largest variant
+        num_variants=largest_variant.num_variants
     )
 
 
@@ -1402,7 +1498,12 @@ def create_output_structure(groups: Dict[int, List[ConsensusInfo]],
                 primers=variant.primers,  # Preserve primers
                 raw_ric=variant.raw_ric,  # Preserve raw_ric
                 p50_diff=variant.p50_diff,  # Preserve stability metrics
-                p95_diff=variant.p95_diff
+                p95_diff=variant.p95_diff,
+                var_mean=variant.var_mean,  # Preserve variance metrics
+                var_median=variant.var_median,
+                var_p95=variant.var_p95,
+                has_variants=variant.has_variants,  # Preserve variant flags
+                num_variants=variant.num_variants
             )
             
             final_consensus.append(renamed_variant)
@@ -1582,7 +1683,12 @@ def write_specimen_data_files(specimen_consensus: List[ConsensusInfo],
                         primers=raw_info.primers,
                         raw_ric=None,  # Pre-merge, not merged
                         p50_diff=raw_info.p50_diff,  # Preserve stability metrics
-                        p95_diff=raw_info.p95_diff
+                        p95_diff=raw_info.p95_diff,
+                        var_mean=raw_info.var_mean,  # Preserve variance metrics
+                        var_median=raw_info.var_median,
+                        var_p95=raw_info.var_p95,
+                        has_variants=raw_info.has_variants,  # Preserve variant flags
+                        num_variants=raw_info.num_variants
                     )
                     raw_file_consensuses.append((raw_consensus, raw_info.sample_name))
 
@@ -1811,6 +1917,39 @@ def write_quality_report(final_consensus: List[ConsensusInfo],
     high_priority_count = sum(1 for item in all_elevated if item[2] > 0)
     outlier_count = sum(1 for item in all_elevated if item[2] == 0 and item[3] > 0)
 
+    # Calculate variance statistics
+    variance_stats = []
+    for cons in final_consensus:
+        if cons.var_mean is not None or cons.var_median is not None or cons.var_p95 is not None:
+            variance_stats.append({
+                'cons': cons,
+                'var_mean': cons.var_mean if cons.var_mean is not None else 0,
+                'var_median': cons.var_median if cons.var_median is not None else 0,
+                'var_p95': cons.var_p95 if cons.var_p95 is not None else 0
+            })
+
+    total_with_variance = len(variance_stats)
+    high_variance_threshold = 0.05  # 5%
+    high_variance_clusters = [v for v in variance_stats if v['var_p95'] > high_variance_threshold]
+
+    # Calculate global variance statistics if we have variance data
+    global_var_mean = None
+    global_var_median = None
+    global_var_p95 = None
+    if variance_stats:
+        import numpy as np
+        all_means = [v['var_mean'] for v in variance_stats]
+        all_medians = [v['var_median'] for v in variance_stats]
+        all_p95s = [v['var_p95'] for v in variance_stats]
+
+        global_var_mean = np.mean(all_means)
+        global_var_median = np.median(all_medians)
+        global_var_p95 = np.percentile(all_p95s, 95)
+
+    # Calculate variant statistics
+    total_with_variants = sum(1 for cons in final_consensus if cons.has_variants)
+    clusters_with_variants = [cons for cons in final_consensus if cons.has_variants and cons.num_variants and cons.num_variants > 0]
+
     # Write report
     with open(quality_report_path, 'w') as f:
         # Header
@@ -1835,6 +1974,62 @@ def write_quality_report(final_consensus: List[ConsensusInfo],
         f.write(f"    - Outlier (p95diff > 0 only):     {outlier_count} sequences\n")
         f.write(f"  Merged with small components:       {len(merged_with_small_components)} sequences\n")
         f.write("\n")
+
+        # Variance statistics section (if available)
+        if total_with_variance > 0:
+            f.write("=" * 80 + "\n")
+            f.write("QUALITY METRICS (READ VARIANCE)\n")
+            f.write("=" * 80 + "\n\n")
+
+            f.write(f"Sequences with variance metrics: {total_with_variance} of {len(final_consensus)}\n\n")
+
+            if global_var_mean is not None:
+                f.write("Global variance statistics (across all clusters):\n")
+                f.write(f"  Mean per-read variance:      {global_var_mean*100:.2f}%\n")
+                f.write(f"  Median per-read variance:    {global_var_median*100:.2f}%\n")
+                f.write(f"  P95 per-read variance:       {global_var_p95*100:.2f}%\n")
+                f.write(f"  Clusters with high variance (>{high_variance_threshold*100:.0f}%): {len(high_variance_clusters)} of {total_with_variance}\n\n")
+
+                f.write("NOTE: Variance measures read-to-consensus differences. Low variance\n")
+                f.write("indicates good clustering and accurate consensus. High variance may\n")
+                f.write("indicate either high sequencing error OR imperfect clustering/consensus.\n\n")
+
+                if high_variance_clusters:
+                    f.write(f"Clusters with high variance (P95 > {high_variance_threshold*100:.0f}%):\n")
+                    f.write(f"{'Sequence':<60s} {'RiC':>6s} {'Mean':>7s} {'Median':>7s} {'P95':>7s}\n")
+                    f.write("-" * 95 + "\n")
+
+                    # Sort by P95 variance descending
+                    high_variance_clusters.sort(key=lambda x: x['var_p95'], reverse=True)
+
+                    for v in high_variance_clusters:
+                        cons = v['cons']
+                        f.write(f"{cons.sample_name:<60s} {cons.ric:6d} {v['var_mean']*100:6.1f}% {v['var_median']*100:6.1f}% {v['var_p95']*100:6.1f}%\n")
+
+                    f.write("\n")
+
+        # Variant detection statistics section (if available)
+        if total_with_variants > 0:
+            f.write("=" * 80 + "\n")
+            f.write("VARIANT DETECTION\n")
+            f.write("=" * 80 + "\n\n")
+
+            f.write(f"Clusters with detected variants: {len(clusters_with_variants)} of {len(final_consensus)}\n\n")
+
+            if clusters_with_variants:
+                f.write("NOTE: Detected variants indicate potential unphased heterozygous positions.\n")
+                f.write("These clusters may benefit from variant phasing in future versions.\n\n")
+
+                f.write(f"{'Sequence':<60s} {'RiC':>6s} {'Variants':>9s}\n")
+                f.write("-" * 80 + "\n")
+
+                # Sort by number of variants descending
+                clusters_with_variants.sort(key=lambda x: x.num_variants if x.num_variants else 0, reverse=True)
+
+                for cons in clusters_with_variants:
+                    f.write(f"{cons.sample_name:<60s} {cons.ric:6d} {cons.num_variants:9d}\n")
+
+                f.write("\n")
 
         # Elevated variation section (unmerged + merged with variation)
         if all_elevated:
@@ -2093,7 +2288,12 @@ def process_single_specimen(file_consensuses: List[ConsensusInfo],
                 primers=variant.primers,  # Preserve primers
                 raw_ric=variant.raw_ric,  # Preserve raw_ric
                 p50_diff=variant.p50_diff,  # Preserve stability metrics
-                p95_diff=variant.p95_diff
+                p95_diff=variant.p95_diff,
+                var_mean=variant.var_mean,  # Preserve variance metrics
+                var_median=variant.var_median,
+                var_p95=variant.var_p95,
+                has_variants=variant.has_variants,  # Preserve variant flags
+                num_variants=variant.num_variants
             )
 
             final_consensus.append(renamed_variant)
