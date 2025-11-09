@@ -850,6 +850,8 @@ def main():
                 if not alignments:
                     continue
 
+                consensus_length = len(consensus)
+
                 # Analyze positional variation with composition tracking
                 position_stats = analyze_positional_variation(
                     alignments,
@@ -873,6 +875,7 @@ def main():
                             'cluster_num': cluster_info.cluster_num,
                             'msa_position': pos_stat.msa_position,
                             'consensus_position': pos_stat.consensus_position,
+                            'consensus_length': consensus_length,
                             'coverage': pos_stat.coverage,
                             'variant_bases': variant_bases,
                             'base_composition': pos_stat.base_composition,
@@ -883,19 +886,56 @@ def main():
 
             # Report variant positions
             logging.info(f"\n  Variant Position Detection Results:")
+            logging.info(f"    NOTE: Analysis performed on UNTRIMMED consensus (before primer trimming)")
             logging.info(f"    Total variant positions found: {len(all_variant_positions)}")
 
             if all_variant_positions:
-                # Filter for high-priority variants (internal, non-homopolymer)
-                # Use consensus_position for filtering (skip insertions and primer regions)
-                high_priority_variants = [
-                    v for v in all_variant_positions
-                    if not v['is_homopolymer']
-                    and v['consensus_position'] is not None
-                    and v['consensus_position'] >= 20
-                ]
+                # Count unique clusters with variants
+                unique_clusters_all = len(set((v['sample_name'], v['cluster_num']) for v in all_variant_positions))
+                logging.info(f"    Unique clusters with variants: {unique_clusters_all}")
 
-                logging.info(f"    High-priority variants (non-HP, internal): {len(high_priority_variants)}")
+                # Categorize variants by position and type
+                # Internal = position >= 20 and position < consensus_length - 20
+                # End = position < 20 or position >= consensus_length - 20
+                # Skip insertions (consensus_position is None)
+
+                high_priority_variants = []  # Internal, non-HP
+                hp_internal_variants = []    # Internal, HP
+                end_variants = []            # At sequence ends
+                insertion_variants = []      # Insertion columns
+
+                for v in all_variant_positions:
+                    cons_pos = v['consensus_position']
+                    cons_len = v['consensus_length']
+                    is_hp = v['is_homopolymer']
+
+                    if cons_pos is None:
+                        # Insertion column (no consensus position)
+                        insertion_variants.append(v)
+                    elif cons_pos < 20 or cons_pos >= cons_len - 20:
+                        # End region
+                        end_variants.append(v)
+                    elif is_hp:
+                        # Internal homopolymer
+                        hp_internal_variants.append(v)
+                    else:
+                        # High priority: internal, non-HP
+                        high_priority_variants.append(v)
+
+                # Count unique clusters for each category
+                unique_clusters_hp = len(set((v['sample_name'], v['cluster_num']) for v in hp_internal_variants))
+                unique_clusters_end = len(set((v['sample_name'], v['cluster_num']) for v in end_variants))
+                unique_clusters_insertion = len(set((v['sample_name'], v['cluster_num']) for v in insertion_variants))
+                unique_clusters_high_priority = len(set((v['sample_name'], v['cluster_num']) for v in high_priority_variants))
+
+                # Get example consensus length for reporting
+                example_cons_len = all_variant_positions[0]['consensus_length'] if all_variant_positions else 0
+
+                logging.info(f"\n  Breakdown by category:")
+                logging.info(f"    High-priority (internal, non-HP): {len(high_priority_variants)} positions in {unique_clusters_high_priority} clusters")
+                logging.info(f"    Homopolymer (internal): {len(hp_internal_variants)} positions in {unique_clusters_hp} clusters")
+                logging.info(f"    End region (pos <20 or >={example_cons_len-20}): {len(end_variants)} positions in {unique_clusters_end} clusters")
+                logging.info(f"    Insertion columns: {len(insertion_variants)} positions in {unique_clusters_insertion} clusters")
 
                 if high_priority_variants:
                     # Sort by error rate (highest first)
