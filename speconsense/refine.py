@@ -31,7 +31,6 @@ from speconsense.analyze import (
     find_cluster_files,
     find_msa_files,
     analyze_cluster,
-    analyze_all_cluster_positions,
     ClusterInfo,
     ClusterStats,
     ReadAlignment
@@ -731,45 +730,11 @@ def main():
     logging.info(f"  Outliers identified: {total_outliers:,} ({total_outliers/total_reads*100:.1f}%)")
     logging.info(f"  Clusters with outliers: {clusters_with_outliers}/{len(all_cluster_alignments)}")
 
-    # STEP 3: Positional analysis for variant detection
-    logging.info("\nSTEP 3: Analyzing positional variation...")
-    all_position_stats = analyze_all_cluster_positions(all_cluster_alignments)
-
-    if all_position_stats:
-        error_rates = [ps.error_rate * 100 for ps in all_position_stats]
-        p95_positional = np.percentile(error_rates, args.variant_percentile)
-
-        high_error_positions = [ps for ps in all_position_stats if ps.error_rate * 100 >= p95_positional]
-
-        # Categorize by priority (exclude homopolymers and ends)
-        high_priority = [
-            ps for ps in high_error_positions
-            if not ps.is_homopolymer
-            and ps.position >= 20
-            and ps.position < (ps.consensus_length - 20)
-        ]
-
-        logging.info(f"\nPositional Variation Results:")
-        logging.info(f"  Total positions analyzed: {len(all_position_stats):,}")
-        logging.info(f"  P{args.variant_percentile} positional error rate: {p95_positional:.2f}%")
-        logging.info(f"  High-error positions: {len(high_error_positions):,}")
-        logging.info(f"  High-priority (internal, non-HP): {len(high_priority)}")
-
-        if high_priority:
-            logging.info(f"\nTop 10 high-priority variant positions:")
-            high_priority.sort(key=lambda x: x.error_rate, reverse=True)
-            for i, ps in enumerate(high_priority[:10], 1):
-                cluster_id = f"{ps.sample_name}-c{ps.cluster_num}"
-                logging.info(f"    {i}. {cluster_id} pos {ps.position}: {ps.error_rate*100:.1f}% error")
-
-    # TODO: STEP 4: Subdivide clusters based on high-priority variant positions
-    # (Will implement variant-based subdivision in future version)
-
-    # STEP 5: Refine clusters by removing outliers and regenerating consensus
+    # STEP 3: Refine clusters by removing outliers and regenerating consensus
     if args.dry_run:
         logging.info("\nDRY RUN: Analysis complete, no files written")
     else:
-        logging.info("\nSTEP 4: Refining clusters...")
+        logging.info("\nSTEP 3: Refining clusters...")
         logging.info(f"  Removing outliers and regenerating consensus sequences")
 
         # Track refinement results
@@ -837,8 +802,8 @@ def main():
         logging.info(f"    Total reads removed: {total_reads_removed:,}")
         logging.info(f"    Sample FASTA files written: {len(samples)}")
 
-        # STEP 5: Variant position analysis on refined clusters
-        logging.info("\nSTEP 5: Analyzing variant positions in refined clusters...")
+        # STEP 4: Variant position analysis on refined clusters
+        logging.info("\nSTEP 4: Analyzing variant positions in refined clusters...")
 
         # Import additional functions
         from speconsense.analyze import (
