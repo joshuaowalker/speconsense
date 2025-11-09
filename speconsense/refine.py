@@ -159,6 +159,10 @@ def is_homopolymer_variant(variant: Dict, consensus_seq: str,
     1. The variant allele is homogeneous (>=80% same base)
     2. At least one adjacent consensus position contains that same base
 
+    For deletions: Check if the consensus base (being deleted) appears in adjacent positions
+    For insertions: Check if the inserted base appears in adjacent consensus positions
+    For substitutions: Check if the substituting base appears in adjacent positions
+
     Args:
         variant: Variant dictionary with base_composition, msa_position, consensus_position
         consensus_seq: Ungapped consensus sequence
@@ -193,19 +197,31 @@ def is_homopolymer_variant(variant: Dict, consensus_seq: str,
     if dominant_count / total_alt < 0.8:
         return False
 
+    # Determine which base to look for in adjacent positions
+    # For deletions (dominant_base == '-'), check if adjacent positions have the consensus base
+    # For insertions/substitutions, check if adjacent positions have the dominant alternative base
+    if dominant_base == '-':
+        # This is a deletion - check if adjacent positions have the consensus nucleotide
+        base_to_check = variant.get('consensus_nucleotide', None)
+        if base_to_check is None or base_to_check == '-':
+            return False
+    else:
+        # This is an insertion or substitution - check if adjacent positions have the dominant base
+        base_to_check = dominant_base
+
     # Now check if adjacent consensus positions have this base
     # For insertions, we need to find adjacent consensus positions via MSA mapping
     if cons_pos is None:
         # This is an insertion - find adjacent consensus positions
         left_pos, right_pos = get_adjacent_consensus_positions(msa_pos, msa_to_consensus_pos)
 
-        # Check if either adjacent position has the dominant base
+        # Check if either adjacent position has the base we're looking for
         adjacent_has_base = False
         if left_pos is not None and left_pos < len(consensus_seq):
-            if consensus_seq[left_pos] == dominant_base:
+            if consensus_seq[left_pos] == base_to_check:
                 adjacent_has_base = True
         if right_pos is not None and right_pos < len(consensus_seq):
-            if consensus_seq[right_pos] == dominant_base:
+            if consensus_seq[right_pos] == base_to_check:
                 adjacent_has_base = True
 
         return adjacent_has_base
@@ -215,12 +231,12 @@ def is_homopolymer_variant(variant: Dict, consensus_seq: str,
 
         # Check left neighbor
         if cons_pos > 0:
-            if consensus_seq[cons_pos - 1] == dominant_base:
+            if consensus_seq[cons_pos - 1] == base_to_check:
                 adjacent_has_base = True
 
         # Check right neighbor
         if cons_pos + 1 < len(consensus_seq):
-            if consensus_seq[cons_pos + 1] == dominant_base:
+            if consensus_seq[cons_pos + 1] == base_to_check:
                 adjacent_has_base = True
 
         return adjacent_has_base
