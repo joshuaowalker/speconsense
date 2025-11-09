@@ -256,6 +256,48 @@ def is_homopolymer_variant(variant: Dict, consensus_seq: str,
         return adjacent_has_base
 
 
+def extract_variant_combinations(msa_file: str, variant_msa_positions: List[int]) -> Dict[Tuple, int]:
+    """
+    Extract variant allele combinations across multiple positions from an MSA.
+
+    For each read in the MSA, extract the base at each variant position and
+    count the frequency of each combination (haplotype).
+
+    Args:
+        msa_file: Path to MSA FASTA file
+        variant_msa_positions: List of MSA positions to check (0-based)
+
+    Returns:
+        Dictionary mapping combinations (tuples of bases) to their counts
+    """
+    from collections import Counter
+    from Bio import SeqIO
+
+    if not os.path.exists(msa_file):
+        return {}
+
+    combinations = []
+
+    try:
+        for record in SeqIO.parse(msa_file, 'fasta'):
+            # Skip the consensus sequence (appears at end, labeled "Consensus")
+            if record.id.lower() == 'consensus':
+                continue
+
+            # Extract bases at variant positions
+            seq_str = str(record.seq)
+            combo = tuple(seq_str[pos] if pos < len(seq_str) else '-'
+                         for pos in variant_msa_positions)
+            combinations.append(combo)
+
+        # Count combinations
+        return dict(Counter(combinations))
+
+    except Exception as e:
+        logging.warning(f"Failed to extract variant combinations from {msa_file}: {e}")
+        return {}
+
+
 def get_adjacent_consensus_positions(msa_position: int,
                                      msa_to_consensus_pos: Dict[int, Optional[int]]) -> Tuple[Optional[int], Optional[int]]:
     """
@@ -1273,6 +1315,36 @@ def main():
 
                                 pos_str = f"MSA:{v['msa_position']}/Cons:{v['consensus_position_str']}"
                                 f.write(f"  - {pos_str}: {max_alt_freq:.1f}% (cov={v['coverage']}, bases=[{comp_str}])\n")
+
+                            # Add variant combinations section for multiple variant positions
+                            if cluster['num_variants'] > 1:
+                                # Find MSA file for this cluster
+                                sample_name = cluster['sample_name']
+                                cluster_debug_dir = os.path.join(args.input_dir, 'cluster_debug')
+
+                                # MSA file has RiC suffix - use glob to find it
+                                msa_pattern = os.path.join(cluster_debug_dir, f"{sample_name}-RiC*-msa.fasta")
+                                msa_files = glob.glob(msa_pattern)
+
+                                if msa_files:
+                                    msa_file = msa_files[0]  # Take first match
+                                    # Get MSA positions from variants (sorted by position)
+                                    sorted_variants = sorted(cluster['variants'], key=lambda x: x['msa_position'])
+                                    variant_msa_positions = [v['msa_position'] for v in sorted_variants]
+
+                                    # Extract combinations
+                                    combinations = extract_variant_combinations(msa_file, variant_msa_positions)
+
+                                    if combinations:
+                                        f.write(f"Variant combinations:\n")
+
+                                        # Sort by count (descending)
+                                        sorted_combos = sorted(combinations.items(), key=lambda x: x[1], reverse=True)
+
+                                        for combo, count in sorted_combos:
+                                            # Format combination as (base1, base2, ...)
+                                            combo_str = '(' + ', '.join(combo) + ')'
+                                            f.write(f"  - {combo_str}: {count} reads\n")
 
                             f.write("\n")
 
