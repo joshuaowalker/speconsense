@@ -41,8 +41,8 @@ class ClusterInfo(NamedTuple):
 
 
 class ErrorPosition(NamedTuple):
-    """An error at a specific position in the consensus."""
-    position: int  # 0-indexed position in consensus
+    """An error at a specific position in the MSA."""
+    msa_position: int  # 0-indexed position in MSA alignment
     error_type: str  # 'sub', 'ins', or 'del'
 
 
@@ -251,7 +251,7 @@ def load_consensus_sequences(output_dir: str) -> Dict[Tuple[str, int], ClusterIn
     return consensus_map
 
 
-def extract_alignments_from_msa(msa_file: str) -> Tuple[List[ReadAlignment], str]:
+def extract_alignments_from_msa(msa_file: str) -> Tuple[List[ReadAlignment], str, Dict[int, Optional[int]]]:
     """
     Extract read alignments from an MSA file.
 
@@ -265,18 +265,24 @@ def extract_alignments_from_msa(msa_file: str) -> Tuple[List[ReadAlignment], str
     - Different bases: Substitution
     - Same base: Match (not an error)
 
+    IMPORTANT: Errors are reported at MSA positions, not consensus positions.
+    This avoids ambiguity when multiple insertion columns map to the same consensus position.
+
     Args:
         msa_file: Path to MSA FASTA file
 
     Returns:
-        Tuple of (list of ReadAlignment objects, consensus sequence without gaps)
+        Tuple of:
+        - list of ReadAlignment objects (with errors at MSA positions)
+        - consensus sequence without gaps
+        - mapping from MSA position to consensus position (None for insertion columns)
     """
     # Parse MSA file
     records = list(SeqIO.parse(msa_file, 'fasta'))
 
     if not records:
         logging.warning(f"No sequences found in MSA file: {msa_file}")
-        return [], ""
+        return [], "", {}
 
     # Find consensus sequence
     consensus_record = None
@@ -290,18 +296,22 @@ def extract_alignments_from_msa(msa_file: str) -> Tuple[List[ReadAlignment], str
 
     if consensus_record is None:
         logging.warning(f"No consensus sequence found in MSA file: {msa_file}")
-        return [], ""
+        return [], "", {}
 
     consensus_aligned = str(consensus_record.seq).upper()
     msa_length = len(consensus_aligned)
 
     # Build mapping from MSA position to consensus position (excluding gaps)
+    # For insertion columns (consensus has '-'), maps to None
     msa_to_consensus_pos = {}
     consensus_pos = 0
     for msa_pos in range(msa_length):
         if consensus_aligned[msa_pos] != '-':
             msa_to_consensus_pos[msa_pos] = consensus_pos
             consensus_pos += 1
+        else:
+            # Insertion column - no consensus position
+            msa_to_consensus_pos[msa_pos] = None
 
     # Get consensus without gaps for return value
     consensus_ungapped = consensus_aligned.replace('-', '')
@@ -330,33 +340,18 @@ def extract_alignments_from_msa(msa_file: str) -> Tuple[List[ReadAlignment], str
             if read_base == '-' and cons_base == '-':
                 continue
 
-            # Get consensus position for error reporting
-            if cons_base != '-':
-                consensus_pos = msa_to_consensus_pos[msa_pos]
-            else:
-                # For insertions (cons has gap), attribute to current consensus position
-                # Find the previous non-gap position in consensus
-                prev_msa_pos = msa_pos - 1
-                while prev_msa_pos >= 0 and consensus_aligned[prev_msa_pos] == '-':
-                    prev_msa_pos -= 1
-
-                if prev_msa_pos >= 0:
-                    consensus_pos = msa_to_consensus_pos[prev_msa_pos]
-                else:
-                    consensus_pos = 0
-
-            # Classify error type
+            # Classify error type and record at MSA position
             if read_base == '-' and cons_base != '-':
                 # Deletion (missing base in read)
-                error_positions.append(ErrorPosition(consensus_pos, 'del'))
+                error_positions.append(ErrorPosition(msa_pos, 'del'))
                 num_deletions += 1
             elif read_base != '-' and cons_base == '-':
                 # Insertion (extra base in read)
-                error_positions.append(ErrorPosition(consensus_pos, 'ins'))
+                error_positions.append(ErrorPosition(msa_pos, 'ins'))
                 num_insertions += 1
             elif read_base != cons_base:
                 # Substitution (different bases)
-                error_positions.append(ErrorPosition(consensus_pos, 'sub'))
+                error_positions.append(ErrorPosition(msa_pos, 'sub'))
                 num_substitutions += 1
             # else: match, no error
 
@@ -377,20 +372,26 @@ def extract_alignments_from_msa(msa_file: str) -> Tuple[List[ReadAlignment], str
         )
         alignments.append(alignment)
 
-    return alignments, consensus_ungapped
+    return alignments, consensus_ungapped, msa_to_consensus_pos
 
 
 
 
-def detect_contiguous_error_regions(error_positions: List[ErrorPosition], consensus_length: int, window_size: int = 50) -> bool:
+def detect_contiguous_error_regions(
+    error_positions: List[ErrorPosition],
+    consensus_length: int,
+    msa_to_consensus_pos: Dict[int, Optional[int]],
+    window_size: int = 50
+) -> bool:
     """
     Detect if errors cluster into contiguous high-error regions.
 
     This helps identify read-end degradation and systematic error patterns.
 
     Args:
-        error_positions: List of ErrorPosition objects
+        error_positions: List of ErrorPosition objects (with MSA positions)
         consensus_length: Length of consensus sequence
+        msa_to_consensus_pos: Mapping from MSA position to consensus position
         window_size: Size of sliding window for error density calculation
 
     Returns:
@@ -399,8 +400,15 @@ def detect_contiguous_error_regions(error_positions: List[ErrorPosition], consen
     if len(error_positions) < 5:
         return False
 
-    # Extract positions from ErrorPosition objects
-    positions = [ep.position for ep in error_positions]
+    # Map MSA positions to consensus positions, filtering out insertions
+    positions = []
+    for ep in error_positions:
+        cons_pos = msa_to_consensus_pos.get(ep.msa_position)
+        if cons_pos is not None:
+            positions.append(cons_pos)
+
+    if len(positions) < 5:
+        return False
 
     # Calculate error density in sliding windows
     error_counts = Counter(positions)
@@ -511,8 +519,9 @@ def benjamini_hochberg_correction(p_values: List[float], alpha: float = 0.05) ->
 
 
 class PositionStats(NamedTuple):
-    """Statistics for a single position in the consensus."""
-    position: int
+    """Statistics for a single position in the MSA."""
+    msa_position: int  # Position in MSA (0-indexed)
+    consensus_position: Optional[int]  # Position in consensus (None for insertion columns)
     coverage: int
     error_count: int
     error_rate: float
@@ -522,7 +531,7 @@ class PositionStats(NamedTuple):
     p_value: float
     is_homopolymer: bool
     gc_content: float
-    nucleotide: str
+    consensus_nucleotide: str  # Base in consensus at this MSA position (or '-' for insertion)
     base_composition: Dict[str, int]  # {A: 50, C: 3, G: 45, T: 2, '-': 0}
 
 
@@ -546,136 +555,139 @@ def analyze_positional_variation(
     alignments: List[ReadAlignment],
     consensus_seq: str,
     overall_error_rate: float,
-    msa_file: Optional[str] = None
+    msa_file: str
 ) -> List[PositionStats]:
     """
-    Analyze error rates at each position in the consensus sequence.
+    Analyze error rates at each position in the MSA.
 
     Identifies positions with significantly elevated error rates, which may
     indicate homopolymer regions, structural variants, or other error-prone
     sequence contexts.
 
+    IMPORTANT: All analysis is performed in MSA space (not consensus space).
+    This correctly handles insertion columns where multiple MSA positions
+    don't correspond to any consensus position.
+
     Args:
-        alignments: List of read alignments
-        consensus_seq: Consensus sequence
+        alignments: List of read alignments (with errors at MSA positions)
+        consensus_seq: Consensus sequence (ungapped)
         overall_error_rate: Overall error rate for binomial test
-        msa_file: Optional path to MSA file for base composition analysis
+        msa_file: Path to MSA file (REQUIRED for getting MSA length and mapping)
 
     Returns:
-        List of PositionStats for each consensus position
+        List of PositionStats for each MSA position
     """
-    consensus_len = len(consensus_seq)
+    # Parse MSA to get alignment structure
+    if not os.path.exists(msa_file):
+        logging.error(f"MSA file not found: {msa_file}")
+        return []
 
-    # Build error frequency matrix
-    # For each position: [sub_count, ins_count, del_count, total_coverage]
-    error_matrix = np.zeros((consensus_len, 4), dtype=int)
+    try:
+        records = list(SeqIO.parse(msa_file, 'fasta'))
 
-    # Track which reads have errors at each position (for binomial test)
-    # Set of read indices with at least one error at each position
-    reads_with_errors = [set() for _ in range(consensus_len)]
+        # Find consensus sequence in MSA
+        consensus_record = None
+        read_records = []
 
-    # Build base composition matrix
-    # Initialize composition tracking for each position
+        for record in records:
+            if 'Consensus' in record.description or 'Consensus' in record.id:
+                consensus_record = record
+            else:
+                read_records.append(record)
+
+        if consensus_record is None:
+            logging.error(f"No consensus found in MSA file: {msa_file}")
+            return []
+
+        consensus_aligned = str(consensus_record.seq).upper()
+        msa_length = len(consensus_aligned)
+
+        # Build mapping from MSA position to consensus position
+        # For insertion columns (consensus has '-'), maps to None
+        msa_to_consensus_pos = {}
+        consensus_pos = 0
+        for msa_pos in range(msa_length):
+            if consensus_aligned[msa_pos] != '-':
+                msa_to_consensus_pos[msa_pos] = consensus_pos
+                consensus_pos += 1
+            else:
+                msa_to_consensus_pos[msa_pos] = None
+
+    except Exception as e:
+        logging.error(f"Failed to parse MSA file: {e}")
+        return []
+
+    # Build error frequency matrix in MSA space
+    # For each MSA position: [sub_count, ins_count, del_count, total_coverage]
+    error_matrix = np.zeros((msa_length, 4), dtype=int)
+
+    # Track which reads have errors at each MSA position (for binomial test)
+    reads_with_errors = [set() for _ in range(msa_length)]
+
+    # Build base composition matrix in MSA space
     base_composition_matrix = [
         {'A': 0, 'C': 0, 'G': 0, 'T': 0, '-': 0}
-        for _ in range(consensus_len)
+        for _ in range(msa_length)
     ]
 
+    # Process alignments to count errors at MSA positions
     for read_idx, alignment in enumerate(alignments):
-        # Count this read as coverage for all positions
-        # (assuming full-length alignments; could be refined with alignment bounds)
-        for pos in range(consensus_len):
-            error_matrix[pos, 3] += 1  # coverage
+        # Count this read as coverage for all MSA positions
+        # Note: alignments are from extract_alignments_from_msa so they span the full MSA
+        for msa_pos in range(msa_length):
+            error_matrix[msa_pos, 3] += 1  # coverage
 
-        # Add errors at specific positions
+        # Add errors at specific MSA positions
         for error_pos in alignment.error_positions:
-            pos = error_pos.position
-            if 0 <= pos < consensus_len:
+            msa_pos = error_pos.msa_position
+            if 0 <= msa_pos < msa_length:
                 if error_pos.error_type == 'sub':
-                    error_matrix[pos, 0] += 1
+                    error_matrix[msa_pos, 0] += 1
                 elif error_pos.error_type == 'ins':
-                    error_matrix[pos, 1] += 1
+                    error_matrix[msa_pos, 1] += 1
                 elif error_pos.error_type == 'del':
-                    error_matrix[pos, 2] += 1
+                    error_matrix[msa_pos, 2] += 1
 
-                # Track that this read has an error at this position
-                reads_with_errors[pos].add(read_idx)
+                # Track that this read has an error at this MSA position
+                reads_with_errors[msa_pos].add(read_idx)
 
-    # Parse MSA to get base composition if available
-    if msa_file and os.path.exists(msa_file):
-        try:
-            # Parse MSA file
-            records = list(SeqIO.parse(msa_file, 'fasta'))
+    # Extract base composition from MSA
+    for read_record in read_records:
+        read_aligned = str(read_record.seq).upper()
 
-            # Find consensus sequence in MSA
-            consensus_record = None
-            read_records = []
+        if len(read_aligned) != msa_length:
+            continue
 
-            for record in records:
-                if 'Consensus' in record.description or 'Consensus' in record.id:
-                    consensus_record = record
-                else:
-                    read_records.append(record)
+        # Track what base each read has at each MSA position
+        for msa_pos in range(msa_length):
+            read_base = read_aligned[msa_pos]
 
-            if consensus_record:
-                consensus_aligned = str(consensus_record.seq).upper()
+            # Normalize base
+            if read_base in ['A', 'C', 'G', 'T', '-']:
+                base_composition_matrix[msa_pos][read_base] += 1
+            else:
+                # Treat N or other ambiguous as gap
+                base_composition_matrix[msa_pos]['-'] += 1
 
-                # Build mapping from MSA position to consensus position
-                msa_to_consensus_pos = {}
-                consensus_pos = 0
-                for msa_pos in range(len(consensus_aligned)):
-                    if consensus_aligned[msa_pos] != '-':
-                        msa_to_consensus_pos[msa_pos] = consensus_pos
-                        consensus_pos += 1
-
-                # Extract base at each consensus position from each read
-                for read_record in read_records:
-                    read_aligned = str(read_record.seq).upper()
-
-                    if len(read_aligned) != len(consensus_aligned):
-                        continue
-
-                    # Track what base each read has at each consensus position
-                    for msa_pos in range(len(consensus_aligned)):
-                        cons_base = consensus_aligned[msa_pos]
-                        read_base = read_aligned[msa_pos]
-
-                        # Only track at consensus positions (not insertion columns)
-                        if cons_base != '-' and msa_pos in msa_to_consensus_pos:
-                            cons_pos = msa_to_consensus_pos[msa_pos]
-
-                            # Normalize base
-                            if read_base in ['A', 'C', 'G', 'T', '-']:
-                                base_composition_matrix[cons_pos][read_base] += 1
-                            else:
-                                # Treat N or other ambiguous as gap
-                                base_composition_matrix[cons_pos]['-'] += 1
-
-        except Exception as e:
-            logging.warning(f"Failed to parse MSA for base composition: {e}")
-
-    # Calculate statistics for each position
+    # Calculate statistics for each MSA position
     position_stats = []
     p_values = []
 
-    for pos in range(consensus_len):
-        sub_count = error_matrix[pos, 0]
-        ins_count = error_matrix[pos, 1]
-        del_count = error_matrix[pos, 2]
-        coverage = error_matrix[pos, 3]
+    for msa_pos in range(msa_length):
+        sub_count = error_matrix[msa_pos, 0]
+        ins_count = error_matrix[msa_pos, 1]
+        del_count = error_matrix[msa_pos, 2]
+        coverage = error_matrix[msa_pos, 3]
 
-        # Total error events (can exceed coverage if multiple insertions per read)
+        # Total error events
         error_count = sub_count + ins_count + del_count
         error_rate = error_count / coverage if coverage > 0 else 0.0
 
         # For binomial test, use number of reads with errors (not total error events)
-        # This ensures k <= n for the binomial distribution
-        num_reads_with_errors = len(reads_with_errors[pos])
+        num_reads_with_errors = len(reads_with_errors[msa_pos])
 
-        # Binomial test: is this position's error rate significantly different from overall?
-        # Using one-tailed test since we're interested in high error rates
+        # Binomial test
         if coverage > 0:
-            # Use num_reads_with_errors for binomial test (k <= n guaranteed)
             result = binomtest(num_reads_with_errors, coverage, overall_error_rate, alternative='greater')
             p_value = result.pvalue
         else:
@@ -683,16 +695,27 @@ def analyze_positional_variation(
 
         p_values.append(p_value)
 
-        # Sequence context
-        is_homopolymer = detect_homopolymer_run(consensus_seq, pos, min_length=4)
-        gc_content = calculate_local_gc(consensus_seq, pos, window=10)
-        nucleotide = consensus_seq[pos] if pos < len(consensus_seq) else 'N'
+        # Get consensus position (None for insertion columns)
+        cons_pos = msa_to_consensus_pos[msa_pos]
 
-        # Get base composition for this position
-        base_comp = base_composition_matrix[pos].copy()
+        # Get consensus nucleotide at this MSA position
+        cons_nucleotide = consensus_aligned[msa_pos]
+
+        # Sequence context - calculate based on consensus position if available
+        if cons_pos is not None:
+            is_homopolymer = detect_homopolymer_run(consensus_seq, cons_pos, min_length=4)
+            gc_content = calculate_local_gc(consensus_seq, cons_pos, window=10)
+        else:
+            # Insertion column - no consensus context
+            is_homopolymer = False
+            gc_content = 0.0
+
+        # Get base composition for this MSA position
+        base_comp = base_composition_matrix[msa_pos].copy()
 
         position_stats.append(PositionStats(
-            position=pos,
+            msa_position=msa_pos,
+            consensus_position=cons_pos,
             coverage=coverage,
             error_count=error_count,
             error_rate=error_rate,
@@ -702,7 +725,7 @@ def analyze_positional_variation(
             p_value=p_value,
             is_homopolymer=is_homopolymer,
             gc_content=gc_content,
-            nucleotide=nucleotide,
+            consensus_nucleotide=cons_nucleotide,
             base_composition=base_comp
         ))
 
@@ -710,15 +733,11 @@ def analyze_positional_variation(
     adjusted_p_values = benjamini_hochberg_correction(p_values)
 
     # Update position_stats with adjusted p-values
-    # (we'll add a q_value field later if needed, for now just use p_value)
-    # For this implementation, we'll create a new list with adjusted p-values
     position_stats_with_fdr = []
     for i, stats in enumerate(position_stats):
-        # Create a new PositionStats with q_value instead of p_value
-        # Actually, PositionStats doesn't have q_value field, so we'll keep p_value
-        # and interpret it as q_value after correction
         position_stats_with_fdr.append(PositionStats(
-            position=stats.position,
+            msa_position=stats.msa_position,
+            consensus_position=stats.consensus_position,
             coverage=stats.coverage,
             error_count=stats.error_count,
             error_rate=stats.error_rate,
@@ -728,7 +747,7 @@ def analyze_positional_variation(
             p_value=adjusted_p_values[i],  # Use adjusted p-value (q-value)
             is_homopolymer=stats.is_homopolymer,
             gc_content=stats.gc_content,
-            nucleotide=stats.nucleotide,
+            consensus_nucleotide=stats.consensus_nucleotide,
             base_composition=stats.base_composition
         ))
 
@@ -956,6 +975,9 @@ def analyze_all_cluster_positions(
     """
     Analyze positional variation across all clusters.
 
+    NOTE: This is legacy code that works in consensus space, not MSA space.
+    For variant detection, use analyze_positional_variation instead.
+
     Args:
         cluster_alignments: List of (cluster_info, alignments) tuples
 
@@ -971,26 +993,42 @@ def analyze_all_cluster_positions(
         consensus_seq = cluster_info.consensus_seq
         consensus_len = len(consensus_seq)
 
-        # Build error frequency matrix for this cluster
+        # Get MSA-to-consensus mapping from MSA file
+        if not cluster_info.msa_file or not os.path.exists(cluster_info.msa_file):
+            logging.warning(f"MSA file not found for {cluster_info.sample_name}, skipping positional analysis")
+            continue
+
+        try:
+            # Parse MSA to get mapping
+            _, _, msa_to_consensus_pos = extract_alignments_from_msa(cluster_info.msa_file)
+        except Exception as e:
+            logging.warning(f"Failed to parse MSA for {cluster_info.sample_name}: {e}")
+            continue
+
+        # Build error frequency matrix for this cluster (in consensus space)
         error_matrix = np.zeros((consensus_len, 4), dtype=int)
 
         for alignment in alignments:
-            # Count coverage
+            # Count coverage for all consensus positions
             for pos in range(consensus_len):
                 error_matrix[pos, 3] += 1
 
-            # Add errors
+            # Map MSA position errors to consensus positions
             for error_pos in alignment.error_positions:
-                pos = error_pos.position
-                if 0 <= pos < consensus_len:
-                    if error_pos.error_type == 'sub':
-                        error_matrix[pos, 0] += 1
-                    elif error_pos.error_type == 'ins':
-                        error_matrix[pos, 1] += 1
-                    elif error_pos.error_type == 'del':
-                        error_matrix[pos, 2] += 1
+                msa_pos = error_pos.msa_position
+                cons_pos = msa_to_consensus_pos.get(msa_pos)
 
-        # Calculate statistics for each position in this cluster
+                # Only count errors that map to a consensus position (skip insertions)
+                if cons_pos is not None and 0 <= cons_pos < consensus_len:
+                    if error_pos.error_type == 'sub':
+                        error_matrix[cons_pos, 0] += 1
+                    elif error_pos.error_type == 'ins':
+                        # Insertions don't really map to consensus positions, skip
+                        pass
+                    elif error_pos.error_type == 'del':
+                        error_matrix[cons_pos, 2] += 1
+
+        # Calculate statistics for each consensus position
         for pos in range(consensus_len):
             sub_count = error_matrix[pos, 0]
             ins_count = error_matrix[pos, 1]
@@ -1052,7 +1090,7 @@ def analyze_cluster(cluster_info: ClusterInfo) -> Tuple[ClusterStats, List[ReadA
 
     # Extract alignments from MSA
     logging.debug(f"Using MSA for {cluster_info.sample_name}: {cluster_info.msa_file}")
-    alignments, consensus_from_msa = extract_alignments_from_msa(cluster_info.msa_file)
+    alignments, consensus_from_msa, msa_to_consensus_pos = extract_alignments_from_msa(cluster_info.msa_file)
 
     # Verify consensus matches
     if consensus_from_msa and consensus_from_msa != consensus_seq:
@@ -1092,7 +1130,8 @@ def analyze_cluster(cluster_info: ClusterInfo) -> Tuple[ClusterStats, List[ReadA
         all_error_positions.extend(a.error_positions)
     has_contiguous = detect_contiguous_error_regions(
         all_error_positions,
-        len(consensus_seq)
+        len(consensus_seq),
+        msa_to_consensus_pos
     )
 
     stats = ClusterStats(

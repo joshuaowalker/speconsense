@@ -78,7 +78,7 @@ def test_extract_alignments_from_msa_perfect_match():
         msa_file = f.name
 
     try:
-        alignments, consensus = extract_alignments_from_msa(msa_file)
+        alignments, consensus, msa_to_consensus_pos = extract_alignments_from_msa(msa_file)
 
         assert consensus == "ACGTACGTACGT"
         assert len(alignments) == 1
@@ -88,6 +88,11 @@ def test_extract_alignments_from_msa_perfect_match():
         assert alignments[0].num_insertions == 0
         assert alignments[0].num_deletions == 0
         assert alignments[0].num_substitutions == 0
+
+        # Verify mapping
+        assert len(msa_to_consensus_pos) == 12
+        for i in range(12):
+            assert msa_to_consensus_pos[i] == i
     finally:
         os.unlink(msa_file)
 
@@ -112,7 +117,7 @@ def test_extract_alignments_from_msa_with_errors():
         msa_file = f.name
 
     try:
-        alignments, consensus = extract_alignments_from_msa(msa_file)
+        alignments, consensus, msa_to_consensus_pos = extract_alignments_from_msa(msa_file)
 
         assert consensus == "ACGTACGT"
         assert len(alignments) == 3
@@ -137,6 +142,12 @@ def test_extract_alignments_from_msa_with_errors():
         assert alignments[2].num_insertions == 1
         assert alignments[2].num_deletions == 0
         assert alignments[2].num_substitutions == 0
+
+        # Verify mapping includes insertion column
+        # MSA length is 9 (8 consensus bases + 1 insertion column)
+        assert len(msa_to_consensus_pos) == 9
+        # Position 5 (after ACGTA) is the insertion column
+        assert msa_to_consensus_pos[5] is None
     finally:
         os.unlink(msa_file)
 

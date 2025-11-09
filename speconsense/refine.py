@@ -880,7 +880,7 @@ def main():
                     continue
 
                 # Extract alignments from MSA
-                alignments, consensus = extract_alignments_from_msa(msa_file)
+                alignments, consensus, msa_to_consensus_pos = extract_alignments_from_msa(msa_file)
 
                 if not alignments:
                     continue
@@ -890,7 +890,7 @@ def main():
                     alignments,
                     consensus,
                     global_stats['read_p95_error_rate'],
-                    msa_file=msa_file
+                    msa_file
                 )
 
                 # Identify variant positions
@@ -906,7 +906,8 @@ def main():
                         all_variant_positions.append({
                             'sample_name': cluster_info.sample_name,
                             'cluster_num': cluster_info.cluster_num,
-                            'position': pos_stat.position,
+                            'msa_position': pos_stat.msa_position,
+                            'consensus_position': pos_stat.consensus_position,
                             'coverage': pos_stat.coverage,
                             'variant_bases': variant_bases,
                             'base_composition': pos_stat.base_composition,
@@ -921,10 +922,12 @@ def main():
 
             if all_variant_positions:
                 # Filter for high-priority variants (internal, non-homopolymer)
+                # Use consensus_position for filtering (skip insertions and primer regions)
                 high_priority_variants = [
                     v for v in all_variant_positions
                     if not v['is_homopolymer']
-                    and v['position'] >= 20
+                    and v['consensus_position'] is not None
+                    and v['consensus_position'] >= 20
                 ]
 
                 logging.info(f"    High-priority variants (non-HP, internal): {len(high_priority_variants)}")
@@ -940,8 +943,13 @@ def main():
                         sorted_comp = sorted(comp.items(), key=lambda x: x[1], reverse=True)
                         comp_str = ', '.join([f"{b}:{c}" for b, c in sorted_comp[:3]])
 
+                        # Display both MSA and consensus position for clarity
+                        pos_str = f"MSA:{v['msa_position']}"
+                        if v['consensus_position'] is not None:
+                            pos_str += f"/Cons:{v['consensus_position']}"
+
                         logging.info(
-                            f"    {i}. {cluster_id} pos {v['position']}: "
+                            f"    {i}. {cluster_id} {pos_str}: "
                             f"{v['error_rate']*100:.1f}% error, "
                             f"cov={v['coverage']}, "
                             f"bases=[{comp_str}], "
