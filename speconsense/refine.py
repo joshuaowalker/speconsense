@@ -151,13 +151,20 @@ def read_metadata(input_dir: str, sample_name: str) -> Optional[Dict]:
 
 
 def is_homopolymer_variant(variant: Dict, consensus_seq: str,
-                           all_variants_by_cluster: Dict, msa_to_consensus_pos: Dict[int, Optional[int]]) -> bool:
+                           all_variants_by_cluster: Dict, msa_to_consensus_pos: Dict[int, Optional[int]],
+                           min_alt_freq: float = 0.20) -> bool:
     """
     Determine if a variant is a homopolymer-related indel.
 
     A variant is considered homopolymer-related if:
-    1. The variant allele is homogeneous (>=80% same base)
+    1. Only one significant alternative allele exists (100% homogeneous)
     2. At least one adjacent consensus position contains that same base
+
+    Only alternative alleles with frequency >= min_alt_freq are considered when
+    determining homogeneity. This prevents low-frequency sequencing errors from
+    masking clear homopolymer length differences. Since we filter to significant
+    alternatives, we require 100% homogeneity - multiple significant alternatives
+    indicate true biological variation, not homopolymer length variation.
 
     For deletions: Check if the consensus base (being deleted) appears in adjacent positions
     For insertions: Check if the inserted base appears in adjacent consensus positions
@@ -168,6 +175,7 @@ def is_homopolymer_variant(variant: Dict, consensus_seq: str,
         consensus_seq: Ungapped consensus sequence
         all_variants_by_cluster: Dict mapping (sample_name, cluster_num, msa_pos) to variant
         msa_to_consensus_pos: Mapping from MSA positions to consensus positions
+        min_alt_freq: Minimum frequency threshold for significant alternative alleles (default 0.20)
 
     Returns:
         True if this is a homopolymer variant
@@ -175,26 +183,32 @@ def is_homopolymer_variant(variant: Dict, consensus_seq: str,
     base_comp = variant['base_composition']
     cons_pos = variant['consensus_position']
     msa_pos = variant['msa_position']
+    coverage = variant.get('coverage', sum(base_comp.values()))
 
-    # Get total non-consensus bases (excluding the consensus base and gaps from consensus)
-    total_alt = sum(count for base, count in base_comp.items()
-                   if base != variant.get('consensus_nucleotide', '-'))
-
-    if total_alt == 0:
-        return False
-
-    # Find the dominant alternative allele
+    # Get alternative alleles (excluding the consensus base)
     alt_bases = [(base, count) for base, count in base_comp.items()
                  if base != variant.get('consensus_nucleotide', '-')]
-    alt_bases.sort(key=lambda x: x[1], reverse=True)
 
     if not alt_bases:
         return False
 
-    dominant_base, dominant_count = alt_bases[0]
+    # Filter to only significant alternative alleles (>= min_alt_freq)
+    # This prevents low-frequency sequencing errors from affecting HP classification
+    significant_alt_bases = [(base, count) for base, count in alt_bases
+                            if count / coverage >= min_alt_freq]
 
-    # Check if variant is homogeneous (>=80% same base among alternatives)
-    if dominant_count / total_alt < 0.8:
+    if not significant_alt_bases:
+        return False
+
+    # Sort by count and get dominant
+    significant_alt_bases.sort(key=lambda x: x[1], reverse=True)
+    dominant_base, dominant_count = significant_alt_bases[0]
+
+    # Check if variant is homogeneous (100% same base among significant alternatives)
+    # Since we've already filtered out low-frequency sequencing errors, multiple
+    # significant alternatives indicate true biological variation, not HP length variation
+    total_significant = sum(count for base, count in significant_alt_bases)
+    if dominant_count / total_significant < 1.0:
         return False
 
     # Determine which base to look for in adjacent positions
@@ -1170,7 +1184,8 @@ def main():
                         v,
                         v['consensus_seq'],
                         variants_by_key,
-                        v['msa_to_consensus_pos']
+                        v['msa_to_consensus_pos'],
+                        min_alt_freq=args.min_alt_freq if hasattr(args, 'min_alt_freq') else 0.20
                     )
 
                     if is_hp:
