@@ -22,8 +22,12 @@ from Bio import SeqIO
 from Bio.Seq import reverse_complement
 from tqdm import tqdm
 
-# Import analysis functions for variance calculation
-from speconsense.analyze import extract_alignments_from_msa
+# Import analysis functions for variance calculation and variant detection
+from speconsense.analyze import (
+    extract_alignments_from_msa,
+    analyze_positional_variation,
+    is_variant_position_with_composition
+)
 
 try:
     from speconsense import __version__
@@ -392,15 +396,19 @@ class SpecimenClusterer:
                             mean_var: Optional[float] = None,
                             median_var: Optional[float] = None,
                             p95_var: Optional[float] = None,
+                            variant_positions: Optional[List[Dict]] = None,
                             actual_size: Optional[int] = None,
                             consensus_fasta_handle = None,
                             sampled_ids: Optional[Set[str]] = None,
                             msa: Optional[str] = None) -> None:
-        """Write cluster files: reads FASTQ, MSA, and consensus FASTA.
+        """Write cluster files: reads FASTQ, MSA, consensus FASTA, and variant debug files.
 
         Variance metrics measure per-read edit distance to consensus:
         - Low variance: good clustering and accurate consensus
         - High variance: may indicate read errors OR imperfect clustering/consensus
+
+        Variant positions indicate potential unphased biological variation that may
+        require cluster subdivision in future processing.
         """
         cluster_size = len(cluster)
         ric_size = min(actual_size or cluster_size, self.max_sample_size)
@@ -415,6 +423,16 @@ class SpecimenClusterer:
             info_parts.append(f"var_med={median_var*100:.1f}")
         if p95_var is not None:
             info_parts.append(f"var_p95={p95_var*100:.1f}")
+
+        # Add variant flags
+        if variant_positions is not None:
+            num_variants = len(variant_positions)
+            if num_variants > 0:
+                info_parts.append(f"has_variants=true")
+                info_parts.append(f"num_variants={num_variants}")
+            else:
+                info_parts.append(f"has_variants=false")
+
         if found_primers:
             info_parts.append(f"primers={','.join(found_primers)}")
         info_str = " ".join(info_parts)
@@ -437,6 +455,32 @@ class SpecimenClusterer:
             msa_file = os.path.join(self.debug_dir, f"{self.sample_name}-c{cluster_num}-RiC{ric_size}-msa.fasta")
             with open(msa_file, 'w') as f:
                 f.write(msa)
+
+        # Write variant positions to debug directory
+        if variant_positions and len(variant_positions) > 0:
+            variant_file = os.path.join(self.debug_dir, f"{self.sample_name}-c{cluster_num}-RiC{ric_size}-variants.txt")
+            with open(variant_file, 'w') as f:
+                f.write(f"Variant positions for {self.sample_name}-c{cluster_num}\n")
+                f.write(f"Total variants: {len(variant_positions)}\n\n")
+
+                for var in variant_positions:
+                    # Format position info
+                    if var['consensus_position'] is not None:
+                        pos_str = f"MSA:{var['msa_position']}/Consensus:{var['consensus_position']}"
+                    else:
+                        pos_str = f"MSA:{var['msa_position']}/Consensus:insertion"
+
+                    # Format base composition
+                    sorted_bases = sorted(var['base_composition'].items(), key=lambda x: x[1], reverse=True)
+                    comp_str = ', '.join([f"{base}:{count}" for base, count in sorted_bases[:4]])
+
+                    # Write variant info
+                    f.write(f"Position {pos_str}\n")
+                    f.write(f"  Coverage: {var['coverage']}\n")
+                    f.write(f"  Error rate: {var['error_rate']*100:.1f}%\n")
+                    f.write(f"  Base composition: {comp_str}\n")
+                    f.write(f"  Variant bases: {var['variant_bases']}\n")
+                    f.write(f"  Reason: {var['reason']}\n\n")
 
         # Write untrimmed consensus to debug directory
         with open(os.path.join(self.debug_dir, f"{self.sample_name}-c{cluster_num}-RiC{ric_size}-untrimmed.fasta"),
@@ -690,6 +734,18 @@ class SpecimenClusterer:
                                 logging.info(f"Cluster {i}: After outlier removal, "
                                            f"P95 variance reduced to {p95_var*100:.1f}%")
 
+                    # Detect variant positions for future phasing
+                    variant_positions = []
+                    if consensus and msa and self.outlier_threshold is not None:
+                        # Use the same threshold as outlier detection
+                        variant_positions = self.detect_variant_positions(
+                            msa, consensus, self.outlier_threshold, min_alt_freq=0.20
+                        )
+
+                        if variant_positions:
+                            logging.info(f"Cluster {i}: Detected {len(variant_positions)} variant positions "
+                                       f"(potential unphased variation)")
+
                     # For merged homopolymer-equivalent clusters, the consensus is already correct
                     # (we use the consensus from the larger cluster during merging)
 
@@ -709,6 +765,7 @@ class SpecimenClusterer:
                             mean_var=mean_var,
                             median_var=median_var,
                             p95_var=p95_var,
+                            variant_positions=variant_positions,
                             actual_size=actual_size,
                             consensus_fasta_handle=consensus_fasta_handle,
                             sampled_ids=sampled_ids,
@@ -929,6 +986,78 @@ class SpecimenClusterer:
         except Exception as e:
             logging.warning(f"Failed to calculate read variance from MSA: {e}")
             return None, None, None
+
+    def detect_variant_positions(self, msa_string: str, consensus_seq: str,
+                                error_threshold: float, min_alt_freq: float = 0.20) -> List[Dict]:
+        """Detect variant positions in MSA for future phasing.
+
+        Identifies positions with significant alternative alleles that may indicate
+        unphased biological variation requiring cluster subdivision.
+
+        Args:
+            msa_string: MSA in FASTA format from SPOA
+            consensus_seq: Ungapped consensus sequence
+            error_threshold: Error rate threshold for variant detection (e.g., P95)
+            min_alt_freq: Minimum alternative allele frequency (default: 0.20)
+
+        Returns:
+            List of variant position dictionaries with metadata, or empty list if none found
+        """
+        if not msa_string or not consensus_seq:
+            return []
+
+        try:
+            # Write MSA to temporary file for parsing
+            with tempfile.NamedTemporaryFile(mode='w', delete=False, suffix='.fasta') as f:
+                f.write(msa_string)
+                temp_msa_file = f.name
+
+            try:
+                # Extract alignments from MSA
+                alignments, msa_consensus, msa_to_consensus_pos = extract_alignments_from_msa(temp_msa_file)
+
+                if not alignments:
+                    logging.debug(f"No alignments found in MSA for variant detection")
+                    return []
+
+                # Analyze positional variation
+                position_stats = analyze_positional_variation(
+                    alignments,
+                    consensus_seq,
+                    error_threshold,
+                    temp_msa_file
+                )
+
+                # Identify variant positions
+                variant_positions = []
+                for pos_stat in position_stats:
+                    is_variant, variant_bases, reason = is_variant_position_with_composition(
+                        pos_stat,
+                        error_threshold,
+                        min_alt_freq=min_alt_freq,
+                        confidence_sigma=3.0
+                    )
+
+                    if is_variant:
+                        variant_positions.append({
+                            'msa_position': pos_stat.msa_position,
+                            'consensus_position': pos_stat.consensus_position,
+                            'coverage': pos_stat.coverage,
+                            'variant_bases': variant_bases,
+                            'base_composition': pos_stat.base_composition,
+                            'error_rate': pos_stat.error_rate,
+                            'reason': reason
+                        })
+
+                return variant_positions
+
+            finally:
+                # Clean up temporary file
+                os.unlink(temp_msa_file)
+
+        except Exception as e:
+            logging.warning(f"Failed to detect variant positions: {e}")
+            return []
 
     def load_primers(self, primer_file: str) -> None:
         """Load primers from FASTA file with position awareness."""
