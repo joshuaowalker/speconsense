@@ -14,28 +14,36 @@ from Bio import SeqIO
 
 
 def test_merge_behavior_with_full_hac_context():
-    """Test merge behavior using real specimen file with MSA-based merging.
+    """Test merge behavior using complete real specimen file with multiple clusters.
 
     This uses the ONT01.06-F01--iNat233404862-all.fasta file which contains
-    2 clusters (c1 and c2). This test demonstrates that sequences with only
-    SNP differences (no structural indels) merge with MSA-based consensus.
+    9 clusters. This test demonstrates that merge decisions depend on the full HAC
+    group context, not just pairwise comparisons.
 
     The file contains:
-    - c1: main cluster (ric=500, size=671)
-    - c2: second cluster (ric=250, size=250)
+    - c1: main cluster (ric=500) - majority pattern
+    - c2: second major cluster (ric=250) - majority pattern
+    - c3: contamination (ric=9) - separate group
+    - c4: variant (ric=6) - ends with TAG, structural variant
+    - c5: variant (ric=6) - structural variant
+    - c6: contamination (ric=4) - separate group
+    - c7: variant (ric=3) - ends with TAA
+    - c8: variant (ric=3) - majority pattern
+    - c9: variant (ric=3) - ends with TAA, homopolymer variation from c7
 
-    Both sequences are nearly identical with only a few SNP differences,
-    so they should merge into a single IUPAC consensus sequence.
-
-    Expected behavior: c1 and c2 merge into a single variant with rawric=500+250
+    Expected behavior:
+    - c1 + c2 merge into 1.v1 with rawric=500+250
+    - c7 + c9 merge into 1.v4 with rawric=3+3 (both end with TAA, differ only by homopolymers)
+    - c4 stays separate as 1.v3 (ends with TAG, not compatible with TAA sequences)
+    - Total: 7 sequences across 3 HAC groups
     """
-    # Use the real file from the data directory
-    real_file = "/Users/josh/mm/data/ont98/demux20251106/clusters/ONT01.06-F01--iNat233404862-all.fasta"
+    # Use the test data file
+    test_file = os.path.join(os.path.dirname(__file__), "data", "ONT01.06-F01--iNat233404862-all.fasta")
 
     # Skip test if file doesn't exist (e.g., on CI)
-    if not os.path.exists(real_file):
+    if not os.path.exists(test_file):
         import pytest
-        pytest.skip(f"Test file not found: {real_file}")
+        pytest.skip(f"Test file not found: {test_file}")
 
     # Create temporary directory for output
     temp_dir = tempfile.mkdtemp()
@@ -44,10 +52,10 @@ def test_merge_behavior_with_full_hac_context():
     os.makedirs(source_dir)
 
     try:
-        # Copy the real file to our temp directory
+        # Copy the test file to our temp directory
         import shutil as shutil_module
         dest_file = os.path.join(source_dir, "ONT01.06-F01--iNat233404862-all.fasta")
-        shutil_module.copy(real_file, dest_file)
+        shutil_module.copy(test_file, dest_file)
 
         # Run speconsense-summarize with default parameters
         result = subprocess.run(
@@ -77,29 +85,76 @@ def test_merge_behavior_with_full_hac_context():
         for seq in output_sequences:
             print(f"  {seq.id}: {seq.description}")
 
-        # c1 and c2 should merge into a single sequence since they only differ by SNPs
-        assert len(output_sequences) == 1, \
-            f"Expected 1 merged sequence in output, got {len(output_sequences)}"
+        # Verify the expected number of output sequences (7 total for this specimen)
+        assert len(output_sequences) == 7, \
+            f"Expected 7 output sequences, got {len(output_sequences)}"
 
-        # Verify the merged sequence has the expected rawric (500+250 or 250+500)
-        merged_seq = output_sequences[0]
-        assert 'rawric=' in merged_seq.description, \
-            f"Expected merged sequence to have rawric field"
+        # Check if c7 and c9 were merged by examining the output sequences
+        # Look for sequences with rawric field indicating a merge
+        c7_c9_merged = False
+        merged_into = None
 
-        # Extract and verify rawric values
-        rawric_match = re.search(r'rawric=([\d+]+)', merged_seq.description)
-        assert rawric_match, "Could not find rawric in merged sequence"
+        for seq in output_sequences:
+            # Check if this sequence has rawric=3+3 (c7 and c9)
+            if 'rawric=' in seq.description:
+                # Extract rawric values
+                rawric_match = re.search(r'rawric=([\d+]+)', seq.description)
+                if rawric_match:
+                    rawric_str = rawric_match.group(1)
+                    ric_values = [int(x) for x in rawric_str.split('+')]
+                    # Check if both values are 3 (c7 and c9)
+                    if ric_values == [3, 3]:
+                        c7_c9_merged = True
+                        merged_into = seq.id
+                        break
 
-        rawric_str = rawric_match.group(1)
-        ric_values = set(int(x) for x in rawric_str.split('+'))
+        # Alternative check: Look at .raw files in variants directory
+        # If c7 and c9 are in the same variant group, they were merged
+        variants_dir = os.path.join(summary_dir, "variants")
+        if os.path.exists(variants_dir) and not c7_c9_merged:
+            specimen_raw_files = sorted([f for f in os.listdir(variants_dir)
+                                         if f.startswith('ONT01.06-F01--iNat233404862') and '.raw' in f])
 
-        # Should contain both original RiC values (500 and 250)
-        assert ric_values == {500, 250}, \
-            f"Expected rawric to contain 500 and 250, got: {ric_values}"
+            # Group raw files by their variant (e.g., "1.v4")
+            variant_groups = {}
+            for raw_file in specimen_raw_files:
+                # Extract variant identifier (e.g., "1.v4" from "...1.v4.raw1...")
+                match = re.search(r'-(\d+\.v\d+)\.raw', raw_file)
+                if match:
+                    variant_id = match.group(1)
+                    if variant_id not in variant_groups:
+                        variant_groups[variant_id] = []
+                    variant_groups[variant_id].append(raw_file)
 
-        # Verify SNP count is reported (sequences differ by a few SNPs)
-        assert 'snp=' in merged_seq.description, \
-            f"Expected merged sequence to have snp field indicating IUPAC consensus"
+            # Check each variant group for both c7 and c9 (both end with TAA)
+            for variant_id, raw_files in variant_groups.items():
+                has_c7_or_c9 = 0
+
+                for raw_file in raw_files:
+                    raw_path = os.path.join(variants_dir, raw_file)
+                    raw_seqs = list(SeqIO.parse(raw_path, "fasta"))
+
+                    for seq in raw_seqs:
+                        seq_str = str(seq.seq)
+                        # Both c7 and c9 end with TAA
+                        if seq_str.endswith('GACCTCAAATCAGGTAGGACTACCCGCTGAACTTAA'):
+                            has_c7_or_c9 += 1
+
+                if has_c7_or_c9 >= 2:  # Found at least 2 sequences ending with TAA
+                    c7_c9_merged = True
+                    merged_into = variant_id
+                    break
+
+        # Key assertion: c7 and c9 SHOULD be merged when in HAC group context
+        # This is because the multi-sequence alignment reveals their differences
+        # are homopolymer variations (both end with TAA)
+        assert c7_c9_merged, \
+            f"c7 (ric=3) and c9 (ric=3) should be merged in HAC group context, " \
+            f"but they were not merged"
+
+        # Verify they merged into the expected variant group (1.v4)
+        assert merged_into == '1.v4' or merged_into == 'ONT01.06-F01--iNat233404862-1.v4', \
+            f"Expected c7 and c9 to merge into variant 1.v4, but merged into: {merged_into}"
 
     finally:
         # Clean up temporary directory
