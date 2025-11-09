@@ -150,6 +150,162 @@ def read_metadata(input_dir: str, sample_name: str) -> Optional[Dict]:
         return None
 
 
+def is_homopolymer_variant(variant: Dict, consensus_seq: str,
+                           all_variants_by_cluster: Dict, msa_to_consensus_pos: Dict[int, Optional[int]]) -> bool:
+    """
+    Determine if a variant is a homopolymer-related indel.
+
+    A variant is considered homopolymer-related if:
+    1. The variant allele is homogeneous (>=80% same base)
+    2. At least one adjacent consensus position contains that same base
+
+    Args:
+        variant: Variant dictionary with base_composition, msa_position, consensus_position
+        consensus_seq: Ungapped consensus sequence
+        all_variants_by_cluster: Dict mapping (sample_name, cluster_num, msa_pos) to variant
+        msa_to_consensus_pos: Mapping from MSA positions to consensus positions
+
+    Returns:
+        True if this is a homopolymer variant
+    """
+    base_comp = variant['base_composition']
+    cons_pos = variant['consensus_position']
+    msa_pos = variant['msa_position']
+
+    # Get total non-consensus bases (excluding the consensus base and gaps from consensus)
+    total_alt = sum(count for base, count in base_comp.items()
+                   if base != variant.get('consensus_nucleotide', '-'))
+
+    if total_alt == 0:
+        return False
+
+    # Find the dominant alternative allele
+    alt_bases = [(base, count) for base, count in base_comp.items()
+                 if base != variant.get('consensus_nucleotide', '-')]
+    alt_bases.sort(key=lambda x: x[1], reverse=True)
+
+    if not alt_bases:
+        return False
+
+    dominant_base, dominant_count = alt_bases[0]
+
+    # Check if variant is homogeneous (>=80% same base among alternatives)
+    if dominant_count / total_alt < 0.8:
+        return False
+
+    # Now check if adjacent consensus positions have this base
+    # For insertions, we need to find adjacent consensus positions via MSA mapping
+    if cons_pos is None:
+        # This is an insertion - find adjacent consensus positions
+        left_pos, right_pos = get_adjacent_consensus_positions(msa_pos, msa_to_consensus_pos)
+
+        # Check if either adjacent position has the dominant base
+        adjacent_has_base = False
+        if left_pos is not None and left_pos < len(consensus_seq):
+            if consensus_seq[left_pos] == dominant_base:
+                adjacent_has_base = True
+        if right_pos is not None and right_pos < len(consensus_seq):
+            if consensus_seq[right_pos] == dominant_base:
+                adjacent_has_base = True
+
+        return adjacent_has_base
+    else:
+        # Regular position - check adjacent consensus positions
+        adjacent_has_base = False
+
+        # Check left neighbor
+        if cons_pos > 0:
+            if consensus_seq[cons_pos - 1] == dominant_base:
+                adjacent_has_base = True
+
+        # Check right neighbor
+        if cons_pos + 1 < len(consensus_seq):
+            if consensus_seq[cons_pos + 1] == dominant_base:
+                adjacent_has_base = True
+
+        return adjacent_has_base
+
+
+def get_adjacent_consensus_positions(msa_position: int,
+                                     msa_to_consensus_pos: Dict[int, Optional[int]]) -> Tuple[Optional[int], Optional[int]]:
+    """
+    For an insertion column in the MSA, find the adjacent consensus positions.
+
+    Args:
+        msa_position: MSA position of the insertion
+        msa_to_consensus_pos: Mapping from MSA positions to consensus positions
+
+    Returns:
+        Tuple of (left_consensus_pos, right_consensus_pos)
+        Either may be None if at the start/end of the sequence
+    """
+    # Find previous consensus position
+    left_pos = None
+    for i in range(msa_position - 1, -1, -1):
+        if i in msa_to_consensus_pos and msa_to_consensus_pos[i] is not None:
+            left_pos = msa_to_consensus_pos[i]
+            break
+
+    # Find next consensus position
+    right_pos = None
+    max_msa_pos = max(msa_to_consensus_pos.keys())
+    for i in range(msa_position + 1, max_msa_pos + 1):
+        if i in msa_to_consensus_pos and msa_to_consensus_pos[i] is not None:
+            right_pos = msa_to_consensus_pos[i]
+            break
+
+    return left_pos, right_pos
+
+
+def write_cluster_metadata(output_dir: str, sample_name: str, cluster_num: int,
+                           trim_start: int, trim_end: int) -> None:
+    """
+    Update metadata file with cluster-specific trimming information.
+
+    Args:
+        output_dir: Output directory where metadata will be written
+        sample_name: Full sample name (e.g., 'sample1-c1')
+        cluster_num: Cluster number
+        trim_start: Start coordinate of trimmed region (0-based, inclusive)
+        trim_end: End coordinate of trimmed region (0-based, exclusive)
+    """
+    # Extract base sample name
+    base_name = sample_name.split('-c')[0] if '-c' in sample_name else sample_name
+
+    metadata_file = os.path.join(output_dir, 'cluster_debug', f'{base_name}-metadata.json')
+
+    # Load existing metadata or create new structure
+    if os.path.exists(metadata_file):
+        try:
+            with open(metadata_file, 'r') as f:
+                metadata = json.load(f)
+        except Exception as e:
+            logging.warning(f"Failed to read existing metadata {metadata_file}: {e}")
+            metadata = {}
+    else:
+        metadata = {}
+
+    # Initialize clusters dict if not present
+    if 'clusters' not in metadata:
+        metadata['clusters'] = {}
+
+    # Store cluster-specific trim coordinates
+    cluster_key = f"c{cluster_num}"
+    metadata['clusters'][cluster_key] = {
+        'trim_start': trim_start,
+        'trim_end': trim_end
+    }
+
+    # Write updated metadata
+    try:
+        os.makedirs(os.path.dirname(metadata_file), exist_ok=True)
+        with open(metadata_file, 'w') as f:
+            json.dump(metadata, f, indent=2)
+        logging.debug(f"Updated metadata for {sample_name}: trim_start={trim_start}, trim_end={trim_end}")
+    except Exception as e:
+        logging.warning(f"Failed to write metadata {metadata_file}: {e}")
+
+
 def compute_global_statistics(
     all_cluster_stats: List[ClusterStats],
     all_cluster_alignments: List[Tuple[ClusterInfo, List[ReadAlignment]]]
@@ -374,7 +530,7 @@ def run_spoa(sequences: List[str], max_sample_size: int = 100) -> Tuple[Optional
         os.unlink(temp_file)
 
 
-def trim_primers(sequence: str, primers: Dict[str, str]) -> Tuple[str, List[str]]:
+def trim_primers(sequence: str, primers: Dict[str, str]) -> Tuple[str, List[str], int, int]:
     """
     Trim primers from start and end of sequence.
 
@@ -383,16 +539,23 @@ def trim_primers(sequence: str, primers: Dict[str, str]) -> Tuple[str, List[str]
         primers: Dict mapping primer names to sequences
 
     Returns:
-        Tuple of (trimmed_sequence, [found_primers])
+        Tuple of (trimmed_sequence, [found_primers], trim_start, trim_end)
+        where trim_start and trim_end are 0-based coordinates in the original sequence:
+        - trim_start: first position kept (inclusive)
+        - trim_end: last position kept (exclusive, Python slice convention)
     """
     if not primers:
-        return sequence, []
+        return sequence, [], 0, len(sequence)
 
     # Convert primer dict to list of tuples (matching core.py format)
     primer_list = list(primers.items())
 
     found_primers = []
     trimmed_seq = sequence
+
+    # Track trimming coordinates in original sequence
+    trim_start = 0  # First position to keep
+    trim_end = len(sequence)  # Last position to keep (exclusive)
 
     # Look for primer at 5' end
     best_start_dist = float('inf')
@@ -415,6 +578,7 @@ def trim_primers(sequence: str, primers: Dict[str, str]) -> Tuple[str, List[str]
     if best_start_primer:
         logging.debug(f"Found {best_start_primer} at 5' end (dist={best_start_dist})")
         found_primers.append(f"5'-{best_start_primer}")
+        trim_start = best_start_end
         trimmed_seq = trimmed_seq[best_start_end:]
 
     # Look for primer at 3' end
@@ -439,9 +603,11 @@ def trim_primers(sequence: str, primers: Dict[str, str]) -> Tuple[str, List[str]
     if best_end_primer:
         logging.debug(f"Found {best_end_primer} at 3' end (dist={best_end_dist})")
         found_primers.append(f"3'-{best_end_primer}")
+        # Convert to original sequence coordinates
+        trim_end = trim_start + best_end_start
         trimmed_seq = trimmed_seq[:best_end_start]
 
-    return trimmed_seq, found_primers
+    return trimmed_seq, found_primers, trim_start, trim_end
 
 
 def refine_cluster(
@@ -546,9 +712,12 @@ def refine_cluster(
 
     # Perform primer trimming if primers are available in metadata
     trimmed_consensus = consensus
+    trim_start = 0
+    trim_end = len(consensus)
+
     if metadata and 'primers' in metadata and metadata['primers']:
         primers = metadata['primers']
-        trimmed_consensus, found_primers = trim_primers(consensus, primers)
+        trimmed_consensus, found_primers, trim_start, trim_end = trim_primers(consensus, primers)
 
         # Write trimmed consensus to main output file
         output_filename = f"{cluster_info.sample_name}.fasta"
@@ -557,6 +726,10 @@ def refine_cluster(
             f.write(f"{header}\n{trimmed_consensus}\n")
 
         logging.debug(f"Trimmed {cluster_info.sample_name}: {len(consensus)} -> {len(trimmed_consensus)} bp, found primers: {found_primers}")
+
+        # Persist trim coordinates to metadata
+        write_cluster_metadata(output_dir, cluster_info.sample_name,
+                              cluster_info.cluster_num, trim_start, trim_end)
     else:
         # No primers available, just copy untrimmed consensus to output
         output_filename = f"{cluster_info.sample_name}.fasta"
@@ -833,7 +1006,7 @@ def main():
             # Analyze each refined cluster
             all_variant_positions = []
 
-            for key in refined_consensus_map.keys():
+            for key in tqdm(refined_consensus_map.keys(), desc="Analyzing variants", unit="cluster"):
                 if key not in refined_msa_files:
                     continue
 
@@ -870,88 +1043,231 @@ def main():
                     )
 
                     if is_variant:
+                        # Handle insertion positions - create position string showing adjacent positions
+                        if pos_stat.consensus_position is None:
+                            # This is an insertion - find adjacent consensus positions
+                            left_pos, right_pos = get_adjacent_consensus_positions(
+                                pos_stat.msa_position, msa_to_consensus_pos
+                            )
+                            if left_pos is not None and right_pos is not None:
+                                consensus_pos_str = f"{left_pos}-{right_pos}"
+                            elif left_pos is not None:
+                                consensus_pos_str = f"{left_pos}-END"
+                            elif right_pos is not None:
+                                consensus_pos_str = f"START-{right_pos}"
+                            else:
+                                consensus_pos_str = "INSERTION"
+                        else:
+                            consensus_pos_str = str(pos_stat.consensus_position)
+
                         all_variant_positions.append({
                             'sample_name': cluster_info.sample_name,
                             'cluster_num': cluster_info.cluster_num,
                             'msa_position': pos_stat.msa_position,
-                            'consensus_position': pos_stat.consensus_position,
+                            'consensus_position': pos_stat.consensus_position,  # Keep numeric for filtering
+                            'consensus_position_str': consensus_pos_str,  # For display
                             'consensus_length': consensus_length,
+                            'consensus_seq': consensus,  # Needed for HP detection
+                            'msa_to_consensus_pos': msa_to_consensus_pos,  # Needed for HP detection
                             'coverage': pos_stat.coverage,
                             'variant_bases': variant_bases,
                             'base_composition': pos_stat.base_composition,
+                            'consensus_nucleotide': pos_stat.consensus_nucleotide,  # Needed for HP detection
                             'error_rate': pos_stat.error_rate,
-                            'is_homopolymer': pos_stat.is_homopolymer,
+                            'is_homopolymer': pos_stat.is_homopolymer,  # Legacy, will be replaced
                             'reason': reason
                         })
 
+            # Filter variants based on primer trimming
+            # Remove variants that fall outside the trimmed region
+            trimmed_variants = []
+            filtered_count = 0
+
+            for v in all_variant_positions:
+                # Try to load trimming coordinates from metadata
+                cluster_key = f"c{v['cluster_num']}"
+                sample_metadata = read_metadata(args.output_dir, v['sample_name'])
+
+                trim_start = 0
+                trim_end = v['consensus_length']
+
+                if sample_metadata and 'clusters' in sample_metadata:
+                    if cluster_key in sample_metadata['clusters']:
+                        trim_start = sample_metadata['clusters'][cluster_key].get('trim_start', 0)
+                        trim_end = sample_metadata['clusters'][cluster_key].get('trim_end', v['consensus_length'])
+
+                # Check if variant is within trimmed region
+                cons_pos = v['consensus_position']
+
+                if cons_pos is None:
+                    # Insertion - check if adjacent positions are within trimmed region
+                    left_pos, right_pos = get_adjacent_consensus_positions(
+                        v['msa_position'], v['msa_to_consensus_pos']
+                    )
+                    # Keep if at least one adjacent position is within trimmed region
+                    keep = False
+                    if left_pos is not None and trim_start <= left_pos < trim_end:
+                        keep = True
+                    if right_pos is not None and trim_start <= right_pos < trim_end:
+                        keep = True
+
+                    if keep:
+                        trimmed_variants.append(v)
+                    else:
+                        filtered_count += 1
+                else:
+                    # Regular position - check if within trimmed region
+                    if trim_start <= cons_pos < trim_end:
+                        trimmed_variants.append(v)
+                    else:
+                        filtered_count += 1
+
             # Report variant positions
             logging.info(f"\n  Variant Position Detection Results:")
-            logging.info(f"    NOTE: Analysis performed on UNTRIMMED consensus (before primer trimming)")
             logging.info(f"    Total variant positions found: {len(all_variant_positions)}")
+            logging.info(f"    Filtered (outside trimmed region): {filtered_count}")
+            logging.info(f"    Remaining after trimming filter: {len(trimmed_variants)}")
+
+            # Replace all_variant_positions with filtered list
+            all_variant_positions = trimmed_variants
 
             if all_variant_positions:
                 # Count unique clusters with variants
                 unique_clusters_all = len(set((v['sample_name'], v['cluster_num']) for v in all_variant_positions))
                 logging.info(f"    Unique clusters with variants: {unique_clusters_all}")
 
-                # Categorize variants by position and type
-                # Internal = position >= 20 and position < consensus_length - 20
-                # End = position < 20 or position >= consensus_length - 20
-                # Skip insertions (consensus_position is None)
+                # Categorize variants by type (homopolymer vs non-homopolymer)
+                # Use enhanced HP detection that checks base composition and adjacent positions
 
-                high_priority_variants = []  # Internal, non-HP
-                hp_internal_variants = []    # Internal, HP
-                end_variants = []            # At sequence ends
-                insertion_variants = []      # Insertion columns
+                hp_variants = []      # Homopolymer variants
+                non_hp_variants = []  # Non-homopolymer variants
+
+                # Create lookup dict for multi-position analysis (currently unused but prepared)
+                variants_by_key = {}
+                for v in all_variant_positions:
+                    key = (v['sample_name'], v['cluster_num'], v['msa_position'])
+                    variants_by_key[key] = v
 
                 for v in all_variant_positions:
-                    cons_pos = v['consensus_position']
-                    cons_len = v['consensus_length']
-                    is_hp = v['is_homopolymer']
+                    # Use enhanced HP detection
+                    is_hp = is_homopolymer_variant(
+                        v,
+                        v['consensus_seq'],
+                        variants_by_key,
+                        v['msa_to_consensus_pos']
+                    )
 
-                    if cons_pos is None:
-                        # Insertion column (no consensus position)
-                        insertion_variants.append(v)
-                    elif cons_pos < 20 or cons_pos >= cons_len - 20:
-                        # End region
-                        end_variants.append(v)
-                    elif is_hp:
-                        # Internal homopolymer
-                        hp_internal_variants.append(v)
+                    if is_hp:
+                        hp_variants.append(v)
                     else:
-                        # High priority: internal, non-HP
-                        high_priority_variants.append(v)
+                        non_hp_variants.append(v)
 
                 # Count unique clusters for each category
-                unique_clusters_hp = len(set((v['sample_name'], v['cluster_num']) for v in hp_internal_variants))
-                unique_clusters_end = len(set((v['sample_name'], v['cluster_num']) for v in end_variants))
-                unique_clusters_insertion = len(set((v['sample_name'], v['cluster_num']) for v in insertion_variants))
-                unique_clusters_high_priority = len(set((v['sample_name'], v['cluster_num']) for v in high_priority_variants))
-
-                # Get example consensus length for reporting
-                example_cons_len = all_variant_positions[0]['consensus_length'] if all_variant_positions else 0
+                unique_clusters_hp = len(set((v['sample_name'], v['cluster_num']) for v in hp_variants))
+                unique_clusters_non_hp = len(set((v['sample_name'], v['cluster_num']) for v in non_hp_variants))
 
                 logging.info(f"\n  Breakdown by category:")
-                logging.info(f"    High-priority (internal, non-HP): {len(high_priority_variants)} positions in {unique_clusters_high_priority} clusters")
-                logging.info(f"    Homopolymer (internal): {len(hp_internal_variants)} positions in {unique_clusters_hp} clusters")
-                logging.info(f"    End region (pos <20 or >={example_cons_len-20}): {len(end_variants)} positions in {unique_clusters_end} clusters")
-                logging.info(f"    Insertion columns: {len(insertion_variants)} positions in {unique_clusters_insertion} clusters")
+                logging.info(f"    Non-homopolymer variants: {len(non_hp_variants)} positions in {unique_clusters_non_hp} clusters")
+                logging.info(f"    Homopolymer variants: {len(hp_variants)} positions in {unique_clusters_hp} clusters")
 
-                if high_priority_variants:
+                # Generate cluster ranking report
+                if non_hp_variants:
+                    # Group non-HP variants by cluster
+                    from collections import defaultdict
+                    clusters_with_variants = defaultdict(list)
+
+                    for v in non_hp_variants:
+                        cluster_key = (v['sample_name'], v['cluster_num'])
+                        clusters_with_variants[cluster_key].append(v)
+
+                    # Calculate variation score for each cluster
+                    cluster_scores = []
+
+                    for cluster_key, variants in clusters_with_variants.items():
+                        # For each variant, get the maximum alternative allele frequency
+                        total_score = 0.0
+
+                        for v in variants:
+                            base_comp = v['base_composition']
+                            cons_nucleotide = v.get('consensus_nucleotide', '-')
+
+                            # Get alternative allele counts (excluding consensus base)
+                            alt_counts = {base: count for base, count in base_comp.items()
+                                        if base != cons_nucleotide}
+
+                            if alt_counts and v['coverage'] > 0:
+                                # Find maximum alternative allele frequency
+                                max_alt_count = max(alt_counts.values())
+                                max_alt_freq = (max_alt_count / v['coverage']) * 100  # As percentage
+
+                                total_score += max_alt_freq
+
+                        cluster_scores.append({
+                            'sample_name': cluster_key[0],
+                            'cluster_num': cluster_key[1],
+                            'total_score': total_score,
+                            'num_variants': len(variants),
+                            'variants': variants
+                        })
+
+                    # Sort by total score (descending)
+                    cluster_scores.sort(key=lambda x: x['total_score'], reverse=True)
+
+                    # Write detailed report to file
+                    report_file = os.path.join(args.output_dir, 'variant_clusters_ranked.txt')
+                    with open(report_file, 'w') as f:
+                        f.write("Cluster Ranking by Non-Homopolymer Variation\n")
+                        f.write("=" * 80 + "\n\n")
+
+                        for rank, cluster in enumerate(cluster_scores, 1):
+                            f.write(f"Rank {rank}: {cluster['sample_name']}\n")
+                            f.write(f"Total variation score: {cluster['total_score']:.1f}%\n")
+                            f.write(f"Non-HP variant positions: {cluster['num_variants']}\n")
+                            f.write(f"Variant details:\n")
+
+                            for v in cluster['variants']:
+                                base_comp = v['base_composition']
+                                cons_nucleotide = v.get('consensus_nucleotide', '-')
+                                sorted_comp = sorted(base_comp.items(), key=lambda x: x[1], reverse=True)
+                                comp_str = ', '.join([f"{b}:{c}" for b, c in sorted_comp[:4]])
+
+                                # Get max alt frequency
+                                alt_counts = {base: count for base, count in base_comp.items()
+                                            if base != cons_nucleotide}
+                                if alt_counts and v['coverage'] > 0:
+                                    max_alt_count = max(alt_counts.values())
+                                    max_alt_freq = (max_alt_count / v['coverage']) * 100
+                                else:
+                                    max_alt_freq = 0.0
+
+                                pos_str = f"MSA:{v['msa_position']}/Cons:{v['consensus_position_str']}"
+                                f.write(f"  - {pos_str}: {max_alt_freq:.1f}% (cov={v['coverage']}, bases=[{comp_str}])\n")
+
+                            f.write("\n")
+
+                    logging.info(f"\n  Cluster Ranking:")
+                    logging.info(f"    Full ranking written to: {report_file}")
+                    logging.info(f"    Top 5 clusters by variation score:")
+
+                    for rank, cluster in enumerate(cluster_scores[:5], 1):
+                        logging.info(
+                            f"      {rank}. {cluster['sample_name']}: "
+                            f"{cluster['total_score']:.1f}% ({cluster['num_variants']} non-HP variants)"
+                        )
+
+                if non_hp_variants:
                     # Sort by error rate (highest first)
-                    high_priority_variants.sort(key=lambda x: x['error_rate'], reverse=True)
+                    non_hp_variants.sort(key=lambda x: x['error_rate'], reverse=True)
 
-                    logging.info(f"\n  Top 20 high-priority variant positions:")
-                    for i, v in enumerate(high_priority_variants[:20], 1):
+                    logging.info(f"\n  Top 20 non-homopolymer variant positions:")
+                    for i, v in enumerate(non_hp_variants[:20], 1):
                         cluster_id = f"{v['sample_name']}"
                         comp = v['base_composition']
                         sorted_comp = sorted(comp.items(), key=lambda x: x[1], reverse=True)
                         comp_str = ', '.join([f"{b}:{c}" for b, c in sorted_comp[:3]])
 
                         # Display both MSA and consensus position for clarity
-                        pos_str = f"MSA:{v['msa_position']}"
-                        if v['consensus_position'] is not None:
-                            pos_str += f"/Cons:{v['consensus_position']}"
+                        pos_str = f"MSA:{v['msa_position']}/Cons:{v['consensus_position_str']}"
 
                         logging.info(
                             f"    {i}. {cluster_id} {pos_str}: "
