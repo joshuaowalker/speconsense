@@ -90,6 +90,15 @@ def parse_arguments():
     )
 
     parser.add_argument(
+        '--mean-error-rate',
+        type=float,
+        default=0.013,
+        help="Estimated mean read-to-consensus error rate (default: 0.013 for 1.3%%). "
+             "Used to calculate outlier detection threshold (mean × 3.0 ≈ P95). "
+             "Actual mean will be computed and compared to validate estimate."
+    )
+
+    parser.add_argument(
         '--use-sampled',
         action='store_true',
         help="Use sampled reads (*-sampled.fastq) instead of full cluster (*-reads.fastq)"
@@ -827,11 +836,21 @@ def main():
     logging.info(f"Input directory: {args.input_dir}")
     logging.info(f"Output directory: {args.output_dir}")
     logging.info(f"Minimum RiC: {args.min_ric}")
-    logging.info(f"Outlier percentile: {args.outlier_percentile}")
-    logging.info(f"Variant percentile: {args.variant_percentile}")
     if args.dry_run:
         logging.info("DRY RUN MODE: No files will be written")
     logging.info("="*80)
+
+    # Calculate error rate threshold from estimated mean
+    OUTLIER_THRESHOLD_MULTIPLIER = 3.0
+    error_rate_threshold = args.mean_error_rate * OUTLIER_THRESHOLD_MULTIPLIER
+
+    logging.info("")
+    logging.info("Error Rate Threshold Calculation:")
+    logging.info(f"  Estimated mean error rate: {args.mean_error_rate*100:.2f}%")
+    logging.info(f"  Multiplier (≈P95): {OUTLIER_THRESHOLD_MULTIPLIER}×")
+    logging.info(f"  Calculated threshold: {error_rate_threshold*100:.2f}%")
+    logging.info(f"  (Reads exceeding this threshold will be identified as outliers)")
+    logging.info("")
 
     # Create output directory
     if not args.dry_run:
@@ -941,10 +960,25 @@ def main():
     logging.info(f"    P95: {global_stats['read_p95_error_rate']*100:.2f}%")
     logging.info(f"    P99: {global_stats['read_p99_error_rate']*100:.2f}%")
 
+    # Compare estimated vs actual mean error rate
+    actual_mean = global_stats['read_mean_error_rate']
+    estimated_mean = args.mean_error_rate
+    mean_error_diff = actual_mean - estimated_mean
+    mean_error_pct_diff = (mean_error_diff / estimated_mean * 100) if estimated_mean > 0 else 0
+
+    logging.info(f"\n  Mean Error Rate Validation:")
+    logging.info(f"    Estimated (--mean-error-rate): {estimated_mean*100:.2f}%")
+    logging.info(f"    Actual (observed): {actual_mean*100:.2f}%")
+    logging.info(f"    Difference: {mean_error_diff*100:+.2f}% ({mean_error_pct_diff:+.1f}%)")
+    if abs(mean_error_pct_diff) < 20:
+        logging.info(f"    ✓ Estimate is reasonable (within 20%)")
+    else:
+        logging.info(f"    ⚠ Estimate differs significantly - consider using --mean-error-rate {actual_mean:.4f}")
+
     # STEP 2: Identify outlier reads
     logging.info("\nSTEP 2: Identifying outlier reads...")
-    outlier_threshold = global_stats['read_p95_error_rate']
-    logging.info(f"  Using read-level P95 threshold: {outlier_threshold*100:.2f}%")
+    outlier_threshold = error_rate_threshold
+    logging.info(f"  Using calculated threshold: {outlier_threshold*100:.2f}%")
 
     total_reads = 0
     total_outliers = 0
@@ -1068,7 +1102,7 @@ def main():
             # Calculate minimum coverage threshold
             min_coverage = calculate_min_coverage_for_variant_detection(
                 min_alt_freq=args.min_alt_freq if hasattr(args, 'min_alt_freq') else 0.20,
-                global_error_rate=global_stats['read_p95_error_rate'],
+                global_error_rate=error_rate_threshold,
                 confidence_sigma=3.0
             )
 
@@ -1101,7 +1135,7 @@ def main():
                 position_stats = analyze_positional_variation(
                     alignments,
                     consensus,
-                    global_stats['read_p95_error_rate'],
+                    error_rate_threshold,
                     msa_file
                 )
 
@@ -1109,7 +1143,7 @@ def main():
                 for pos_stat in position_stats:
                     is_variant, variant_bases, reason = is_variant_position_with_composition(
                         pos_stat,
-                        global_stats['read_p95_error_rate'],
+                        error_rate_threshold,
                         min_alt_freq=args.min_alt_freq if hasattr(args, 'min_alt_freq') else 0.20,
                         confidence_sigma=3.0
                     )
