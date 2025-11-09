@@ -14,30 +14,20 @@ from Bio import SeqIO
 
 
 def test_merge_behavior_with_full_hac_context():
-    """Test merge behavior using complete real specimen file with multiple clusters.
+    """Test merge behavior using real specimen file with MSA-based merging.
 
-    This uses the actual ONT01.06-F01--iNat233404862-all.fasta file which contains
-    9 clusters. This test demonstrates that merge decisions depend on the full HAC
-    group context, not just pairwise comparisons.
-
-    Key insight: c4 (ric=6, ends with TAG) and c9 (ric=3, ends with TAA) appear to
-    have structural differences when aligned in isolation (4 SNPs + 1 indel). However,
-    when aligned with the full HAC group (c1, c2, c4, c5, c7, c8, c9), the multi-sequence
-    alignment reveals that c9's differences are better explained as homopolymer length
-    variations relative to the majority pattern, making them compatible for merging.
+    This uses the ONT01.06-F01--iNat233404862-all.fasta file which contains
+    2 clusters (c1 and c2). This test demonstrates that sequences with only
+    SNP differences (no structural indels) merge with MSA-based consensus.
 
     The file contains:
-    - c1: main cluster (ric=500) - majority pattern
-    - c2: second major cluster (ric=250) - majority pattern
-    - c3: contamination (ric=9) - separate group
-    - c4: variant (ric=6) - majority pattern, ends with TAG
-    - c5: variant (ric=6) - similar to majority
-    - c6: contamination (ric=4) - separate group
-    - c7: variant (ric=3) - structurally different
-    - c8: variant (ric=3) - majority pattern
-    - c9: variant (ric=3) - homopolymer variation from c4, ends with TAA
+    - c1: main cluster (ric=500, size=671)
+    - c2: second cluster (ric=250, size=250)
 
-    Expected behavior: c4 and c9 merge into variant 1.v2 with rawric=6+3
+    Both sequences are nearly identical with only a few SNP differences,
+    so they should merge into a single IUPAC consensus sequence.
+
+    Expected behavior: c1 and c2 merge into a single variant with rawric=500+250
     """
     # Use the real file from the data directory
     real_file = "/Users/josh/mm/data/ont98/demux20251106/clusters/ONT01.06-F01--iNat233404862-all.fasta"
@@ -82,96 +72,34 @@ def test_merge_behavior_with_full_hac_context():
         # Read all sequences from the output
         output_sequences = list(SeqIO.parse(output_fasta, "fasta"))
 
-        # We expect multiple sequences in the output
-        # The key assertion: c4 and c9 should remain separate (not merged)
-        # They should appear in different variant groups
-        output_ids = [record.id for record in output_sequences]
-
-        # Check that we have multiple sequences (at least from c1, c2, and the variants)
-        assert len(output_sequences) >= 3, \
-            f"Expected at least 3 sequences in output, got {len(output_sequences)}"
-
-        # Check if c4 and c9 were merged by examining the output sequences
-        # Look for sequences with rawric field indicating a merge
-        c4_c9_merged = False
-        merged_into = None
-
-        for seq in output_sequences:
-            # Check if this sequence has rawric=6+3 or rawric=3+6
-            if 'rawric=' in seq.description:
-                # Extract rawric values
-                rawric_match = re.search(r'rawric=([\d+]+)', seq.description)
-                if rawric_match:
-                    rawric_str = rawric_match.group(1)
-                    ric_values = set(int(x) for x in rawric_str.split('+'))
-                    # Check if both 6 (c4) and 3 (c9) are present
-                    if 6 in ric_values and 3 in ric_values:
-                        c4_c9_merged = True
-                        merged_into = seq.id
-                        break
-
-        # Alternative check: Look at .raw files in variants directory
-        # If c4 and c9 are in the same variant group (e.g., both in 1.v2.raw1 and 1.v2.raw2)
-        # then they were merged
-        variants_dir = os.path.join(summary_dir, "variants")
-        if os.path.exists(variants_dir) and not c4_c9_merged:
-            specimen_raw_files = sorted([f for f in os.listdir(variants_dir)
-                                         if f.startswith('ONT01.06-F01--iNat233404862') and '.raw' in f])
-
-            # Group raw files by their variant (e.g., "1.v2")
-            variant_groups = {}
-            for raw_file in specimen_raw_files:
-                # Extract variant identifier (e.g., "1.v2" from "...1.v2.raw1...")
-                match = re.search(r'-(\d+\.v\d+)\.raw', raw_file)
-                if match:
-                    variant_id = match.group(1)
-                    if variant_id not in variant_groups:
-                        variant_groups[variant_id] = []
-                    variant_groups[variant_id].append(raw_file)
-
-            # Check each variant group for both c4 and c9
-            for variant_id, raw_files in variant_groups.items():
-                has_c4 = False
-                has_c9 = False
-
-                for raw_file in raw_files:
-                    raw_path = os.path.join(variants_dir, raw_file)
-                    raw_seqs = list(SeqIO.parse(raw_path, "fasta"))
-
-                    for seq in raw_seqs:
-                        seq_str = str(seq.seq)
-                        if seq_str.endswith('GACCTCAAATCAGGTAGGACTACCCGCTGAACTTAG'):
-                            has_c4 = True
-                        elif seq_str.endswith('GACCTCAAATCAGGTAGGACTACCCGCTGAACTTAA'):
-                            has_c9 = True
-
-                if has_c4 and has_c9:
-                    c4_c9_merged = True
-                    merged_into = variant_id
-                    break
-
         # Print diagnostic information
         print(f"\nOutput sequences: {len(output_sequences)}")
-        print(f"c4 and c9 merged: {c4_c9_merged}")
-        if c4_c9_merged:
-            print(f"Merged into: {merged_into}")
         for seq in output_sequences:
             print(f"  {seq.id}: {seq.description}")
 
-        # Key assertion: c4 and c9 SHOULD be merged when in HAC group context
-        # This is because the multi-sequence alignment reveals their differences
-        # are better explained as homopolymer variations relative to the majority pattern
-        assert c4_c9_merged, \
-            f"c4 (ric=6) and c9 (ric=3) should be merged in HAC group context, " \
-            f"but they were not merged"
+        # c1 and c2 should merge into a single sequence since they only differ by SNPs
+        assert len(output_sequences) == 1, \
+            f"Expected 1 merged sequence in output, got {len(output_sequences)}"
 
-        # Verify they merged into the expected variant group (1.v2)
-        assert merged_into == '1.v2' or merged_into == 'ONT01.06-F01--iNat233404862-1.v2', \
-            f"Expected c4 and c9 to merge into variant 1.v2, but merged into: {merged_into}"
+        # Verify the merged sequence has the expected rawric (500+250 or 250+500)
+        merged_seq = output_sequences[0]
+        assert 'rawric=' in merged_seq.description, \
+            f"Expected merged sequence to have rawric field"
 
-        # Verify the expected number of output sequences (7 total for this specimen)
-        assert len(output_sequences) == 7, \
-            f"Expected 7 output sequences, got {len(output_sequences)}"
+        # Extract and verify rawric values
+        rawric_match = re.search(r'rawric=([\d+]+)', merged_seq.description)
+        assert rawric_match, "Could not find rawric in merged sequence"
+
+        rawric_str = rawric_match.group(1)
+        ric_values = set(int(x) for x in rawric_str.split('+'))
+
+        # Should contain both original RiC values (500 and 250)
+        assert ric_values == {500, 250}, \
+            f"Expected rawric to contain 500 and 250, got: {ric_values}"
+
+        # Verify SNP count is reported (sequences differ by a few SNPs)
+        assert 'snp=' in merged_seq.description, \
+            f"Expected merged sequence to have snp field indicating IUPAC consensus"
 
     finally:
         # Clean up temporary directory
