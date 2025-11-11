@@ -14,7 +14,9 @@ import re
 import glob
 import csv
 import logging
-from typing import List, Dict, Tuple, Optional, NamedTuple
+from io import StringIO
+from typing import List, Dict, Tuple, Optional, NamedTuple, Union
+from pathlib import Path
 from collections import defaultdict, Counter
 
 from Bio import SeqIO
@@ -251,9 +253,9 @@ def load_consensus_sequences(output_dir: str) -> Dict[Tuple[str, int], ClusterIn
     return consensus_map
 
 
-def extract_alignments_from_msa(msa_file: str) -> Tuple[List[ReadAlignment], str, Dict[int, Optional[int]]]:
+def extract_alignments_from_msa(msa_input: Union[str, Path]) -> Tuple[List[ReadAlignment], str, Dict[int, Optional[int]]]:
     """
-    Extract read alignments from an MSA file.
+    Extract read alignments from an MSA file or string.
 
     The MSA contains aligned sequences where the consensus has header containing "Consensus".
     This function compares each read to the consensus at each aligned position.
@@ -269,7 +271,7 @@ def extract_alignments_from_msa(msa_file: str) -> Tuple[List[ReadAlignment], str
     This avoids ambiguity when multiple insertion columns map to the same consensus position.
 
     Args:
-        msa_file: Path to MSA FASTA file
+        msa_input: Path to MSA FASTA file OR MSA content as string
 
     Returns:
         Tuple of:
@@ -277,11 +279,21 @@ def extract_alignments_from_msa(msa_file: str) -> Tuple[List[ReadAlignment], str
         - consensus sequence without gaps
         - mapping from MSA position to consensus position (None for insertion columns)
     """
-    # Parse MSA file
-    records = list(SeqIO.parse(msa_file, 'fasta'))
+    # Determine if input is MSA content (string with newlines) or file path
+    if isinstance(msa_input, str) and '\n' in msa_input:
+        # Input is MSA content as string - use StringIO
+        msa_handle = StringIO(msa_input)
+        source_desc = "MSA string"
+    else:
+        # Input is file path - use directly
+        msa_handle = msa_input
+        source_desc = f"MSA file: {msa_input}"
+
+    # Parse MSA
+    records = list(SeqIO.parse(msa_handle, 'fasta'))
 
     if not records:
-        logging.warning(f"No sequences found in MSA file: {msa_file}")
+        logging.warning(f"No sequences found in {source_desc}")
         return [], "", {}
 
     # Find consensus sequence
@@ -295,7 +307,7 @@ def extract_alignments_from_msa(msa_file: str) -> Tuple[List[ReadAlignment], str
             read_records.append(record)
 
     if consensus_record is None:
-        logging.warning(f"No consensus sequence found in MSA file: {msa_file}")
+        logging.warning(f"No consensus sequence found in {source_desc}")
         return [], "", {}
 
     consensus_aligned = str(consensus_record.seq).upper()
@@ -555,7 +567,7 @@ def analyze_positional_variation(
     alignments: List[ReadAlignment],
     consensus_seq: str,
     overall_error_rate: float,
-    msa_file: str
+    msa_input: Union[str, Path]
 ) -> List[PositionStats]:
     """
     Analyze error rates at each position in the MSA.
@@ -572,18 +584,26 @@ def analyze_positional_variation(
         alignments: List of read alignments (with errors at MSA positions)
         consensus_seq: Consensus sequence (ungapped)
         overall_error_rate: Overall error rate for binomial test
-        msa_file: Path to MSA file (REQUIRED for getting MSA length and mapping)
+        msa_input: Path to MSA file OR MSA content as string (REQUIRED for getting MSA length and mapping)
 
     Returns:
         List of PositionStats for each MSA position
     """
-    # Parse MSA to get alignment structure
-    if not os.path.exists(msa_file):
-        logging.error(f"MSA file not found: {msa_file}")
-        return []
+    # Determine if input is MSA content (string with newlines) or file path
+    if isinstance(msa_input, str) and '\n' in msa_input:
+        # Input is MSA content as string - use StringIO
+        msa_handle = StringIO(msa_input)
+        source_desc = "MSA string"
+    else:
+        # Input is file path - validate and use directly
+        if not os.path.exists(msa_input):
+            logging.error(f"MSA file not found: {msa_input}")
+            return []
+        msa_handle = msa_input
+        source_desc = f"MSA file: {msa_input}"
 
     try:
-        records = list(SeqIO.parse(msa_file, 'fasta'))
+        records = list(SeqIO.parse(msa_handle, 'fasta'))
 
         # Find consensus sequence in MSA
         consensus_record = None
@@ -596,7 +616,7 @@ def analyze_positional_variation(
                 read_records.append(record)
 
         if consensus_record is None:
-            logging.error(f"No consensus found in MSA file: {msa_file}")
+            logging.error(f"No consensus found in {source_desc}")
             return []
 
         consensus_aligned = str(consensus_record.seq).upper()

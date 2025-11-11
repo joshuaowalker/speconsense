@@ -147,6 +147,34 @@ class SpecimenClusterer:
 
         logging.info(f"Wrote run metadata to {metadata_file}")
 
+    def write_phasing_stats(self, initial_clusters_count: int, subclusters_count: int,
+                           merged_count: int, final_count: int) -> None:
+        """Write phasing statistics to JSON file after clustering completes.
+
+        Args:
+            initial_clusters_count: Number of clusters from initial clustering
+            subclusters_count: Number of sub-clusters after phasing
+            merged_count: Number of clusters after merging
+            final_count: Number of final clusters after filtering
+        """
+        phasing_stats = {
+            "phasing_enabled": self.outlier_threshold is not None,
+            "initial_clusters": initial_clusters_count,
+            "phased_subclusters": subclusters_count,
+            "after_merging": merged_count,
+            "after_filtering": final_count,
+            "clusters_split": subclusters_count > initial_clusters_count,
+            "clusters_merged": merged_count < subclusters_count,
+            "net_change": final_count - initial_clusters_count
+        }
+
+        # Write phasing stats to separate JSON file
+        stats_file = os.path.join(self.debug_dir, f"{self.sample_name}-phasing_stats.json")
+        with open(stats_file, 'w') as f:
+            json.dump(phasing_stats, f, indent=2)
+
+        logging.info(f"Wrote phasing statistics to {stats_file}")
+
     def add_sequences(self, records: List[SeqIO.SeqRecord],
                       augment_records: Optional[List[SeqIO.SeqRecord]] = None) -> None:
         """Add sequences to be clustered, with optional presampling."""
@@ -276,26 +304,26 @@ class SpecimenClusterer:
             logging.error(f"Stderr: {e.stderr}")
             raise
 
-    def merge_similar_clusters(self, clusters: List[Set[str]]) -> List[Set[str]]:
+    def merge_similar_clusters(self, clusters: List[Dict]) -> List[Dict]:
         """
         Merge clusters whose consensus sequences are identical or homopolymer-equivalent.
-        Only counts unique consensus sequences when tracking merge information.
+        Preserves provenance metadata through the merging process.
 
         Note: Primer trimming is performed before comparison to ensure clusters that differ
         only in primer regions are properly merged. Trimmed consensuses are used only for
         comparison and are discarded after merging.
 
         Args:
-            clusters: List of clusters, where each cluster is a set of sequence IDs
+            clusters: List of cluster dictionaries with 'read_ids' and provenance fields
 
         Returns:
-            List of merged clusters
+            List of merged cluster dictionaries with combined provenance
         """
         if not clusters:
             return []
 
         # Sort clusters by size, largest first
-        clusters = sorted(clusters, key=len, reverse=True)
+        clusters = sorted(clusters, key=lambda c: len(c['read_ids']), reverse=True)
 
         # Generate a consensus sequence for each cluster
         logging.info("Generating consensus sequences for cluster merging...")
@@ -303,12 +331,14 @@ class SpecimenClusterer:
         cluster_to_consensus = {}  # Map from cluster index to its consensus
 
         with tqdm(total=len(clusters), desc="Generating cluster consensuses") as pbar:
-            for i, cluster in enumerate(clusters):
+            for i, cluster_dict in enumerate(clusters):
+                cluster_reads = cluster_dict['read_ids']
+
                 # Sample from larger clusters to speed up consensus generation
-                if len(cluster) > self.max_sample_size:
+                if len(cluster_reads) > self.max_sample_size:
                     # Sample by quality
                     qualities = []
-                    for seq_id in cluster:
+                    for seq_id in cluster_reads:
                         record = self.records[seq_id]
                         mean_quality = statistics.mean(record.letter_annotations["phred_quality"])
                         qualities.append((mean_quality, seq_id))
@@ -317,7 +347,7 @@ class SpecimenClusterer:
                                    sorted(qualities, reverse=True)[:self.max_sample_size]]
                     sampled_seqs = [self.sequences[seq_id] for seq_id in sampled_ids]
                 else:
-                    sampled_seqs = [self.sequences[seq_id] for seq_id in cluster]
+                    sampled_seqs = [self.sequences[seq_id] for seq_id in cluster_reads]
 
                 consensus, _ = self.run_spoa(sampled_seqs)  # Ignore MSA for merging
 
@@ -363,18 +393,36 @@ class SpecimenClusterer:
         for equivalent_clusters in consensus_to_clusters.values():
             if len(equivalent_clusters) > 1:
                 # Merge clusters with equivalent consensus
-                new_cluster = set()
+                merged_read_ids = set()
+                merged_from_list = []
+
                 for idx in equivalent_clusters:
-                    new_cluster.update(clusters[idx])
+                    merged_read_ids.update(clusters[idx]['read_ids'])
                     merged_indices.add(idx)
 
+                    # Track what we're merging from
+                    cluster_info = {
+                        'initial_cluster_num': clusters[idx]['initial_cluster_num'],
+                        'allele_combo': clusters[idx].get('allele_combo'),
+                        'size': len(clusters[idx]['read_ids'])
+                    }
+                    merged_from_list.append(cluster_info)
 
-                merged.append(new_cluster)
+                # Create merged cluster with provenance
+                merged_cluster = {
+                    'read_ids': merged_read_ids,
+                    'initial_cluster_num': None,  # Multiple sources
+                    'allele_combo': None,  # Multiple alleles merged
+                    'variant_positions': None,
+                    'num_variants': 0,
+                    'merged_from': merged_from_list  # Track merge provenance
+                }
+                merged.append(merged_cluster)
 
         # Add remaining unmerged clusters
-        for i, cluster in enumerate(clusters):
+        for i, cluster_dict in enumerate(clusters):
             if i not in merged_indices:
-                merged.append(cluster)
+                merged.append(cluster_dict)
 
         merge_type = "identical" if self.disable_homopolymer_equivalence else "homopolymer-equivalent"
         if len(merged) < len(clusters):
@@ -595,7 +643,9 @@ class SpecimenClusterer:
         return best_center, best_members
 
     def cluster(self, algorithm: str = "graph") -> None:
-        """Perform complete clustering process and write output files.
+        """Perform complete clustering process with variant phasing and write output files.
+
+        Pipeline: Splitting (clustering + outlier removal + phasing) → Merging → Filtering → Output
 
         Args:
             algorithm: Clustering algorithm to use ('graph' for MCL or 'greedy')
@@ -603,91 +653,168 @@ class SpecimenClusterer:
         # Create temporary directory outside the clustering method to allow
         # flexibility in choosing different clustering algorithms
         with tempfile.TemporaryDirectory() as temp_dir:
-            # Select clustering algorithm
+            # ============================================================
+            # PHASE 1: INITIAL CLUSTERING
+            # ============================================================
             if algorithm == "graph":
                 try:
-                    clusters = self.run_mcl_clustering(temp_dir)
+                    initial_clusters = self.run_mcl_clustering(temp_dir)
                 except (subprocess.SubprocessError, FileNotFoundError) as e:
                     logging.error(f"MCL clustering failed: {str(e)}")
                     logging.error("You may need to install MCL: https://micans.org/mcl/")
                     logging.error("Falling back to greedy clustering algorithm...")
-                    clusters = self.run_greedy_clustering(temp_dir)
+                    initial_clusters = self.run_greedy_clustering(temp_dir)
             elif algorithm == "greedy":
-                clusters = self.run_greedy_clustering(temp_dir)
+                initial_clusters = self.run_greedy_clustering(temp_dir)
             else:
                 raise ValueError(f"Unknown clustering algorithm: {algorithm}")
 
-            # Sort by size (largest first)
-            clusters.sort(key=lambda c: len(c), reverse=True)
+            # Sort initial clusters by size (largest first)
+            initial_clusters.sort(key=lambda c: len(c), reverse=True)
 
-            # Merge clusters with identical/homopolymer-equivalent consensus sequences
-            # This happens BEFORE size filtering so that small clusters with identical
-            # consensus can merge to meet the size threshold
-            merged_clusters = self.merge_similar_clusters(clusters)
+            logging.info(f"Initial clustering produced {len(initial_clusters)} clusters")
 
-            # Re-sort by size after merging
-            merged_clusters.sort(key=lambda c: len(c), reverse=True)
+            # ============================================================
+            # PHASE 2: DETECTION + PHASING (Splitting Phase)
+            # ============================================================
+            # Process each initial cluster to detect variants and phase reads
+            all_subclusters = []  # Will hold all phased sub-clusters with provenance
 
-            # Filter clusters by size AFTER merging
-            large_clusters = [c for c in merged_clusters if len(c) >= self.min_size]
+            logging.info("Processing clusters for variant detection and phasing...")
 
-            cluster_sizes = [len(c) for c in large_clusters]
-            cluster_sizes_str = ', '.join(str(s) for s in cluster_sizes[:10])
-            if len(cluster_sizes) > 10:
-                cluster_sizes_str += f", ... ({len(cluster_sizes) - 10} more)"
-
-            logging.info(
-                f"After merging, found {len(large_clusters)} clusters meeting size threshold (>={self.min_size}): {cluster_sizes_str}")
-
-            total_sequences = len(self.sequences)
-
-            sequences_covered = 0
-            clusters_to_output = []
-
-            largest_cluster_size = len(large_clusters[0]) if large_clusters else 0
-
-            skipped_clusters = []
-            for cluster in large_clusters:
+            for initial_idx, cluster in enumerate(initial_clusters, 1):
                 cluster_size = len(cluster)
 
-                # Apply min_cluster_ratio filter if specified and not the first cluster
-                if self.min_cluster_ratio > 0 and largest_cluster_size > 0:
-                    size_ratio = cluster_size / largest_cluster_size
+                # Sample sequences for consensus generation if needed
+                if cluster_size > self.max_sample_size:
+                    logging.debug(f"Initial cluster {initial_idx}: Sampling {self.max_sample_size} from {cluster_size} reads")
+                    qualities = []
+                    for seq_id in cluster:
+                        record = self.records[seq_id]
+                        mean_quality = statistics.mean(record.letter_annotations["phred_quality"])
+                        qualities.append((mean_quality, seq_id))
+                    sampled_ids = {seq_id for _, seq_id in
+                                   sorted(qualities, reverse=True)[:self.max_sample_size]}
+                else:
+                    sampled_ids = cluster
 
-                    # Skip this cluster if it's too small relative to the largest cluster
-                    if size_ratio < self.min_cluster_ratio:
-                        skipped_clusters.append((cluster_size, size_ratio))
-                        continue
+                # Generate consensus and MSA
+                sampled_seqs = [self.sequences[seq_id] for seq_id in sampled_ids]
+                consensus, msa = self.run_spoa(sampled_seqs)
 
-                clusters_to_output.append(cluster)
-                sequences_covered += cluster_size
+                if not consensus or not msa:
+                    logging.warning(f"Initial cluster {initial_idx}: Failed to generate consensus, skipping")
+                    continue
 
-            # Log summary of skipped clusters if any were skipped
-            if skipped_clusters:
-                skipped_count = len(skipped_clusters)
-                skipped_sizes = [size for size, _ in skipped_clusters]
-                min_ratio = min([ratio for _, ratio in skipped_clusters])
-                max_ratio = max([ratio for _, ratio in skipped_clusters])
+                # Calculate per-read variance from MSA
+                mean_var, median_var, p95_var = self.calculate_read_variance(msa, consensus)
 
-                logging.info(
-                    f"Skipped {skipped_count} clusters with sizes {min(skipped_sizes)}-{max(skipped_sizes)} "
-                    f"(ratios to largest: {min_ratio:.3f}-{max_ratio:.3f} < {self.min_cluster_ratio})")
+                # Optional: Remove outlier reads and regenerate consensus
+                if self.outlier_threshold is not None:
+                    keep_ids, outlier_ids = self.identify_outlier_reads(
+                        msa, consensus, sampled_ids, self.outlier_threshold
+                    )
 
-            logging.info(f"Outputting {len(clusters_to_output)} clusters covering {sequences_covered} sequences "
-                         f"({sequences_covered / total_sequences:.1%} of total)")
+                    if outlier_ids:
+                        logging.info(f"Initial cluster {initial_idx}: Removing {len(outlier_ids)}/{len(sampled_ids)} outlier reads, "
+                                   f"regenerating consensus")
 
-            # Create the main consensus output file
+                        # Update sampled_ids to exclude outliers
+                        sampled_ids = keep_ids
+
+                        # CRITICAL: Also remove outliers from the full cluster
+                        # This ensures outliers don't reappear in phased haplotypes
+                        cluster = cluster - outlier_ids
+
+                        # Regenerate consensus with filtered reads
+                        sampled_seqs = [self.sequences[seq_id] for seq_id in sampled_ids]
+                        consensus, msa = self.run_spoa(sampled_seqs)
+
+                        # Recalculate variance
+                        if consensus and msa:
+                            mean_var, median_var, p95_var = self.calculate_read_variance(msa, consensus)
+
+                # Detect variant positions
+                variant_positions = []
+                if consensus and msa and self.outlier_threshold is not None:
+                    variant_positions = self.detect_variant_positions(
+                        msa, consensus, self.outlier_threshold, min_alt_freq=0.20
+                    )
+
+                    if variant_positions:
+                        logging.info(f"Initial cluster {initial_idx}: Detected {len(variant_positions)} variant positions")
+
+                # Phase reads into haplotypes
+                # Note: Uses the FULL cluster (not just sampled_ids) for phasing
+                phased_haplotypes = self.phase_reads_by_variants(
+                    msa, consensus, cluster, variant_positions
+                )
+
+                # Store each haplotype as a sub-cluster with provenance
+                for haplotype_idx, (allele_combo, haplotype_reads) in enumerate(phased_haplotypes):
+                    subcluster = {
+                        'read_ids': haplotype_reads,
+                        'initial_cluster_num': initial_idx,
+                        'allele_combo': allele_combo,
+                        'variant_positions': variant_positions if allele_combo else None,
+                        'num_variants': len(variant_positions) if variant_positions else 0
+                    }
+                    all_subclusters.append(subcluster)
+
+            logging.info(f"After phasing, created {len(all_subclusters)} sub-clusters from {len(initial_clusters)} initial clusters")
+
+            # ============================================================
+            # PHASE 3: MERGING
+            # ============================================================
+            # Merge sub-clusters with identical/homopolymer-equivalent consensus sequences
+            logging.info("Merging homopolymer-equivalent sub-clusters...")
+            merged_subclusters = self.merge_similar_clusters(all_subclusters)
+
+            logging.info(f"After merging, have {len(merged_subclusters)} clusters")
+
+            # ============================================================
+            # PHASE 4: FILTERING
+            # ============================================================
+            # Filter by absolute size
+            large_clusters = [c for c in merged_subclusters if len(c['read_ids']) >= self.min_size]
+
+            if len(large_clusters) < len(merged_subclusters):
+                filtered_count = len(merged_subclusters) - len(large_clusters)
+                logging.info(f"Filtered {filtered_count} clusters below minimum size ({self.min_size})")
+
+            # Filter by relative size ratio
+            if large_clusters and self.min_cluster_ratio > 0:
+                largest_size = max(len(c['read_ids']) for c in large_clusters)
+                before_ratio_filter = len(large_clusters)
+                large_clusters = [c for c in large_clusters
+                                 if len(c['read_ids']) / largest_size >= self.min_cluster_ratio]
+
+                if len(large_clusters) < before_ratio_filter:
+                    filtered_count = before_ratio_filter - len(large_clusters)
+                    logging.info(f"Filtered {filtered_count} clusters below minimum ratio ({self.min_cluster_ratio})")
+
+            # Sort by size and renumber as c1, c2, c3...
+            large_clusters.sort(key=lambda c: len(c['read_ids']), reverse=True)
+
+            total_sequences = len(self.sequences)
+            sequences_covered = sum(len(c['read_ids']) for c in large_clusters)
+
+            logging.info(f"Final: {len(large_clusters)} clusters covering {sequences_covered} sequences "
+                        f"({sequences_covered / total_sequences:.1%} of total)")
+
+            # ============================================================
+            # PHASE 5: OUTPUT
+            # ============================================================
+            # Generate final consensus and write output files
             consensus_output_file = os.path.join(self.output_dir, f"{self.sample_name}-all.fasta")
             with open(consensus_output_file, 'w') as consensus_fasta_handle:
-                for i, cluster in enumerate(clusters_to_output, 1):
+                for final_idx, cluster_dict in enumerate(large_clusters, 1):
+                    cluster = cluster_dict['read_ids']
                     actual_size = len(cluster)
 
-                    # Check if this cluster was formed by merging
-                    cluster_idx = large_clusters.index(cluster)
-
-                    # Sample sequences for consensus generation if needed
+                    # Sample sequences for final consensus generation if needed
                     if len(cluster) > self.max_sample_size:
-                        logging.info(f"Sampling {self.max_sample_size} sequences from cluster {i} (size: {len(cluster)})")
+                        logging.info(f"Cluster {final_idx}: Sampling {self.max_sample_size} from {len(cluster)} reads for final consensus")
                         qualities = []
                         for seq_id in cluster:
                             record = self.records[seq_id]
@@ -698,56 +825,17 @@ class SpecimenClusterer:
                     else:
                         sampled_ids = cluster
 
-                    # Generate consensus and MSA
+                    # Generate final consensus and MSA
                     sampled_seqs = [self.sequences[seq_id] for seq_id in sampled_ids]
                     consensus, msa = self.run_spoa(sampled_seqs)
 
-                    # Calculate per-read variance from MSA
+                    # Calculate final variance metrics
                     mean_var, median_var, p95_var = None, None, None
                     if consensus and msa:
                         mean_var, median_var, p95_var = self.calculate_read_variance(msa, consensus)
 
-                    # Optional: Remove outlier reads and regenerate consensus
-                    if (self.outlier_threshold is not None and consensus and msa and
-                        p95_var is not None and p95_var > self.outlier_threshold):
-
-                        # Identify outliers
-                        keep_ids, outlier_ids = self.identify_outlier_reads(
-                            msa, consensus, sampled_ids, self.outlier_threshold
-                        )
-
-                        if outlier_ids:
-                            logging.info(f"Cluster {i}: Removing {len(outlier_ids)}/{len(sampled_ids)} outlier reads "
-                                       f"(P95 variance {p95_var*100:.1f}% > threshold {self.outlier_threshold*100:.1f}%), "
-                                       f"regenerating consensus")
-
-                            # Update sampled_ids to exclude outliers
-                            sampled_ids = keep_ids
-
-                            # Regenerate consensus with filtered reads
-                            sampled_seqs = [self.sequences[seq_id] for seq_id in sampled_ids]
-                            consensus, msa = self.run_spoa(sampled_seqs)
-
-                            # Recalculate variance
-                            if consensus and msa:
-                                mean_var, median_var, p95_var = self.calculate_read_variance(msa, consensus)
-                                logging.info(f"Cluster {i}: After outlier removal, "
-                                           f"P95 variance reduced to {p95_var*100:.1f}%")
-
-                    # Detect variant positions for future phasing
-                    variant_positions = []
-                    if consensus and msa and self.outlier_threshold is not None:
-                        # Use the same threshold as outlier detection
-                        variant_positions = self.detect_variant_positions(
-                            msa, consensus, self.outlier_threshold, min_alt_freq=0.20
-                        )
-
-                        if variant_positions:
-                            logging.info(f"Cluster {i}: Detected {len(variant_positions)} variant positions "
-                                       f"(potential unphased variation)")
-
-                    # For merged homopolymer-equivalent clusters, the consensus is already correct
-                    # (we use the consensus from the larger cluster during merging)
+                    # Note: No outlier removal or variant detection in output phase
+                    # (already done in detection phase)
 
                     if consensus:
                         # Perform primer trimming
@@ -756,8 +844,9 @@ class SpecimenClusterer:
                         if hasattr(self, 'primers'):
                             trimmed_consensus, found_primers = self.trim_primers(consensus)
 
+                        # Write output files (no variant positions in output phase)
                         self.write_cluster_files(
-                            cluster_num=i,
+                            cluster_num=final_idx,
                             cluster=cluster,
                             consensus=consensus,
                             trimmed_consensus=trimmed_consensus,
@@ -765,12 +854,22 @@ class SpecimenClusterer:
                             mean_var=mean_var,
                             median_var=median_var,
                             p95_var=p95_var,
-                            variant_positions=variant_positions,
+                            variant_positions=None,  # Don't report variants in final output
                             actual_size=actual_size,
                             consensus_fasta_handle=consensus_fasta_handle,
                             sampled_ids=sampled_ids,
                             msa=msa
                         )
+
+            # ============================================================
+            # WRITE PHASING STATISTICS
+            # ============================================================
+            self.write_phasing_stats(
+                initial_clusters_count=len(initial_clusters),
+                subclusters_count=len(all_subclusters),
+                merged_count=len(merged_subclusters),
+                final_count=len(large_clusters)
+            )
 
     def _create_id_mapping(self) -> None:
         """Create short numeric IDs for all sequences."""
@@ -881,47 +980,37 @@ class SpecimenClusterer:
             return sampled_ids, set()
 
         try:
-            # Write MSA to temporary file for parsing
-            with tempfile.NamedTemporaryFile(mode='w', delete=False, suffix='.fasta') as f:
-                f.write(msa_string)
-                temp_msa_file = f.name
+            # Extract alignments from MSA string directly (no temp file needed)
+            alignments, _, _ = extract_alignments_from_msa(msa_string)
 
-            try:
-                # Extract alignments from MSA
-                alignments, _, _ = extract_alignments_from_msa(temp_msa_file)
+            if not alignments:
+                logging.debug(f"No alignments found in MSA for outlier detection")
+                return sampled_ids, set()
 
-                if not alignments:
-                    logging.debug(f"No alignments found in MSA for outlier detection")
-                    return sampled_ids, set()
+            # Map MSA IDs (seq0, seq1, ...) to actual read IDs
+            # SPOA writes sequences in the order they were provided
+            sampled_list = list(sampled_ids)
+            msa_to_read_id = {f"seq{i}": sampled_list[i] for i in range(len(sampled_list))}
 
-                # Map MSA IDs (seq0, seq1, ...) to actual read IDs
-                # SPOA writes sequences in the order they were provided
-                sampled_list = list(sampled_ids)
-                msa_to_read_id = {f"seq{i}": sampled_list[i] for i in range(len(sampled_list))}
+            keep_ids = set()
+            outlier_ids = set()
 
-                keep_ids = set()
-                outlier_ids = set()
+            consensus_length = len(consensus_seq)
+            if consensus_length == 0:
+                return sampled_ids, set()
 
-                consensus_length = len(consensus_seq)
-                if consensus_length == 0:
-                    return sampled_ids, set()
+            for alignment in alignments:
+                error_rate = alignment.edit_distance / consensus_length
 
-                for alignment in alignments:
-                    error_rate = alignment.edit_distance / consensus_length
+                # Get actual read ID
+                actual_read_id = msa_to_read_id.get(alignment.read_id, alignment.read_id)
 
-                    # Get actual read ID
-                    actual_read_id = msa_to_read_id.get(alignment.read_id, alignment.read_id)
+                if error_rate <= threshold:
+                    keep_ids.add(actual_read_id)
+                else:
+                    outlier_ids.add(actual_read_id)
 
-                    if error_rate <= threshold:
-                        keep_ids.add(actual_read_id)
-                    else:
-                        outlier_ids.add(actual_read_id)
-
-                return keep_ids, outlier_ids
-
-            finally:
-                # Clean up temporary file
-                os.unlink(temp_msa_file)
+            return keep_ids, outlier_ids
 
         except Exception as e:
             logging.warning(f"Failed to identify outlier reads: {e}")
@@ -946,42 +1035,32 @@ class SpecimenClusterer:
             return None, None, None
 
         try:
-            # Write MSA to temporary file for parsing
-            with tempfile.NamedTemporaryFile(mode='w', delete=False, suffix='.fasta') as f:
-                f.write(msa_string)
-                temp_msa_file = f.name
+            # Extract alignments from MSA string directly (no temp file needed)
+            alignments, msa_consensus, _ = extract_alignments_from_msa(msa_string)
 
-            try:
-                # Extract alignments from MSA
-                alignments, msa_consensus, _ = extract_alignments_from_msa(temp_msa_file)
+            if not alignments:
+                logging.debug(f"No alignments found in MSA")
+                return None, None, None
 
-                if not alignments:
-                    logging.debug(f"No alignments found in MSA")
-                    return None, None, None
+            # Calculate variance (edit distance / consensus length) for each read
+            consensus_length = len(consensus_seq)
+            if consensus_length == 0:
+                return None, None, None
 
-                # Calculate variance (edit distance / consensus length) for each read
-                consensus_length = len(consensus_seq)
-                if consensus_length == 0:
-                    return None, None, None
+            variances = []
+            for alignment in alignments:
+                variance = alignment.edit_distance / consensus_length
+                variances.append(variance)
 
-                variances = []
-                for alignment in alignments:
-                    variance = alignment.edit_distance / consensus_length
-                    variances.append(variance)
+            if not variances:
+                return None, None, None
 
-                if not variances:
-                    return None, None, None
+            # Calculate statistics
+            mean_var = np.mean(variances)
+            median_var = np.median(variances)
+            p95_var = np.percentile(variances, 95)
 
-                # Calculate statistics
-                mean_var = np.mean(variances)
-                median_var = np.median(variances)
-                p95_var = np.percentile(variances, 95)
-
-                return mean_var, median_var, p95_var
-
-            finally:
-                # Clean up temporary file
-                os.unlink(temp_msa_file)
+            return mean_var, median_var, p95_var
 
         except Exception as e:
             logging.warning(f"Failed to calculate read variance from MSA: {e}")
@@ -1007,57 +1086,148 @@ class SpecimenClusterer:
             return []
 
         try:
-            # Write MSA to temporary file for parsing
-            with tempfile.NamedTemporaryFile(mode='w', delete=False, suffix='.fasta') as f:
-                f.write(msa_string)
-                temp_msa_file = f.name
+            # Extract alignments from MSA string directly (no temp file needed)
+            alignments, msa_consensus, msa_to_consensus_pos = extract_alignments_from_msa(msa_string)
 
-            try:
-                # Extract alignments from MSA
-                alignments, msa_consensus, msa_to_consensus_pos = extract_alignments_from_msa(temp_msa_file)
+            if not alignments:
+                logging.debug(f"No alignments found in MSA for variant detection")
+                return []
 
-                if not alignments:
-                    logging.debug(f"No alignments found in MSA for variant detection")
-                    return []
+            # Analyze positional variation
+            position_stats = analyze_positional_variation(
+                alignments,
+                consensus_seq,
+                error_threshold,
+                msa_string
+            )
 
-                # Analyze positional variation
-                position_stats = analyze_positional_variation(
-                    alignments,
-                    consensus_seq,
+            # Identify variant positions
+            variant_positions = []
+            for pos_stat in position_stats:
+                is_variant, variant_bases, reason = is_variant_position_with_composition(
+                    pos_stat,
                     error_threshold,
-                    temp_msa_file
+                    min_alt_freq=min_alt_freq,
+                    confidence_sigma=3.0
                 )
 
-                # Identify variant positions
-                variant_positions = []
-                for pos_stat in position_stats:
-                    is_variant, variant_bases, reason = is_variant_position_with_composition(
-                        pos_stat,
-                        error_threshold,
-                        min_alt_freq=min_alt_freq,
-                        confidence_sigma=3.0
-                    )
+                if is_variant:
+                    variant_positions.append({
+                        'msa_position': pos_stat.msa_position,
+                        'consensus_position': pos_stat.consensus_position,
+                        'coverage': pos_stat.coverage,
+                        'variant_bases': variant_bases,
+                        'base_composition': pos_stat.base_composition,
+                        'error_rate': pos_stat.error_rate,
+                        'reason': reason
+                    })
 
-                    if is_variant:
-                        variant_positions.append({
-                            'msa_position': pos_stat.msa_position,
-                            'consensus_position': pos_stat.consensus_position,
-                            'coverage': pos_stat.coverage,
-                            'variant_bases': variant_bases,
-                            'base_composition': pos_stat.base_composition,
-                            'error_rate': pos_stat.error_rate,
-                            'reason': reason
-                        })
-
-                return variant_positions
-
-            finally:
-                # Clean up temporary file
-                os.unlink(temp_msa_file)
+            return variant_positions
 
         except Exception as e:
             logging.warning(f"Failed to detect variant positions: {e}")
             return []
+
+    def phase_reads_by_variants(
+        self,
+        msa_string: str,
+        consensus_seq: str,
+        cluster_read_ids: Set[str],
+        variant_positions: List[Dict]
+    ) -> List[Tuple[str, Set[str]]]:
+        """Phase reads into haplotypes based on variant positions.
+
+        Splits a cluster into sub-clusters where each sub-cluster represents reads
+        sharing the same alleles at all variant positions. Every unique combination
+        of alleles observed in the data becomes a separate haplotype.
+
+        Args:
+            msa_string: MSA in FASTA format from SPOA
+            consensus_seq: Ungapped consensus sequence
+            cluster_read_ids: Set of read IDs in this cluster (for mapping MSA IDs)
+            variant_positions: List of variant position dicts from detect_variant_positions()
+
+        Returns:
+            List of (allele_combo_string, read_id_set) tuples
+            e.g., [("C-T-A", {id1, id2}), ("T-C-A", {id3, id4})]
+
+            Allele combination format: bases separated by hyphens, in MSA position order
+            Gap positions are represented as "-" (the gap character itself)
+        """
+        if not msa_string or not variant_positions:
+            # No variants to phase - return single group with all reads
+            return [(None, cluster_read_ids)]
+
+        try:
+            # Parse MSA to get aligned sequences
+            from io import StringIO
+            from Bio import SeqIO
+
+            msa_handle = StringIO(msa_string)
+            records = list(SeqIO.parse(msa_handle, 'fasta'))
+
+            if not records:
+                logging.warning("No sequences found in MSA for phasing")
+                return [(None, cluster_read_ids)]
+
+            # Separate consensus from read sequences
+            read_sequences = {}
+            for record in records:
+                if 'Consensus' not in record.description and 'Consensus' not in record.id:
+                    read_sequences[record.id] = str(record.seq).upper()
+
+            if not read_sequences:
+                logging.warning("No read sequences found in MSA for phasing")
+                return [(None, cluster_read_ids)]
+
+            # Map MSA IDs (seq0, seq1, ...) to actual read IDs
+            # SPOA writes sequences in the order they were provided
+            cluster_read_list = list(cluster_read_ids)
+            msa_to_read_id = {f"seq{i}": cluster_read_list[i] for i in range(len(cluster_read_list))}
+
+            # Extract MSA positions for variants (sorted by position)
+            variant_msa_positions = sorted([v['msa_position'] for v in variant_positions])
+
+            # For each read, extract alleles at variant positions
+            read_to_alleles = {}
+            for msa_id, aligned_seq in read_sequences.items():
+                # Get actual read ID
+                actual_read_id = msa_to_read_id.get(msa_id, msa_id)
+
+                # Extract allele at each variant position
+                alleles = []
+                for msa_pos in variant_msa_positions:
+                    if msa_pos < len(aligned_seq):
+                        allele = aligned_seq[msa_pos]
+                        alleles.append(allele)
+                    else:
+                        # Read doesn't cover this position - treat as gap
+                        alleles.append('-')
+
+                # Create allele combination string
+                allele_combo = '-'.join(alleles)
+                read_to_alleles[actual_read_id] = allele_combo
+
+            # Group reads by allele combination
+            combo_to_reads = defaultdict(set)
+            for read_id, allele_combo in read_to_alleles.items():
+                combo_to_reads[allele_combo].add(read_id)
+
+            # Convert to list of tuples
+            result = [(combo, reads) for combo, reads in combo_to_reads.items()]
+
+            # Sort by size (largest first) for consistency
+            result.sort(key=lambda x: len(x[1]), reverse=True)
+
+            logging.debug(f"Phased {len(cluster_read_ids)} reads into {len(result)} haplotypes "
+                         f"based on {len(variant_positions)} variant positions")
+
+            return result
+
+        except Exception as e:
+            logging.warning(f"Failed to phase reads by variants: {e}")
+            # On error, return all reads as single group
+            return [(None, cluster_read_ids)]
 
     def load_primers(self, primer_file: str) -> None:
         """Load primers from FASTA file with position awareness."""
@@ -1335,8 +1505,8 @@ class SpecimenClusterer:
         """
         if not seq1 or not seq2:
             return max(len(seq1), len(seq2))
-            
-        # Get alignment from edlib
+
+        # Get alignment from edlib (uses global NW alignment by default)
         result = edlib.align(seq1, seq2, task="path")
         if result["editDistance"] == -1:
             # Alignment failed, return maximum possible distance
@@ -1377,9 +1547,14 @@ class SpecimenClusterer:
         )
         
         # Check for merge compatibility if requested
-        if require_merge_compatible and 'I' in score_result.score_aligned:
-            logging.debug(f"Non-homopolymer indel detected, sequences not merge-compatible")
-            return -1  # Signal that merging should not occur
+        # Both non-homopolymer indels ('I') and terminal overhangs ('.') prevent merging
+        if require_merge_compatible:
+            if 'I' in score_result.score_aligned:
+                logging.debug(f"Non-homopolymer indel detected, sequences not merge-compatible")
+                return -1  # Signal that merging should not occur
+            if '.' in score_result.score_aligned:
+                logging.debug(f"Terminal overhang detected, sequences not merge-compatible")
+                return -1  # Signal that merging should not occur
         
         # Count only substitutions (not homopolymer adjustments or indels)
         # Note: mismatches includes both substitutions and non-homopolymer indels
@@ -1398,11 +1573,17 @@ class SpecimenClusterer:
         return distance
 
     def are_homopolymer_equivalent(self, seq1: str, seq2: str) -> bool:
-        """Check if two sequences are equivalent when considering only homopolymer differences."""
+        """Check if two sequences are equivalent when considering only homopolymer differences.
+
+        Uses adjusted-identity scoring with global alignment. Terminal overhangs (marked as '.')
+        and non-homopolymer indels (marked as 'I') prevent merging, ensuring truncated sequences
+        don't merge with full-length sequences.
+        """
         if not seq1 or not seq2:
             return seq1 == seq2
-            
+
         # Use calculate_consensus_distance with merge compatibility check
+        # Global alignment ensures terminal gaps are counted as indels
         # Returns: -1 (non-homopolymer indels), 0 (homopolymer-equivalent), >0 (substitutions)
         # Only distance == 0 means truly homopolymer-equivalent
         distance = self.calculate_consensus_distance(seq1, seq2, require_merge_compatible=True)
