@@ -37,8 +37,9 @@ class ClusterInfo(NamedTuple):
     reads_file: str  # Path to FASTQ file with raw reads
     ric: int  # Reads in consensus (from header)
     size: int  # Total cluster size (from header)
-    p50_diff: Optional[float] = None
-    p95_diff: Optional[float] = None
+    rid: Optional[float] = None  # Mean read identity
+    rid_min: Optional[float] = None  # Minimum read identity
+    pid_min: Optional[float] = None  # Minimum positional identity
     msa_file: Optional[str] = None  # Path to MSA file (if available)
 
 
@@ -79,18 +80,19 @@ class ClusterStats(NamedTuple):
     consensus_length: int
     mean_read_length: float
     has_contiguous_errors: bool  # True if reads show contiguous high-error regions
-    p50_diff: Optional[float] = None
-    p95_diff: Optional[float] = None
+    rid: Optional[float] = None  # Mean read identity from consensus header
+    rid_min: Optional[float] = None  # Minimum read identity from consensus header
+    pid_min: Optional[float] = None  # Minimum positional identity from consensus header
 
 
-def parse_consensus_header(header: str) -> Tuple[str, int, int, Optional[float], Optional[float]]:
+def parse_consensus_header(header: str) -> Tuple[str, int, int, Optional[float], Optional[float], Optional[float]]:
     """
     Parse a consensus FASTA header to extract metadata.
 
-    Header format: >sample-c1 size=200 ric=100 [p50diff=0.0] [p95diff=1.0]
+    Header format: >sample-c1 size=200 ric=100 [rid=99.3] [rid_min=97.5] [pid_min=92.0]
 
     Returns:
-        Tuple of (sample_name, size, ric, p50_diff, p95_diff)
+        Tuple of (sample_name, cluster_num, size, ric, rid, rid_min, pid_min)
     """
     # Remove '>' if present
     header = header.lstrip('>')
@@ -107,7 +109,7 @@ def parse_consensus_header(header: str) -> Tuple[str, int, int, Optional[float],
 
     # Parse key=value pairs
     size = ric = None
-    p50_diff = p95_diff = None
+    rid = rid_min = pid_min = None
 
     for part in parts[1:]:
         if '=' in part:
@@ -116,15 +118,17 @@ def parse_consensus_header(header: str) -> Tuple[str, int, int, Optional[float],
                 size = int(value)
             elif key == 'ric':
                 ric = int(value)
-            elif key == 'p50diff':
-                p50_diff = float(value)
-            elif key == 'p95diff':
-                p95_diff = float(value)
+            elif key == 'rid':
+                rid = float(value) / 100.0  # Convert percentage to fraction
+            elif key == 'rid_min':
+                rid_min = float(value) / 100.0  # Convert percentage to fraction
+            elif key == 'pid_min':
+                pid_min = float(value) / 100.0  # Convert percentage to fraction
 
     if size is None or ric is None:
         raise ValueError(f"Missing size or ric in header: {header}")
 
-    return sample_name, cluster_num, size, ric, p50_diff, p95_diff
+    return sample_name, cluster_num, size, ric, rid, rid_min, pid_min
 
 
 def find_cluster_files(output_dir: str, use_sampled: bool = False) -> Dict[Tuple[str, int], str]:
@@ -231,7 +235,7 @@ def load_consensus_sequences(output_dir: str) -> Dict[Tuple[str, int], ClusterIn
     for fasta_file in glob.glob(pattern):
         try:
             for record in SeqIO.parse(fasta_file, 'fasta'):
-                sample_name, cluster_num, size, ric, p50_diff, p95_diff = parse_consensus_header(record.description)
+                sample_name, cluster_num, size, ric, rid, rid_min, pid_min = parse_consensus_header(record.description)
 
                 # Extract base sample name (remove -c{num} suffix)
                 base_name = re.sub(r'-c\d+$', '', sample_name)
@@ -243,8 +247,9 @@ def load_consensus_sequences(output_dir: str) -> Dict[Tuple[str, int], ClusterIn
                     reads_file='',  # Will be filled in later
                     ric=ric,
                     size=size,
-                    p50_diff=p50_diff,
-                    p95_diff=p95_diff
+                    rid=rid,
+                    rid_min=rid_min,
+                    pid_min=pid_min
                 )
         except Exception as e:
             logging.warning(f"Error parsing {fasta_file}: {e}")
@@ -1172,8 +1177,9 @@ def analyze_cluster(cluster_info: ClusterInfo) -> Tuple[ClusterStats, List[ReadA
         consensus_length=len(consensus_seq),
         mean_read_length=np.mean(read_lengths),
         has_contiguous_errors=has_contiguous,
-        p50_diff=cluster_info.p50_diff,
-        p95_diff=cluster_info.p95_diff
+        rid=cluster_info.rid,
+        rid_min=cluster_info.rid_min,
+        pid_min=cluster_info.pid_min
     )
 
     return stats, alignments
@@ -1187,7 +1193,7 @@ def write_cluster_statistics(cluster_stats: List[ClusterStats], output_file: str
         'mean_error_rate', 'median_error_rate',
         'insertion_rate', 'deletion_rate', 'substitution_rate',
         'consensus_length', 'mean_read_length', 'has_contiguous_errors',
-        'p50_diff', 'p95_diff'
+        'rid', 'rid_min', 'pid_min'
     ]
 
     with open(output_file, 'w', newline='') as f:

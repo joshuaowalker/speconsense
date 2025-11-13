@@ -76,11 +76,9 @@ class ConsensusInfo(NamedTuple):
     snp_count: Optional[int] = None  # Number of SNPs from IUPAC consensus generation
     primers: Optional[List[str]] = None  # List of detected primer names
     raw_ric: Optional[List[int]] = None  # RiC values of .raw source variants
-    p50_diff: Optional[float] = None  # Median edit distance from stability assessment (legacy)
-    p95_diff: Optional[float] = None  # 95th percentile edit distance from stability (legacy)
-    var_mean: Optional[float] = None  # Mean per-read variance (edit distance / consensus length)
-    var_median: Optional[float] = None  # Median per-read variance
-    var_p95: Optional[float] = None  # P95 per-read variance
+    rid: Optional[float] = None  # Mean read identity (internal consistency metric)
+    rid_min: Optional[float] = None  # Minimum read identity (worst-case read)
+    pid_min: Optional[float] = None  # Minimum positional identity (worst-case position)
     has_variants: Optional[bool] = None  # Whether variant positions were detected
     num_variants: Optional[int] = None  # Number of variant positions detected
 
@@ -145,26 +143,6 @@ class SnpField(FastaField):
         return None
 
 
-class P50DiffField(FastaField):
-    def __init__(self):
-        super().__init__('p50diff', 'Median (p50) edit distance from stability')
-
-    def format_value(self, consensus: ConsensusInfo) -> Optional[str]:
-        if consensus.p50_diff is not None:
-            return f"p50diff={consensus.p50_diff:.1f}"
-        return None
-
-
-class P95DiffField(FastaField):
-    def __init__(self):
-        super().__init__('p95diff', '95th percentile edit distance')
-
-    def format_value(self, consensus: ConsensusInfo) -> Optional[str]:
-        if consensus.p95_diff is not None:
-            return f"p95diff={consensus.p95_diff:.1f}"
-        return None
-
-
 class PrimersField(FastaField):
     def __init__(self):
         super().__init__('primers', 'Detected primer names')
@@ -175,33 +153,33 @@ class PrimersField(FastaField):
         return None
 
 
-class MeanVarField(FastaField):
+class RidField(FastaField):
     def __init__(self):
-        super().__init__('var_mean', 'Mean per-read variance (percentage)')
+        super().__init__('rid', 'Mean read identity (percentage)')
 
     def format_value(self, consensus: ConsensusInfo) -> Optional[str]:
-        if consensus.var_mean is not None:
-            return f"var_mean={consensus.var_mean*100:.1f}"
+        if consensus.rid is not None:
+            return f"rid={consensus.rid*100:.1f}"
         return None
 
 
-class MedianVarField(FastaField):
+class RidMinField(FastaField):
     def __init__(self):
-        super().__init__('var_med', 'Median per-read variance (percentage)')
+        super().__init__('rid_min', 'Minimum read identity (percentage)')
 
     def format_value(self, consensus: ConsensusInfo) -> Optional[str]:
-        if consensus.var_median is not None:
-            return f"var_med={consensus.var_median*100:.1f}"
+        if consensus.rid_min is not None:
+            return f"rid_min={consensus.rid_min*100:.1f}"
         return None
 
 
-class P95VarField(FastaField):
+class PidMinField(FastaField):
     def __init__(self):
-        super().__init__('var_p95', 'P95 per-read variance (percentage)')
+        super().__init__('pid_min', 'Minimum positional identity (percentage)')
 
     def format_value(self, consensus: ConsensusInfo) -> Optional[str]:
-        if consensus.var_p95 is not None:
-            return f"var_p95={consensus.var_p95*100:.1f}"
+        if consensus.pid_min is not None:
+            return f"pid_min={consensus.pid_min*100:.1f}"
         return None
 
 
@@ -256,11 +234,9 @@ FASTA_FIELDS = {
     'length': LengthField(),
     'rawric': RawRicField(),
     'snp': SnpField(),
-    'p50diff': P50DiffField(),
-    'p95diff': P95DiffField(),
-    'var_mean': MeanVarField(),
-    'var_med': MedianVarField(),
-    'var_p95': P95VarField(),
+    'rid': RidField(),
+    'rid_min': RidMinField(),
+    'pid_min': PidMinField(),
     'has_variants': HasVariantsField(),
     'num_variants': NumVariantsField(),
     'primers': PrimersField(),
@@ -272,8 +248,8 @@ FASTA_FIELDS = {
 FASTA_FIELD_PRESETS = {
     'default': ['size', 'ric', 'rawric', 'snp', 'primers'],
     'minimal': ['size', 'ric'],
-    'qc': ['size', 'ric', 'length', 'var_mean', 'var_med', 'var_p95', 'has_variants', 'num_variants'],
-    'full': ['size', 'ric', 'length', 'rawric', 'snp', 'var_mean', 'var_med', 'var_p95', 'has_variants', 'num_variants', 'primers'],
+    'qc': ['size', 'ric', 'length', 'rid', 'rid_min', 'pid_min', 'has_variants', 'num_variants'],
+    'full': ['size', 'ric', 'length', 'rawric', 'snp', 'rid', 'rid_min', 'pid_min', 'has_variants', 'num_variants', 'primers'],
     'id-only': [],
 }
 
@@ -301,7 +277,7 @@ def parse_fasta_fields(spec: str) -> List[FastaField]:
                 - "default" (single preset)
                 - "minimal,qc" (preset union)
                 - "size,ric,primers" (field list)
-                - "minimal,p50diff,p95diff" (preset + fields)
+                - "minimal,rid,rid_min" (preset + fields)
 
     Returns:
         List of FastaField objects in specified order, duplicates removed
@@ -383,9 +359,9 @@ def parse_arguments():
                         help="FASTA header fields to output. Can be: "
                              "(1) a preset name (default, minimal, qc, full, id-only), "
                              "(2) comma-separated field names (size, ric, length, rawric, "
-                             "snp, p50diff, p95diff, primers, group, variant), or "
+                             "snp, rid, rid_min, pid_min, primers, group, variant), or "
                              "(3) a combination of presets and fields (e.g., minimal,qc or "
-                             "minimal,p50diff,p95diff). Duplicates removed, order preserved "
+                             "minimal,rid,rid_min). Duplicates removed, order preserved "
                              "left to right. Default: default")
 
     # Merge phase parameters
@@ -475,24 +451,20 @@ def setup_logging(log_level: str, log_file: str = None):
 
 
 def parse_consensus_header(header: str) -> Tuple[Optional[str], Optional[int], Optional[int],
-                                                   Optional[List[str]], Optional[float], Optional[float],
-                                                   Optional[float], Optional[float], Optional[float],
+                                                   Optional[List[str]], Optional[float], Optional[float], Optional[float],
                                                    Optional[bool], Optional[int]]:
     """
     Extract information from Speconsense consensus FASTA header.
 
-    Supports both old stability metrics (p50diff, p95diff) and new variance metrics
-    (var_mean, var_med, var_p95) for backward compatibility.
-
-    Also parses variant detection flags (has_variants, num_variants).
+    Parses read identity metrics and variant detection flags.
 
     Returns:
-        Tuple of (sample_name, ric, size, primers, p50_diff, p95_diff,
-                  var_mean, var_median, var_p95, has_variants, num_variants)
+        Tuple of (sample_name, ric, size, primers, rid, rid_min, pid_min,
+                  has_variants, num_variants)
     """
     sample_match = re.match(r'>([^ ]+) (.+)', header)
     if not sample_match:
-        return None, None, None, None, None, None, None, None, None, None, None
+        return None, None, None, None, None, None, None, None, None
 
     sample_name = sample_match.group(1)
     info_string = sample_match.group(2)
@@ -509,26 +481,15 @@ def parse_consensus_header(header: str) -> Tuple[Optional[str], Optional[int], O
     primers_match = re.search(r'primers=([^,\s]+(?:,[^,\s]+)*)', info_string)
     primers = primers_match.group(1).split(',') if primers_match else None
 
-    # Extract legacy stability metrics (for backward compatibility)
-    # Accept both new (p50diff, p95diff) and legacy (median_diff, p95_diff) names
-    p50_diff_match = re.search(r'(?:p50diff|median_diff)=([\d.]+)', info_string)
-    p50_diff = float(p50_diff_match.group(1)) if p50_diff_match else None
+    # Extract read identity metrics (percentages in headers, convert to fractions)
+    rid_match = re.search(r'rid=([\d.]+)', info_string)
+    rid = float(rid_match.group(1)) / 100.0 if rid_match else None
 
-    p95_diff_match = re.search(r'p95diff=([\d.]+)', info_string)
-    if not p95_diff_match:
-        # Try legacy name
-        p95_diff_match = re.search(r'p95_diff=([\d.]+)', info_string)
-    p95_diff = float(p95_diff_match.group(1)) if p95_diff_match else None
+    rid_min_match = re.search(r'rid_min=([\d.]+)', info_string)
+    rid_min = float(rid_min_match.group(1)) / 100.0 if rid_min_match else None
 
-    # Extract new variance metrics (percentages in headers, convert to fractions)
-    var_mean_match = re.search(r'var_mean=([\d.]+)', info_string)
-    var_mean = float(var_mean_match.group(1)) / 100.0 if var_mean_match else None
-
-    var_med_match = re.search(r'var_med=([\d.]+)', info_string)
-    var_median = float(var_med_match.group(1)) / 100.0 if var_med_match else None
-
-    var_p95_match = re.search(r'var_p95=([\d.]+)', info_string)
-    var_p95 = float(var_p95_match.group(1)) / 100.0 if var_p95_match else None
+    pid_min_match = re.search(r'pid_min=([\d.]+)', info_string)
+    pid_min = float(pid_min_match.group(1)) / 100.0 if pid_min_match else None
 
     # Extract variant detection flags
     has_variants_match = re.search(r'has_variants=(true|false)', info_string)
@@ -537,7 +498,7 @@ def parse_consensus_header(header: str) -> Tuple[Optional[str], Optional[int], O
     num_variants_match = re.search(r'num_variants=(\d+)', info_string)
     num_variants = int(num_variants_match.group(1)) if num_variants_match else None
 
-    return sample_name, ric, size, primers, p50_diff, p95_diff, var_mean, var_median, var_p95, has_variants, num_variants
+    return sample_name, ric, size, primers, rid, rid_min, pid_min, has_variants, num_variants
 
 
 def load_consensus_sequences(source_folder: str, min_ric: int) -> List[ConsensusInfo]:
@@ -553,7 +514,7 @@ def load_consensus_sequences(source_folder: str, min_ric: int) -> List[Consensus
 
         with open(fasta_file, 'r') as f:
             for record in SeqIO.parse(f, "fasta"):
-                sample_name, ric, size, primers, p50_diff, p95_diff, var_mean, var_median, var_p95, has_variants, num_variants = \
+                sample_name, ric, size, primers, rid, rid_min, pid_min, has_variants, num_variants = \
                     parse_consensus_header(f">{record.description}")
 
                 if sample_name and ric >= min_ric:
@@ -571,11 +532,9 @@ def load_consensus_sequences(source_folder: str, min_ric: int) -> List[Consensus
                         snp_count=None,  # No SNP info from original speconsense output
                         primers=primers,
                         raw_ric=None,  # Not available in original speconsense output
-                        p50_diff=p50_diff,  # From stability assessment if available (legacy)
-                        p95_diff=p95_diff,  # From stability assessment if available (legacy)
-                        var_mean=var_mean,  # From variance calculation if available
-                        var_median=var_median,  # From variance calculation if available
-                        var_p95=var_p95,  # From variance calculation if available
+                        rid=rid,  # Mean read identity if available
+                        rid_min=rid_min,  # Minimum read identity if available
+                        pid_min=pid_min,  # Minimum positional identity if available
                         has_variants=has_variants,  # From variant detection if available
                         num_variants=num_variants  # From variant detection if available
                     )
@@ -981,11 +940,9 @@ def create_consensus_from_msa(aligned_seqs: List, variants: List[ConsensusInfo])
         snp_count=snp_count if snp_count > 0 else None,
         primers=largest_variant.primers,
         raw_ric=raw_ric_values,
-        p50_diff=None,  # Merged sequence - original stability metrics don't apply
-        p95_diff=None,
-        var_mean=largest_variant.var_mean,  # Preserve variance from largest variant
-        var_median=largest_variant.var_median,
-        var_p95=largest_variant.var_p95,
+        rid=largest_variant.rid,  # Preserve identity metrics from largest variant
+        rid_min=largest_variant.rid_min,
+        pid_min=largest_variant.pid_min,
         has_variants=largest_variant.has_variants,  # Preserve variant flags from largest variant
         num_variants=largest_variant.num_variants
     )
@@ -1497,11 +1454,9 @@ def create_output_structure(groups: Dict[int, List[ConsensusInfo]],
                 snp_count=variant.snp_count,  # Preserve SNP count from original
                 primers=variant.primers,  # Preserve primers
                 raw_ric=variant.raw_ric,  # Preserve raw_ric
-                p50_diff=variant.p50_diff,  # Preserve stability metrics
-                p95_diff=variant.p95_diff,
-                var_mean=variant.var_mean,  # Preserve variance metrics
-                var_median=variant.var_median,
-                var_p95=variant.var_p95,
+                rid=variant.rid,  # Preserve identity metrics
+                rid_min=variant.rid_min,
+                pid_min=variant.pid_min,
                 has_variants=variant.has_variants,  # Preserve variant flags
                 num_variants=variant.num_variants
             )
@@ -1682,11 +1637,9 @@ def write_specimen_data_files(specimen_consensus: List[ConsensusInfo],
                         snp_count=None,  # Pre-merge, no SNPs from merging
                         primers=raw_info.primers,
                         raw_ric=None,  # Pre-merge, not merged
-                        p50_diff=raw_info.p50_diff,  # Preserve stability metrics
-                        p95_diff=raw_info.p95_diff,
-                        var_mean=raw_info.var_mean,  # Preserve variance metrics
-                        var_median=raw_info.var_median,
-                        var_p95=raw_info.var_p95,
+                        rid=raw_info.rid,  # Preserve read identity metrics
+                        rid_min=raw_info.rid_min,
+                        pid_min=raw_info.pid_min,
                         has_variants=raw_info.has_variants,  # Preserve variant flags
                         num_variants=raw_info.num_variants
                     )
@@ -1803,11 +1756,11 @@ def write_quality_report(final_consensus: List[ConsensusInfo],
     Write quality report highlighting sequences with potential concerns.
 
     Focuses on:
-    - Sequences with elevated stability metrics (p50diff > 0 or p95diff > 0)
+    - Sequences with low read identity (rid < 0.95 or rid_min < 0.90)
     - Merged sequences where components have quality issues
 
-    Report prioritizes by (p50diff, p95diff) descending to surface the most
-    actionable quality issues first.
+    Report prioritizes by (rid, rid_min) ascending to surface the most
+    actionable quality issues first (lowest identity = worst quality).
 
     Args:
         final_consensus: List of final consensus sequences
@@ -1830,12 +1783,13 @@ def write_quality_report(final_consensus: List[ConsensusInfo],
             raw_lookup[base_name].append(raw_cons)
 
     # Separate sequences by type and quality
-    unmerged_with_variation = []
-    merged_with_variation = []
+    # Quality thresholds: rid < 0.95 (mean identity below 95%) or rid_min < 0.90 (worst read below 90%)
+    unmerged_with_low_quality = []
+    merged_with_low_quality = []
     merged_with_small_components = []
-    total_with_stability = 0
+    total_with_identity = 0
     total_merged = 0
-    total_without_stability = 0
+    total_without_identity = 0
 
     for cons in final_consensus:
         # Check if merged (has SNP count)
@@ -1846,30 +1800,32 @@ def write_quality_report(final_consensus: List[ConsensusInfo],
             # Get component raw sequences
             raw_components = raw_lookup.get(cons.sample_name, [])
 
-            # Check for variation in components
-            has_variation = False
+            # Check for quality issues in components
+            has_low_quality = False
             has_small_component = False
-            worst_p50 = 0
-            worst_p95 = 0
+            worst_rid = 1.0
+            worst_rid_min = 1.0
             worst_component = None
             smallest_component = None
             smallest_ric = float('inf')
 
             for raw in raw_components:
-                # Track stability metrics
-                if raw.p50_diff is not None or raw.p95_diff is not None:
-                    total_with_stability += 1
-                    p50 = raw.p50_diff if raw.p50_diff else 0
-                    p95 = raw.p95_diff if raw.p95_diff else 0
+                # Track identity metrics
+                if raw.rid is not None or raw.rid_min is not None:
+                    total_with_identity += 1
+                    rid = raw.rid if raw.rid is not None else 1.0
+                    rid_min = raw.rid_min if raw.rid_min is not None else 1.0
 
-                    if p50 > 0 or p95 > 0:
-                        has_variation = True
-                        if (p50, p95) > (worst_p50, worst_p95):
-                            worst_p50 = p50
-                            worst_p95 = p95
+                    # Low quality: rid < 0.95 or rid_min < 0.90
+                    if rid < 0.95 or rid_min < 0.90:
+                        has_low_quality = True
+                        # Track worst (lowest) identity
+                        if (rid, rid_min) < (worst_rid, worst_rid_min):
+                            worst_rid = rid
+                            worst_rid_min = rid_min
                             worst_component = raw
                 else:
-                    total_without_stability += 1
+                    total_without_identity += 1
 
                 # Track small components (RiC < 21)
                 if raw.ric < 21:
@@ -1879,72 +1835,75 @@ def write_quality_report(final_consensus: List[ConsensusInfo],
                         smallest_component = raw
 
             # Categorize merged sequence
-            if has_variation:
-                merged_with_variation.append((cons, worst_component, worst_p50, worst_p95))
+            if has_low_quality:
+                merged_with_low_quality.append((cons, worst_component, worst_rid, worst_rid_min))
             elif has_small_component:
                 merged_with_small_components.append((cons, smallest_component))
         else:
             # Unmerged sequence
-            has_p50 = cons.p50_diff is not None
-            has_p95 = cons.p95_diff is not None
+            has_rid = cons.rid is not None
+            has_rid_min = cons.rid_min is not None
 
-            if has_p50 or has_p95:
-                total_with_stability += 1
-                if (cons.p50_diff and cons.p50_diff > 0) or (cons.p95_diff and cons.p95_diff > 0):
-                    unmerged_with_variation.append(cons)
+            if has_rid or has_rid_min:
+                total_with_identity += 1
+                rid = cons.rid if cons.rid is not None else 1.0
+                rid_min = cons.rid_min if cons.rid_min is not None else 1.0
+                # Flag if low quality
+                if rid < 0.95 or rid_min < 0.90:
+                    unmerged_with_low_quality.append(cons)
             else:
-                total_without_stability += 1
+                total_without_identity += 1
 
-    # Combine and sort all elevated variation (unmerged + merged)
+    # Combine and sort all low quality sequences (unmerged + merged)
     # Create unified list with sort keys
-    all_elevated = []
+    all_low_quality = []
 
-    for cons in unmerged_with_variation:
-        p50 = cons.p50_diff if cons.p50_diff else 0
-        p95 = cons.p95_diff if cons.p95_diff else 0
-        all_elevated.append(('unmerged', cons, p50, p95, None))
+    for cons in unmerged_with_low_quality:
+        rid = cons.rid if cons.rid is not None else 1.0
+        rid_min = cons.rid_min if cons.rid_min is not None else 1.0
+        all_low_quality.append(('unmerged', cons, rid, rid_min, None))
 
-    for cons, worst_comp, p50, p95 in merged_with_variation:
-        all_elevated.append(('merged', cons, p50, p95, worst_comp))
+    for cons, worst_comp, rid, rid_min in merged_with_low_quality:
+        all_low_quality.append(('merged', cons, rid, rid_min, worst_comp))
 
-    # Sort by (p50, p95) descending
-    all_elevated.sort(key=lambda x: (x[2], x[3]), reverse=True)
+    # Sort by (rid, rid_min) ascending (lowest identity first = worst quality first)
+    all_low_quality.sort(key=lambda x: (x[2], x[3]))
 
     # Sort small component merged sequences by RiC descending
     merged_with_small_components.sort(key=lambda x: x[0].ric, reverse=True)
 
     # Count statistics
-    high_priority_count = sum(1 for item in all_elevated if item[2] > 0)
-    outlier_count = sum(1 for item in all_elevated if item[2] == 0 and item[3] > 0)
+    critical_count = sum(1 for item in all_low_quality if item[2] < 0.95)  # Mean identity below 95%
+    outlier_count = sum(1 for item in all_low_quality if item[2] >= 0.95 and item[3] < 0.90)  # Only outliers
 
-    # Calculate variance statistics
-    variance_stats = []
+    # Calculate identity statistics
+    identity_stats = []
     for cons in final_consensus:
-        if cons.var_mean is not None or cons.var_median is not None or cons.var_p95 is not None:
-            variance_stats.append({
+        if cons.rid is not None or cons.rid_min is not None:
+            identity_stats.append({
                 'cons': cons,
-                'var_mean': cons.var_mean if cons.var_mean is not None else 0,
-                'var_median': cons.var_median if cons.var_median is not None else 0,
-                'var_p95': cons.var_p95 if cons.var_p95 is not None else 0
+                'rid': cons.rid if cons.rid is not None else 1.0,
+                'rid_min': cons.rid_min if cons.rid_min is not None else 1.0,
+                'pid_min': cons.pid_min if cons.pid_min is not None else 1.0
             })
 
-    total_with_variance = len(variance_stats)
-    high_variance_threshold = 0.05  # 5%
-    high_variance_clusters = [v for v in variance_stats if v['var_p95'] > high_variance_threshold]
+    total_with_identity = len(identity_stats)
+    low_quality_threshold = 0.95  # 95% identity
+    low_identity_clusters = [v for v in identity_stats if v['rid'] < low_quality_threshold]
 
-    # Calculate global variance statistics if we have variance data
-    global_var_mean = None
-    global_var_median = None
-    global_var_p95 = None
-    if variance_stats:
+    # Calculate global identity statistics if we have identity data
+    global_rid = None
+    global_rid_min = None
+    global_pid_min = None
+    if identity_stats:
         import numpy as np
-        all_means = [v['var_mean'] for v in variance_stats]
-        all_medians = [v['var_median'] for v in variance_stats]
-        all_p95s = [v['var_p95'] for v in variance_stats]
+        all_rids = [v['rid'] for v in identity_stats]
+        all_rid_mins = [v['rid_min'] for v in identity_stats]
+        all_pid_mins = [v['pid_min'] for v in identity_stats]
 
-        global_var_mean = np.mean(all_means)
-        global_var_median = np.median(all_medians)
-        global_var_p95 = np.percentile(all_p95s, 95)
+        global_rid = np.mean(all_rids)
+        global_rid_min = np.mean(all_rid_mins)
+        global_pid_min = np.mean(all_pid_mins)
 
     # Calculate variant statistics
     total_with_variants = sum(1 for cons in final_consensus if cons.has_variants)
@@ -1963,48 +1922,48 @@ def write_quality_report(final_consensus: List[ConsensusInfo],
         f.write("SUMMARY\n")
         f.write("-" * 80 + "\n")
         f.write(f"Total sequences analyzed: {len(final_consensus)}\n")
-        f.write(f"  With stability metrics:    {total_with_stability} ({100*total_with_stability/len(final_consensus):.1f}%)\n")
+        f.write(f"  With identity metrics:      {total_with_identity} ({100*total_with_identity/len(final_consensus):.1f}%)\n")
         f.write(f"  Merged sequences:           {total_merged} ({100*total_merged/len(final_consensus):.1f}%)\n")
-        f.write(f"  Too small for stability:   {total_without_stability} ({100*total_without_stability/len(final_consensus):.1f}%)\n")
+        f.write(f"  Too small for identity:     {total_without_identity} ({100*total_without_identity/len(final_consensus):.1f}%)\n")
         f.write("\n")
 
         f.write("Quality concerns:\n")
-        f.write(f"  Elevated variation:                 {len(all_elevated)} sequences\n")
-        f.write(f"    - HIGH PRIORITY (p50diff > 0):    {high_priority_count} sequences\n")
-        f.write(f"    - Outlier (p95diff > 0 only):     {outlier_count} sequences\n")
+        f.write(f"  Low read identity:                  {len(all_low_quality)} sequences\n")
+        f.write(f"    - CRITICAL (rid < 95%):           {critical_count} sequences\n")
+        f.write(f"    - Outlier (rid_min < 90% only):   {outlier_count} sequences\n")
         f.write(f"  Merged with small components:       {len(merged_with_small_components)} sequences\n")
         f.write("\n")
 
-        # Variance statistics section (if available)
-        if total_with_variance > 0:
+        # Identity statistics section (if available)
+        if total_with_identity > 0:
             f.write("=" * 80 + "\n")
-            f.write("QUALITY METRICS (READ VARIANCE)\n")
+            f.write("QUALITY METRICS (READ IDENTITY)\n")
             f.write("=" * 80 + "\n\n")
 
-            f.write(f"Sequences with variance metrics: {total_with_variance} of {len(final_consensus)}\n\n")
+            f.write(f"Sequences with identity metrics: {total_with_identity} of {len(final_consensus)}\n\n")
 
-            if global_var_mean is not None:
-                f.write("Global variance statistics (across all clusters):\n")
-                f.write(f"  Mean per-read variance:      {global_var_mean*100:.2f}%\n")
-                f.write(f"  Median per-read variance:    {global_var_median*100:.2f}%\n")
-                f.write(f"  P95 per-read variance:       {global_var_p95*100:.2f}%\n")
-                f.write(f"  Clusters with high variance (>{high_variance_threshold*100:.0f}%): {len(high_variance_clusters)} of {total_with_variance}\n\n")
+            if global_rid is not None:
+                f.write("Global identity statistics (across all clusters):\n")
+                f.write(f"  Mean read identity (rid):      {global_rid*100:.2f}%\n")
+                f.write(f"  Mean min read identity:        {global_rid_min*100:.2f}%\n")
+                f.write(f"  Mean min positional identity:  {global_pid_min*100:.2f}%\n")
+                f.write(f"  Clusters with low quality (rid <{low_quality_threshold*100:.0f}%): {len(low_identity_clusters)} of {total_with_identity}\n\n")
 
-                f.write("NOTE: Variance measures read-to-consensus differences. Low variance\n")
-                f.write("indicates good clustering and accurate consensus. High variance may\n")
-                f.write("indicate either high sequencing error OR imperfect clustering/consensus.\n\n")
+                f.write("NOTE: Identity measures agreement between reads and consensus. High identity\n")
+                f.write("indicates good clustering and accurate consensus. Low identity may indicate\n")
+                f.write("either high sequencing error OR imperfect clustering/consensus.\n\n")
 
-                if high_variance_clusters:
-                    f.write(f"Clusters with high variance (P95 > {high_variance_threshold*100:.0f}%):\n")
-                    f.write(f"{'Sequence':<60s} {'RiC':>6s} {'Mean':>7s} {'Median':>7s} {'P95':>7s}\n")
+                if low_identity_clusters:
+                    f.write(f"Clusters with low identity (rid < {low_quality_threshold*100:.0f}%):\n")
+                    f.write(f"{'Sequence':<60s} {'RiC':>6s} {'rid':>7s} {'rid_min':>8s} {'pid_min':>8s}\n")
                     f.write("-" * 95 + "\n")
 
-                    # Sort by P95 variance descending
-                    high_variance_clusters.sort(key=lambda x: x['var_p95'], reverse=True)
+                    # Sort by rid ascending (worst first)
+                    low_identity_clusters.sort(key=lambda x: x['rid'])
 
-                    for v in high_variance_clusters:
+                    for v in low_identity_clusters:
                         cons = v['cons']
-                        f.write(f"{cons.sample_name:<60s} {cons.ric:6d} {v['var_mean']*100:6.1f}% {v['var_median']*100:6.1f}% {v['var_p95']*100:6.1f}%\n")
+                        f.write(f"{cons.sample_name:<60s} {cons.ric:6d} {v['rid']*100:6.1f}% {v['rid_min']*100:7.1f}% {v['pid_min']*100:7.1f}%\n")
 
                     f.write("\n")
 
@@ -2031,52 +1990,54 @@ def write_quality_report(final_consensus: List[ConsensusInfo],
 
                 f.write("\n")
 
-        # Elevated variation section (unmerged + merged with variation)
-        if all_elevated:
+        # Low quality section (unmerged + merged with low quality)
+        if all_low_quality:
             f.write("=" * 80 + "\n")
-            f.write("ELEVATED VARIATION (HIGH PRIORITY)\n")
+            f.write("LOW READ IDENTITY (HIGH PRIORITY)\n")
             f.write("=" * 80 + "\n\n")
-            f.write("Sequences with p50diff > 0 or p95diff > 0.\n")
-            f.write("Merged sequences evaluated by worst component stability.\n\n")
+            f.write("Sequences with rid < 95% or rid_min < 90%.\n")
+            f.write("Merged sequences evaluated by worst component quality.\n\n")
 
-            f.write(f"{'Type':<7s} {'Sequence':<53s} {'RiC':>6s} {'p50diff':>8s} {'p95diff':>8s}  {'Notes':<30s}\n")
+            f.write(f"{'Type':<7s} {'Sequence':<53s} {'RiC':>6s} {'rid':>7s} {'rid_min':>8s}  {'Notes':<30s}\n")
             f.write("-" * 120 + "\n")
 
-            for seq_type, cons, p50, p95, worst_comp in all_elevated:
-                p50_str = f"{p50:.1f}" if p50 is not None else "N/A"
-                p95_str = f"{p95:.1f}" if p95 is not None else "N/A"
+            for seq_type, cons, rid, rid_min, worst_comp in all_low_quality:
+                rid_str = f"{rid*100:.1f}%" if rid is not None else "N/A"
+                rid_min_str = f"{rid_min*100:.1f}%" if rid_min is not None else "N/A"
 
                 if seq_type == 'unmerged':
                     type_label = ""
-                    if p50 > 0:
-                        notes = "Consensus instability"
+                    if rid < 0.95:
+                        notes = "Low mean identity"
                     else:
-                        notes = "Outlier variation"
+                        notes = "Outlier reads"
                 else:
                     type_label = "MERGED"
                     # Show worst component info
                     if worst_comp:
                         raw_name = worst_comp.sample_name.split('.')[-1]  # Get .raw1, .raw2, etc.
-                        notes = f"{raw_name}: p50={worst_comp.p50_diff if worst_comp.p50_diff else 0:.1f}, p95={worst_comp.p95_diff if worst_comp.p95_diff else 0:.1f} (RiC={worst_comp.ric})"
+                        worst_rid = worst_comp.rid if worst_comp.rid is not None else 1.0
+                        worst_rid_min = worst_comp.rid_min if worst_comp.rid_min is not None else 1.0
+                        notes = f"{raw_name}: rid={worst_rid*100:.1f}%, rid_min={worst_rid_min*100:.1f}% (RiC={worst_comp.ric})"
                     else:
-                        notes = "Component has variation"
+                        notes = "Component has low quality"
 
-                f.write(f"{type_label:<7s} {cons.sample_name:<53s} {cons.ric:6d} {p50_str:>8s} {p95_str:>8s}  {notes:<30s}\n")
+                f.write(f"{type_label:<7s} {cons.sample_name:<53s} {cons.ric:6d} {rid_str:>7s} {rid_min_str:>8s}  {notes:<30s}\n")
 
             f.write("\n")
         else:
             f.write("=" * 80 + "\n")
             f.write("ELEVATED VARIATION (HIGH PRIORITY)\n")
             f.write("=" * 80 + "\n\n")
-            f.write("No sequences with elevated stability metrics detected.\n")
-            f.write("All sequences show excellent consensus stability.\n\n")
+            f.write("No sequences with low read identity detected.\n")
+            f.write("All sequences show excellent read identity.\n\n")
 
         # Merged sequences with small components section
         if merged_with_small_components:
             f.write("=" * 80 + "\n")
             f.write("MERGED SEQUENCES WITH SMALL COMPONENTS (lower concern)\n")
             f.write("=" * 80 + "\n\n")
-            f.write("At least one component too small for stability metrics (RiC < 21).\n\n")
+            f.write("At least one component too small for identity metrics (RiC < 21).\n\n")
 
             f.write(f"{'Sequence':<60s} {'RiC':>6s} {'SNPs':>5s}  {'Small Components':<40s}\n")
             f.write("-" * 120 + "\n")
@@ -2108,36 +2069,36 @@ def write_quality_report(final_consensus: List[ConsensusInfo],
         f.write("INTERPRETATION GUIDE\n")
         f.write("=" * 80 + "\n\n")
 
-        f.write("ELEVATED VARIATION SECTION:\n")
-        f.write("  p50diff > 0 (HIGH PRIORITY):\n")
-        f.write("    - More than half of stability trials produced variant consensuses\n")
+        f.write("LOW READ IDENTITY SECTION:\n")
+        f.write("  rid < 95% (CRITICAL):\n")
+        f.write("    - Mean read identity below 95%\n")
         f.write("    - Indicates unresolved heterogeneity or mixed sequences in cluster\n")
         f.write("    - ACTION: Review cluster using cluster_debug FASTQ files\n")
         f.write("    - CONSIDER: Stricter clustering parameters or manual curation\n\n")
 
-        f.write("  p50diff = 0, p95diff > 0 (outlier):\n")
-        f.write("    - Median trials stable, but worst 5% showed variation\n")
-        f.write("    - May indicate rare substitutions or indels\n")
+        f.write("  rid >= 95%, rid_min < 90% (outlier):\n")
+        f.write("    - Mean identity good, but worst reads below 90%\n")
+        f.write("    - May indicate outlier reads or rare substitutions\n")
         f.write("    - ACTION: Review if sequence is critical; often acceptable\n\n")
 
         f.write("  MERGED sequences in this section:\n")
-        f.write("    - At least one component has elevated variation\n")
-        f.write("    - Shown with worst component's stability metrics\n")
+        f.write("    - At least one component has low read identity\n")
+        f.write("    - Shown with worst component's identity metrics\n")
         f.write("    - ACTION: Review .raw variant files to assess merge appropriateness\n\n")
 
         f.write("SMALL COMPONENTS SECTION:\n")
         f.write("  - Merged sequences with at least one component RiC < 21\n")
-        f.write("  - Small components lack stability metrics (too few reads)\n")
+        f.write("  - Small components lack identity metrics (too few reads)\n")
         f.write("  - May represent low-abundance variants or contamination\n")
         f.write("  - ACTION: Consider if small components should have been filtered\n")
         f.write("  - CONSIDER: Adjusting --min-size or --min-ric thresholds in speconsense\n")
 
     logging.info(f"Quality report written to: {quality_report_path}")
-    if all_elevated:
-        logging.info(f"  {high_priority_count} HIGH priority sequence(s) require review (p50diff > 0)")
-        logging.info(f"  {outlier_count} sequence(s) with outlier variation (p95diff > 0 only)")
+    if all_low_quality:
+        logging.info(f"  {critical_count} CRITICAL sequence(s) require review (rid < 95%)")
+        logging.info(f"  {outlier_count} sequence(s) with outlier reads (rid_min < 90% only)")
     else:
-        logging.info("  All sequences show excellent consensus stability")
+        logging.info("  All sequences show excellent read identity")
     if merged_with_small_components:
         logging.info(f"  {len(merged_with_small_components)} merged sequence(s) with small components")
 
@@ -2287,11 +2248,9 @@ def process_single_specimen(file_consensuses: List[ConsensusInfo],
                 snp_count=variant.snp_count,  # Preserve SNP count from merging
                 primers=variant.primers,  # Preserve primers
                 raw_ric=variant.raw_ric,  # Preserve raw_ric
-                p50_diff=variant.p50_diff,  # Preserve stability metrics
-                p95_diff=variant.p95_diff,
-                var_mean=variant.var_mean,  # Preserve variance metrics
-                var_median=variant.var_median,
-                var_p95=variant.var_p95,
+                rid=variant.rid,  # Preserve identity metrics
+                rid_min=variant.rid_min,
+                pid_min=variant.pid_min,
                 has_variants=variant.has_variants,  # Preserve variant flags
                 num_variants=variant.num_variants
             )

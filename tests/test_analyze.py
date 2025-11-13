@@ -31,28 +31,30 @@ def test_parse_consensus_header_basic():
     """Test parsing of basic consensus header."""
     header = ">sample-c1 size=200 ric=100"
 
-    sample_name, cluster_num, size, ric, p50_diff, p95_diff = parse_consensus_header(header)
+    sample_name, cluster_num, size, ric, rid, rid_min, pid_min = parse_consensus_header(header)
 
     assert sample_name == "sample-c1"
     assert cluster_num == 1
     assert size == 200
     assert ric == 100
-    assert p50_diff is None
-    assert p95_diff is None
+    assert rid is None
+    assert rid_min is None
+    assert pid_min is None
 
 
 def test_parse_consensus_header_with_stability():
-    """Test parsing of header with stability metrics."""
-    header = ">sample-c2 size=150 ric=75 p50diff=0.5 p95diff=1.2"
+    """Test parsing of header with read identity metrics."""
+    header = ">sample-c2 size=150 ric=75 rid=98.5 rid_min=96.8 pid_min=92.3"
 
-    sample_name, cluster_num, size, ric, p50_diff, p95_diff = parse_consensus_header(header)
+    sample_name, cluster_num, size, ric, rid, rid_min, pid_min = parse_consensus_header(header)
 
     assert sample_name == "sample-c2"
     assert cluster_num == 2
     assert size == 150
     assert ric == 75
-    assert p50_diff == 0.5
-    assert p95_diff == 1.2
+    assert abs(rid - 0.985) < 0.0001  # Stored as fraction
+    assert abs(rid_min - 0.968) < 0.0001
+    assert abs(pid_min - 0.923) < 0.0001
 
 
 def test_parse_consensus_header_no_cluster_number():
@@ -193,7 +195,7 @@ def test_load_consensus_sequences():
         os.makedirs(cluster_debug_dir)
 
         # Create untrimmed consensus FASTA files
-        fasta_content = """>sample1-c1 size=200 ric=100 p50diff=0.0 p95diff=1.0
+        fasta_content = """>sample1-c1 size=200 ric=100 rid=99.0 rid_min=97.5 pid_min=95.0
 ACGTACGTACGTACGTACGT
 >sample1-c2 size=150 ric=75
 TGCATGCATGCATGCA
@@ -218,8 +220,9 @@ TGCATGCATGCATGCA
         assert c1.consensus_seq == 'ACGTACGTACGTACGTACGT'
         assert c1.ric == 100
         assert c1.size == 200
-        assert c1.p50_diff == 0.0
-        assert c1.p95_diff == 1.0
+        assert c1.rid == 0.99
+        assert c1.rid_min == 0.975
+        assert c1.pid_min == 0.95
 
         c2 = consensus_map[('sample1', 2)]
         assert c2.sample_name == 'sample1-c2'
@@ -278,8 +281,9 @@ def test_analyze_cluster_integration():
             reads_file=reads_file,
             ric=4,
             size=4,
-            p50_diff=0.0,
-            p95_diff=1.0,
+            rid=0.99,
+            rid_min=0.975,
+            pid_min=0.95,
             msa_file=msa_file
         )
 
