@@ -443,7 +443,6 @@ class SpecimenClusterer:
                             found_primers: Optional[List[str]] = None,
                             rid: Optional[float] = None,
                             rid_min: Optional[float] = None,
-                            pid_min: Optional[float] = None,
                             variant_positions: Optional[List[Dict]] = None,
                             actual_size: Optional[int] = None,
                             consensus_fasta_handle = None,
@@ -454,7 +453,6 @@ class SpecimenClusterer:
         Read identity metrics measure internal cluster consistency (not accuracy vs. ground truth):
         - rid: Mean read identity - measures average agreement between reads and consensus
         - rid_min: Minimum read identity - captures worst-case outlier reads
-        - pid_min: Minimum positional identity - identifies positions with low agreement
 
         High identity values indicate homogeneous clusters with consistent reads.
         Low values may indicate heterogeneity, outliers, or poor consensus (especially at low RiC).
@@ -473,8 +471,6 @@ class SpecimenClusterer:
             info_parts.append(f"rid={rid*100:.1f}")
         if rid_min is not None:
             info_parts.append(f"rid_min={rid_min*100:.1f}")
-        if pid_min is not None:
-            info_parts.append(f"pid_min={pid_min*100:.1f}")
 
         # Add variant flags
         if variant_positions is not None:
@@ -711,7 +707,7 @@ class SpecimenClusterer:
                     continue
 
                 # Calculate per-read identity from MSA
-                rid, rid_min, pid_min = self.calculate_read_identity(msa, consensus)
+                rid, rid_min = self.calculate_read_identity(msa, consensus)
 
                 # Optional: Remove outlier reads and regenerate consensus
                 if self.outlier_threshold is not None:
@@ -736,7 +732,7 @@ class SpecimenClusterer:
 
                         # Recalculate identity metrics
                         if consensus and msa:
-                            rid, rid_min, pid_min = self.calculate_read_identity(msa, consensus)
+                            rid, rid_min = self.calculate_read_identity(msa, consensus)
 
                 # Detect variant positions
                 variant_positions = []
@@ -834,9 +830,9 @@ class SpecimenClusterer:
                     consensus, msa = self.run_spoa(sampled_seqs)
 
                     # Calculate final identity metrics
-                    rid, rid_min, pid_min = None, None, None
+                    rid, rid_min = None, None
                     if consensus and msa:
-                        rid, rid_min, pid_min = self.calculate_read_identity(msa, consensus)
+                        rid, rid_min = self.calculate_read_identity(msa, consensus)
 
                     # Note: No outlier removal or variant detection in output phase
                     # (already done in detection phase)
@@ -857,7 +853,6 @@ class SpecimenClusterer:
                             found_primers=found_primers,
                             rid=rid,
                             rid_min=rid_min,
-                            pid_min=pid_min,
                             variant_positions=None,  # Don't report variants in final output
                             actual_size=actual_size,
                             consensus_fasta_handle=consensus_fasta_handle,
@@ -1020,7 +1015,7 @@ class SpecimenClusterer:
             logging.warning(f"Failed to identify outlier reads: {e}")
             return sampled_ids, set()
 
-    def calculate_read_identity(self, msa_string: str, consensus_seq: str) -> Tuple[Optional[float], Optional[float], Optional[float]]:
+    def calculate_read_identity(self, msa_string: str, consensus_seq: str) -> Tuple[Optional[float], Optional[float]]:
         """Calculate read identity metrics from MSA.
 
         Read identity measures how well individual reads agree with the consensus sequence.
@@ -1033,14 +1028,13 @@ class SpecimenClusterer:
             consensus_seq: Ungapped consensus sequence
 
         Returns:
-            Tuple of (mean_rid, min_rid, min_pid) where:
+            Tuple of (mean_rid, min_rid) where:
             - mean_rid: Mean read identity across all reads (0.0-1.0)
             - min_rid: Minimum read identity (worst-case read) (0.0-1.0)
-            - min_pid: Minimum positional identity (worst-case position) (0.0-1.0)
-            Returns (None, None, None) if MSA cannot be parsed or has no valid reads
+            Returns (None, None) if MSA cannot be parsed or has no valid reads
         """
         if not msa_string or not consensus_seq:
-            return None, None, None
+            return None, None
 
         try:
             # Extract alignments from MSA string directly (no temp file needed)
@@ -1048,12 +1042,12 @@ class SpecimenClusterer:
 
             if not alignments:
                 logging.debug(f"No alignments found in MSA")
-                return None, None, None
+                return None, None
 
             # Calculate read identity (1 - error_rate) for each read
             consensus_length = len(consensus_seq)
             if consensus_length == 0:
-                return None, None, None
+                return None, None
 
             identities = []
             for alignment in alignments:
@@ -1062,98 +1056,19 @@ class SpecimenClusterer:
                 identities.append(identity)
 
             if not identities:
-                return None, None, None
+                return None, None
 
             # Calculate per-read statistics
             mean_rid = np.mean(identities)
             min_rid = np.min(identities)
 
-            # Calculate positional identity (pid_min)
-            # For each MSA position, count agreement with consensus
-            min_pid = self._calculate_min_positional_identity(msa_string, msa_consensus)
+            logging.debug(f"Calculated identity metrics: rid={mean_rid:.3f}, rid_min={min_rid:.3f}")
 
-            logging.debug(f"Calculated identity metrics: rid={mean_rid:.3f}, rid_min={min_rid:.3f}, pid_min={min_pid if min_pid is not None else 'None'}")
-
-            return mean_rid, min_rid, min_pid
+            return mean_rid, min_rid
 
         except Exception as e:
             logging.warning(f"Failed to calculate read identity from MSA: {e}")
-            return None, None, None
-
-    def _calculate_min_positional_identity(self, msa_string: str, msa_consensus: str) -> Optional[float]:
-        """Calculate minimum positional identity across all consensus positions.
-
-        For each position in the consensus, calculates what percentage of reads
-        agree with the consensus base at that position.
-
-        Args:
-            msa_string: MSA in FASTA format (string) from SPOA
-            msa_consensus: The aligned consensus sequence (with gaps)
-
-        Returns:
-            Minimum positional identity (0.0-1.0), or None if cannot calculate
-        """
-        try:
-            # Parse MSA to get all sequences
-            from io import StringIO
-            records = list(SeqIO.parse(StringIO(msa_string), "fasta"))
-
-            # Separate consensus from reads
-            # SPOA puts consensus LAST with header ">Consensus"
-            # We need the ALIGNED consensus (with gaps) for position-by-position comparison
-            aligned_consensus = None
-            read_seqs = []
-            for record in records:
-                if 'Consensus' in record.description or 'Consensus' in record.id:
-                    aligned_consensus = str(record.seq).upper()
-                else:
-                    read_seqs.append(str(record.seq).upper())
-
-            if not aligned_consensus or not read_seqs:
-                logging.debug(f"Cannot calculate pid_min: aligned_consensus={aligned_consensus is not None}, {len(read_seqs)} reads")
-                return None
-
-            num_reads = len(read_seqs)
-            msa_length = len(aligned_consensus)
-
-            # For each position, count agreements (ignoring gap positions in consensus)
-            positional_identities = []
-            min_pos = -1
-            min_val = 1.0
-            for pos in range(msa_length):
-                consensus_base = aligned_consensus[pos]
-
-                # Skip positions where consensus has a gap (insertion columns)
-                if consensus_base == '-':
-                    continue
-
-                # Count how many reads match the consensus at this position
-                matches = 0
-                for read_seq in read_seqs:
-                    if pos < len(read_seq) and read_seq[pos] == consensus_base:
-                        matches += 1
-
-                # Calculate positional identity
-                pos_identity = matches / num_reads
-                positional_identities.append(pos_identity)
-
-                # Track minimum
-                if pos_identity < min_val:
-                    min_val = pos_identity
-                    min_pos = pos
-
-            if not positional_identities:
-                logging.debug(f"No positional identities calculated (all positions were gaps?)")
-                return None
-
-            # Return the minimum positional identity
-            min_pid_val = min(positional_identities)
-            logging.debug(f"Calculated pid_min={min_pid_val:.3f} from {len(positional_identities)} positions")
-            return min_pid_val
-
-        except Exception as e:
-            logging.debug(f"Failed to calculate positional identity: {e}")
-            return None
+            return None, None
 
     def detect_variant_positions(self, msa_string: str, consensus_seq: str,
                                 error_threshold: float, min_alt_freq: float = 0.20) -> List[Dict]:

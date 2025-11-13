@@ -78,7 +78,6 @@ class ConsensusInfo(NamedTuple):
     raw_ric: Optional[List[int]] = None  # RiC values of .raw source variants
     rid: Optional[float] = None  # Mean read identity (internal consistency metric)
     rid_min: Optional[float] = None  # Minimum read identity (worst-case read)
-    pid_min: Optional[float] = None  # Minimum positional identity (worst-case position)
     has_variants: Optional[bool] = None  # Whether variant positions were detected
     num_variants: Optional[int] = None  # Number of variant positions detected
 
@@ -173,16 +172,6 @@ class RidMinField(FastaField):
         return None
 
 
-class PidMinField(FastaField):
-    def __init__(self):
-        super().__init__('pid_min', 'Minimum positional identity (percentage)')
-
-    def format_value(self, consensus: ConsensusInfo) -> Optional[str]:
-        if consensus.pid_min is not None:
-            return f"pid_min={consensus.pid_min*100:.1f}"
-        return None
-
-
 class HasVariantsField(FastaField):
     def __init__(self):
         super().__init__('has_variants', 'Whether variant positions were detected')
@@ -236,7 +225,6 @@ FASTA_FIELDS = {
     'snp': SnpField(),
     'rid': RidField(),
     'rid_min': RidMinField(),
-    'pid_min': PidMinField(),
     'has_variants': HasVariantsField(),
     'num_variants': NumVariantsField(),
     'primers': PrimersField(),
@@ -248,8 +236,8 @@ FASTA_FIELDS = {
 FASTA_FIELD_PRESETS = {
     'default': ['size', 'ric', 'rawric', 'snp', 'primers'],
     'minimal': ['size', 'ric'],
-    'qc': ['size', 'ric', 'length', 'rid', 'rid_min', 'pid_min', 'has_variants', 'num_variants'],
-    'full': ['size', 'ric', 'length', 'rawric', 'snp', 'rid', 'rid_min', 'pid_min', 'has_variants', 'num_variants', 'primers'],
+    'qc': ['size', 'ric', 'length', 'rid', 'rid_min', 'has_variants', 'num_variants'],
+    'full': ['size', 'ric', 'length', 'rawric', 'snp', 'rid', 'rid_min', 'has_variants', 'num_variants', 'primers'],
     'id-only': [],
 }
 
@@ -359,7 +347,7 @@ def parse_arguments():
                         help="FASTA header fields to output. Can be: "
                              "(1) a preset name (default, minimal, qc, full, id-only), "
                              "(2) comma-separated field names (size, ric, length, rawric, "
-                             "snp, rid, rid_min, pid_min, primers, group, variant), or "
+                             "snp, rid, rid_min, primers, group, variant), or "
                              "(3) a combination of presets and fields (e.g., minimal,qc or "
                              "minimal,rid,rid_min). Duplicates removed, order preserved "
                              "left to right. Default: default")
@@ -451,7 +439,7 @@ def setup_logging(log_level: str, log_file: str = None):
 
 
 def parse_consensus_header(header: str) -> Tuple[Optional[str], Optional[int], Optional[int],
-                                                   Optional[List[str]], Optional[float], Optional[float], Optional[float],
+                                                   Optional[List[str]], Optional[float], Optional[float],
                                                    Optional[bool], Optional[int]]:
     """
     Extract information from Speconsense consensus FASTA header.
@@ -459,12 +447,12 @@ def parse_consensus_header(header: str) -> Tuple[Optional[str], Optional[int], O
     Parses read identity metrics and variant detection flags.
 
     Returns:
-        Tuple of (sample_name, ric, size, primers, rid, rid_min, pid_min,
+        Tuple of (sample_name, ric, size, primers, rid, rid_min,
                   has_variants, num_variants)
     """
     sample_match = re.match(r'>([^ ]+) (.+)', header)
     if not sample_match:
-        return None, None, None, None, None, None, None, None, None
+        return None, None, None, None, None, None, None, None
 
     sample_name = sample_match.group(1)
     info_string = sample_match.group(2)
@@ -488,9 +476,6 @@ def parse_consensus_header(header: str) -> Tuple[Optional[str], Optional[int], O
     rid_min_match = re.search(r'rid_min=([\d.]+)', info_string)
     rid_min = float(rid_min_match.group(1)) / 100.0 if rid_min_match else None
 
-    pid_min_match = re.search(r'pid_min=([\d.]+)', info_string)
-    pid_min = float(pid_min_match.group(1)) / 100.0 if pid_min_match else None
-
     # Extract variant detection flags
     has_variants_match = re.search(r'has_variants=(true|false)', info_string)
     has_variants = (has_variants_match.group(1) == 'true') if has_variants_match else None
@@ -498,7 +483,7 @@ def parse_consensus_header(header: str) -> Tuple[Optional[str], Optional[int], O
     num_variants_match = re.search(r'num_variants=(\d+)', info_string)
     num_variants = int(num_variants_match.group(1)) if num_variants_match else None
 
-    return sample_name, ric, size, primers, rid, rid_min, pid_min, has_variants, num_variants
+    return sample_name, ric, size, primers, rid, rid_min, has_variants, num_variants
 
 
 def load_consensus_sequences(source_folder: str, min_ric: int) -> List[ConsensusInfo]:
@@ -514,7 +499,7 @@ def load_consensus_sequences(source_folder: str, min_ric: int) -> List[Consensus
 
         with open(fasta_file, 'r') as f:
             for record in SeqIO.parse(f, "fasta"):
-                sample_name, ric, size, primers, rid, rid_min, pid_min, has_variants, num_variants = \
+                sample_name, ric, size, primers, rid, rid_min, has_variants, num_variants = \
                     parse_consensus_header(f">{record.description}")
 
                 if sample_name and ric >= min_ric:
@@ -534,7 +519,6 @@ def load_consensus_sequences(source_folder: str, min_ric: int) -> List[Consensus
                         raw_ric=None,  # Not available in original speconsense output
                         rid=rid,  # Mean read identity if available
                         rid_min=rid_min,  # Minimum read identity if available
-                        pid_min=pid_min,  # Minimum positional identity if available
                         has_variants=has_variants,  # From variant detection if available
                         num_variants=num_variants  # From variant detection if available
                     )
@@ -942,7 +926,6 @@ def create_consensus_from_msa(aligned_seqs: List, variants: List[ConsensusInfo])
         raw_ric=raw_ric_values,
         rid=largest_variant.rid,  # Preserve identity metrics from largest variant
         rid_min=largest_variant.rid_min,
-        pid_min=largest_variant.pid_min,
         has_variants=largest_variant.has_variants,  # Preserve variant flags from largest variant
         num_variants=largest_variant.num_variants
     )
@@ -1456,7 +1439,6 @@ def create_output_structure(groups: Dict[int, List[ConsensusInfo]],
                 raw_ric=variant.raw_ric,  # Preserve raw_ric
                 rid=variant.rid,  # Preserve identity metrics
                 rid_min=variant.rid_min,
-                pid_min=variant.pid_min,
                 has_variants=variant.has_variants,  # Preserve variant flags
                 num_variants=variant.num_variants
             )
@@ -1639,7 +1621,6 @@ def write_specimen_data_files(specimen_consensus: List[ConsensusInfo],
                         raw_ric=None,  # Pre-merge, not merged
                         rid=raw_info.rid,  # Preserve read identity metrics
                         rid_min=raw_info.rid_min,
-                        pid_min=raw_info.pid_min,
                         has_variants=raw_info.has_variants,  # Preserve variant flags
                         num_variants=raw_info.num_variants
                     )
@@ -1883,8 +1864,7 @@ def write_quality_report(final_consensus: List[ConsensusInfo],
             identity_stats.append({
                 'cons': cons,
                 'rid': cons.rid if cons.rid is not None else 1.0,
-                'rid_min': cons.rid_min if cons.rid_min is not None else 1.0,
-                'pid_min': cons.pid_min if cons.pid_min is not None else 1.0
+                'rid_min': cons.rid_min if cons.rid_min is not None else 1.0
             })
 
     total_with_identity = len(identity_stats)
@@ -1894,16 +1874,13 @@ def write_quality_report(final_consensus: List[ConsensusInfo],
     # Calculate global identity statistics if we have identity data
     global_rid = None
     global_rid_min = None
-    global_pid_min = None
     if identity_stats:
         import numpy as np
         all_rids = [v['rid'] for v in identity_stats]
         all_rid_mins = [v['rid_min'] for v in identity_stats]
-        all_pid_mins = [v['pid_min'] for v in identity_stats]
 
         global_rid = np.mean(all_rids)
         global_rid_min = np.mean(all_rid_mins)
-        global_pid_min = np.mean(all_pid_mins)
 
     # Calculate variant statistics
     total_with_variants = sum(1 for cons in final_consensus if cons.has_variants)
@@ -1946,7 +1923,6 @@ def write_quality_report(final_consensus: List[ConsensusInfo],
                 f.write("Global identity statistics (across all clusters):\n")
                 f.write(f"  Mean read identity (rid):      {global_rid*100:.2f}%\n")
                 f.write(f"  Mean min read identity:        {global_rid_min*100:.2f}%\n")
-                f.write(f"  Mean min positional identity:  {global_pid_min*100:.2f}%\n")
                 f.write(f"  Clusters with low quality (rid <{low_quality_threshold*100:.0f}%): {len(low_identity_clusters)} of {total_with_identity}\n\n")
 
                 f.write("NOTE: Identity measures agreement between reads and consensus. High identity\n")
@@ -1955,15 +1931,15 @@ def write_quality_report(final_consensus: List[ConsensusInfo],
 
                 if low_identity_clusters:
                     f.write(f"Clusters with low identity (rid < {low_quality_threshold*100:.0f}%):\n")
-                    f.write(f"{'Sequence':<60s} {'RiC':>6s} {'rid':>7s} {'rid_min':>8s} {'pid_min':>8s}\n")
-                    f.write("-" * 95 + "\n")
+                    f.write(f"{'Sequence':<60s} {'RiC':>6s} {'rid':>7s} {'rid_min':>8s}\n")
+                    f.write("-" * 85 + "\n")
 
                     # Sort by rid ascending (worst first)
                     low_identity_clusters.sort(key=lambda x: x['rid'])
 
                     for v in low_identity_clusters:
                         cons = v['cons']
-                        f.write(f"{cons.sample_name:<60s} {cons.ric:6d} {v['rid']*100:6.1f}% {v['rid_min']*100:7.1f}% {v['pid_min']*100:7.1f}%\n")
+                        f.write(f"{cons.sample_name:<60s} {cons.ric:6d} {v['rid']*100:6.1f}% {v['rid_min']*100:7.1f}%\n")
 
                     f.write("\n")
 
@@ -2250,7 +2226,6 @@ def process_single_specimen(file_consensuses: List[ConsensusInfo],
                 raw_ric=variant.raw_ric,  # Preserve raw_ric
                 rid=variant.rid,  # Preserve identity metrics
                 rid_min=variant.rid_min,
-                pid_min=variant.pid_min,
                 has_variants=variant.has_variants,  # Preserve variant flags
                 num_variants=variant.num_variants
             )
