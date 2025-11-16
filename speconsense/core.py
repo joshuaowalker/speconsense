@@ -12,7 +12,7 @@ import sys
 import tempfile
 import math
 import itertools
-from typing import List, Set, Tuple, Optional, Dict, Any
+from typing import List, Set, Tuple, Optional, Dict, Any, NamedTuple
 from datetime import datetime
 
 import edlib
@@ -21,13 +21,6 @@ import numpy as np
 from Bio import SeqIO
 from Bio.Seq import reverse_complement
 from tqdm import tqdm
-
-# Import analysis functions for identity calculation and variant detection
-from speconsense.analyze import (
-    extract_alignments_from_msa,
-    analyze_positional_variation,
-    is_variant_position_with_composition
-)
 
 try:
     from speconsense import __version__
@@ -55,6 +48,458 @@ IUPAC_CODES = {
     frozenset(['A', 'C', 'G', 'T']): 'N',
 }
 
+
+class ErrorPosition(NamedTuple):
+    """An error at a specific position in the MSA."""
+    msa_position: int  # 0-indexed position in MSA alignment
+    error_type: str  # 'sub', 'ins', or 'del'
+
+
+class ReadAlignment(NamedTuple):
+    """Alignment result for a single read against consensus."""
+    read_id: str
+    aligned_sequence: str  # Gapped sequence from MSA
+    read_length: int
+    edit_distance: int
+    num_insertions: int
+    num_deletions: int
+    num_substitutions: int
+    error_positions: List[ErrorPosition]  # Detailed error information
+
+
+class PositionStats(NamedTuple):
+    """Statistics for a single position in the MSA."""
+    msa_position: int  # Position in MSA (0-indexed)
+    consensus_position: Optional[int]  # Position in consensus (None for insertion columns)
+    coverage: int
+    error_count: int
+    error_rate: float
+    sub_count: int
+    ins_count: int
+    del_count: int
+    is_homopolymer: bool
+    consensus_nucleotide: str  # Base in consensus at this MSA position (or '-' for insertion)
+    base_composition: Dict[str, int]  # {A: 50, C: 3, G: 45, T: 2, '-': 0}
+
+
+class MSAResult(NamedTuple):
+    """Result from SPOA multiple sequence alignment.
+
+    Attributes:
+        consensus: Ungapped consensus sequence
+        msa_string: Raw MSA in FASTA format (for file writing)
+        alignments: Parsed read alignments with gapped sequences
+        msa_to_consensus_pos: Mapping from MSA position to consensus position
+    """
+    consensus: str
+    msa_string: str
+    alignments: List[ReadAlignment]
+    msa_to_consensus_pos: Dict[int, Optional[int]]
+
+
+# ============================================================================
+# MSA Analysis Functions (moved from analyze.py to break circular dependency)
+# ============================================================================
+
+def extract_alignments_from_msa(msa_string: str) -> Tuple[List[ReadAlignment], str, Dict[int, Optional[int]]]:
+    """
+    Extract read alignments from an MSA string.
+
+    The MSA contains aligned sequences where the consensus has header containing "Consensus".
+    This function compares each read to the consensus at each aligned position.
+
+    Error classification:
+    - Both '-': Not an error (read doesn't cover this position)
+    - Read '-', consensus base: Deletion (missing base in read)
+    - Read base, consensus '-': Insertion (extra base in read)
+    - Different bases: Substitution
+    - Same base: Match (not an error)
+
+    IMPORTANT: Errors are reported at MSA positions, not consensus positions.
+    This avoids ambiguity when multiple insertion columns map to the same consensus position.
+
+    Args:
+        msa_string: MSA content in FASTA format
+
+    Returns:
+        Tuple of:
+        - list of ReadAlignment objects (with errors at MSA positions and gapped sequences)
+        - consensus sequence without gaps
+        - mapping from MSA position to consensus position (None for insertion columns)
+    """
+    from io import StringIO
+
+    # Parse MSA
+    msa_handle = StringIO(msa_string)
+    records = list(SeqIO.parse(msa_handle, 'fasta'))
+
+    if not records:
+        logging.warning("No sequences found in MSA string")
+        return [], "", {}
+
+    # Find consensus sequence
+    consensus_record = None
+    read_records = []
+
+    for record in records:
+        if 'Consensus' in record.description or 'Consensus' in record.id:
+            consensus_record = record
+        else:
+            read_records.append(record)
+
+    if consensus_record is None:
+        logging.warning("No consensus sequence found in MSA string")
+        return [], "", {}
+
+    consensus_aligned = str(consensus_record.seq).upper()
+    msa_length = len(consensus_aligned)
+
+    # Build mapping from MSA position to consensus position (excluding gaps)
+    # For insertion columns (consensus has '-'), maps to None
+    msa_to_consensus_pos = {}
+    consensus_pos = 0
+    for msa_pos in range(msa_length):
+        if consensus_aligned[msa_pos] != '-':
+            msa_to_consensus_pos[msa_pos] = consensus_pos
+            consensus_pos += 1
+        else:
+            # Insertion column - no consensus position
+            msa_to_consensus_pos[msa_pos] = None
+
+    # Get consensus without gaps for return value
+    consensus_ungapped = consensus_aligned.replace('-', '')
+
+    # Process each read
+    alignments = []
+
+    for read_record in read_records:
+        read_aligned = str(read_record.seq).upper()
+
+        if len(read_aligned) != msa_length:
+            logging.warning(f"Read {read_record.id} length mismatch with MSA length")
+            continue
+
+        # Compare read to consensus at each position
+        error_positions = []
+        num_insertions = 0
+        num_deletions = 0
+        num_substitutions = 0
+
+        for msa_pos in range(msa_length):
+            read_base = read_aligned[msa_pos]
+            cons_base = consensus_aligned[msa_pos]
+
+            # Skip if both are gaps (read doesn't cover this position)
+            if read_base == '-' and cons_base == '-':
+                continue
+
+            # Classify error type and record at MSA position
+            if read_base == '-' and cons_base != '-':
+                # Deletion (missing base in read)
+                error_positions.append(ErrorPosition(msa_pos, 'del'))
+                num_deletions += 1
+            elif read_base != '-' and cons_base == '-':
+                # Insertion (extra base in read)
+                error_positions.append(ErrorPosition(msa_pos, 'ins'))
+                num_insertions += 1
+            elif read_base != cons_base:
+                # Substitution (different bases)
+                error_positions.append(ErrorPosition(msa_pos, 'sub'))
+                num_substitutions += 1
+            # else: match, no error
+
+        # Calculate edit distance and read length
+        edit_distance = num_insertions + num_deletions + num_substitutions
+        read_length = len(read_aligned.replace('-', ''))  # Length without gaps
+
+        # Create alignment object with gapped sequence
+        alignment = ReadAlignment(
+            read_id=read_record.id,
+            aligned_sequence=read_aligned,  # Store gapped sequence
+            read_length=read_length,
+            edit_distance=edit_distance,
+            num_insertions=num_insertions,
+            num_deletions=num_deletions,
+            num_substitutions=num_substitutions,
+            error_positions=error_positions
+        )
+        alignments.append(alignment)
+
+    return alignments, consensus_ungapped, msa_to_consensus_pos
+
+
+def detect_homopolymer_run(seq: str, position: int, min_length: int = 4) -> bool:
+    """
+    Check if a position is within a homopolymer run.
+
+    Args:
+        seq: DNA sequence
+        position: Position to check (0-indexed)
+        min_length: Minimum length of homopolymer to detect
+
+    Returns:
+        True if position is within a homopolymer run of min_length or longer
+    """
+    if position >= len(seq) or position < 0:
+        return False
+
+    base = seq[position]
+
+    # Find start of run
+    start = position
+    while start > 0 and seq[start - 1] == base:
+        start -= 1
+
+    # Find end of run
+    end = position
+    while end < len(seq) - 1 and seq[end + 1] == base:
+        end += 1
+
+    run_length = end - start + 1
+    return run_length >= min_length
+
+
+def analyze_positional_variation(
+    alignments: List[ReadAlignment],
+    consensus_seq: str,
+    consensus_aligned: str,
+    msa_to_consensus_pos: Dict[int, Optional[int]],
+    overall_error_rate: float
+) -> List[PositionStats]:
+    """
+    Analyze error rates at each position in the MSA.
+
+    Identifies positions with elevated error rates, which may indicate
+    homopolymer regions, structural variants, or other error-prone
+    sequence contexts.
+
+    IMPORTANT: All analysis is performed in MSA space (not consensus space).
+    This correctly handles insertion columns where multiple MSA positions
+    don't correspond to any consensus position.
+
+    Args:
+        alignments: List of read alignments (with errors at MSA positions)
+        consensus_seq: Consensus sequence (ungapped)
+        consensus_aligned: Consensus sequence (gapped, from MSA)
+        msa_to_consensus_pos: Mapping from MSA position to consensus position
+        overall_error_rate: Overall error rate (currently unused, kept for compatibility)
+
+    Returns:
+        List of PositionStats for each MSA position
+    """
+    msa_length = len(consensus_aligned)
+
+    # Build error frequency matrix in MSA space
+    # For each MSA position: [sub_count, ins_count, del_count, total_coverage]
+    error_matrix = np.zeros((msa_length, 4), dtype=int)
+
+    # Build base composition matrix in MSA space
+    base_composition_matrix = [
+        {'A': 0, 'C': 0, 'G': 0, 'T': 0, '-': 0}
+        for _ in range(msa_length)
+    ]
+
+    # Process alignments to count errors at MSA positions
+    for read_idx, alignment in enumerate(alignments):
+        # Count this read as coverage for all MSA positions
+        # Note: alignments span the full MSA
+        for msa_pos in range(msa_length):
+            error_matrix[msa_pos, 3] += 1  # coverage
+
+        # Add errors at specific MSA positions
+        for error_pos in alignment.error_positions:
+            msa_pos = error_pos.msa_position
+            if 0 <= msa_pos < msa_length:
+                if error_pos.error_type == 'sub':
+                    error_matrix[msa_pos, 0] += 1
+                elif error_pos.error_type == 'ins':
+                    error_matrix[msa_pos, 1] += 1
+                elif error_pos.error_type == 'del':
+                    error_matrix[msa_pos, 2] += 1
+
+        # Extract base composition from aligned sequence
+        read_aligned = alignment.aligned_sequence
+        if len(read_aligned) != msa_length:
+            continue
+
+        # Track what base each read has at each MSA position
+        for msa_pos in range(msa_length):
+            read_base = read_aligned[msa_pos]
+
+            # Normalize base
+            if read_base in ['A', 'C', 'G', 'T', '-']:
+                base_composition_matrix[msa_pos][read_base] += 1
+            else:
+                # Treat N or other ambiguous as gap
+                base_composition_matrix[msa_pos]['-'] += 1
+
+    # Calculate statistics for each MSA position
+    position_stats = []
+
+    for msa_pos in range(msa_length):
+        sub_count = error_matrix[msa_pos, 0]
+        ins_count = error_matrix[msa_pos, 1]
+        del_count = error_matrix[msa_pos, 2]
+        coverage = error_matrix[msa_pos, 3]
+
+        # Total error events
+        error_count = sub_count + ins_count + del_count
+        error_rate = error_count / coverage if coverage > 0 else 0.0
+
+        # Get consensus position (None for insertion columns)
+        cons_pos = msa_to_consensus_pos[msa_pos]
+
+        # Get consensus nucleotide at this MSA position
+        cons_nucleotide = consensus_aligned[msa_pos]
+
+        # Sequence context - calculate based on consensus position if available
+        if cons_pos is not None:
+            is_homopolymer = detect_homopolymer_run(consensus_seq, cons_pos, min_length=4)
+        else:
+            # Insertion column - no consensus context
+            is_homopolymer = False
+
+        # Get base composition for this MSA position
+        base_comp = base_composition_matrix[msa_pos].copy()
+
+        position_stats.append(PositionStats(
+            msa_position=msa_pos,
+            consensus_position=cons_pos,
+            coverage=coverage,
+            error_count=error_count,
+            error_rate=error_rate,
+            sub_count=sub_count,
+            ins_count=ins_count,
+            del_count=del_count,
+            is_homopolymer=is_homopolymer,
+            consensus_nucleotide=cons_nucleotide,
+            base_composition=base_comp
+        ))
+
+    return position_stats
+
+
+def calculate_min_coverage_for_variant_detection(
+    min_alt_freq: float,
+    global_error_rate: float,
+    confidence_sigma: float = 3.0
+) -> int:
+    """
+    Calculate minimum coverage needed to distinguish variant from random error.
+
+    Uses statistical threshold: k_alt > μ + c×σ where k_alt = n × f_alt
+
+    Args:
+        min_alt_freq: Minimum alternative allele frequency (e.g., 0.20 for 20%)
+        global_error_rate: Global error rate (e.g., 0.05 for 5%)
+        confidence_sigma: Confidence level in standard deviations (default: 3.0)
+
+    Returns:
+        Minimum coverage required for reliable variant detection
+    """
+    p = global_error_rate
+    f = min_alt_freq
+    c = confidence_sigma
+
+    # Avoid division by zero or invalid cases
+    if f <= p:
+        # Cannot distinguish if alternative frequency <= error rate
+        return 10000  # Effectively infinite
+
+    # Solve: n × f > n × p + c × √(n × p × (1-p))
+    # Squaring: n² × (f - p)² > c² × n × p × (1-p)
+    # n > c² × p × (1-p) / (f - p)²
+    min_n = (c**2 * p * (1 - p)) / ((f - p)**2)
+
+    return int(np.ceil(min_n))
+
+
+def is_variant_position_with_composition(
+    position_stats: PositionStats,
+    global_error_rate: float,
+    min_alt_freq: float = 0.20,
+    confidence_sigma: float = 3.0
+) -> Tuple[bool, List[str], str]:
+    """
+    Identify variant positions using composition analysis and statistical thresholds.
+
+    This function determines if a position shows systematic variation (true biological
+    variant) rather than scattered sequencing errors.
+
+    Criteria for variant detection:
+    1. Coverage must meet statistical minimum for the given min_alt_freq
+    2. At least one alternative allele must have frequency ≥ min_alt_freq
+    3. Alternative allele count must exceed random error threshold (μ + c×σ)
+
+    Args:
+        position_stats: Position statistics including base composition
+        global_error_rate: Global error rate (e.g., 0.05 for 5%)
+        min_alt_freq: Minimum alternative allele frequency (default: 0.20 for 20%)
+        confidence_sigma: Confidence level for statistical test (default: 3.0)
+
+    Returns:
+        Tuple of (is_variant, variant_bases, reason)
+        - is_variant: True if this position requires cluster separation
+        - variant_bases: List of alternative bases with freq ≥ min_alt_freq (e.g., ['G', 'T'])
+        - reason: Explanation of decision for logging/debugging
+    """
+    n = position_stats.coverage
+    p = global_error_rate
+    base_composition = position_stats.base_composition
+
+    # Step 1: Check minimum coverage
+    min_n = calculate_min_coverage_for_variant_detection(
+        min_alt_freq, p, confidence_sigma
+    )
+
+    if n < min_n:
+        return False, [], f"Insufficient coverage ({n} < {min_n} required)"
+
+    # Step 2: Analyze base composition
+    if not base_composition or sum(base_composition.values()) == 0:
+        return False, [], "No composition data available"
+
+    sorted_bases = sorted(
+        base_composition.items(),
+        key=lambda x: x[1],
+        reverse=True
+    )
+
+    if len(sorted_bases) < 2:
+        return False, [], "No alternative alleles observed"
+
+    consensus_base = sorted_bases[0][0]
+    consensus_count = sorted_bases[0][1]
+
+    # Step 3: Check each alternative allele
+    variant_bases = []
+    variant_details = []
+
+    # Calculate error threshold for this coverage
+    mu = n * p
+    sigma = np.sqrt(n * p * (1 - p))
+    count_threshold = mu + confidence_sigma * sigma
+
+    for base, count in sorted_bases[1:]:
+        f_alt = count / n if n > 0 else 0
+
+        # Must meet frequency threshold
+        if f_alt < min_alt_freq:
+            continue
+
+        # Must exceed statistical threshold for count
+        if count > count_threshold:
+            variant_bases.append(base)
+            variant_details.append(f"{base}:{count}/{n}({f_alt:.1%})")
+
+    if variant_bases:
+        return True, variant_bases, f"Variant alleles: {', '.join(variant_details)}"
+
+    # High error count but no systematic pattern (scattered errors)
+    if position_stats.error_count > count_threshold:
+        return False, [], f"Errors scattered across {len([b for b, c in sorted_bases[1:] if c > 0])} bases, no systematic variant"
+
+    return False, [], "No variants detected"
 
 
 class SpecimenClusterer:
@@ -345,17 +790,19 @@ class SpecimenClusterer:
 
                     sampled_ids = [seq_id for _, seq_id in
                                    sorted(qualities, reverse=True)[:self.max_sample_size]]
-                    sampled_seqs = [self.sequences[seq_id] for seq_id in sampled_ids]
+                    sampled_seqs = {seq_id: self.sequences[seq_id] for seq_id in sampled_ids}
                 else:
-                    sampled_seqs = [self.sequences[seq_id] for seq_id in cluster_reads]
+                    sampled_seqs = {seq_id: self.sequences[seq_id] for seq_id in cluster_reads}
 
-                consensus, _ = self.run_spoa(sampled_seqs)  # Ignore MSA for merging
+                result = self.run_spoa(sampled_seqs)
 
                 # Skip empty clusters (can occur when all sequences are filtered out)
-                if consensus is None:
+                if result is None:
                     logging.warning(f"Cluster {i} produced no consensus (empty cluster), skipping")
                     pbar.update(1)
                     continue
+
+                consensus = result.consensus
 
                 # Trim primers before comparison to merge clusters that differ only in primer regions
                 # The trimmed consensus is used only for comparison and discarded after merging
@@ -699,20 +1146,25 @@ class SpecimenClusterer:
                     sampled_ids = cluster
 
                 # Generate consensus and MSA
-                sampled_seqs = [self.sequences[seq_id] for seq_id in sampled_ids]
-                consensus, msa = self.run_spoa(sampled_seqs)
+                sampled_seqs = {seq_id: self.sequences[seq_id] for seq_id in sampled_ids}
+                result = self.run_spoa(sampled_seqs)
 
-                if not consensus or not msa:
+                if result is None:
                     logging.warning(f"Initial cluster {initial_idx}: Failed to generate consensus, skipping")
                     continue
 
+                consensus = result.consensus
+                msa = result.msa_string
+                alignments = result.alignments
+                msa_to_consensus_pos = result.msa_to_consensus_pos
+
                 # Calculate per-read identity from MSA
-                rid, rid_min = self.calculate_read_identity(msa, consensus)
+                rid, rid_min = self.calculate_read_identity(alignments, consensus)
 
                 # Optional: Remove outlier reads and regenerate consensus
                 if self.outlier_threshold is not None:
                     keep_ids, outlier_ids = self.identify_outlier_reads(
-                        msa, consensus, sampled_ids, self.outlier_threshold
+                        alignments, consensus, sampled_ids, self.outlier_threshold
                     )
 
                     if outlier_ids:
@@ -727,18 +1179,22 @@ class SpecimenClusterer:
                         cluster = cluster - outlier_ids
 
                         # Regenerate consensus with filtered reads
-                        sampled_seqs = [self.sequences[seq_id] for seq_id in sampled_ids]
-                        consensus, msa = self.run_spoa(sampled_seqs)
+                        sampled_seqs = {seq_id: self.sequences[seq_id] for seq_id in sampled_ids}
+                        result = self.run_spoa(sampled_seqs)
 
                         # Recalculate identity metrics
-                        if consensus and msa:
-                            rid, rid_min = self.calculate_read_identity(msa, consensus)
+                        if result is not None:
+                            consensus = result.consensus
+                            msa = result.msa_string
+                            alignments = result.alignments
+                            msa_to_consensus_pos = result.msa_to_consensus_pos
+                            rid, rid_min = self.calculate_read_identity(alignments, consensus)
 
                 # Detect variant positions
                 variant_positions = []
-                if consensus and msa and self.outlier_threshold is not None:
+                if consensus and alignments and self.outlier_threshold is not None:
                     variant_positions = self.detect_variant_positions(
-                        msa, consensus, self.outlier_threshold, min_alt_freq=0.20
+                        alignments, consensus, msa_to_consensus_pos, self.outlier_threshold, min_alt_freq=0.20
                     )
 
                     if variant_positions:
@@ -747,7 +1203,7 @@ class SpecimenClusterer:
                 # Phase reads into haplotypes
                 # Note: Uses the FULL cluster (not just sampled_ids) for phasing
                 phased_haplotypes = self.phase_reads_by_variants(
-                    msa, consensus, cluster, variant_positions
+                    msa, consensus, cluster, variant_positions, alignments
                 )
 
                 # Store each haplotype as a sub-cluster with provenance
@@ -826,13 +1282,19 @@ class SpecimenClusterer:
                         sampled_ids = cluster
 
                     # Generate final consensus and MSA
-                    sampled_seqs = [self.sequences[seq_id] for seq_id in sampled_ids]
-                    consensus, msa = self.run_spoa(sampled_seqs)
+                    sampled_seqs = {seq_id: self.sequences[seq_id] for seq_id in sampled_ids}
+                    result = self.run_spoa(sampled_seqs)
 
                     # Calculate final identity metrics
                     rid, rid_min = None, None
-                    if consensus and msa:
-                        rid, rid_min = self.calculate_read_identity(msa, consensus)
+                    consensus = None
+                    msa = None
+
+                    if result is not None:
+                        consensus = result.consensus
+                        msa = result.msa_string
+                        alignments = result.alignments
+                        rid, rid_min = self.calculate_read_identity(alignments, consensus)
 
                     # Note: No outlier removal or variant detection in output phase
                     # (already done in detection phase)
@@ -890,21 +1352,24 @@ class SpecimenClusterer:
 
         return 1.0 - (result["editDistance"] / max(len(seq1), len(seq2)))
 
-    def run_spoa(self, sequences: List[str]) -> Tuple[Optional[str], Optional[str]]:
+    def run_spoa(self, read_sequences: Dict[str, str]) -> Optional[MSAResult]:
         """Run SPOA to generate consensus sequence and MSA.
 
+        Args:
+            read_sequences: Dictionary mapping read IDs to sequence strings
+
         Returns:
-            Tuple of (consensus_sequence, msa_fasta) where msa_fasta includes all
-            aligned sequences and the consensus
+            MSAResult containing consensus sequence, raw MSA string, and parsed records,
+            or None if SPOA fails or input is empty
         """
-        if not sequences:
-            return None, None
+        if not read_sequences:
+            return None
 
         try:
-            # Create temporary input file
+            # Create temporary input file with actual read IDs
             with tempfile.NamedTemporaryFile(mode='w', delete=False, suffix='.fasta') as f:
-                for i, seq in enumerate(sequences):
-                    f.write(f">seq{i}\n{seq}\n")
+                for read_id, seq in read_sequences.items():
+                    f.write(f">{read_id}\n{seq}\n")
                 temp_input = f.name
 
             # Construct SPOA command with parameters
@@ -931,66 +1396,51 @@ class SpecimenClusterer:
 
             # Parse SPOA output - capture both MSA and consensus
             msa_output = result.stdout
-            consensus = None
-            current_seq = []
-            is_consensus = False
-            for line in result.stdout.split('\n'):
-                if line.startswith('>'):
-                    # Check if this is the consensus sequence
-                    is_consensus = 'Consensus' in line
-                    current_seq = []
-                elif line.strip() and is_consensus:
-                    current_seq.append(line.strip())
-            # Extract the consensus sequence and remove gaps
-            # (consensus is part of MSA so will have gaps, but we want ungapped sequence)
-            if current_seq:
-                consensus = ''.join(current_seq).replace('-', '')
+
+            # Parse MSA into ReadAlignment objects
+            alignments, consensus, msa_to_consensus_pos = extract_alignments_from_msa(msa_output)
 
             if not consensus:
-                logging.warning("SPOA did not generate consensus sequence")
-                return sequences[0], msa_output  # Fall back to first sequence
+                raise RuntimeError("SPOA did not generate consensus sequence")
 
-            return consensus, msa_output
+            return MSAResult(
+                consensus=consensus,
+                msa_string=msa_output,
+                alignments=alignments,
+                msa_to_consensus_pos=msa_to_consensus_pos
+            )
 
         except subprocess.CalledProcessError as e:
             logging.error(f"SPOA failed with return code {e.returncode}")
             logging.error(f"Command: {' '.join(cmd)}")
             logging.error(f"Stderr: {e.stderr}")
-            return sequences[0], None  # Fall back to first sequence
+            return None
+
+        except RuntimeError:
+            # Re-raise RuntimeError (e.g., consensus generation failure) as hard error
+            raise
 
         except Exception as e:
             logging.error(f"Error running SPOA: {str(e)}")
-            return sequences[0], None  # Fall back to first sequence
+            return None
 
-    def identify_outlier_reads(self, msa_string: str, consensus_seq: str, sampled_ids: Set[str],
-                              threshold: float) -> Tuple[Set[str], Set[str]]:
+    def identify_outlier_reads(self, alignments: List[ReadAlignment], consensus_seq: str,
+                              sampled_ids: Set[str], threshold: float) -> Tuple[Set[str], Set[str]]:
         """Identify outlier reads that exceed error rate threshold.
 
         Args:
-            msa_string: MSA in FASTA format from SPOA
+            alignments: List of ReadAlignment objects from MSA
             consensus_seq: Ungapped consensus sequence
-            sampled_ids: Set of read IDs that were sampled (in order written to SPOA)
+            sampled_ids: Set of read IDs that were sampled
             threshold: Error rate threshold (e.g., mean × 3.0)
 
         Returns:
-            Tuple of (keep_ids, outlier_ids) where both are sets of actual read IDs
+            Tuple of (keep_ids, outlier_ids) where both are sets of read IDs
         """
-        if not msa_string or not consensus_seq:
+        if not alignments or not consensus_seq:
             return sampled_ids, set()
 
         try:
-            # Extract alignments from MSA string directly (no temp file needed)
-            alignments, _, _ = extract_alignments_from_msa(msa_string)
-
-            if not alignments:
-                logging.debug(f"No alignments found in MSA for outlier detection")
-                return sampled_ids, set()
-
-            # Map MSA IDs (seq0, seq1, ...) to actual read IDs
-            # SPOA writes sequences in the order they were provided
-            sampled_list = list(sampled_ids)
-            msa_to_read_id = {f"seq{i}": sampled_list[i] for i in range(len(sampled_list))}
-
             keep_ids = set()
             outlier_ids = set()
 
@@ -1001,13 +1451,10 @@ class SpecimenClusterer:
             for alignment in alignments:
                 error_rate = alignment.edit_distance / consensus_length
 
-                # Get actual read ID
-                actual_read_id = msa_to_read_id.get(alignment.read_id, alignment.read_id)
-
                 if error_rate <= threshold:
-                    keep_ids.add(actual_read_id)
+                    keep_ids.add(alignment.read_id)
                 else:
-                    outlier_ids.add(actual_read_id)
+                    outlier_ids.add(alignment.read_id)
 
             return keep_ids, outlier_ids
 
@@ -1015,8 +1462,8 @@ class SpecimenClusterer:
             logging.warning(f"Failed to identify outlier reads: {e}")
             return sampled_ids, set()
 
-    def calculate_read_identity(self, msa_string: str, consensus_seq: str) -> Tuple[Optional[float], Optional[float]]:
-        """Calculate read identity metrics from MSA.
+    def calculate_read_identity(self, alignments: List[ReadAlignment], consensus_seq: str) -> Tuple[Optional[float], Optional[float]]:
+        """Calculate read identity metrics from MSA alignments.
 
         Read identity measures how well individual reads agree with the consensus sequence.
         This is an internal consistency metric - it does NOT measure accuracy against ground truth.
@@ -1024,26 +1471,19 @@ class SpecimenClusterer:
         Low values may indicate heterogeneous clusters, outliers, or poor consensus quality (esp. at low RiC).
 
         Args:
-            msa_string: MSA in FASTA format (string) generated by SPOA
+            alignments: List of ReadAlignment objects from MSA
             consensus_seq: Ungapped consensus sequence
 
         Returns:
             Tuple of (mean_rid, min_rid) where:
             - mean_rid: Mean read identity across all reads (0.0-1.0)
             - min_rid: Minimum read identity (worst-case read) (0.0-1.0)
-            Returns (None, None) if MSA cannot be parsed or has no valid reads
+            Returns (None, None) if no valid alignments or consensus
         """
-        if not msa_string or not consensus_seq:
+        if not alignments or not consensus_seq:
             return None, None
 
         try:
-            # Extract alignments from MSA string directly (no temp file needed)
-            alignments, msa_consensus, _ = extract_alignments_from_msa(msa_string)
-
-            if not alignments:
-                logging.debug(f"No alignments found in MSA")
-                return None, None
-
             # Calculate read identity (1 - error_rate) for each read
             consensus_length = len(consensus_seq)
             if consensus_length == 0:
@@ -1070,7 +1510,8 @@ class SpecimenClusterer:
             logging.warning(f"Failed to calculate read identity from MSA: {e}")
             return None, None
 
-    def detect_variant_positions(self, msa_string: str, consensus_seq: str,
+    def detect_variant_positions(self, alignments: List[ReadAlignment], consensus_seq: str,
+                                msa_to_consensus_pos: Dict[int, Optional[int]],
                                 error_threshold: float, min_alt_freq: float = 0.20) -> List[Dict]:
         """Detect variant positions in MSA for future phasing.
 
@@ -1078,31 +1519,42 @@ class SpecimenClusterer:
         unphased biological variation requiring cluster subdivision.
 
         Args:
-            msa_string: MSA in FASTA format from SPOA
+            alignments: List of ReadAlignment objects from MSA
             consensus_seq: Ungapped consensus sequence
+            msa_to_consensus_pos: Mapping from MSA position to consensus position
             error_threshold: Error rate threshold for variant detection (e.g., P95)
             min_alt_freq: Minimum alternative allele frequency (default: 0.20)
 
         Returns:
             List of variant position dictionaries with metadata, or empty list if none found
         """
-        if not msa_string or not consensus_seq:
+        if not alignments or not consensus_seq:
             return []
 
         try:
-            # Extract alignments from MSA string directly (no temp file needed)
-            alignments, msa_consensus, msa_to_consensus_pos = extract_alignments_from_msa(msa_string)
-
+            # Extract consensus_aligned from first alignment (they all have the same length)
             if not alignments:
                 logging.debug(f"No alignments found in MSA for variant detection")
                 return []
+
+            # Reconstruct consensus_aligned from consensus_seq and msa_to_consensus_pos
+            msa_length = len(alignments[0].aligned_sequence)
+            consensus_aligned = []
+            for msa_pos in range(msa_length):
+                cons_pos = msa_to_consensus_pos.get(msa_pos)
+                if cons_pos is not None:
+                    consensus_aligned.append(consensus_seq[cons_pos])
+                else:
+                    consensus_aligned.append('-')
+            consensus_aligned = ''.join(consensus_aligned)
 
             # Analyze positional variation
             position_stats = analyze_positional_variation(
                 alignments,
                 consensus_seq,
-                error_threshold,
-                msa_string
+                consensus_aligned,
+                msa_to_consensus_pos,
+                error_threshold
             )
 
             # Identify variant positions
@@ -1137,7 +1589,8 @@ class SpecimenClusterer:
         msa_string: str,
         consensus_seq: str,
         cluster_read_ids: Set[str],
-        variant_positions: List[Dict]
+        variant_positions: List[Dict],
+        alignments: Optional[List[ReadAlignment]] = None
     ) -> List[Tuple[str, Set[str]]]:
         """Phase reads into haplotypes based on variant positions.
 
@@ -1146,10 +1599,11 @@ class SpecimenClusterer:
         of alleles observed in the data becomes a separate haplotype.
 
         Args:
-            msa_string: MSA in FASTA format from SPOA
+            msa_string: MSA in FASTA format from SPOA (used if alignments not provided)
             consensus_seq: Ungapped consensus sequence
-            cluster_read_ids: Set of read IDs in this cluster (for mapping MSA IDs)
+            cluster_read_ids: Set of read IDs in this cluster (for validation)
             variant_positions: List of variant position dicts from detect_variant_positions()
+            alignments: Optional pre-parsed alignments (avoids reparsing)
 
         Returns:
             List of (allele_combo_string, read_id_set) tuples
@@ -1158,46 +1612,34 @@ class SpecimenClusterer:
             Allele combination format: bases separated by hyphens, in MSA position order
             Gap positions are represented as "-" (the gap character itself)
         """
-        if not msa_string or not variant_positions:
+        if not variant_positions:
             # No variants to phase - return single group with all reads
             return [(None, cluster_read_ids)]
 
         try:
-            # Parse MSA to get aligned sequences
-            from io import StringIO
-            from Bio import SeqIO
+            # Use pre-parsed alignments if provided, otherwise parse msa_string
+            if not alignments:
+                if not msa_string:
+                    return [(None, cluster_read_ids)]
+                alignments, _, _ = extract_alignments_from_msa(msa_string)
 
-            msa_handle = StringIO(msa_string)
-            records = list(SeqIO.parse(msa_handle, 'fasta'))
-
-            if not records:
-                logging.warning("No sequences found in MSA for phasing")
+            if not alignments:
+                logging.warning("No alignments found in MSA for phasing")
                 return [(None, cluster_read_ids)]
 
-            # Separate consensus from read sequences
-            read_sequences = {}
-            for record in records:
-                if 'Consensus' not in record.description and 'Consensus' not in record.id:
-                    read_sequences[record.id] = str(record.seq).upper()
-
-            if not read_sequences:
-                logging.warning("No read sequences found in MSA for phasing")
-                return [(None, cluster_read_ids)]
-
-            # Map MSA IDs (seq0, seq1, ...) to actual read IDs
-            # SPOA writes sequences in the order they were provided
-            cluster_read_list = list(cluster_read_ids)
-            msa_to_read_id = {f"seq{i}": cluster_read_list[i] for i in range(len(cluster_read_list))}
+            # Build read_sequences dict from alignments (using gapped sequences)
+            read_sequences = {
+                alignment.read_id: alignment.aligned_sequence
+                for alignment in alignments
+            }
 
             # Extract MSA positions for variants (sorted by position)
             variant_msa_positions = sorted([v['msa_position'] for v in variant_positions])
 
             # For each read, extract alleles at variant positions
+            # Note: read_id is now the actual read ID (not seq{i})
             read_to_alleles = {}
-            for msa_id, aligned_seq in read_sequences.items():
-                # Get actual read ID
-                actual_read_id = msa_to_read_id.get(msa_id, msa_id)
-
+            for read_id, aligned_seq in read_sequences.items():
                 # Extract allele at each variant position
                 alleles = []
                 for msa_pos in variant_msa_positions:
@@ -1210,7 +1652,7 @@ class SpecimenClusterer:
 
                 # Create allele combination string
                 allele_combo = '-'.join(alleles)
-                read_to_alleles[actual_read_id] = allele_combo
+                read_to_alleles[read_id] = allele_combo
 
             # Group reads by allele combination
             combo_to_reads = defaultdict(set)

@@ -21,7 +21,7 @@ from speconsense.analyze import (
     parse_consensus_header,
     find_cluster_files,
     load_consensus_sequences,
-    extract_alignments_from_msa,
+    extract_alignments_from_msa_file,
     analyze_cluster,
     ClusterInfo
 )
@@ -78,7 +78,7 @@ def test_extract_alignments_from_msa_perfect_match():
         msa_file = f.name
 
     try:
-        alignments, consensus, msa_to_consensus_pos = extract_alignments_from_msa(msa_file)
+        alignments, consensus, msa_to_consensus_pos = extract_alignments_from_msa_file(msa_file)
 
         assert consensus == "ACGTACGTACGT"
         assert len(alignments) == 1
@@ -117,7 +117,7 @@ def test_extract_alignments_from_msa_with_errors():
         msa_file = f.name
 
     try:
-        alignments, consensus, msa_to_consensus_pos = extract_alignments_from_msa(msa_file)
+        alignments, consensus, msa_to_consensus_pos = extract_alignments_from_msa_file(msa_file)
 
         assert consensus == "ACGTACGT"
         assert len(alignments) == 3
