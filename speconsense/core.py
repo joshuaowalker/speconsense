@@ -379,83 +379,36 @@ def analyze_positional_variation(
     return position_stats
 
 
-def calculate_min_coverage_for_variant_detection(
-    min_alt_freq: float,
-    global_error_rate: float,
-    confidence_sigma: float = 3.0
-) -> int:
-    """
-    Calculate minimum coverage needed to distinguish variant from random error.
-
-    Uses statistical threshold: k_alt > μ + c×σ where k_alt = n × f_alt
-
-    Args:
-        min_alt_freq: Minimum alternative allele frequency (e.g., 0.20 for 20%)
-        global_error_rate: Global error rate (e.g., 0.05 for 5%)
-        confidence_sigma: Confidence level in standard deviations (default: 3.0)
-
-    Returns:
-        Minimum coverage required for reliable variant detection
-    """
-    p = global_error_rate
-    f = min_alt_freq
-    c = confidence_sigma
-
-    # Avoid division by zero or invalid cases
-    if f <= p:
-        # Cannot distinguish if alternative frequency <= error rate
-        return 10000  # Effectively infinite
-
-    # Solve: n × f > n × p + c × √(n × p × (1-p))
-    # Squaring: n² × (f - p)² > c² × n × p × (1-p)
-    # n > c² × p × (1-p) / (f - p)²
-    min_n = (c**2 * p * (1 - p)) / ((f - p)**2)
-
-    return int(np.ceil(min_n))
-
-
 def is_variant_position_with_composition(
     position_stats: PositionStats,
-    global_error_rate: float,
-    min_alt_freq: float = 0.20,
-    confidence_sigma: float = 3.0
+    min_variant_frequency: float = 0.20,
+    min_variant_count: int = 5
 ) -> Tuple[bool, List[str], str]:
     """
-    Identify variant positions using composition analysis and statistical thresholds.
+    Identify variant positions using simple frequency and count thresholds.
 
     This function determines if a position shows systematic variation (true biological
     variant) rather than scattered sequencing errors.
 
     Criteria for variant detection:
-    1. Coverage must meet statistical minimum for the given min_alt_freq
-    2. At least one alternative allele must have frequency ≥ min_alt_freq
-    3. Alternative allele count must exceed random error threshold (μ + c×σ)
+    1. At least one alternative allele must have frequency ≥ min_variant_frequency
+    2. That allele must have count ≥ min_variant_count
 
     Args:
         position_stats: Position statistics including base composition
-        global_error_rate: Global error rate (e.g., 0.05 for 5%)
-        min_alt_freq: Minimum alternative allele frequency (default: 0.20 for 20%)
-        confidence_sigma: Confidence level for statistical test (default: 3.0)
+        min_variant_frequency: Minimum alternative allele frequency (default: 0.20 for 20%)
+        min_variant_count: Minimum alternative allele read count (default: 5 reads)
 
     Returns:
         Tuple of (is_variant, variant_bases, reason)
         - is_variant: True if this position requires cluster separation
-        - variant_bases: List of alternative bases with freq ≥ min_alt_freq (e.g., ['G', 'T'])
+        - variant_bases: List of alternative bases meeting criteria (e.g., ['G', 'T'])
         - reason: Explanation of decision for logging/debugging
     """
     n = position_stats.coverage
-    p = global_error_rate
     base_composition = position_stats.base_composition
 
-    # Step 1: Check minimum coverage
-    min_n = calculate_min_coverage_for_variant_detection(
-        min_alt_freq, p, confidence_sigma
-    )
-
-    if n < min_n:
-        return False, [], f"Insufficient coverage ({n} < {min_n} required)"
-
-    # Step 2: Analyze base composition
+    # Check we have composition data
     if not base_composition or sum(base_composition.values()) == 0:
         return False, [], "No composition data available"
 
@@ -468,36 +421,20 @@ def is_variant_position_with_composition(
     if len(sorted_bases) < 2:
         return False, [], "No alternative alleles observed"
 
-    consensus_base = sorted_bases[0][0]
-    consensus_count = sorted_bases[0][1]
-
-    # Step 3: Check each alternative allele
+    # Check each alternative allele (skip consensus base at index 0)
     variant_bases = []
     variant_details = []
 
-    # Calculate error threshold for this coverage
-    mu = n * p
-    sigma = np.sqrt(n * p * (1 - p))
-    count_threshold = mu + confidence_sigma * sigma
-
     for base, count in sorted_bases[1:]:
-        f_alt = count / n if n > 0 else 0
+        freq = count / n if n > 0 else 0
 
-        # Must meet frequency threshold
-        if f_alt < min_alt_freq:
-            continue
-
-        # Must exceed statistical threshold for count
-        if count > count_threshold:
+        # Must meet both frequency and count thresholds
+        if freq >= min_variant_frequency and count >= min_variant_count:
             variant_bases.append(base)
-            variant_details.append(f"{base}:{count}/{n}({f_alt:.1%})")
+            variant_details.append(f"{base}:{count}/{n}({freq:.1%})")
 
     if variant_bases:
         return True, variant_bases, f"Variant alleles: {', '.join(variant_details)}"
-
-    # High error count but no systematic pattern (scattered errors)
-    if position_stats.error_count > count_threshold:
-        return False, [], f"Errors scattered across {len([b for b, c in sorted_bases[1:] if c > 0])} bases, no systematic variant"
 
     return False, [], "No variants detected"
 
@@ -513,7 +450,10 @@ class SpecimenClusterer:
                  sample_name: str = "sample",
                  disable_homopolymer_equivalence: bool = False,
                  output_dir: str = "clusters",
-                 mean_error_rate: Optional[float] = None):
+                 outlier_threshold: Optional[float] = None,
+                 enable_secondpass_phasing: bool = True,
+                 min_variant_frequency: float = 0.20,
+                 min_variant_count: int = 5):
         self.min_identity = min_identity
         self.inflation = inflation
         self.min_size = min_size
@@ -524,17 +464,14 @@ class SpecimenClusterer:
         self.sample_name = sample_name
         self.disable_homopolymer_equivalence = disable_homopolymer_equivalence
         self.output_dir = output_dir
-        self.mean_error_rate = mean_error_rate
+        self.outlier_threshold = outlier_threshold
+        self.enable_secondpass_phasing = enable_secondpass_phasing
+        self.min_variant_frequency = min_variant_frequency
+        self.min_variant_count = min_variant_count
         self.sequences = {}  # id -> sequence string
         self.records = {}  # id -> SeqRecord object
         self.id_map = {}  # short_id -> original_id
         self.rev_id_map = {}  # original_id -> short_id
-
-        # Calculate outlier threshold from mean error rate
-        self.outlier_threshold = None
-        if mean_error_rate is not None:
-            OUTLIER_THRESHOLD_MULTIPLIER = 3.0
-            self.outlier_threshold = mean_error_rate * OUTLIER_THRESHOLD_MULTIPLIER
 
         # Create output directory and debug subdirectory
         os.makedirs(self.output_dir, exist_ok=True)
@@ -564,8 +501,10 @@ class SpecimenClusterer:
                 "presample_size": self.presample_size,
                 "k_nearest_neighbors": self.k_nearest_neighbors,
                 "disable_homopolymer_equivalence": self.disable_homopolymer_equivalence,
-                "mean_error_rate": self.mean_error_rate,
                 "outlier_threshold": self.outlier_threshold,
+                "enable_secondpass_phasing": self.enable_secondpass_phasing,
+                "min_variant_frequency": self.min_variant_frequency,
+                "min_variant_count": self.min_variant_count,
                 "orient_mode": self.orient_mode,
             },
             "input_file": self.input_file,
@@ -603,7 +542,7 @@ class SpecimenClusterer:
             final_count: Number of final clusters after filtering
         """
         phasing_stats = {
-            "phasing_enabled": self.outlier_threshold is not None,
+            "phasing_enabled": self.enable_secondpass_phasing,
             "initial_clusters": initial_clusters_count,
             "phased_subclusters": subclusters_count,
             "after_merging": merged_count,
@@ -1190,11 +1129,11 @@ class SpecimenClusterer:
                             msa_to_consensus_pos = result.msa_to_consensus_pos
                             rid, rid_min = self.calculate_read_identity(alignments, consensus)
 
-                # Detect variant positions
+                # Detect variant positions (if second-pass phasing enabled)
                 variant_positions = []
-                if consensus and alignments and self.outlier_threshold is not None:
+                if consensus and alignments and self.enable_secondpass_phasing:
                     variant_positions = self.detect_variant_positions(
-                        alignments, consensus, msa_to_consensus_pos, self.outlier_threshold, min_alt_freq=0.20
+                        alignments, consensus, msa_to_consensus_pos
                     )
 
                     if variant_positions:
@@ -1511,8 +1450,7 @@ class SpecimenClusterer:
             return None, None
 
     def detect_variant_positions(self, alignments: List[ReadAlignment], consensus_seq: str,
-                                msa_to_consensus_pos: Dict[int, Optional[int]],
-                                error_threshold: float, min_alt_freq: float = 0.20) -> List[Dict]:
+                                msa_to_consensus_pos: Dict[int, Optional[int]]) -> List[Dict]:
         """Detect variant positions in MSA for future phasing.
 
         Identifies positions with significant alternative alleles that may indicate
@@ -1522,8 +1460,6 @@ class SpecimenClusterer:
             alignments: List of ReadAlignment objects from MSA
             consensus_seq: Ungapped consensus sequence
             msa_to_consensus_pos: Mapping from MSA position to consensus position
-            error_threshold: Error rate threshold for variant detection (e.g., P95)
-            min_alt_freq: Minimum alternative allele frequency (default: 0.20)
 
         Returns:
             List of variant position dictionaries with metadata, or empty list if none found
@@ -1548,13 +1484,13 @@ class SpecimenClusterer:
                     consensus_aligned.append('-')
             consensus_aligned = ''.join(consensus_aligned)
 
-            # Analyze positional variation
+            # Analyze positional variation (error_threshold parameter unused but kept for compatibility)
             position_stats = analyze_positional_variation(
                 alignments,
                 consensus_seq,
                 consensus_aligned,
                 msa_to_consensus_pos,
-                error_threshold
+                overall_error_rate=0.0  # Unused, kept for compatibility
             )
 
             # Identify variant positions
@@ -1562,9 +1498,8 @@ class SpecimenClusterer:
             for pos_stat in position_stats:
                 is_variant, variant_bases, reason = is_variant_position_with_composition(
                     pos_stat,
-                    error_threshold,
-                    min_alt_freq=min_alt_freq,
-                    confidence_sigma=3.0
+                    min_variant_frequency=self.min_variant_frequency,
+                    min_variant_count=self.min_variant_count
                 )
 
                 if is_variant:
@@ -2067,10 +2002,17 @@ def main():
                         help="Minimum size ratio between a cluster and the largest cluster (default: 0.2, 0 to disable)")
     parser.add_argument("--max-sample-size", type=int, default=500,
                         help="Maximum cluster size for consensus (default: 500)")
-    parser.add_argument("--mean-error-rate", type=float, default=None,
-                        help="Estimated mean read-to-consensus error rate (e.g., 0.013 for 1.3%%). "
-                             "When set, outlier reads exceeding threshold (mean × 3.0) will be removed "
-                             "and consensus regenerated. Leave unset to disable outlier removal.")
+    parser.add_argument("--outlier-threshold", type=float, default=None,
+                        help="Error rate threshold for outlier removal (e.g., 0.04 for 4%%). "
+                             "Reads with error rate exceeding this threshold will be removed and consensus regenerated. "
+                             "Leave unset to disable outlier removal.")
+    parser.add_argument("--disable-secondpass-phasing", action="store_true",
+                        help="Disable second-pass variant phasing (enabled by default). "
+                             "First-pass MCL clustering already handles most variants.")
+    parser.add_argument("--min-variant-frequency", type=float, default=0.20,
+                        help="Minimum alternative allele frequency to call variant (default: 0.20 for 20%%)")
+    parser.add_argument("--min-variant-count", type=int, default=5,
+                        help="Minimum alternative allele read count to call variant (default: 5)")
     parser.add_argument("--presample", type=int, default=1000,
                         help="Presample size for initial reads (default: 1000, 0 to disable)")
     parser.add_argument("--k-nearest-neighbors", type=int, default=5,
@@ -2109,13 +2051,19 @@ def main():
         sample_name=sample,
         disable_homopolymer_equivalence=args.disable_homopolymer_equivalence,
         output_dir=args.output_dir,
-        mean_error_rate=args.mean_error_rate
+        outlier_threshold=args.outlier_threshold,
+        enable_secondpass_phasing=not args.disable_secondpass_phasing,
+        min_variant_frequency=args.min_variant_frequency,
+        min_variant_count=args.min_variant_count
     )
 
-    # Log outlier removal configuration if enabled
-    if args.mean_error_rate is not None:
-        logging.info(f"Outlier removal enabled: mean_error_rate={args.mean_error_rate*100:.2f}%, "
-                    f"threshold={clusterer.outlier_threshold*100:.2f}%")
+    # Log configuration
+    if args.outlier_threshold is not None:
+        logging.info(f"Outlier removal enabled: threshold={args.outlier_threshold*100:.2f}%")
+
+    if not args.disable_secondpass_phasing:
+        logging.info(f"Second-pass variant phasing enabled: min_freq={args.min_variant_frequency:.0%}, "
+                    f"min_count={args.min_variant_count}")
 
     # Set additional attributes for metadata
     clusterer.input_file = os.path.abspath(args.input_file)
