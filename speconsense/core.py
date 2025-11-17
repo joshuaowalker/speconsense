@@ -440,7 +440,7 @@ def is_variant_position_with_composition(
 
 
 class SpecimenClusterer:
-    def __init__(self, min_identity: float = 0.8,
+    def __init__(self, min_identity: float = 0.9,
                  inflation: float = 4.0,
                  min_size: int = 5,
                  min_cluster_ratio: float = 0.2,
@@ -450,7 +450,7 @@ class SpecimenClusterer:
                  sample_name: str = "sample",
                  disable_homopolymer_equivalence: bool = False,
                  output_dir: str = "clusters",
-                 outlier_threshold: Optional[float] = None,
+                 outlier_identity_threshold: Optional[float] = None,
                  enable_secondpass_phasing: bool = True,
                  min_variant_frequency: float = 0.20,
                  min_variant_count: int = 5):
@@ -464,7 +464,16 @@ class SpecimenClusterer:
         self.sample_name = sample_name
         self.disable_homopolymer_equivalence = disable_homopolymer_equivalence
         self.output_dir = output_dir
-        self.outlier_threshold = outlier_threshold
+
+        # Auto-calculate outlier identity threshold if not provided
+        # Logic: min_identity accounts for 2×error (read-to-read comparison)
+        # outlier_identity_threshold accounts for 1×error (read-to-consensus)
+        # Therefore: outlier_identity_threshold = (1 + min_identity) / 2
+        if outlier_identity_threshold is None:
+            self.outlier_identity_threshold = (1.0 + min_identity) / 2.0
+        else:
+            self.outlier_identity_threshold = outlier_identity_threshold
+
         self.enable_secondpass_phasing = enable_secondpass_phasing
         self.min_variant_frequency = min_variant_frequency
         self.min_variant_count = min_variant_count
@@ -501,7 +510,7 @@ class SpecimenClusterer:
                 "presample_size": self.presample_size,
                 "k_nearest_neighbors": self.k_nearest_neighbors,
                 "disable_homopolymer_equivalence": self.disable_homopolymer_equivalence,
-                "outlier_threshold": self.outlier_threshold,
+                "outlier_identity_threshold": self.outlier_identity_threshold,
                 "enable_secondpass_phasing": self.enable_secondpass_phasing,
                 "min_variant_frequency": self.min_variant_frequency,
                 "min_variant_count": self.min_variant_count,
@@ -1101,9 +1110,9 @@ class SpecimenClusterer:
                 rid, rid_min = self.calculate_read_identity(alignments, consensus)
 
                 # Optional: Remove outlier reads and regenerate consensus
-                if self.outlier_threshold is not None:
+                if self.outlier_identity_threshold is not None:
                     keep_ids, outlier_ids = self.identify_outlier_reads(
-                        alignments, consensus, sampled_ids, self.outlier_threshold
+                        alignments, consensus, sampled_ids, self.outlier_identity_threshold
                     )
 
                     if outlier_ids:
@@ -1365,13 +1374,14 @@ class SpecimenClusterer:
 
     def identify_outlier_reads(self, alignments: List[ReadAlignment], consensus_seq: str,
                               sampled_ids: Set[str], threshold: float) -> Tuple[Set[str], Set[str]]:
-        """Identify outlier reads that exceed error rate threshold.
+        """Identify outlier reads below identity threshold.
 
         Args:
             alignments: List of ReadAlignment objects from MSA
             consensus_seq: Ungapped consensus sequence
             sampled_ids: Set of read IDs that were sampled
-            threshold: Error rate threshold (e.g., mean × 3.0)
+            threshold: Identity threshold (e.g., 0.95 for 95% identity)
+                      Reads with identity < threshold are considered outliers
 
         Returns:
             Tuple of (keep_ids, outlier_ids) where both are sets of read IDs
@@ -1388,9 +1398,11 @@ class SpecimenClusterer:
                 return sampled_ids, set()
 
             for alignment in alignments:
+                # Calculate read identity (1 - error_rate)
                 error_rate = alignment.edit_distance / consensus_length
+                identity = 1.0 - error_rate
 
-                if error_rate <= threshold:
+                if identity >= threshold:
                     keep_ids.add(alignment.read_id)
                 else:
                     outlier_ids.add(alignment.read_id)
@@ -1992,8 +2004,8 @@ def main():
     parser.add_argument("--augment-input", help="Additional FASTQ/FASTA file with sequences recovered after primary demultiplexing (e.g., from specimine)")
     parser.add_argument("--algorithm", type=str, default="graph", choices=["graph", "greedy"],
                         help="Clustering algorithm to use (default: graph)")
-    parser.add_argument("--min-identity", type=float, default=0.85,
-                        help="Minimum sequence identity threshold (default: 0.85)")
+    parser.add_argument("--min-identity", type=float, default=0.9,
+                        help="Minimum sequence identity threshold for clustering (default: 0.9)")
     parser.add_argument("--inflation", type=float, default=4.0,
                         help="MCL inflation parameter (default: 4.0)")
     parser.add_argument("--min-size", type=int, default=5,
@@ -2002,10 +2014,11 @@ def main():
                         help="Minimum size ratio between a cluster and the largest cluster (default: 0.2, 0 to disable)")
     parser.add_argument("--max-sample-size", type=int, default=500,
                         help="Maximum cluster size for consensus (default: 500)")
-    parser.add_argument("--outlier-threshold", type=float, default=None,
-                        help="Error rate threshold for outlier removal (e.g., 0.04 for 4%%). "
-                             "Reads with error rate exceeding this threshold will be removed and consensus regenerated. "
-                             "Leave unset to disable outlier removal.")
+    parser.add_argument("--outlier-identity-threshold", type=float, default=None,
+                        help="Identity threshold for outlier removal (e.g., 0.95 for 95%% identity). "
+                             "Reads with identity below this threshold will be removed and consensus regenerated. "
+                             "Auto-calculated as (1 + min_identity) / 2 if not specified. "
+                             "For min_identity=0.9, default is 0.95.")
     parser.add_argument("--disable-secondpass-phasing", action="store_true",
                         help="Disable second-pass variant phasing (enabled by default). "
                              "First-pass MCL clustering already handles most variants.")
@@ -2051,15 +2064,19 @@ def main():
         sample_name=sample,
         disable_homopolymer_equivalence=args.disable_homopolymer_equivalence,
         output_dir=args.output_dir,
-        outlier_threshold=args.outlier_threshold,
+        outlier_identity_threshold=args.outlier_identity_threshold,
         enable_secondpass_phasing=not args.disable_secondpass_phasing,
         min_variant_frequency=args.min_variant_frequency,
         min_variant_count=args.min_variant_count
     )
 
     # Log configuration
-    if args.outlier_threshold is not None:
-        logging.info(f"Outlier removal enabled: threshold={args.outlier_threshold*100:.2f}%")
+    if args.outlier_identity_threshold is not None:
+        logging.info(f"Outlier removal enabled: min_identity_threshold={args.outlier_identity_threshold*100:.1f}% (user-specified)")
+    else:
+        # Auto-calculated threshold
+        auto_threshold = (1.0 + args.min_identity) / 2.0
+        logging.info(f"Outlier removal enabled: min_identity_threshold={auto_threshold*100:.1f}% (auto-calculated from min_identity={args.min_identity*100:.1f}%)")
 
     if not args.disable_secondpass_phasing:
         logging.info(f"Second-pass variant phasing enabled: min_freq={args.min_variant_frequency:.0%}, "
