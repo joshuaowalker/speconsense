@@ -84,7 +84,6 @@ class PositionStats(NamedTuple):
     sub_count: int
     ins_count: int
     del_count: int
-    is_homopolymer: bool
     consensus_nucleotide: str  # Base in consensus at this MSA position (or '-' for insertion)
     base_composition: Dict[str, int]  # {A: 50, C: 3, G: 45, T: 2, '-': 0}
 
@@ -336,37 +335,6 @@ def extract_alignments_from_msa(
     return alignments, consensus_ungapped, msa_to_consensus_pos
 
 
-def detect_homopolymer_run(seq: str, position: int, min_length: int = 4) -> bool:
-    """
-    Check if a position is within a homopolymer run.
-
-    Args:
-        seq: DNA sequence
-        position: Position to check (0-indexed)
-        min_length: Minimum length of homopolymer to detect
-
-    Returns:
-        True if position is within a homopolymer run of min_length or longer
-    """
-    if position >= len(seq) or position < 0:
-        return False
-
-    base = seq[position]
-
-    # Find start of run
-    start = position
-    while start > 0 and seq[start - 1] == base:
-        start -= 1
-
-    # Find end of run
-    end = position
-    while end < len(seq) - 1 and seq[end + 1] == base:
-        end += 1
-
-    run_length = end - start + 1
-    return run_length >= min_length
-
-
 def analyze_positional_variation(
     alignments: List[ReadAlignment],
     consensus_seq: str,
@@ -474,13 +442,6 @@ def analyze_positional_variation(
         # Get consensus nucleotide at this MSA position
         cons_nucleotide = consensus_aligned[msa_pos]
 
-        # Sequence context - calculate based on consensus position if available
-        if cons_pos is not None:
-            is_homopolymer = detect_homopolymer_run(consensus_seq, cons_pos, min_length=4)
-        else:
-            # Insertion column - no consensus context
-            is_homopolymer = False
-
         # Get base composition for this MSA position
         base_comp = base_composition_matrix[msa_pos].copy()
 
@@ -493,7 +454,6 @@ def analyze_positional_variation(
             sub_count=sub_count,
             ins_count=ins_count,
             del_count=del_count,
-            is_homopolymer=is_homopolymer,
             consensus_nucleotide=cons_nucleotide,
             base_composition=base_comp
         ))
