@@ -60,11 +60,18 @@ class ReadAlignment(NamedTuple):
     read_id: str
     aligned_sequence: str  # Gapped sequence from MSA
     read_length: int
+
+    # Raw metrics (count all differences including homopolymer length)
     edit_distance: int
     num_insertions: int
     num_deletions: int
     num_substitutions: int
     error_positions: List[ErrorPosition]  # Detailed error information
+
+    # Homopolymer-normalized metrics (exclude homopolymer extensions)
+    normalized_edit_distance: int  # Edit distance excluding homopolymer length differences
+    normalized_error_positions: List[ErrorPosition]  # Only non-homopolymer errors
+    score_aligned: str  # Scoring string from adjusted-identity ('|'=match, '='=homopolymer, ' '=error)
 
 
 class PositionStats(NamedTuple):
@@ -101,33 +108,97 @@ class MSAResult(NamedTuple):
 # MSA Analysis Functions (moved from analyze.py to break circular dependency)
 # ============================================================================
 
-def extract_alignments_from_msa(msa_string: str) -> Tuple[List[ReadAlignment], str, Dict[int, Optional[int]]]:
+def parse_score_aligned_for_errors(
+    score_aligned: str,
+    read_aligned: str,
+    consensus_aligned: str
+) -> List[ErrorPosition]:
     """
-    Extract read alignments from an MSA string.
+    Parse score_aligned string to extract non-homopolymer errors.
+
+    The score_aligned string from adjusted-identity uses these codes:
+    - '|' : Exact match (not an error)
+    - '=' : Ambiguous match or homopolymer extension (not counted as error)
+    - ' ' : Substitution or indel (IS an error)
+    - '.' : End-trimmed position (not counted)
+
+    Args:
+        score_aligned: Scoring string from adjusted-identity
+        read_aligned: Aligned read sequence with gaps
+        consensus_aligned: Aligned consensus sequence with gaps
+
+    Returns:
+        List of ErrorPosition for positions marked as errors (excluding homopolymer extensions)
+    """
+    normalized_errors = []
+
+    for msa_pos, (score_char, read_base, cons_base) in enumerate(
+        zip(score_aligned, read_aligned, consensus_aligned)
+    ):
+        # Skip matches and homopolymer extensions
+        if score_char in ('|', '=', '.'):
+            continue
+
+        # This is a real error (substitution or indel) - classify it
+        if read_base == '-' and cons_base != '-':
+            error_type = 'del'
+        elif read_base != '-' and cons_base == '-':
+            error_type = 'ins'
+        elif read_base != cons_base:
+            error_type = 'sub'
+        else:
+            # Both are gaps or identical - should not happen if score_char indicates error
+            continue
+
+        normalized_errors.append(ErrorPosition(msa_pos, error_type))
+
+    return normalized_errors
+
+
+def extract_alignments_from_msa(
+    msa_string: str,
+    enable_homopolymer_normalization: bool = True
+) -> Tuple[List[ReadAlignment], str, Dict[int, Optional[int]]]:
+    """
+    Extract read alignments from an MSA string with optional homopolymer normalization.
 
     The MSA contains aligned sequences where the consensus has header containing "Consensus".
     This function compares each read to the consensus at each aligned position.
 
-    Error classification:
+    Error classification (raw metrics):
     - Both '-': Not an error (read doesn't cover this position)
     - Read '-', consensus base: Deletion (missing base in read)
     - Read base, consensus '-': Insertion (extra base in read)
     - Different bases: Substitution
     - Same base: Match (not an error)
 
+    When enable_homopolymer_normalization=True, also computes normalized metrics that
+    exclude homopolymer length differences using adjusted-identity library.
+
     IMPORTANT: Errors are reported at MSA positions, not consensus positions.
     This avoids ambiguity when multiple insertion columns map to the same consensus position.
 
     Args:
         msa_string: MSA content in FASTA format
+        enable_homopolymer_normalization: If True, compute homopolymer-normalized metrics
 
     Returns:
         Tuple of:
-        - list of ReadAlignment objects (with errors at MSA positions and gapped sequences)
+        - list of ReadAlignment objects (with both raw and normalized metrics)
         - consensus sequence without gaps
         - mapping from MSA position to consensus position (None for insertion columns)
     """
     from io import StringIO
+
+    # Define adjustment parameters for homopolymer normalization
+    # Only normalize homopolymers (single-base repeats), no other adjustments
+    HOMOPOLYMER_ADJUSTMENT_PARAMS = AdjustmentParams(
+        normalize_homopolymers=True,
+        handle_iupac_overlap=False,
+        normalize_indels=False,
+        end_skip_distance=0,
+        max_repeat_motif_length=1  # Single-base repeats only
+    )
 
     # Parse MSA
     msa_handle = StringIO(msa_string)
@@ -212,16 +283,53 @@ def extract_alignments_from_msa(msa_string: str) -> Tuple[List[ReadAlignment], s
         edit_distance = num_insertions + num_deletions + num_substitutions
         read_length = len(read_aligned.replace('-', ''))  # Length without gaps
 
-        # Create alignment object with gapped sequence
+        # Compute homopolymer-normalized metrics if enabled
+        if enable_homopolymer_normalization:
+            try:
+                # Use adjusted-identity to get homopolymer-normalized scoring
+                result = score_alignment(
+                    read_aligned,
+                    consensus_aligned,
+                    HOMOPOLYMER_ADJUSTMENT_PARAMS
+                )
+
+                # Parse score_aligned string to extract normalized errors
+                normalized_error_positions = parse_score_aligned_for_errors(
+                    result.score_aligned,
+                    read_aligned,
+                    consensus_aligned
+                )
+
+                normalized_edit_distance = result.mismatches
+                score_aligned_str = result.score_aligned
+
+            except Exception as e:
+                # If normalization fails, fall back to raw metrics
+                logging.warning(f"Homopolymer normalization failed for read {read_record.id}: {e}")
+                normalized_edit_distance = edit_distance
+                normalized_error_positions = error_positions
+                score_aligned_str = ""
+        else:
+            # Homopolymer normalization disabled - use raw metrics
+            normalized_edit_distance = edit_distance
+            normalized_error_positions = error_positions
+            score_aligned_str = ""
+
+        # Create alignment object with both raw and normalized metrics
         alignment = ReadAlignment(
             read_id=read_record.id,
             aligned_sequence=read_aligned,  # Store gapped sequence
             read_length=read_length,
+            # Raw metrics
             edit_distance=edit_distance,
             num_insertions=num_insertions,
             num_deletions=num_deletions,
             num_substitutions=num_substitutions,
-            error_positions=error_positions
+            error_positions=error_positions,
+            # Normalized metrics
+            normalized_edit_distance=normalized_edit_distance,
+            normalized_error_positions=normalized_error_positions,
+            score_aligned=score_aligned_str
         )
         alignments.append(alignment)
 
@@ -1346,7 +1454,12 @@ class SpecimenClusterer:
             msa_output = result.stdout
 
             # Parse MSA into ReadAlignment objects
-            alignments, consensus, msa_to_consensus_pos = extract_alignments_from_msa(msa_output)
+            # Homopolymer normalization is enabled unless explicitly disabled
+            enable_normalization = not self.disable_homopolymer_equivalence
+            alignments, consensus, msa_to_consensus_pos = extract_alignments_from_msa(
+                msa_output,
+                enable_homopolymer_normalization=enable_normalization
+            )
 
             if not consensus:
                 raise RuntimeError("SPOA did not generate consensus sequence")
@@ -1374,7 +1487,10 @@ class SpecimenClusterer:
 
     def identify_outlier_reads(self, alignments: List[ReadAlignment], consensus_seq: str,
                               sampled_ids: Set[str], threshold: float) -> Tuple[Set[str], Set[str]]:
-        """Identify outlier reads below identity threshold.
+        """Identify outlier reads below identity threshold using homopolymer-normalized metrics.
+
+        Uses normalized_edit_distance which excludes homopolymer length differences when
+        homopolymer normalization is enabled (default behavior).
 
         Args:
             alignments: List of ReadAlignment objects from MSA
@@ -1398,8 +1514,9 @@ class SpecimenClusterer:
                 return sampled_ids, set()
 
             for alignment in alignments:
-                # Calculate read identity (1 - error_rate)
-                error_rate = alignment.edit_distance / consensus_length
+                # Calculate read identity using normalized edit distance
+                # (excludes homopolymer length differences when normalization is enabled)
+                error_rate = alignment.normalized_edit_distance / consensus_length
                 identity = 1.0 - error_rate
 
                 if identity >= threshold:
@@ -1414,12 +1531,15 @@ class SpecimenClusterer:
             return sampled_ids, set()
 
     def calculate_read_identity(self, alignments: List[ReadAlignment], consensus_seq: str) -> Tuple[Optional[float], Optional[float]]:
-        """Calculate read identity metrics from MSA alignments.
+        """Calculate read identity metrics from MSA alignments using homopolymer-normalized metrics.
 
         Read identity measures how well individual reads agree with the consensus sequence.
         This is an internal consistency metric - it does NOT measure accuracy against ground truth.
         High values indicate homogeneous clustering and/or low read error rates.
         Low values may indicate heterogeneous clusters, outliers, or poor consensus quality (esp. at low RiC).
+
+        Uses normalized_edit_distance which excludes homopolymer length differences when
+        homopolymer normalization is enabled (default behavior).
 
         Args:
             alignments: List of ReadAlignment objects from MSA
@@ -1435,14 +1555,15 @@ class SpecimenClusterer:
             return None, None
 
         try:
-            # Calculate read identity (1 - error_rate) for each read
+            # Calculate read identity (1 - error_rate) for each read using normalized metrics
             consensus_length = len(consensus_seq)
             if consensus_length == 0:
                 return None, None
 
             identities = []
             for alignment in alignments:
-                error_rate = alignment.edit_distance / consensus_length
+                # Use normalized edit distance (excludes homopolymer differences)
+                error_rate = alignment.normalized_edit_distance / consensus_length
                 identity = 1.0 - error_rate
                 identities.append(identity)
 
@@ -1568,7 +1689,12 @@ class SpecimenClusterer:
             if not alignments:
                 if not msa_string:
                     return [(None, cluster_read_ids)]
-                alignments, _, _ = extract_alignments_from_msa(msa_string)
+                # Homopolymer normalization is enabled unless explicitly disabled
+                enable_normalization = not self.disable_homopolymer_equivalence
+                alignments, _, _ = extract_alignments_from_msa(
+                    msa_string,
+                    enable_homopolymer_normalization=enable_normalization
+                )
 
             if not alignments:
                 logging.warning("No alignments found in MSA for phasing")
