@@ -375,25 +375,27 @@ def analyze_positional_variation(
     overall_error_rate: float
 ) -> List[PositionStats]:
     """
-    Analyze error rates at each position in the MSA.
+    Analyze error rates at each position in the MSA with homopolymer normalization.
 
-    Identifies positions with elevated error rates, which may indicate
-    homopolymer regions, structural variants, or other error-prone
-    sequence contexts.
+    Uses normalized error positions and base composition to identify true variants
+    while ignoring homopolymer length differences. For each position, reads with
+    homopolymer-equivalent alleles (score_aligned='=') are counted as having the
+    consensus base, allowing detection of real variants even at positions with
+    homopolymer variation.
 
     IMPORTANT: All analysis is performed in MSA space (not consensus space).
     This correctly handles insertion columns where multiple MSA positions
     don't correspond to any consensus position.
 
     Args:
-        alignments: List of read alignments (with errors at MSA positions)
+        alignments: List of read alignments (with normalized metrics)
         consensus_seq: Consensus sequence (ungapped)
         consensus_aligned: Consensus sequence (gapped, from MSA)
         msa_to_consensus_pos: Mapping from MSA position to consensus position
         overall_error_rate: Overall error rate (currently unused, kept for compatibility)
 
     Returns:
-        List of PositionStats for each MSA position
+        List of PositionStats for each MSA position with normalized base composition
     """
     msa_length = len(consensus_aligned)
 
@@ -414,8 +416,9 @@ def analyze_positional_variation(
         for msa_pos in range(msa_length):
             error_matrix[msa_pos, 3] += 1  # coverage
 
-        # Add errors at specific MSA positions
-        for error_pos in alignment.error_positions:
+        # Add errors at specific MSA positions using normalized errors
+        # (excludes homopolymer extensions)
+        for error_pos in alignment.normalized_error_positions:
             msa_pos = error_pos.msa_position
             if 0 <= msa_pos < msa_length:
                 if error_pos.error_type == 'sub':
@@ -425,18 +428,29 @@ def analyze_positional_variation(
                 elif error_pos.error_type == 'del':
                     error_matrix[msa_pos, 2] += 1
 
-        # Extract base composition from aligned sequence
+        # Extract base composition from aligned sequence with homopolymer normalization
         read_aligned = alignment.aligned_sequence
         if len(read_aligned) != msa_length:
             continue
 
         # Track what base each read has at each MSA position
+        # Use normalized alleles: homopolymer-equivalent bases count as consensus
         for msa_pos in range(msa_length):
             read_base = read_aligned[msa_pos]
+            cons_base = consensus_aligned[msa_pos]
 
-            # Normalize base
-            if read_base in ['A', 'C', 'G', 'T', '-']:
-                base_composition_matrix[msa_pos][read_base] += 1
+            # Determine base to count: use consensus if homopolymer-equivalent
+            base_to_count = read_base
+
+            # Check if this position is a homopolymer extension
+            if alignment.score_aligned and msa_pos < len(alignment.score_aligned):
+                if alignment.score_aligned[msa_pos] == '=':
+                    # Homopolymer extension - count as consensus base
+                    base_to_count = cons_base
+
+            # Normalize base (handle N and other ambiguous codes)
+            if base_to_count in ['A', 'C', 'G', 'T', '-']:
+                base_composition_matrix[msa_pos][base_to_count] += 1
             else:
                 # Treat N or other ambiguous as gap
                 base_composition_matrix[msa_pos]['-'] += 1
@@ -1660,11 +1674,12 @@ class SpecimenClusterer:
         variant_positions: List[Dict],
         alignments: Optional[List[ReadAlignment]] = None
     ) -> List[Tuple[str, Set[str]]]:
-        """Phase reads into haplotypes based on variant positions.
+        """Phase reads into haplotypes based on variant positions with homopolymer normalization.
 
         Splits a cluster into sub-clusters where each sub-cluster represents reads
-        sharing the same alleles at all variant positions. Every unique combination
-        of alleles observed in the data becomes a separate haplotype.
+        sharing the same alleles at all variant positions. Uses normalized alleles where
+        homopolymer-equivalent bases (score_aligned='=') are treated as the consensus base,
+        reducing spurious cluster splits due to homopolymer length variation.
 
         Args:
             msa_string: MSA in FASTA format from SPOA (used if alignments not provided)
@@ -1679,6 +1694,7 @@ class SpecimenClusterer:
 
             Allele combination format: bases separated by hyphens, in MSA position order
             Gap positions are represented as "-" (the gap character itself)
+            Uses normalized alleles (homopolymer-equivalent = consensus base)
         """
         if not variant_positions:
             # No variants to phase - return single group with all reads
@@ -1700,24 +1716,50 @@ class SpecimenClusterer:
                 logging.warning("No alignments found in MSA for phasing")
                 return [(None, cluster_read_ids)]
 
-            # Build read_sequences dict from alignments (using gapped sequences)
-            read_sequences = {
-                alignment.read_id: alignment.aligned_sequence
+            # Parse MSA to get consensus_aligned for normalized allele extraction
+            from io import StringIO
+            msa_handle = StringIO(msa_string)
+            records = list(SeqIO.parse(msa_handle, 'fasta'))
+
+            # Find consensus sequence in MSA
+            consensus_aligned = None
+            for record in records:
+                if 'Consensus' in record.description or 'Consensus' in record.id:
+                    consensus_aligned = str(record.seq).upper()
+                    break
+
+            if not consensus_aligned:
+                logging.warning("No consensus found in MSA for phasing")
+                return [(None, cluster_read_ids)]
+
+            # Build mapping from read_id to alignment (for score_aligned access)
+            read_to_alignment = {
+                alignment.read_id: alignment
                 for alignment in alignments
             }
 
             # Extract MSA positions for variants (sorted by position)
             variant_msa_positions = sorted([v['msa_position'] for v in variant_positions])
 
-            # For each read, extract alleles at variant positions
-            # Note: read_id is now the actual read ID (not seq{i})
+            # For each read, extract normalized alleles at variant positions
+            # Normalized: homopolymer-equivalent positions use consensus base
             read_to_alleles = {}
-            for read_id, aligned_seq in read_sequences.items():
-                # Extract allele at each variant position
+            for read_id, alignment in read_to_alignment.items():
+                aligned_seq = alignment.aligned_sequence
+                score_aligned = alignment.score_aligned
+
+                # Extract normalized allele at each variant position
                 alleles = []
                 for msa_pos in variant_msa_positions:
                     if msa_pos < len(aligned_seq):
                         allele = aligned_seq[msa_pos]
+
+                        # Use normalized allele if homopolymer-equivalent
+                        if score_aligned and msa_pos < len(score_aligned):
+                            if score_aligned[msa_pos] == '=':
+                                # Homopolymer extension - use consensus base
+                                allele = consensus_aligned[msa_pos]
+
                         alleles.append(allele)
                     else:
                         # Read doesn't cover this position - treat as gap
