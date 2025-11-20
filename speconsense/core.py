@@ -1641,6 +1641,13 @@ class SpecimenClusterer:
         homopolymer-equivalent bases (score_aligned='=') are treated as the consensus base,
         reducing spurious cluster splits due to homopolymer length variation.
 
+        Haplotype-level filtering prevents creation of too-small subclusters:
+        - Only haplotypes meeting min_variant_count AND min_variant_frequency are kept
+        - Frequency is calculated relative to total cluster size
+        - Reads with rare haplotypes are reassigned to the nearest qualifying haplotype
+        - If 0 or 1 qualifying haplotypes exist, the cluster is not split
+        - This prevents read loss and eliminates subclusters destined to be filtered
+
         Args:
             msa_string: MSA in FASTA format from SPOA (used if alignments not provided)
             consensus_seq: Ungapped consensus sequence
@@ -1655,6 +1662,9 @@ class SpecimenClusterer:
             Allele combination format: bases separated by hyphens, in MSA position order
             Gap positions are represented as "-" (the gap character itself)
             Uses normalized alleles (homopolymer-equivalent = consensus base)
+
+            If cluster should not be split (0-1 qualifying haplotypes), returns:
+            [(None, cluster_read_ids)]
         """
         if not variant_positions:
             # No variants to phase - return single group with all reads
@@ -1734,14 +1744,61 @@ class SpecimenClusterer:
             for read_id, allele_combo in read_to_alleles.items():
                 combo_to_reads[allele_combo].add(read_id)
 
+            # Apply haplotype-level thresholds to filter combinations
+            # This prevents creating subclusters that are too small to be useful
+            total_cluster_size = len(cluster_read_ids)
+            qualifying_combos = {}
+            non_qualifying_combos = {}
+
+            for combo, reads in combo_to_reads.items():
+                count = len(reads)
+                frequency = count / total_cluster_size if total_cluster_size > 0 else 0
+
+                # Check if this haplotype meets both thresholds (relative to total cluster)
+                if count >= self.min_variant_count and frequency >= self.min_variant_frequency:
+                    qualifying_combos[combo] = reads
+                else:
+                    non_qualifying_combos[combo] = reads
+
+            # If 0 or 1 qualifying haplotypes, don't split the cluster
+            if len(qualifying_combos) <= 1:
+                logging.debug(f"Only {len(qualifying_combos)} qualifying haplotype(s) found - not splitting cluster")
+                return [(None, cluster_read_ids)]
+
+            # Reassign reads from non-qualifying haplotypes to nearest qualifying haplotype
+            # This prevents read loss while maintaining biological accuracy
+            if non_qualifying_combos:
+                qualifying_combo_list = list(qualifying_combos.keys())
+
+                for non_qual_combo, non_qual_reads in non_qualifying_combos.items():
+                    # Find nearest qualifying haplotype using edlib (Levenshtein distance)
+                    min_distance = float('inf')
+                    nearest_combo = None
+
+                    for qual_combo in qualifying_combo_list:
+                        result = edlib.align(non_qual_combo, qual_combo)
+                        distance = result['editDistance']
+
+                        if distance < min_distance:
+                            min_distance = distance
+                            nearest_combo = qual_combo
+
+                    # Merge reads into nearest qualifying haplotype
+                    if nearest_combo is not None:
+                        qualifying_combos[nearest_combo].update(non_qual_reads)
+                        logging.debug(f"Reassigned {len(non_qual_reads)} reads from rare haplotype "
+                                     f"'{non_qual_combo}' to nearest haplotype '{nearest_combo}' "
+                                     f"(distance={min_distance})")
+
             # Convert to list of tuples
-            result = [(combo, reads) for combo, reads in combo_to_reads.items()]
+            result = [(combo, reads) for combo, reads in qualifying_combos.items()]
 
             # Sort by size (largest first) for consistency
             result.sort(key=lambda x: len(x[1]), reverse=True)
 
-            logging.debug(f"Phased {len(cluster_read_ids)} reads into {len(result)} haplotypes "
-                         f"based on {len(variant_positions)} variant positions")
+            logging.debug(f"Phased {len(cluster_read_ids)} reads into {len(result)} qualifying haplotypes "
+                         f"based on {len(variant_positions)} variant positions "
+                         f"(reassigned {len(non_qualifying_combos)} rare haplotypes)")
 
             return result
 
