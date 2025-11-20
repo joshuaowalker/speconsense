@@ -20,6 +20,9 @@ import subprocess
 from tqdm import tqdm
 import numpy as np
 import matplotlib
+
+# Import homopolymer-aware alignment functions from core
+from speconsense.core import extract_alignments_from_msa, ReadAlignment
 matplotlib.use('Agg')  # Non-interactive backend
 import matplotlib.pyplot as plt
 from io import StringIO
@@ -1596,90 +1599,16 @@ def classify_mismatch_significance(
     return 2
 
 
-def extract_alignments_from_msa(msa_input: str) -> Tuple[List, str, Dict[int, Optional[int]]]:
-    """
-    Extract read alignments from an MSA file or string.
-
-    This is a simplified version from analyze.py focused on getting aligned sequences.
-
-    Args:
-        msa_input: Path to MSA FASTA file OR MSA content as string
-
-    Returns:
-        Tuple of:
-        - list of (read_id, aligned_sequence) tuples
-        - consensus sequence without gaps
-        - mapping from MSA position to consensus position (None for insertion columns)
-    """
-    # Determine if input is MSA content (string with newlines) or file path
-    if '\n' in msa_input:
-        # Input is MSA content as string - use StringIO
-        msa_handle = StringIO(msa_input)
-    else:
-        # Input is file path - validate and use directly
-        if not os.path.exists(msa_input):
-            logging.warning(f"MSA file not found: {msa_input}")
-            return [], "", {}
-        msa_handle = msa_input
-
-    # Parse MSA
-    try:
-        records = list(SeqIO.parse(msa_handle, 'fasta'))
-    except Exception as e:
-        logging.warning(f"Failed to parse MSA: {e}")
-        return [], "", {}
-
-    if not records:
-        logging.warning(f"No sequences found in MSA")
-        return [], "", {}
-
-    # Find consensus sequence
-    consensus_record = None
-    read_records = []
-
-    for record in records:
-        if 'Consensus' in record.description or 'Consensus' in record.id:
-            consensus_record = record
-        else:
-            read_records.append(record)
-
-    if consensus_record is None:
-        logging.warning(f"No consensus sequence found in MSA")
-        return [], "", {}
-
-    consensus_aligned = str(consensus_record.seq).upper()
-    msa_length = len(consensus_aligned)
-
-    # Build mapping from MSA position to consensus position
-    msa_to_consensus_pos = {}
-    consensus_pos = 0
-    for msa_pos in range(msa_length):
-        if consensus_aligned[msa_pos] != '-':
-            msa_to_consensus_pos[msa_pos] = consensus_pos
-            consensus_pos += 1
-        else:
-            msa_to_consensus_pos[msa_pos] = None
-
-    # Get consensus without gaps
-    consensus_ungapped = consensus_aligned.replace('-', '')
-
-    # Extract read alignments
-    alignments = []
-    for record in read_records:
-        read_id = record.id
-        read_aligned = str(record.seq).upper()
-        alignments.append((read_id, read_aligned))
-
-    return alignments, consensus_ungapped, msa_to_consensus_pos
-
-
 def build_alignment_matrix(
     msa_file: str,
     consensus_seq: str,
     max_reads: Optional[int] = None
 ) -> Optional[AlignmentMatrix]:
     """
-    Build alignment matrix from MSA file.
+    Build alignment matrix from MSA file with homopolymer-aware classification.
+
+    Uses the same homopolymer normalization approach as core.py's variant phasing
+    to ensure consistent treatment of homopolymer length differences across the pipeline.
 
     Args:
         msa_file: Path to MSA FASTA file
@@ -1693,8 +1622,20 @@ def build_alignment_matrix(
         logging.debug(f"MSA file not found: {msa_file}")
         return None
 
-    # Extract alignments from MSA
-    alignments, msa_consensus, msa_to_consensus_pos = extract_alignments_from_msa(msa_file)
+    # Load MSA file content
+    try:
+        with open(msa_file, 'r') as f:
+            msa_string = f.read()
+    except Exception as e:
+        logging.debug(f"Failed to read MSA file {msa_file}: {e}")
+        return None
+
+    # Extract alignments from MSA using core.py function with homopolymer normalization
+    # This returns ReadAlignment objects with score_aligned field
+    alignments, msa_consensus, msa_to_consensus_pos = extract_alignments_from_msa(
+        msa_string,
+        enable_homopolymer_normalization=True
+    )
 
     if not alignments:
         logging.debug(f"No alignments found in MSA: {msa_file}")
@@ -1714,13 +1655,8 @@ def build_alignment_matrix(
         logging.debug(f"Empty consensus sequence: {msa_file}")
         return None
 
-    # Get consensus aligned sequence
-    # Re-parse to get consensus aligned
-    if '\n' in msa_file:
-        msa_handle = StringIO(msa_file)
-    else:
-        msa_handle = msa_file
-
+    # Get consensus aligned sequence by parsing MSA string
+    msa_handle = StringIO(msa_string)
     records = list(SeqIO.parse(msa_handle, 'fasta'))
     consensus_aligned = None
     for record in records:
@@ -1736,15 +1672,13 @@ def build_alignment_matrix(
 
     # Downsample reads if needed
     if max_reads and len(alignments) > max_reads:
-        # Sort by read identity (edit distance) and take worst reads first, then best
+        # Sort by read identity (using normalized edit distance) and take worst reads first, then best
         # This gives us a representative sample showing the quality range
         read_identities_temp = []
-        for read_id, read_aligned in alignments:
-            # Quick edit distance calculation
-            edit_dist = sum(1 for i in range(min(len(read_aligned), len(consensus_aligned)))
-                          if read_aligned[i] != consensus_aligned[i])
-            identity = 1.0 - (edit_dist / consensus_length) if consensus_length > 0 else 0.0
-            read_identities_temp.append((identity, read_id, read_aligned))
+        for alignment in alignments:
+            # Use normalized edit distance for identity calculation
+            identity = 1.0 - (alignment.normalized_edit_distance / consensus_length) if consensus_length > 0 else 0.0
+            read_identities_temp.append((identity, alignment))
 
         # Sort by identity
         read_identities_temp.sort(key=lambda x: x[0])
@@ -1754,24 +1688,26 @@ def build_alignment_matrix(
         n_best = max_reads - n_worst
         sampled = read_identities_temp[:n_worst] + read_identities_temp[-n_best:]
 
-        alignments = [(rid, ralign) for _, rid, ralign in sampled]
+        alignments = [alignment for _, alignment in sampled]
         logging.debug(f"Downsampled {len(read_identities_temp)} reads to {len(alignments)} for visualization")
 
     num_reads = len(alignments)
 
-    # Build matrix
+    # Build matrix with homopolymer-aware classification
     matrix = np.zeros((num_reads, consensus_length), dtype=np.uint8)
     read_ids = []
     read_identities = []
 
-    for read_idx, (read_id, read_aligned) in enumerate(alignments):
-        read_ids.append(read_id)
+    for read_idx, alignment in enumerate(alignments):
+        read_ids.append(alignment.read_id)
+        read_aligned = alignment.aligned_sequence
+        score_aligned = alignment.score_aligned
 
         if len(read_aligned) != msa_length:
-            logging.warning(f"Read {read_id} length mismatch with MSA")
+            logging.warning(f"Read {alignment.read_id} length mismatch with MSA")
             continue
 
-        # Classify each position
+        # Classify each position using score_aligned from adjusted-identity
         num_matches = 0
         num_errors = 0
 
@@ -1782,9 +1718,28 @@ def build_alignment_matrix(
 
             # Only fill matrix for consensus positions (skip insertion columns)
             if cons_pos is not None:
-                classification = classify_mismatch_significance(
-                    read_base, cons_base, cons_pos, consensus_seq
-                )
+                # Use score_aligned to determine classification
+                # '|' = match, '=' = homopolymer-equivalent (insignificant), ' ' = error
+                if msa_pos < len(score_aligned):
+                    score_char = score_aligned[msa_pos]
+                    if score_char == '|':
+                        # Exact match
+                        classification = 0
+                    elif score_char == '=':
+                        # Homopolymer-equivalent (treat as insignificant)
+                        classification = 1
+                    else:
+                        # Error (substitution or structural indel)
+                        classification = 2
+                else:
+                    # Fallback: if score_aligned not available, check for exact match
+                    if read_base != '-' and cons_base != '-' and read_base == cons_base:
+                        classification = 0
+                    elif read_base == '-' and cons_base == '-':
+                        classification = 3  # Gap
+                    else:
+                        classification = 2  # Error
+
                 matrix[read_idx, cons_pos] = classification
 
                 if classification == 0:
@@ -1792,19 +1747,23 @@ def build_alignment_matrix(
                 elif classification in [1, 2]:
                     num_errors += 1
 
-        # Calculate read identity
+        # Calculate read identity (matches / (matches + errors))
         total_positions = num_matches + num_errors
         identity = num_matches / total_positions if total_positions > 0 else 0.0
         read_identities.append(identity)
 
     # Calculate per-position error rates
+    # Classification: 0=match, 1=homopolymer-equivalent (insignificant), 2=error, 3=gap
+    # For positional analysis, count only classification 2 as errors
+    # Homopolymer-equivalent positions (1) are treated like matches
     position_error_rates = []
     for pos in range(consensus_length):
         column = matrix[:, pos]
         # Count non-matches (excluding gaps=3)
         non_gap_positions = column[column != 3]
         if len(non_gap_positions) > 0:
-            errors = np.sum((non_gap_positions == 1) | (non_gap_positions == 2))
+            # Only count classification 2 (true errors), not classification 1 (homopolymer-equivalent)
+            errors = np.sum(non_gap_positions == 2)
             error_rate = errors / len(non_gap_positions)
         else:
             error_rate = 0.0
