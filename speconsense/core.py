@@ -705,10 +705,13 @@ class SpecimenClusterer:
         n = len(self.sequences)
         total_comparisons = (n * (n - 1)) // 2
 
+        # Sort sequence IDs for deterministic order
+        seq_ids = sorted(self.sequences.keys())
+
         with tqdm(total=total_comparisons, desc="Calculating pairwise sequence similarities") as pbar:
-            for id1 in self.sequences:
+            for id1 in seq_ids:
                 similarities[id1] = {}
-                for id2 in self.sequences:
+                for id2 in seq_ids:
                     if id1 >= id2:  # Only calculate upper triangle
                         continue
                     sim = self.calculate_similarity(self.sequences[id1], self.sequences[id2])
@@ -721,7 +724,7 @@ class SpecimenClusterer:
         min_edges_per_node = 3  # Ensure at least some connections per node
 
         with open(output_file, 'w') as f:
-            for id1 in self.sequences:
+            for id1 in seq_ids:
                 short_id1 = self.rev_id_map[id1]
 
                 # Sort neighbors by similarity
@@ -818,11 +821,20 @@ class SpecimenClusterer:
                         mean_quality = statistics.mean(record.letter_annotations["phred_quality"])
                         qualities.append((mean_quality, seq_id))
 
+                    # Sort by quality (descending), then by read ID (ascending) for deterministic tie-breaking
                     sampled_ids = [seq_id for _, seq_id in
-                                   sorted(qualities, reverse=True)[:self.max_sample_size]]
+                                   sorted(qualities, key=lambda x: (-x[0], x[1]))[:self.max_sample_size]]
                     sampled_seqs = {seq_id: self.sequences[seq_id] for seq_id in sampled_ids}
                 else:
-                    sampled_seqs = {seq_id: self.sequences[seq_id] for seq_id in cluster_reads}
+                    # Sort all reads by quality for optimal SPOA ordering
+                    qualities = []
+                    for seq_id in cluster_reads:
+                        record = self.records[seq_id]
+                        mean_quality = statistics.mean(record.letter_annotations["phred_quality"])
+                        qualities.append((mean_quality, seq_id))
+                    sorted_ids = [seq_id for _, seq_id in
+                                  sorted(qualities, key=lambda x: (-x[0], x[1]))]
+                    sampled_seqs = {seq_id: self.sequences[seq_id] for seq_id in sorted_ids}
 
                 result = self.run_spoa(sampled_seqs)
 
@@ -866,12 +878,19 @@ class SpecimenClusterer:
         merged = []
         merged_indices = set()
 
+        # Determine merge type for logging
+        merge_type = "identical" if self.disable_homopolymer_equivalence else "homopolymer-equivalent"
+
         # Handle clusters with equivalent consensus sequences
         for equivalent_clusters in consensus_to_clusters.values():
             if len(equivalent_clusters) > 1:
                 # Merge clusters with equivalent consensus
                 merged_read_ids = set()
                 merged_from_list = []
+
+                # Check if we're merging phased subclusters from the same initial cluster
+                initial_clusters_involved = set()
+                phased_subclusters_merged = []
 
                 for idx in equivalent_clusters:
                     merged_read_ids.update(clusters[idx]['read_ids'])
@@ -884,6 +903,21 @@ class SpecimenClusterer:
                         'size': len(clusters[idx]['read_ids'])
                     }
                     merged_from_list.append(cluster_info)
+
+                    # Track if phased subclusters are being merged
+                    if clusters[idx].get('allele_combo') is not None:
+                        phased_subclusters_merged.append(cluster_info)
+                        initial_clusters_involved.add(clusters[idx]['initial_cluster_num'])
+
+                # Warn if we're merging phased subclusters that came from the same initial cluster
+                if len(phased_subclusters_merged) > 1 and len(initial_clusters_involved) == 1:
+                    initial_cluster = list(initial_clusters_involved)[0]
+                    logging.warning(
+                        f"Merging {len(phased_subclusters_merged)} phased subclusters from initial cluster {initial_cluster} "
+                        f"back together (consensus sequences are {merge_type}). Phasing split is being undone!"
+                    )
+                    for info in phased_subclusters_merged:
+                        logging.debug(f"  Subcluster: allele_combo='{info['allele_combo']}', size={info['size']}")
 
                 # Create merged cluster with provenance
                 merged_cluster = {
@@ -901,7 +935,6 @@ class SpecimenClusterer:
             if i not in merged_indices:
                 merged.append(cluster_dict)
 
-        merge_type = "identical" if self.disable_homopolymer_equivalence else "homopolymer-equivalent"
         if len(merged) < len(clusters):
             logging.info(f"Merged {len(clusters) - len(merged)} clusters with {merge_type} consensus sequences")
         else:
@@ -1075,7 +1108,8 @@ class SpecimenClusterer:
         """Calculate all pairwise similarities between sequences."""
         logging.info("Calculating pairwise sequence similarities...")
 
-        seq_ids = list(self.sequences.keys())
+        # Sort for deterministic order
+        seq_ids = sorted(self.sequences.keys())
         total = len(seq_ids) * (len(seq_ids) - 1) // 2
 
         with tqdm(total=total, desc="Building similarity matrix") as pbar:
@@ -1101,19 +1135,21 @@ class SpecimenClusterer:
         best_members = set()
         best_count = -1
 
-        for seq_id in available_ids:
+        # Sort for deterministic iteration (important for tie-breaking)
+        for seq_id in sorted(available_ids):
             # Get all sequences that align with current sequence
             members = {other_id for other_id in self.alignments.get(seq_id, {})
                        if other_id in available_ids}
 
+            # Use > (not >=) so first alphabetically wins ties
             if len(members) > best_count:
                 best_count = len(members)
                 best_center = seq_id
                 best_members = members
 
         if best_center is None:
-            # No alignments found, create singleton cluster with first available sequence
-            singleton_id = next(iter(available_ids))
+            # No alignments found, create singleton cluster with smallest ID
+            singleton_id = min(available_ids)
             return singleton_id, {singleton_id}
 
         best_members.add(best_center)  # Include center in cluster
@@ -1170,13 +1206,24 @@ class SpecimenClusterer:
                         record = self.records[seq_id]
                         mean_quality = statistics.mean(record.letter_annotations["phred_quality"])
                         qualities.append((mean_quality, seq_id))
-                    sampled_ids = {seq_id for _, seq_id in
-                                   sorted(qualities, reverse=True)[:self.max_sample_size]}
+                    # Sort by quality (descending), then by read ID (ascending) for deterministic tie-breaking
+                    sorted_ids = [seq_id for _, seq_id in
+                                  sorted(qualities, key=lambda x: (-x[0], x[1]))[:self.max_sample_size]]
+                    sampled_ids = set(sorted_ids)  # Keep set for membership testing
                 else:
+                    # Sort all reads by quality for optimal SPOA ordering
+                    qualities = []
+                    for seq_id in cluster:
+                        record = self.records[seq_id]
+                        mean_quality = statistics.mean(record.letter_annotations["phred_quality"])
+                        qualities.append((mean_quality, seq_id))
+                    sorted_ids = [seq_id for _, seq_id in
+                                  sorted(qualities, key=lambda x: (-x[0], x[1]))]
                     sampled_ids = cluster
 
                 # Generate consensus and MSA
-                sampled_seqs = {seq_id: self.sequences[seq_id] for seq_id in sampled_ids}
+                # Pass sequences to SPOA in quality-descending order
+                sampled_seqs = {seq_id: self.sequences[seq_id] for seq_id in sorted_ids}
                 result = self.run_spoa(sampled_seqs)
 
                 if result is None:
@@ -1209,7 +1256,17 @@ class SpecimenClusterer:
                         cluster = cluster - outlier_ids
 
                         # Regenerate consensus with filtered reads
-                        sampled_seqs = {seq_id: self.sequences[seq_id] for seq_id in sampled_ids}
+                        # Re-sort by quality after outlier removal
+                        qualities_filtered = []
+                        for seq_id in sampled_ids:
+                            record = self.records[seq_id]
+                            mean_quality = statistics.mean(record.letter_annotations["phred_quality"])
+                            qualities_filtered.append((mean_quality, seq_id))
+                        sorted_ids_filtered = [seq_id for _, seq_id in
+                                              sorted(qualities_filtered, key=lambda x: (-x[0], x[1]))]
+
+                        # Pass sequences to SPOA in quality-descending order
+                        sampled_seqs = {seq_id: self.sequences[seq_id] for seq_id in sorted_ids_filtered}
                         result = self.run_spoa(sampled_seqs)
 
                         # Recalculate identity metrics
@@ -1306,13 +1363,24 @@ class SpecimenClusterer:
                             record = self.records[seq_id]
                             mean_quality = statistics.mean(record.letter_annotations["phred_quality"])
                             qualities.append((mean_quality, seq_id))
-                        sampled_ids = {seq_id for _, seq_id in
-                                       sorted(qualities, reverse=True)[:self.max_sample_size]}
+                        # Sort by quality (descending), then by read ID (ascending) for deterministic tie-breaking
+                        sorted_ids = [seq_id for _, seq_id in
+                                      sorted(qualities, key=lambda x: (-x[0], x[1]))[:self.max_sample_size]]
+                        sampled_ids = set(sorted_ids)  # Keep set for membership testing
                     else:
+                        # Sort all reads by quality for optimal SPOA ordering
+                        qualities = []
+                        for seq_id in cluster:
+                            record = self.records[seq_id]
+                            mean_quality = statistics.mean(record.letter_annotations["phred_quality"])
+                            qualities.append((mean_quality, seq_id))
+                        sorted_ids = [seq_id for _, seq_id in
+                                      sorted(qualities, key=lambda x: (-x[0], x[1]))]
                         sampled_ids = cluster
 
                     # Generate final consensus and MSA
-                    sampled_seqs = {seq_id: self.sequences[seq_id] for seq_id in sampled_ids}
+                    # Pass sequences to SPOA in quality-descending order
+                    sampled_seqs = {seq_id: self.sequences[seq_id] for seq_id in sorted_ids}
                     result = self.run_spoa(sampled_seqs)
 
                     # Calculate final identity metrics
@@ -1602,6 +1670,8 @@ class SpecimenClusterer:
 
             # Identify variant positions
             variant_positions = []
+            high_error_not_variants = []  # Track positions with high error but not detected as variants
+
             for pos_stat in position_stats:
                 is_variant, variant_bases, reason = is_variant_position_with_composition(
                     pos_stat,
@@ -1619,6 +1689,36 @@ class SpecimenClusterer:
                         'error_rate': pos_stat.error_rate,
                         'reason': reason
                     })
+                elif pos_stat.error_rate >= self.min_variant_frequency:
+                    # High error but didn't meet variant criteria (scattered errors)
+                    high_error_not_variants.append({
+                        'msa_position': pos_stat.msa_position,
+                        'error_rate': pos_stat.error_rate,
+                        'base_composition': pos_stat.base_composition,
+                        'reason': reason
+                    })
+
+            # Debug logging for variant detection results
+            if variant_positions:
+                logging.debug(f"Variant detection: Found {len(variant_positions)} variant positions "
+                            f"(thresholds: freq >= {self.min_variant_frequency*100:.1f}%, "
+                            f"count >= {self.min_variant_count})")
+                for var in variant_positions:
+                    cons_pos_str = f"consensus:{var['consensus_position']}" if var['consensus_position'] is not None else "insertion"
+                    logging.debug(f"  MSA pos {var['msa_position']} ({cons_pos_str}): "
+                                f"error={var['error_rate']*100:.1f}%, variants={var['variant_bases']}, "
+                                f"composition={var['base_composition']}")
+            else:
+                logging.debug(f"Variant detection: No variant positions detected "
+                            f"(thresholds: freq >= {self.min_variant_frequency*100:.1f}%, "
+                            f"count >= {self.min_variant_count})")
+
+            if high_error_not_variants:
+                logging.debug(f"Note: {len(high_error_not_variants)} positions have error >= {self.min_variant_frequency*100:.1f}% "
+                            f"but no single alternative allele meets both thresholds (scattered errors)")
+                for pos_info in high_error_not_variants[:3]:  # Show first 3 examples
+                    logging.debug(f"  MSA pos {pos_info['msa_position']}: error={pos_info['error_rate']*100:.1f}%, "
+                                f"composition={pos_info['base_composition']}")
 
             return variant_positions
 
@@ -1744,6 +1844,11 @@ class SpecimenClusterer:
             for read_id, allele_combo in read_to_alleles.items():
                 combo_to_reads[allele_combo].add(read_id)
 
+            # Debug: Report all allele combinations found
+            logging.debug(f"Phasing analysis: Found {len(combo_to_reads)} distinct haplotypes from {len(variant_positions)} variant positions")
+            for combo, reads in sorted(combo_to_reads.items(), key=lambda x: len(x[1]), reverse=True):
+                logging.debug(f"  Haplotype '{combo}': {len(reads)} reads ({len(reads)/len(cluster_read_ids)*100:.1f}%)")
+
             # Apply haplotype-level thresholds to filter combinations
             # This prevents creating subclusters that are too small to be useful
             total_cluster_size = len(cluster_read_ids)
@@ -1757,17 +1862,39 @@ class SpecimenClusterer:
                 # Check if this haplotype meets both thresholds (relative to total cluster)
                 if count >= self.min_variant_count and frequency >= self.min_variant_frequency:
                     qualifying_combos[combo] = reads
+                    logging.debug(f"  ✓ Haplotype '{combo}' qualifies: {count} reads ({frequency*100:.1f}%) "
+                                f"[>= {self.min_variant_count} reads AND >= {self.min_variant_frequency*100:.1f}%]")
                 else:
                     non_qualifying_combos[combo] = reads
+                    # Determine which criterion failed
+                    count_ok = count >= self.min_variant_count
+                    freq_ok = frequency >= self.min_variant_frequency
+                    reason = []
+                    if not count_ok:
+                        reason.append(f"count {count} < {self.min_variant_count}")
+                    if not freq_ok:
+                        reason.append(f"freq {frequency*100:.1f}% < {self.min_variant_frequency*100:.1f}%")
+                    logging.debug(f"  ✗ Haplotype '{combo}' does not qualify: {count} reads ({frequency*100:.1f}%) "
+                                f"[{', '.join(reason)}]")
 
             # If 0 or 1 qualifying haplotypes, don't split the cluster
             if len(qualifying_combos) <= 1:
-                logging.debug(f"Only {len(qualifying_combos)} qualifying haplotype(s) found - not splitting cluster")
+                logging.info(f"Phasing decision: NOT splitting cluster "
+                           f"({len(qualifying_combos)} qualifying haplotype(s) found, need >= 2)")
+                logging.debug(f"  Total haplotypes found: {len(combo_to_reads)}")
+                logging.debug(f"  Qualifying: {len(qualifying_combos)}")
+                logging.debug(f"  Non-qualifying: {len(non_qualifying_combos)}")
                 return [(None, cluster_read_ids)]
+
+            # At this point we have >= 2 qualifying haplotypes, so we will split
+            logging.info(f"Phasing decision: SPLITTING cluster into {len(qualifying_combos)} haplotypes")
+            for combo, reads in sorted(qualifying_combos.items(), key=lambda x: len(x[1]), reverse=True):
+                logging.debug(f"  Qualifying haplotype '{combo}': {len(reads)} reads ({len(reads)/total_cluster_size*100:.1f}%)")
 
             # Reassign reads from non-qualifying haplotypes to nearest qualifying haplotype
             # This prevents read loss while maintaining biological accuracy
             if non_qualifying_combos:
+                logging.debug(f"Reassigning {len(non_qualifying_combos)} non-qualifying haplotype(s):")
                 qualifying_combo_list = list(qualifying_combos.keys())
 
                 for non_qual_combo, non_qual_reads in non_qualifying_combos.items():
@@ -1786,9 +1913,8 @@ class SpecimenClusterer:
                     # Merge reads into nearest qualifying haplotype
                     if nearest_combo is not None:
                         qualifying_combos[nearest_combo].update(non_qual_reads)
-                        logging.debug(f"Reassigned {len(non_qual_reads)} reads from rare haplotype "
-                                     f"'{non_qual_combo}' to nearest haplotype '{nearest_combo}' "
-                                     f"(distance={min_distance})")
+                        logging.debug(f"  '{non_qual_combo}' ({len(non_qual_reads)} reads) → "
+                                     f"'{nearest_combo}' (edit distance={min_distance})")
 
             # Convert to list of tuples
             result = [(combo, reads) for combo, reads in qualifying_combos.items()]
@@ -1796,9 +1922,10 @@ class SpecimenClusterer:
             # Sort by size (largest first) for consistency
             result.sort(key=lambda x: len(x[1]), reverse=True)
 
-            logging.debug(f"Phased {len(cluster_read_ids)} reads into {len(result)} qualifying haplotypes "
-                         f"based on {len(variant_positions)} variant positions "
-                         f"(reassigned {len(non_qualifying_combos)} rare haplotypes)")
+            # Final summary with per-haplotype counts
+            logging.info(f"Phasing complete: Split {len(cluster_read_ids)} reads into {len(result)} haplotypes")
+            for i, (combo, reads) in enumerate(result, 1):
+                logging.debug(f"  Haplotype {i}: '{combo}' with {len(reads)} reads ({len(reads)/len(cluster_read_ids)*100:.1f}%)")
 
             return result
 

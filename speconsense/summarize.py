@@ -22,7 +22,7 @@ import numpy as np
 import matplotlib
 
 # Import homopolymer-aware alignment functions from core
-from speconsense.core import extract_alignments_from_msa, ReadAlignment
+from speconsense.core import extract_alignments_from_msa, ReadAlignment, analyze_positional_variation
 matplotlib.use('Agg')  # Non-interactive backend
 import matplotlib.pyplot as plt
 from io import StringIO
@@ -91,14 +91,11 @@ class ConsensusInfo(NamedTuple):
     num_variants: Optional[int] = None  # Number of variant positions detected
 
 
-class AlignmentMatrix(NamedTuple):
-    """Alignment matrix for visualization."""
+class ClusterQualityData(NamedTuple):
+    """Quality metrics for a cluster (no visualization matrix)."""
     consensus_seq: str
-    read_ids: List[str]
-    matrix: np.ndarray  # Shape: (num_reads, consensus_length)
-                        # Values: 0=match, 1=insignificant, 2=significant, 3=gap
+    position_error_rates: List[float]  # Per-position error rates (0-1) in consensus space
     read_identities: List[float]  # Per-read identity scores (0-1)
-    position_error_rates: List[float]  # Per-position error rates (0-1)
 
 
 # FASTA field customization support
@@ -712,11 +709,12 @@ def analyze_positional_identity_outliers(
             'max_error_rate': float,
             'mean_error_rate': float,
             'outlier_threshold': float,
-            'outlier_positions': List of (position, error_rate) tuples,
-            'homopolymer_mean': float,
-            'non_homopolymer_mean': float
+            'outlier_positions': List of (position, error_rate) tuples
         }
         Returns None if MSA file not found or analysis fails
+
+        Note: Error rates already exclude homopolymer length differences due to
+        homopolymer normalization in analyze_positional_variation()
     """
     # Skip analysis for low-RiC sequences (insufficient data for meaningful statistics)
     # Need at least 2 * min_variant_count to confidently phase two variants
@@ -761,14 +759,14 @@ def analyze_positional_identity_outliers(
         logging.debug(f"No MSA file found for {original_cluster_name}")
         return None
 
-    # Build alignment matrix
-    alignment_matrix = build_alignment_matrix(msa_file, consensus_info.sequence)
+    # Analyze cluster quality using core.py's positional analysis
+    quality_data = analyze_cluster_quality(msa_file, consensus_info.sequence)
 
-    if not alignment_matrix or not alignment_matrix.position_error_rates:
-        logging.debug(f"Failed to build alignment matrix for {base_name}")
+    if not quality_data or not quality_data.position_error_rates:
+        logging.debug(f"Failed to analyze cluster quality for {original_cluster_name}")
         return None
 
-    position_error_rates = alignment_matrix.position_error_rates
+    position_error_rates = quality_data.position_error_rates
 
     # Calculate statistics
     mean_error = np.mean(position_error_rates)
@@ -782,48 +780,12 @@ def analyze_positional_identity_outliers(
         if rate > threshold
     ]
 
-    # Calculate homopolymer vs non-homopolymer stats
-    # (reuse logic from render_positional_identity_histogram if needed)
-    homopolymer_rates = []
-    non_homopolymer_rates = []
-
-    seq = consensus_info.sequence
-    for i, rate in enumerate(position_error_rates):
-        if i < len(seq):
-            # Simple homopolymer detection: check if position is in run of 4+ same base
-            is_homopoly = False
-            base = seq[i]
-            if base in 'ACGT':
-                # Check if part of 4+ run
-                run_length = 1
-                # Count backwards
-                j = i - 1
-                while j >= 0 and seq[j] == base:
-                    run_length += 1
-                    j -= 1
-                # Count forwards
-                j = i + 1
-                while j < len(seq) and seq[j] == base:
-                    run_length += 1
-                    j += 1
-                is_homopoly = run_length >= 4
-
-            if is_homopoly:
-                homopolymer_rates.append(rate)
-            else:
-                non_homopolymer_rates.append(rate)
-
-    homopolymer_mean = np.mean(homopolymer_rates) if homopolymer_rates else 0.0
-    non_homopolymer_mean = np.mean(non_homopolymer_rates) if non_homopolymer_rates else 0.0
-
     return {
         'num_outlier_positions': len(outlier_positions),
         'max_error_rate': max_error,
         'mean_error_rate': mean_error,
         'outlier_threshold': threshold,
-        'outlier_positions': outlier_positions,
-        'homopolymer_mean': homopolymer_mean,
-        'non_homopolymer_mean': non_homopolymer_mean
+        'outlier_positions': outlier_positions
     }
 
 
@@ -1519,96 +1481,16 @@ def calculate_adjusted_identity_distance(seq1: str, seq2: str) -> float:
 # Alignment Matrix Visualization Functions
 # ============================================================================
 
-def detect_homopolymer_run(seq: str, position: int, min_length: int = 4) -> bool:
-    """
-    Check if a position is within a homopolymer run.
-
-    Args:
-        seq: DNA sequence
-        position: Position to check (0-indexed)
-        min_length: Minimum length of homopolymer to detect
-
-    Returns:
-        True if position is within a homopolymer run of min_length or longer
-    """
-    if position >= len(seq) or position < 0:
-        return False
-
-    base = seq[position]
-    if base == '-':
-        return False
-
-    # Find start of run
-    start = position
-    while start > 0 and seq[start - 1] == base:
-        start -= 1
-
-    # Find end of run
-    end = position
-    while end < len(seq) - 1 and seq[end + 1] == base:
-        end += 1
-
-    run_length = end - start + 1
-    return run_length >= min_length
-
-
-def classify_mismatch_significance(
-    read_base: str,
-    cons_base: str,
-    cons_position: Optional[int],
-    consensus_seq: str
-) -> int:
-    """
-    Classify a mismatch as match, insignificant (homopolymer), or significant.
-
-    Args:
-        read_base: Base from read at this MSA position
-        cons_base: Base from consensus at this MSA position
-        cons_position: Position in ungapped consensus (None for insertion columns)
-        consensus_seq: Ungapped consensus sequence
-
-    Returns:
-        0: Match
-        1: Insignificant mismatch (homopolymer length variation)
-        2: Significant mismatch (substitution or structural indel)
-        3: Gap (both have gaps - read doesn't cover this position)
-    """
-    # Both have gaps - not covered
-    if read_base == '-' and cons_base == '-':
-        return 3
-
-    # Exact match
-    if read_base != '-' and cons_base != '-' and read_base == cons_base:
-        return 0
-
-    # Deletion in read (read has gap, consensus has base)
-    if read_base == '-' and cons_base != '-':
-        # Check if consensus position is in homopolymer run
-        if cons_position is not None and detect_homopolymer_run(consensus_seq, cons_position, min_length=4):
-            return 1  # Insignificant (homopolymer deletion)
-        return 2  # Significant deletion
-
-    # Insertion in read (consensus has gap, read has base)
-    if read_base != '-' and cons_base == '-':
-        # Insertions are harder to classify without read context
-        # For now, treat all as significant
-        return 2
-
-    # Substitution (both have bases but different)
-    # Could enhance: check if within homopolymer run context
-    return 2
-
-
-def build_alignment_matrix(
+def analyze_cluster_quality(
     msa_file: str,
     consensus_seq: str,
     max_reads: Optional[int] = None
-) -> Optional[AlignmentMatrix]:
+) -> Optional[ClusterQualityData]:
     """
-    Build alignment matrix from MSA file with homopolymer-aware classification.
+    Analyze cluster quality using core.py's analyze_positional_variation().
 
-    Uses the same homopolymer normalization approach as core.py's variant phasing
-    to ensure consistent treatment of homopolymer length differences across the pipeline.
+    Uses the canonical positional analysis from core.py to ensure consistent
+    treatment of homopolymer length differences across the pipeline.
 
     Args:
         msa_file: Path to MSA FASTA file
@@ -1616,7 +1498,7 @@ def build_alignment_matrix(
         max_reads: Maximum reads to include (for downsampling large clusters)
 
     Returns:
-        AlignmentMatrix with classified positions, or None if failed
+        ClusterQualityData with position error rates and read identities, or None if failed
     """
     if not os.path.exists(msa_file):
         logging.debug(f"MSA file not found: {msa_file}")
@@ -1668,8 +1550,6 @@ def build_alignment_matrix(
         logging.debug(f"No consensus found in MSA: {msa_file}")
         return None
 
-    msa_length = len(consensus_aligned)
-
     # Downsample reads if needed
     if max_reads and len(alignments) > max_reads:
         # Sort by read identity (using normalized edit distance) and take worst reads first, then best
@@ -1689,240 +1569,39 @@ def build_alignment_matrix(
         sampled = read_identities_temp[:n_worst] + read_identities_temp[-n_best:]
 
         alignments = [alignment for _, alignment in sampled]
-        logging.debug(f"Downsampled {len(read_identities_temp)} reads to {len(alignments)} for visualization")
+        logging.debug(f"Downsampled {len(read_identities_temp)} reads to {len(alignments)} for analysis")
 
-    num_reads = len(alignments)
+    # Use core.py's canonical positional analysis
+    position_stats = analyze_positional_variation(
+        alignments,
+        consensus_seq,
+        consensus_aligned,
+        msa_to_consensus_pos,
+        0.0  # overall_error_rate (unused parameter)
+    )
 
-    # Build matrix with homopolymer-aware classification
-    matrix = np.zeros((num_reads, consensus_length), dtype=np.uint8)
-    read_ids = []
+    # Extract position error rates for consensus positions only (skip insertion columns)
+    consensus_position_stats = [ps for ps in position_stats if ps.consensus_position is not None]
+    # Sort by consensus position to ensure correct order
+    consensus_position_stats.sort(key=lambda ps: ps.consensus_position)
+    position_error_rates = [ps.error_rate for ps in consensus_position_stats]
+
+    # Calculate per-read identities from alignments
     read_identities = []
-
-    for read_idx, alignment in enumerate(alignments):
-        read_ids.append(alignment.read_id)
-        read_aligned = alignment.aligned_sequence
-        score_aligned = alignment.score_aligned
-
-        if len(read_aligned) != msa_length:
-            logging.warning(f"Read {alignment.read_id} length mismatch with MSA")
-            continue
-
-        # Classify each position using score_aligned from adjusted-identity
-        num_matches = 0
-        num_errors = 0
-
-        for msa_pos in range(msa_length):
-            read_base = read_aligned[msa_pos]
-            cons_base = consensus_aligned[msa_pos]
-            cons_pos = msa_to_consensus_pos[msa_pos]
-
-            # Only fill matrix for consensus positions (skip insertion columns)
-            if cons_pos is not None:
-                # Use score_aligned to determine classification
-                # '|' = match, '=' = homopolymer-equivalent (insignificant), ' ' = error
-                if msa_pos < len(score_aligned):
-                    score_char = score_aligned[msa_pos]
-                    if score_char == '|':
-                        # Exact match
-                        classification = 0
-                    elif score_char == '=':
-                        # Homopolymer-equivalent (treat as insignificant)
-                        classification = 1
-                    else:
-                        # Error (substitution or structural indel)
-                        classification = 2
-                else:
-                    # Fallback: if score_aligned not available, check for exact match
-                    if read_base != '-' and cons_base != '-' and read_base == cons_base:
-                        classification = 0
-                    elif read_base == '-' and cons_base == '-':
-                        classification = 3  # Gap
-                    else:
-                        classification = 2  # Error
-
-                matrix[read_idx, cons_pos] = classification
-
-                if classification == 0:
-                    num_matches += 1
-                elif classification in [1, 2]:
-                    num_errors += 1
-
-        # Calculate read identity (matches / (matches + errors))
-        total_positions = num_matches + num_errors
-        identity = num_matches / total_positions if total_positions > 0 else 0.0
+    for alignment in alignments:
+        # Use normalized edit distance for identity calculation
+        identity = 1.0 - (alignment.normalized_edit_distance / consensus_length) if consensus_length > 0 else 0.0
         read_identities.append(identity)
 
-    # Calculate per-position error rates
-    # Classification: 0=match, 1=homopolymer-equivalent (insignificant), 2=error, 3=gap
-    # For positional analysis, count only classification 2 as errors
-    # Homopolymer-equivalent positions (1) are treated like matches
-    position_error_rates = []
-    for pos in range(consensus_length):
-        column = matrix[:, pos]
-        # Count non-matches (excluding gaps=3)
-        non_gap_positions = column[column != 3]
-        if len(non_gap_positions) > 0:
-            # Only count classification 2 (true errors), not classification 1 (homopolymer-equivalent)
-            errors = np.sum(non_gap_positions == 2)
-            error_rate = errors / len(non_gap_positions)
-        else:
-            error_rate = 0.0
-        position_error_rates.append(error_rate)
-
-    return AlignmentMatrix(
+    return ClusterQualityData(
         consensus_seq=consensus_seq,
-        read_ids=read_ids,
-        matrix=matrix,
-        read_identities=read_identities,
-        position_error_rates=position_error_rates
+        position_error_rates=position_error_rates,
+        read_identities=read_identities
     )
-
-
-def render_alignment_matrix(
-    matrix_data: AlignmentMatrix,
-    output_file: str,
-    title: str,
-    max_width: int = 2000,
-    max_height: int = 1000
-):
-    """
-    Render alignment matrix as PNG image.
-
-    Args:
-        matrix_data: Alignment matrix data
-        output_file: Output PNG path
-        title: Plot title (cluster name)
-        max_width: Maximum image width in pixels
-        max_height: Maximum image height in pixels
-    """
-    matrix = matrix_data.matrix
-    num_reads, seq_length = matrix.shape
-
-    if num_reads == 0 or seq_length == 0:
-        logging.warning(f"Empty matrix for {title}, skipping visualization")
-        return
-
-    # Calculate downsampling if needed
-    col_downsample = max(1, seq_length // max_width)
-    row_downsample = max(1, num_reads // max_height)
-
-    # Downsample matrix if needed
-    if col_downsample > 1 or row_downsample > 1:
-        new_height = num_reads // row_downsample
-        new_width = seq_length // col_downsample
-
-        downsampled = np.zeros((new_height, new_width), dtype=np.uint8)
-
-        for i in range(new_height):
-            for j in range(new_width):
-                # Take max severity in window
-                window = matrix[
-                    i * row_downsample:(i + 1) * row_downsample,
-                    j * col_downsample:(j + 1) * col_downsample
-                ]
-                # Max value represents worst error in window
-                downsampled[i, j] = np.max(window)
-
-        matrix = downsampled
-        num_reads, seq_length = matrix.shape
-
-    # Create figure
-    fig_width = max(8, min(20, seq_length / 100))
-    fig_height = max(6, min(12, num_reads / 100))
-
-    fig, (ax_top, ax_main, ax_bottom) = plt.subplots(
-        3, 1,
-        figsize=(fig_width, fig_height),
-        gridspec_kw={'height_ratios': [0.5, 10, 0.5], 'hspace': 0.02}
-    )
-
-    # Define colors: 0=white (match), 1=yellow (insignificant), 2=red (significant), 3=gray (gap)
-    colors = ['#FFFFFF', '#FFC107', '#E74C3C', '#CCCCCC']
-    from matplotlib.colors import ListedColormap
-    cmap = ListedColormap(colors)
-
-    # Main matrix
-    ax_main.imshow(matrix, cmap=cmap, aspect='auto', interpolation='nearest', vmin=0, vmax=3)
-    ax_main.set_xlabel('Consensus Position', fontsize=10)
-    ax_main.set_ylabel('Reads', fontsize=10)
-    ax_main.set_title(title, fontsize=12, fontweight='bold', pad=10)
-
-    # Format ticks
-    if seq_length <= 100:
-        ax_main.set_xticks(range(0, seq_length, 10))
-    else:
-        step = max(1, seq_length // 10)
-        ax_main.set_xticks(range(0, seq_length, step))
-
-    # Reduce y-axis tick density
-    if num_reads <= 50:
-        ax_main.set_yticks(range(0, num_reads, 5))
-    else:
-        step = max(1, num_reads // 10)
-        ax_main.set_yticks(range(0, num_reads, step))
-
-    # Top track: per-position error rate
-    if col_downsample == 1:
-        error_rates = matrix_data.position_error_rates
-    else:
-        # Downsample error rates
-        error_rates = []
-        for j in range(seq_length):
-            start = j * col_downsample
-            end = min((j + 1) * col_downsample, len(matrix_data.position_error_rates))
-            window_rates = matrix_data.position_error_rates[start:end]
-            error_rates.append(max(window_rates) if window_rates else 0.0)
-
-    ax_top.fill_between(range(len(error_rates)), error_rates, color='steelblue', alpha=0.7)
-    ax_top.set_xlim(0, seq_length - 1)
-    ax_top.set_ylim(0, max(0.1, max(error_rates) * 1.1) if error_rates else 0.1)
-    ax_top.set_ylabel('Err Rate', fontsize=8)
-    ax_top.set_xticks([])
-    ax_top.tick_params(axis='y', labelsize=7)
-
-    # Bottom track: consensus base identity
-    # Color code: A=green, C=blue, G=yellow, T=red, other=gray
-    base_colors = {'A': '#2ECC71', 'C': '#3498DB', 'G': '#F1C40F', 'T': '#E74C3C'}
-    consensus_colors = [base_colors.get(base, '#95A5A6') for base in matrix_data.consensus_seq]
-
-    if col_downsample > 1:
-        # Downsample consensus colors
-        downsampled_colors = []
-        for j in range(seq_length):
-            start = j * col_downsample
-            downsampled_colors.append(consensus_colors[start] if start < len(consensus_colors) else '#95A5A6')
-        consensus_colors = downsampled_colors
-
-    # Create bar plot for base colors
-    for i, color in enumerate(consensus_colors):
-        ax_bottom.bar(i, 1, width=1, color=color, edgecolor='none')
-
-    ax_bottom.set_xlim(0, seq_length - 1)
-    ax_bottom.set_ylim(0, 1)
-    ax_bottom.set_ylabel('Base', fontsize=8)
-    ax_bottom.set_yticks([])
-    ax_bottom.set_xticks([])
-
-    # Add legend
-    from matplotlib.patches import Patch
-    legend_elements = [
-        Patch(facecolor='#FFFFFF', edgecolor='black', label='Match'),
-        Patch(facecolor='#FFC107', edgecolor='black', label='Homopolymer'),
-        Patch(facecolor='#E74C3C', edgecolor='black', label='Significant'),
-        Patch(facecolor='#CCCCCC', edgecolor='black', label='Gap')
-    ]
-    ax_main.legend(handles=legend_elements, loc='upper right', fontsize=8, framealpha=0.9)
-
-    # Save figure
-    plt.tight_layout()
-    plt.savefig(output_file, dpi=100, bbox_inches='tight')
-    plt.close()
-
-    logging.debug(f"Saved alignment visualization: {output_file}")
 
 
 def render_read_identity_histogram(
-    matrix_data: AlignmentMatrix,
+    quality_data: ClusterQualityData,
     output_file: str,
     title: str
 ):
@@ -1930,11 +1609,11 @@ def render_read_identity_histogram(
     Render histogram of read identity distribution.
 
     Args:
-        matrix_data: Alignment matrix data
+        quality_data: Cluster quality data
         output_file: Output PNG path
         title: Plot title (cluster name)
     """
-    identities = [id * 100 for id in matrix_data.read_identities]  # Convert to percentage
+    identities = [id * 100 for id in quality_data.read_identities]  # Convert to percentage
 
     if not identities:
         logging.warning(f"No read identities for {title}, skipping histogram")
@@ -1986,7 +1665,7 @@ def render_read_identity_histogram(
 
 
 def render_positional_identity_histogram(
-    matrix_data: AlignmentMatrix,
+    quality_data: ClusterQualityData,
     output_file: str,
     title: str
 ):
@@ -1994,48 +1673,29 @@ def render_positional_identity_histogram(
     Render bar graph of positional error rates by consensus position.
 
     Args:
-        matrix_data: Alignment matrix data
+        quality_data: Cluster quality data
         output_file: Output PNG path
         title: Plot title (cluster name)
     """
-    if not matrix_data.position_error_rates:
+    if not quality_data.position_error_rates:
         logging.warning(f"No position data for {title}, skipping visualization")
         return
 
-    # Classify each position as homopolymer or not
-    positions = []
-    error_rates = []
-    is_homopolymer = []
-
-    for pos, error_rate in enumerate(matrix_data.position_error_rates):
-        positions.append(pos)
-        error_rates.append(error_rate * 100)  # Convert to percentage
-        is_homopoly = detect_homopolymer_run(matrix_data.consensus_seq, pos, min_length=4)
-        is_homopolymer.append(is_homopoly)
-
-    # Calculate statistics for each category
-    homopoly_rates = [err for err, is_hp in zip(error_rates, is_homopolymer) if is_hp]
-    non_homopoly_rates = [err for err, is_hp in zip(error_rates, is_homopolymer) if not is_hp]
+    # Build position and error rate lists
+    positions = list(range(len(quality_data.position_error_rates)))
+    error_rates = [rate * 100 for rate in quality_data.position_error_rates]  # Convert to percentage
 
     # Create figure
     fig, ax = plt.subplots(figsize=(16, 6))
 
-    # Create bar colors based on homopolymer status
-    colors = ['#FFA500' if is_hp else '#4682B4' for is_hp in is_homopolymer]
+    # Plot bars (single color - homopolymer differences already excluded from error rates)
+    ax.bar(positions, error_rates, width=1.0, color='#4682B4', edgecolor='none', alpha=0.7)
 
-    # Plot bars
-    ax.bar(positions, error_rates, width=1.0, color=colors, edgecolor='none', alpha=0.7)
-
-    # Add mean lines
-    if homopoly_rates:
-        mean_h = np.mean(homopoly_rates)
-        ax.axhline(mean_h, color='darkorange', linestyle='--', linewidth=1.5,
-                   alpha=0.8, label=f'Homopolymer mean: {mean_h:.2f}%')
-
-    if non_homopoly_rates:
-        mean_nh = np.mean(non_homopoly_rates)
-        ax.axhline(mean_nh, color='darkblue', linestyle='--', linewidth=1.5,
-                   alpha=0.8, label=f'Non-homopolymer mean: {mean_nh:.2f}%')
+    # Add mean line
+    if error_rates:
+        mean_error = np.mean(error_rates)
+        ax.axhline(mean_error, color='darkblue', linestyle='--', linewidth=1.5,
+                   alpha=0.8, label=f'Mean: {mean_error:.2f}%')
 
     # Labels and title
     ax.set_xlabel('Consensus Position', fontsize=12)
@@ -2060,31 +1720,15 @@ def render_positional_identity_histogram(
     tick_positions = range(0, seq_length, tick_step)
     ax.set_xticks(tick_positions)
 
-    # Add custom legend with patches
-    from matplotlib.patches import Patch
-    legend_elements = [
-        Patch(facecolor='#4682B4', alpha=0.7, label='Non-homopolymer'),
-        Patch(facecolor='#FFA500', alpha=0.7, label='Homopolymer (≥4bp)')
-    ]
-
-    # Add mean lines to legend if they exist
-    if non_homopoly_rates:
-        from matplotlib.lines import Line2D
-        legend_elements.append(Line2D([0], [0], color='darkblue', linestyle='--',
-                                      linewidth=1.5, label=f'Non-HP mean: {mean_nh:.2f}%'))
-    if homopoly_rates:
-        legend_elements.append(Line2D([0], [0], color='darkorange', linestyle='--',
-                                      linewidth=1.5, label=f'HP mean: {mean_h:.2f}%'))
-
-    ax.legend(handles=legend_elements, loc='upper right', fontsize=10, framealpha=0.9)
+    # Add legend with mean line
+    if error_rates:
+        ax.legend(loc='upper right', fontsize=10, framealpha=0.9)
 
     # Add summary statistics text box
     textstr = f'Sequence length: {seq_length} bp\n'
-    textstr += f'Homopolymer positions: {sum(is_homopolymer)} ({100*sum(is_homopolymer)/seq_length:.1f}%)\n'
-    if non_homopoly_rates:
-        textstr += f'Non-HP error rate: {mean_nh:.2f}% ± {np.std(non_homopoly_rates):.2f}%\n'
-    if homopoly_rates:
-        textstr += f'HP error rate: {mean_h:.2f}% ± {np.std(homopoly_rates):.2f}%'
+    if error_rates:
+        textstr += f'Mean error rate: {mean_error:.2f}% ± {np.std(error_rates):.2f}%\n'
+        textstr += f'Max error rate: {max(error_rates):.2f}%'
 
     props = dict(boxstyle='round', facecolor='wheat', alpha=0.9)
     ax.text(0.02, 0.98, textstr, transform=ax.transAxes, fontsize=9,
@@ -2179,40 +1823,30 @@ def generate_alignment_visualizations(
             skipped_count += 1
             continue
 
-        # Build alignment matrix
-        matrix = build_alignment_matrix(msa_file, cons.sequence, max_reads=max_reads)
+        # Analyze cluster quality
+        quality_data = analyze_cluster_quality(msa_file, cons.sequence, max_reads=max_reads)
 
-        if matrix is None:
+        if quality_data is None:
             skipped_count += 1
             continue
 
         # Generate output filename
         safe_name = cons.sample_name.replace('/', '_').replace('\\', '_')
-        output_file = os.path.join(viz_dir, f"{safe_name}_alignment.png")
 
         # Render visualizations
         try:
-            # 1. Alignment matrix
-            render_alignment_matrix(
-                matrix,
-                output_file,
-                title=cons.sample_name,
-                max_width=max_width,
-                max_height=max_height
-            )
-
-            # 2. Read identity histogram
+            # 1. Read identity histogram
             read_hist_file = os.path.join(viz_dir, f"{safe_name}_read_identity.png")
             render_read_identity_histogram(
-                matrix,
+                quality_data,
                 read_hist_file,
                 title=cons.sample_name
             )
 
-            # 3. Positional identity histogram
+            # 2. Positional identity histogram
             pos_hist_file = os.path.join(viz_dir, f"{safe_name}_positional_identity.png")
             render_positional_identity_histogram(
-                matrix,
+                quality_data,
                 pos_hist_file,
                 title=cons.sample_name
             )
@@ -2222,7 +1856,7 @@ def generate_alignment_visualizations(
             logging.warning(f"Failed to generate visualizations for {cons.sample_name}: {e}")
             skipped_count += 1
 
-    logging.info(f"Generated visualization sets for {generated_count} clusters ({generated_count * 3} total images)")
+    logging.info(f"Generated visualization sets for {generated_count} clusters ({generated_count * 2} total images)")
     if skipped_count > 0:
         logging.info(f"Skipped {skipped_count} clusters (no MSA file or generation failed)")
 
@@ -3033,7 +2667,7 @@ def write_quality_report(final_consensus: List[ConsensusInfo],
             f.write(f"{'Sequence':<42} {'RiC':<6} {'#Outliers':<10} {'MaxErr':<8} {'Threshold':<10}\n")
             f.write("-" * 80 + "\n")
 
-            for cons, result in sequences_with_pos_outliers[:20]:  # Limit to top 20
+            for cons, result in sequences_with_pos_outliers:  # Show all sequences
                 # Show component name if this is from a merged sequence
                 if 'component_name' in result:
                     # Extract the variant number from component name (e.g., .raw1 -> .1)
@@ -3048,8 +2682,6 @@ def write_quality_report(final_consensus: List[ConsensusInfo],
                 f.write(f"{name_truncated:<42} {ric_val:<6} {result['num_outlier_positions']:<10} "
                        f"{result['max_error_rate']:<8.1%} {result['outlier_threshold']:<10.1%}\n")
 
-            if len(sequences_with_pos_outliers) > 20:
-                f.write(f"\n... and {len(sequences_with_pos_outliers) - 20} more sequences\n")
             f.write("\n")
 
         # ====================================================================
