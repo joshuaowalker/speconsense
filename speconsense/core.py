@@ -2224,12 +2224,14 @@ class SpecimenClusterer:
             return result["editDistance"]
             
         # Configure custom adjustment parameters for homopolymer normalization only
+        # Use max_repeat_motif_length=1 to be consistent with variant detection
+        # (extract_alignments_from_msa also uses length=1)
         custom_params = AdjustmentParams(
             normalize_homopolymers=True,    # Enable homopolymer normalization
             handle_iupac_overlap=False,     # Disable IUPAC overlap handling
             normalize_indels=False,         # Disable indel normalization
             end_skip_distance=0,            # Disable end trimming
-            max_repeat_motif_length=2       # Keep default motif length
+            max_repeat_motif_length=1       # Single-base repeats only (consistent with variant detection)
         )
         
         # Create custom scoring format to distinguish indels from substitutions
