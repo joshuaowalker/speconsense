@@ -85,7 +85,8 @@ class PositionStats(NamedTuple):
     ins_count: int
     del_count: int
     consensus_nucleotide: str  # Base in consensus at this MSA position (or '-' for insertion)
-    base_composition: Dict[str, int]  # {A: 50, C: 3, G: 45, T: 2, '-': 0}
+    base_composition: Dict[str, int]  # Raw base counts: {A: 50, C: 3, G: 45, T: 2, '-': 0}
+    homopolymer_composition: Dict[str, int]  # HP extension counts: {A: 5, G: 2} (base and count)
 
 
 class MSAResult(NamedTuple):
@@ -343,13 +344,15 @@ def analyze_positional_variation(
     overall_error_rate: float
 ) -> List[PositionStats]:
     """
-    Analyze error rates at each position in the MSA with homopolymer normalization.
+    Analyze error rates at each position in the MSA with homopolymer tracking.
 
     Uses normalized error positions and base composition to identify true variants
-    while ignoring homopolymer length differences. For each position, reads with
-    homopolymer-equivalent alleles (score_aligned='=') are counted as having the
-    consensus base, allowing detection of real variants even at positions with
-    homopolymer variation.
+    while tracking homopolymer length differences separately. For each position:
+    - base_composition: Raw counts of each base observed
+    - homopolymer_composition: Counts of bases that are homopolymer extensions (score_aligned='=')
+
+    Downstream variant detection uses effective counts (raw - HP) to identify true
+    biological variants while ignoring diversity due solely to homopolymer variation.
 
     IMPORTANT: All analysis is performed in MSA space (not consensus space).
     This correctly handles insertion columns where multiple MSA positions
@@ -371,8 +374,15 @@ def analyze_positional_variation(
     # For each MSA position: [sub_count, ins_count, del_count, total_coverage]
     error_matrix = np.zeros((msa_length, 4), dtype=int)
 
-    # Build base composition matrix in MSA space
+    # Build base composition matrix in MSA space (raw counts)
     base_composition_matrix = [
+        {'A': 0, 'C': 0, 'G': 0, 'T': 0, '-': 0}
+        for _ in range(msa_length)
+    ]
+
+    # Build homopolymer composition matrix in MSA space
+    # Tracks bases that are homopolymer extensions (score_aligned='=')
+    homopolymer_composition_matrix = [
         {'A': 0, 'C': 0, 'G': 0, 'T': 0, '-': 0}
         for _ in range(msa_length)
     ]
@@ -402,26 +412,25 @@ def analyze_positional_variation(
             continue
 
         # Track what base each read has at each MSA position
-        # Use normalized alleles: homopolymer-equivalent bases count as consensus
+        # Raw base composition plus separate tracking of homopolymer extensions
         for msa_pos in range(msa_length):
             read_base = read_aligned[msa_pos]
-            cons_base = consensus_aligned[msa_pos]
 
-            # Determine base to count: use consensus if homopolymer-equivalent
-            base_to_count = read_base
-
-            # Check if this position is a homopolymer extension
-            if alignment.score_aligned and msa_pos < len(alignment.score_aligned):
-                if alignment.score_aligned[msa_pos] == '=':
-                    # Homopolymer extension - count as consensus base
-                    base_to_count = cons_base
-
-            # Normalize base (handle N and other ambiguous codes)
-            if base_to_count in ['A', 'C', 'G', 'T', '-']:
-                base_composition_matrix[msa_pos][base_to_count] += 1
+            # Track raw base composition
+            if read_base in ['A', 'C', 'G', 'T', '-']:
+                base_composition_matrix[msa_pos][read_base] += 1
             else:
                 # Treat N or other ambiguous as gap
                 base_composition_matrix[msa_pos]['-'] += 1
+
+            # Additionally track if this is a homopolymer extension
+            if alignment.score_aligned and msa_pos < len(alignment.score_aligned):
+                if alignment.score_aligned[msa_pos] == '=':
+                    # Homopolymer extension - track separately
+                    if read_base in ['A', 'C', 'G', 'T', '-']:
+                        homopolymer_composition_matrix[msa_pos][read_base] += 1
+                    else:
+                        homopolymer_composition_matrix[msa_pos]['-'] += 1
 
     # Calculate statistics for each MSA position
     position_stats = []
@@ -442,8 +451,11 @@ def analyze_positional_variation(
         # Get consensus nucleotide at this MSA position
         cons_nucleotide = consensus_aligned[msa_pos]
 
-        # Get base composition for this MSA position
+        # Get base composition for this MSA position (raw counts)
         base_comp = base_composition_matrix[msa_pos].copy()
+
+        # Get homopolymer extension composition for this MSA position
+        hp_comp = homopolymer_composition_matrix[msa_pos].copy()
 
         position_stats.append(PositionStats(
             msa_position=msa_pos,
@@ -455,7 +467,8 @@ def analyze_positional_variation(
             ins_count=ins_count,
             del_count=del_count,
             consensus_nucleotide=cons_nucleotide,
-            base_composition=base_comp
+            base_composition=base_comp,
+            homopolymer_composition=hp_comp
         ))
 
     return position_stats
@@ -470,11 +483,14 @@ def is_variant_position_with_composition(
     Identify variant positions using simple frequency and count thresholds.
 
     This function determines if a position shows systematic variation (true biological
-    variant) rather than scattered sequencing errors.
+    variant) rather than scattered sequencing errors. Homopolymer extensions are
+    excluded from consideration - diversity due solely to homopolymer length variation
+    is not considered a true variant.
 
     Criteria for variant detection:
     1. At least one alternative allele must have frequency ≥ min_variant_frequency
     2. That allele must have count ≥ min_variant_count
+    3. Counts are adjusted by subtracting homopolymer extension counts
 
     Args:
         position_stats: Position statistics including base composition
@@ -489,36 +505,53 @@ def is_variant_position_with_composition(
     """
     n = position_stats.coverage
     base_composition = position_stats.base_composition
+    hp_composition = position_stats.homopolymer_composition
 
     # Check we have composition data
     if not base_composition or sum(base_composition.values()) == 0:
         return False, [], "No composition data available"
 
+    # Calculate effective counts by subtracting homopolymer extensions
+    # This excludes diversity that's purely due to HP length variation
+    effective_composition = {}
+    for base in ['A', 'C', 'G', 'T', '-']:
+        raw_count = base_composition.get(base, 0)
+        hp_count = hp_composition.get(base, 0) if hp_composition else 0
+        effective_count = raw_count - hp_count
+        if effective_count > 0:
+            effective_composition[base] = effective_count
+
+    # Check we have effective composition data after HP adjustment
+    if not effective_composition or sum(effective_composition.values()) == 0:
+        return False, [], "No composition data after HP adjustment"
+
+    effective_total = sum(effective_composition.values())
+
     sorted_bases = sorted(
-        base_composition.items(),
+        effective_composition.items(),
         key=lambda x: x[1],
         reverse=True
     )
 
     if len(sorted_bases) < 2:
-        return False, [], "No alternative alleles observed"
+        return False, [], "No alternative alleles observed (after HP adjustment)"
 
     # Check each alternative allele (skip consensus base at index 0)
     variant_bases = []
     variant_details = []
 
     for base, count in sorted_bases[1:]:
-        freq = count / n if n > 0 else 0
+        freq = count / effective_total if effective_total > 0 else 0
 
         # Must meet both frequency and count thresholds
         if freq >= min_variant_frequency and count >= min_variant_count:
             variant_bases.append(base)
-            variant_details.append(f"{base}:{count}/{n}({freq:.1%})")
+            variant_details.append(f"{base}:{count}/{effective_total}({freq:.1%})")
 
     if variant_bases:
         return True, variant_bases, f"Variant alleles: {', '.join(variant_details)}"
 
-    return False, [], "No variants detected"
+    return False, [], "No variants detected (after HP adjustment)"
 
 
 class SpecimenClusterer:
@@ -531,6 +564,7 @@ class SpecimenClusterer:
                  k_nearest_neighbors: int = 20,
                  sample_name: str = "sample",
                  disable_homopolymer_equivalence: bool = False,
+                 disable_cluster_merging: bool = False,
                  output_dir: str = "clusters",
                  outlier_identity_threshold: Optional[float] = None,
                  enable_secondpass_phasing: bool = True,
@@ -545,6 +579,7 @@ class SpecimenClusterer:
         self.k_nearest_neighbors = k_nearest_neighbors
         self.sample_name = sample_name
         self.disable_homopolymer_equivalence = disable_homopolymer_equivalence
+        self.disable_cluster_merging = disable_cluster_merging
         self.output_dir = output_dir
 
         # Auto-calculate outlier identity threshold if not provided
@@ -592,6 +627,7 @@ class SpecimenClusterer:
                 "presample_size": self.presample_size,
                 "k_nearest_neighbors": self.k_nearest_neighbors,
                 "disable_homopolymer_equivalence": self.disable_homopolymer_equivalence,
+                "disable_cluster_merging": self.disable_cluster_merging,
                 "outlier_identity_threshold": self.outlier_identity_threshold,
                 "enable_secondpass_phasing": self.enable_secondpass_phasing,
                 "min_variant_frequency": self.min_variant_frequency,
@@ -909,12 +945,14 @@ class SpecimenClusterer:
                         phased_subclusters_merged.append(cluster_info)
                         initial_clusters_involved.add(clusters[idx]['initial_cluster_num'])
 
-                # Warn if we're merging phased subclusters that came from the same initial cluster
+                # Log if we're merging phased subclusters that came from the same initial cluster
+                # This can happen when SPOA consensus generation doesn't preserve variant differences
+                # that were detected during phasing (e.g., due to homopolymer normalization differences)
                 if len(phased_subclusters_merged) > 1 and len(initial_clusters_involved) == 1:
                     initial_cluster = list(initial_clusters_involved)[0]
-                    logging.warning(
+                    logging.debug(
                         f"Merging {len(phased_subclusters_merged)} phased subclusters from initial cluster {initial_cluster} "
-                        f"back together (consensus sequences are {merge_type}). Phasing split is being undone!"
+                        f"back together (consensus sequences are {merge_type})"
                     )
                     for info in phased_subclusters_merged:
                         logging.debug(f"  Subcluster: allele_combo='{info['allele_combo']}', size={info['size']}")
@@ -957,7 +995,9 @@ class SpecimenClusterer:
                             actual_size: Optional[int] = None,
                             consensus_fasta_handle = None,
                             sampled_ids: Optional[Set[str]] = None,
-                            msa: Optional[str] = None) -> None:
+                            msa: Optional[str] = None,
+                            sorted_cluster_ids: Optional[List[str]] = None,
+                            sorted_sampled_ids: Optional[List[str]] = None) -> None:
         """Write cluster files: reads FASTQ, MSA, consensus FASTA, and variant debug files.
 
         Read identity metrics measure internal cluster consistency (not accuracy vs. ground truth):
@@ -996,16 +1036,20 @@ class SpecimenClusterer:
         info_str = " ".join(info_parts)
 
         # Write reads FASTQ to debug directory with new naming convention
+        # Use sorted order (by quality descending) if available, matching MSA order
         reads_file = os.path.join(self.debug_dir, f"{self.sample_name}-c{cluster_num}-RiC{ric_size}-reads.fastq")
         with open(reads_file, 'w') as f:
-            for seq_id in cluster:
+            read_ids_to_write = sorted_cluster_ids if sorted_cluster_ids is not None else cluster
+            for seq_id in read_ids_to_write:
                 SeqIO.write(self.records[seq_id], f, "fastq")
 
         # Write sampled reads FASTQ (only sequences used for consensus generation)
-        if sampled_ids is not None:
+        # Use sorted order (by quality descending) if available, matching MSA order
+        if sampled_ids is not None or sorted_sampled_ids is not None:
             sampled_file = os.path.join(self.debug_dir, f"{self.sample_name}-c{cluster_num}-RiC{ric_size}-sampled.fastq")
             with open(sampled_file, 'w') as f:
-                for seq_id in sampled_ids:
+                sampled_to_write = sorted_sampled_ids if sorted_sampled_ids is not None else sampled_ids
+                for seq_id in sampled_to_write:
                     SeqIO.write(self.records[seq_id], f, "fastq")
 
         # Write MSA (multiple sequence alignment) to debug directory
@@ -1310,10 +1354,13 @@ class SpecimenClusterer:
             # PHASE 3: MERGING
             # ============================================================
             # Merge sub-clusters with identical/homopolymer-equivalent consensus sequences
-            logging.info("Merging homopolymer-equivalent sub-clusters...")
-            merged_subclusters = self.merge_similar_clusters(all_subclusters)
-
-            logging.info(f"After merging, have {len(merged_subclusters)} clusters")
+            if self.disable_cluster_merging:
+                logging.info("Cluster merging disabled, skipping merge phase")
+                merged_subclusters = all_subclusters
+            else:
+                logging.info("Merging homopolymer-equivalent sub-clusters...")
+                merged_subclusters = self.merge_similar_clusters(all_subclusters)
+                logging.info(f"After merging, have {len(merged_subclusters)} clusters")
 
             # ============================================================
             # PHASE 4: FILTERING
@@ -1355,32 +1402,29 @@ class SpecimenClusterer:
                     cluster = cluster_dict['read_ids']
                     actual_size = len(cluster)
 
+                    # Sort all cluster reads by quality for consistent output ordering
+                    qualities = []
+                    for seq_id in cluster:
+                        record = self.records[seq_id]
+                        mean_quality = statistics.mean(record.letter_annotations["phred_quality"])
+                        qualities.append((mean_quality, seq_id))
+                    # Sort by quality (descending), then by read ID (ascending) for deterministic tie-breaking
+                    sorted_cluster_ids = [seq_id for _, seq_id in
+                                          sorted(qualities, key=lambda x: (-x[0], x[1]))]
+
                     # Sample sequences for final consensus generation if needed
                     if len(cluster) > self.max_sample_size:
                         logging.info(f"Cluster {final_idx}: Sampling {self.max_sample_size} from {len(cluster)} reads for final consensus")
-                        qualities = []
-                        for seq_id in cluster:
-                            record = self.records[seq_id]
-                            mean_quality = statistics.mean(record.letter_annotations["phred_quality"])
-                            qualities.append((mean_quality, seq_id))
-                        # Sort by quality (descending), then by read ID (ascending) for deterministic tie-breaking
-                        sorted_ids = [seq_id for _, seq_id in
-                                      sorted(qualities, key=lambda x: (-x[0], x[1]))[:self.max_sample_size]]
-                        sampled_ids = set(sorted_ids)  # Keep set for membership testing
+                        sorted_sampled_ids = sorted_cluster_ids[:self.max_sample_size]
+                        sampled_ids = set(sorted_sampled_ids)  # Keep set for membership testing
                     else:
-                        # Sort all reads by quality for optimal SPOA ordering
-                        qualities = []
-                        for seq_id in cluster:
-                            record = self.records[seq_id]
-                            mean_quality = statistics.mean(record.letter_annotations["phred_quality"])
-                            qualities.append((mean_quality, seq_id))
-                        sorted_ids = [seq_id for _, seq_id in
-                                      sorted(qualities, key=lambda x: (-x[0], x[1]))]
+                        # All reads used for consensus
+                        sorted_sampled_ids = sorted_cluster_ids
                         sampled_ids = cluster
 
                     # Generate final consensus and MSA
                     # Pass sequences to SPOA in quality-descending order
-                    sampled_seqs = {seq_id: self.sequences[seq_id] for seq_id in sorted_ids}
+                    sampled_seqs = {seq_id: self.sequences[seq_id] for seq_id in sorted_sampled_ids}
                     result = self.run_spoa(sampled_seqs)
 
                     # Calculate final identity metrics
@@ -1417,7 +1461,9 @@ class SpecimenClusterer:
                             actual_size=actual_size,
                             consensus_fasta_handle=consensus_fasta_handle,
                             sampled_ids=sampled_ids,
-                            msa=msa
+                            msa=msa,
+                            sorted_cluster_ids=sorted_cluster_ids,
+                            sorted_sampled_ids=sorted_sampled_ids
                         )
 
             # ============================================================
@@ -1686,6 +1732,7 @@ class SpecimenClusterer:
                         'coverage': pos_stat.coverage,
                         'variant_bases': variant_bases,
                         'base_composition': pos_stat.base_composition,
+                        'homopolymer_composition': pos_stat.homopolymer_composition,
                         'error_rate': pos_stat.error_rate,
                         'reason': reason
                     })
@@ -1695,6 +1742,7 @@ class SpecimenClusterer:
                         'msa_position': pos_stat.msa_position,
                         'error_rate': pos_stat.error_rate,
                         'base_composition': pos_stat.base_composition,
+                        'homopolymer_composition': pos_stat.homopolymer_composition,
                         'reason': reason
                     })
 
@@ -1707,7 +1755,7 @@ class SpecimenClusterer:
                     cons_pos_str = f"consensus:{var['consensus_position']}" if var['consensus_position'] is not None else "insertion"
                     logging.debug(f"  MSA pos {var['msa_position']} ({cons_pos_str}): "
                                 f"error={var['error_rate']*100:.1f}%, variants={var['variant_bases']}, "
-                                f"composition={var['base_composition']}")
+                                f"raw={var['base_composition']}, hp={var['homopolymer_composition']}")
             else:
                 logging.debug(f"Variant detection: No variant positions detected "
                             f"(thresholds: freq >= {self.min_variant_frequency*100:.1f}%, "
@@ -1718,7 +1766,7 @@ class SpecimenClusterer:
                             f"but no single alternative allele meets both thresholds (scattered errors)")
                 for pos_info in high_error_not_variants[:3]:  # Show first 3 examples
                     logging.debug(f"  MSA pos {pos_info['msa_position']}: error={pos_info['error_rate']*100:.1f}%, "
-                                f"composition={pos_info['base_composition']}")
+                                f"raw={pos_info['base_composition']}, hp={pos_info['homopolymer_composition']}")
 
             return variant_positions
 
@@ -2138,7 +2186,7 @@ class SpecimenClusterer:
         found_primers = []
         trimmed_seq = sequence
 
-        logging.debug(f"Starting primer trimming on sequence of length {len(sequence)}")
+        # logging.debug(f"Starting primer trimming on sequence of length {len(sequence)}")
 
         # Look for primer at 5' end
         best_start_dist = float('inf')
@@ -2150,7 +2198,7 @@ class SpecimenClusterer:
             search_region = sequence[:len(primer_seq) * 2]
 
             result = edlib.align(primer_seq, search_region, task="path", mode="HW", k=k)
-            logging.debug(f"Testing {primer_name} at 5' end (k={k})")
+            # logging.debug(f"Testing {primer_name} at 5' end (k={k})")
 
             if result["editDistance"] != -1:
                 dist = result["editDistance"]
@@ -2160,7 +2208,7 @@ class SpecimenClusterer:
                     best_start_end = result["locations"][0][1] + 1
 
         if best_start_primer:
-            logging.debug(f"Found {best_start_primer} at 5' end (k={best_start_dist})")
+            # logging.debug(f"Found {best_start_primer} at 5' end (k={best_start_dist})")
             found_primers.append(f"5'-{best_start_primer}")
             trimmed_seq = trimmed_seq[best_start_end:]
 
@@ -2184,7 +2232,7 @@ class SpecimenClusterer:
                     best_end_start = base_pos + result["locations"][0][0]
 
         if best_end_primer:
-            logging.debug(f"Found {best_end_primer} at 3' end (k={best_end_dist})")
+            # logging.debug(f"Found {best_end_primer} at 3' end (k={best_end_dist})")
             found_primers.append(f"3'-{best_end_primer}")
             trimmed_seq = trimmed_seq[:best_end_start]
 
@@ -2257,10 +2305,10 @@ class SpecimenClusterer:
         # Both non-homopolymer indels ('I') and terminal overhangs ('.') prevent merging
         if require_merge_compatible:
             if 'I' in score_result.score_aligned:
-                logging.debug(f"Non-homopolymer indel detected, sequences not merge-compatible")
+                # logging.debug(f"Non-homopolymer indel detected, sequences not merge-compatible")
                 return -1  # Signal that merging should not occur
             if '.' in score_result.score_aligned:
-                logging.debug(f"Terminal overhang detected, sequences not merge-compatible")
+                # logging.debug(f"Terminal overhang detected, sequences not merge-compatible")
                 return -1  # Signal that merging should not occur
         
         # Count only substitutions (not homopolymer adjustments or indels)
@@ -2273,9 +2321,9 @@ class SpecimenClusterer:
         indels = score_result.score_aligned.count('I')
         homopolymers = score_result.score_aligned.count('=')
         
-        logging.debug(f"Consensus distance: {distance} total mismatches "
-                     f"({substitutions} substitutions, {indels} indels, "
-                     f"{homopolymers} homopolymer adjustments)")
+        # logging.debug(f"Consensus distance: {distance} total mismatches "
+        #              f"({substitutions} substitutions, {indels} indels, "
+        #              f"{homopolymers} homopolymer adjustments)")
         
         return distance
 
@@ -2349,6 +2397,8 @@ def main():
                         help="Output directory for all files (default: clusters)")
     parser.add_argument("--disable-homopolymer-equivalence", action="store_true",
                         help="Disable homopolymer equivalence in cluster merging (only merge identical sequences)")
+    parser.add_argument("--disable-cluster-merging", action="store_true",
+                        help="Disable merging of clusters with identical consensus sequences")
     parser.add_argument("--orient-mode", choices=["skip", "keep-all", "filter-failed"], default="skip",
                         help="Sequence orientation mode: skip (default, no orientation), keep-all (orient but keep failed), or filter-failed (orient and remove failed)")
     parser.add_argument("--log-level", default="INFO",
@@ -2377,6 +2427,7 @@ def main():
         k_nearest_neighbors=args.k_nearest_neighbors,
         sample_name=sample,
         disable_homopolymer_equivalence=args.disable_homopolymer_equivalence,
+        disable_cluster_merging=args.disable_cluster_merging,
         output_dir=args.output_dir,
         outlier_identity_threshold=args.outlier_identity_threshold,
         enable_secondpass_phasing=not args.disable_secondpass_phasing,
