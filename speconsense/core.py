@@ -658,24 +658,27 @@ class SpecimenClusterer:
 
         logging.info(f"Wrote run metadata to {metadata_file}")
 
-    def write_phasing_stats(self, initial_clusters_count: int, subclusters_count: int,
-                           merged_count: int, final_count: int) -> None:
+    def write_phasing_stats(self, initial_clusters_count: int, after_prephasing_merge_count: int,
+                           subclusters_count: int, merged_count: int, final_count: int) -> None:
         """Write phasing statistics to JSON file after clustering completes.
 
         Args:
             initial_clusters_count: Number of clusters from initial clustering
+            after_prephasing_merge_count: Number of clusters after pre-phasing merge
             subclusters_count: Number of sub-clusters after phasing
-            merged_count: Number of clusters after merging
+            merged_count: Number of clusters after post-phasing merge
             final_count: Number of final clusters after filtering
         """
         phasing_stats = {
             "phasing_enabled": self.enable_secondpass_phasing,
             "initial_clusters": initial_clusters_count,
+            "after_prephasing_merge": after_prephasing_merge_count,
             "phased_subclusters": subclusters_count,
-            "after_merging": merged_count,
+            "after_postphasing_merge": merged_count,
             "after_filtering": final_count,
-            "clusters_split": subclusters_count > initial_clusters_count,
-            "clusters_merged": merged_count < subclusters_count,
+            "prephasing_clusters_merged": after_prephasing_merge_count < initial_clusters_count,
+            "clusters_split": subclusters_count > after_prephasing_merge_count,
+            "postphasing_clusters_merged": merged_count < subclusters_count,
             "net_change": final_count - initial_clusters_count
         }
 
@@ -818,10 +821,13 @@ class SpecimenClusterer:
             logging.error(f"Stderr: {e.stderr}")
             raise
 
-    def merge_similar_clusters(self, clusters: List[Dict]) -> List[Dict]:
+    def merge_similar_clusters(self, clusters: List[Dict], phase_name: str = "Post-phasing") -> List[Dict]:
         """
         Merge clusters whose consensus sequences are identical or homopolymer-equivalent.
         Preserves provenance metadata through the merging process.
+
+        This function is used for both pre-phasing merge (combining initial clusters before
+        variant detection) and post-phasing merge (combining subclusters after phasing).
 
         Note: Primer trimming is performed before comparison to ensure clusters that differ
         only in primer regions are properly merged. Trimmed consensuses are used only for
@@ -829,6 +835,7 @@ class SpecimenClusterer:
 
         Args:
             clusters: List of cluster dictionaries with 'read_ids' and provenance fields
+            phase_name: Name of the merge phase for logging (e.g., "Pre-phasing", "Post-phasing")
 
         Returns:
             List of merged cluster dictionaries with combined provenance
@@ -840,7 +847,7 @@ class SpecimenClusterer:
         clusters = sorted(clusters, key=lambda c: len(c['read_ids']), reverse=True)
 
         # Generate a consensus sequence for each cluster
-        logging.info("Generating consensus sequences for cluster merging...")
+        logging.info(f"{phase_name} merge: Generating consensus sequences...")
         consensuses = []
         cluster_to_consensus = {}  # Map from cluster index to its consensus
 
@@ -974,9 +981,10 @@ class SpecimenClusterer:
                 merged.append(cluster_dict)
 
         if len(merged) < len(clusters):
-            logging.info(f"Merged {len(clusters) - len(merged)} clusters with {merge_type} consensus sequences")
+            logging.info(f"{phase_name} merge: Combined {len(clusters)} clusters into {len(merged)} "
+                        f"({len(clusters) - len(merged)} merged due to {merge_type} consensus)")
         else:
-            logging.info(f"No clusters were merged (no {merge_type} consensus sequences found)")
+            logging.info(f"{phase_name} merge: No clusters merged (no {merge_type} consensus found)")
 
         return merged
 
@@ -1202,7 +1210,13 @@ class SpecimenClusterer:
     def cluster(self, algorithm: str = "graph") -> None:
         """Perform complete clustering process with variant phasing and write output files.
 
-        Pipeline: Splitting (clustering + outlier removal + phasing) → Merging → Filtering → Output
+        Pipeline:
+            1. Initial clustering (MCL or greedy)
+            2. Pre-phasing merge (combine HP-equivalent initial clusters)
+            3. Variant detection + phasing (split clusters by haplotype)
+            4. Post-phasing merge (combine HP-equivalent subclusters)
+            5. Filtering (size and ratio thresholds)
+            6. Output generation
 
         Args:
             algorithm: Clustering algorithm to use ('graph' for MCL or 'greedy')
@@ -1232,14 +1246,33 @@ class SpecimenClusterer:
             logging.info(f"Initial clustering produced {len(initial_clusters)} clusters")
 
             # ============================================================
-            # PHASE 2: DETECTION + PHASING (Splitting Phase)
+            # PHASE 2: PRE-PHASING MERGE
             # ============================================================
-            # Process each initial cluster to detect variants and phase reads
+            # Merge initial clusters with HP-equivalent consensus to maximize
+            # read depth for variant detection in the next phase
+            if self.disable_cluster_merging:
+                logging.info("Cluster merging disabled, skipping pre-phasing merge")
+                merged_initial_clusters = initial_clusters
+            else:
+                # Convert initial clusters to dict format for merge_similar_clusters
+                initial_cluster_dicts = [
+                    {'read_ids': cluster, 'initial_cluster_num': i, 'allele_combo': None,
+                     'variant_positions': None, 'num_variants': 0}
+                    for i, cluster in enumerate(initial_clusters, 1)
+                ]
+                merged_dicts = self.merge_similar_clusters(initial_cluster_dicts, phase_name="Pre-phasing")
+                # Extract back to sets for Phase 3
+                merged_initial_clusters = [d['read_ids'] for d in merged_dicts]
+
+            # ============================================================
+            # PHASE 3: DETECTION + PHASING (Splitting Phase)
+            # ============================================================
+            # Process each merged cluster to detect variants and phase reads
             all_subclusters = []  # Will hold all phased sub-clusters with provenance
 
             logging.info("Processing clusters for variant detection and phasing...")
 
-            for initial_idx, cluster in enumerate(initial_clusters, 1):
+            for initial_idx, cluster in enumerate(merged_initial_clusters, 1):
                 cluster_size = len(cluster)
 
                 # Sample sequences for consensus generation if needed
@@ -1348,22 +1381,20 @@ class SpecimenClusterer:
                     }
                     all_subclusters.append(subcluster)
 
-            logging.info(f"After phasing, created {len(all_subclusters)} sub-clusters from {len(initial_clusters)} initial clusters")
+            logging.info(f"After phasing, created {len(all_subclusters)} sub-clusters from {len(merged_initial_clusters)} merged clusters")
 
             # ============================================================
-            # PHASE 3: MERGING
+            # PHASE 4: POST-PHASING MERGE
             # ============================================================
             # Merge sub-clusters with identical/homopolymer-equivalent consensus sequences
             if self.disable_cluster_merging:
-                logging.info("Cluster merging disabled, skipping merge phase")
+                logging.info("Cluster merging disabled, skipping post-phasing merge")
                 merged_subclusters = all_subclusters
             else:
-                logging.info("Merging homopolymer-equivalent sub-clusters...")
-                merged_subclusters = self.merge_similar_clusters(all_subclusters)
-                logging.info(f"After merging, have {len(merged_subclusters)} clusters")
+                merged_subclusters = self.merge_similar_clusters(all_subclusters, phase_name="Post-phasing")
 
             # ============================================================
-            # PHASE 4: FILTERING
+            # PHASE 5: FILTERING
             # ============================================================
             # Filter by absolute size
             large_clusters = [c for c in merged_subclusters if len(c['read_ids']) >= self.min_size]
@@ -1393,7 +1424,7 @@ class SpecimenClusterer:
                         f"({sequences_covered / total_sequences:.1%} of total)")
 
             # ============================================================
-            # PHASE 5: OUTPUT
+            # PHASE 6: OUTPUT
             # ============================================================
             # Generate final consensus and write output files
             consensus_output_file = os.path.join(self.output_dir, f"{self.sample_name}-all.fasta")
@@ -1471,6 +1502,7 @@ class SpecimenClusterer:
             # ============================================================
             self.write_phasing_stats(
                 initial_clusters_count=len(initial_clusters),
+                after_prephasing_merge_count=len(merged_initial_clusters),
                 subclusters_count=len(all_subclusters),
                 merged_count=len(merged_subclusters),
                 final_count=len(large_clusters)
