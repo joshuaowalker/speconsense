@@ -95,6 +95,7 @@ class ClusterQualityData(NamedTuple):
     """Quality metrics for a cluster (no visualization matrix)."""
     consensus_seq: str
     position_error_rates: List[float]  # Per-position error rates (0-1) in consensus space
+    position_error_counts: List[int]  # Per-position error counts in consensus space
     read_identities: List[float]  # Per-read identity scores (0-1)
 
 
@@ -694,7 +695,7 @@ def analyze_positional_identity_outliers(
     min_variant_frequency: float,
     min_variant_count: int
 ) -> Optional[Dict]:
-    """Analyze positional error rates and identify outlier positions.
+    """Analyze positional error rates and identify high-error positions.
 
     Args:
         consensus_info: ConsensusInfo object for the sequence
@@ -706,10 +707,10 @@ def analyze_positional_identity_outliers(
         Dictionary with positional analysis:
         {
             'num_outlier_positions': int,
-            'max_error_rate': float,
-            'mean_error_rate': float,
+            'mean_outlier_error_rate': float,  # Mean error rate across outlier positions only
+            'total_nucleotide_errors': int,    # Sum of error counts at outlier positions
             'outlier_threshold': float,
-            'outlier_positions': List of (position, error_rate) tuples
+            'outlier_positions': List of (position, error_rate, error_count) tuples
         }
         Returns None if MSA file not found or analysis fails
 
@@ -767,23 +768,29 @@ def analyze_positional_identity_outliers(
         return None
 
     position_error_rates = quality_data.position_error_rates
-
-    # Calculate statistics
-    mean_error = np.mean(position_error_rates)
-    max_error = np.max(position_error_rates)
+    position_error_counts = quality_data.position_error_counts
 
     # Use global min_variant_frequency as threshold
     # Positions above this could be undetected/unphased variants
     threshold = min_variant_frequency
     outlier_positions = [
-        (i, rate) for i, rate in enumerate(position_error_rates)
+        (i, rate, count)
+        for i, (rate, count) in enumerate(zip(position_error_rates, position_error_counts))
         if rate > threshold
     ]
 
+    # Calculate statistics for outlier positions only
+    if outlier_positions:
+        mean_outlier_error = np.mean([rate for _, rate, _ in outlier_positions])
+        total_nucleotide_errors = sum(count for _, _, count in outlier_positions)
+    else:
+        mean_outlier_error = 0.0
+        total_nucleotide_errors = 0
+
     return {
         'num_outlier_positions': len(outlier_positions),
-        'max_error_rate': max_error,
-        'mean_error_rate': mean_error,
+        'mean_outlier_error_rate': mean_outlier_error,
+        'total_nucleotide_errors': total_nucleotide_errors,
         'outlier_threshold': threshold,
         'outlier_positions': outlier_positions
     }
@@ -1580,11 +1587,12 @@ def analyze_cluster_quality(
         0.0  # overall_error_rate (unused parameter)
     )
 
-    # Extract position error rates for consensus positions only (skip insertion columns)
+    # Extract position error rates and counts for consensus positions only (skip insertion columns)
     consensus_position_stats = [ps for ps in position_stats if ps.consensus_position is not None]
     # Sort by consensus position to ensure correct order
     consensus_position_stats.sort(key=lambda ps: ps.consensus_position)
     position_error_rates = [ps.error_rate for ps in consensus_position_stats]
+    position_error_counts = [ps.error_count for ps in consensus_position_stats]
 
     # Calculate per-read identities from alignments
     read_identities = []
@@ -1596,6 +1604,7 @@ def analyze_cluster_quality(
     return ClusterQualityData(
         consensus_seq=consensus_seq,
         position_error_rates=position_error_rates,
+        position_error_counts=position_error_counts,
         read_identities=read_identities
     )
 
@@ -2484,8 +2493,8 @@ def write_quality_report(final_consensus: List[ConsensusInfo],
             if result and result['num_outlier_positions'] > 0:
                 sequences_with_pos_outliers.append((cons, result))
 
-    # Sort positional outliers by number of problem positions (desc)
-    sequences_with_pos_outliers.sort(key=lambda x: x[1]['num_outlier_positions'], reverse=True)
+    # Sort positional outliers by total nucleotide errors (desc)
+    sequences_with_pos_outliers.sort(key=lambda x: x[1].get('total_nucleotide_errors', 0), reverse=True)
 
     # Identify merged sequences with quality issues in components
     merged_with_issues = []
@@ -2582,7 +2591,7 @@ def write_quality_report(final_consensus: List[ConsensusInfo],
         f.write(f"    - Below clustering threshold: {n_cluster}\n")
         f.write(f"    - Statistical outliers: {n_stat}\n")
         f.write(f"    - Both criteria: {n_both}\n")
-        f.write(f"    - Problematic positions: {n_pos}\n")
+        f.write(f"    - High-error positions: {n_pos}\n")
         f.write(f"    - With detected variants: {n_var}\n")
         f.write(f"    - Merged with component issues: {n_merged}\n\n")
 
@@ -2658,29 +2667,45 @@ def write_quality_report(final_consensus: List[ConsensusInfo],
             f.write("POSITIONAL IDENTITY ANALYSIS\n")
             f.write("=" * 80 + "\n\n")
 
-            f.write("Sequences with outlier positions (high error rate at specific positions):\n")
+            f.write("Sequences with high-error positions (error rate > threshold at specific positions):\n")
             f.write(f"Threshold: {min_variant_frequency:.1%} (--min-variant-frequency from metadata)\n")
             f.write(f"Min RiC: {2 * min_variant_count} (2 × --min-variant-count)\n")
             f.write("Positions above threshold may indicate undetected/unphased variants.\n")
             f.write("For merged sequences, shows worst component.\n\n")
 
-            f.write(f"{'Sequence':<42} {'RiC':<6} {'#Outliers':<10} {'MaxErr':<8} {'Threshold':<10}\n")
-            f.write("-" * 80 + "\n")
+            # Sort by total nucleotide errors (descending)
+            sorted_pos_outliers = sorted(
+                sequences_with_pos_outliers,
+                key=lambda x: x[1].get('total_nucleotide_errors', 0),
+                reverse=True
+            )
 
-            for cons, result in sequences_with_pos_outliers:  # Show all sequences
-                # Show component name if this is from a merged sequence
+            # Calculate display names and find max length for dynamic column width
+            display_data = []
+            for cons, result in sorted_pos_outliers:
                 if 'component_name' in result:
-                    # Extract the variant number from component name (e.g., .raw1 -> .1)
                     component_suffix = result['component_name'].split('.')[-1] if '.' in result['component_name'] else ''
                     display_name = f"{cons.sample_name} ({component_suffix})"
-                    name_truncated = display_name[:41] if len(display_name) > 41 else display_name
                     ric_val = result.get('component_ric', cons.ric)
                 else:
-                    name_truncated = cons.sample_name[:41] if len(cons.sample_name) > 41 else cons.sample_name
+                    display_name = cons.sample_name
                     ric_val = cons.ric
+                display_data.append((display_name, ric_val, result))
 
-                f.write(f"{name_truncated:<42} {ric_val:<6} {result['num_outlier_positions']:<10} "
-                       f"{result['max_error_rate']:<8.1%} {result['outlier_threshold']:<10.1%}\n")
+            # Calculate column width based on longest name (minimum 40, cap at 70)
+            max_name_len = max(len(name) for name, _, _ in display_data) if display_data else 40
+            name_col_width = min(max(max_name_len + 2, 40), 70)
+
+            f.write(f"{'Sequence':<{name_col_width}} {'RiC':<6} {'#Pos':<6} {'MeanErr':<8} {'TotalErr':<10}\n")
+            f.write("-" * (name_col_width + 32) + "\n")
+
+            for display_name, ric_val, result in display_data:
+                mean_err = result.get('mean_outlier_error_rate', 0.0)
+                total_err = result.get('total_nucleotide_errors', 0)
+                num_pos = result['num_outlier_positions']
+
+                f.write(f"{display_name:<{name_col_width}} {ric_val:<6} {num_pos:<6} "
+                       f"{mean_err:<8.1%} {total_err:<10}\n")
 
             f.write("\n")
 
@@ -2753,13 +2778,14 @@ def write_quality_report(final_consensus: List[ConsensusInfo],
 
         f.write("Positional Identity Analysis:\n")
         f.write("-" * 40 + "\n")
-        f.write("  Uses global threshold (--min-variant-frequency) to identify problematic positions.\n")
+        f.write("  Uses global threshold (--min-variant-frequency) to identify high-error positions.\n")
         f.write("  Only analyzes sequences with RiC >= 2×min-variant-count (sufficient depth).\n")
         f.write("  Positions with error rates above threshold may indicate:\n")
         f.write("  - Undetected or unphased heterozygous positions\n")
         f.write("  - True biological variation (SNPs)\n")
         f.write("  - Systematic sequencing errors at specific positions\n")
         f.write("  - Primer binding sites or homopolymer regions\n")
+        f.write("  TotalErr = sum of nucleotide errors at high-error positions.\n")
         f.write("  Recommendation: Compare with variant detection results.\n\n")
 
         f.write("Variant Detection:\n")
@@ -2791,7 +2817,7 @@ def write_quality_report(final_consensus: List[ConsensusInfo],
         logging.info("  All sequences show good read identity")
 
     if n_pos > 0:
-        logging.info(f"  {n_pos} sequence(s) with problematic positions")
+        logging.info(f"  {n_pos} sequence(s) with high-error positions")
     if n_var > 0:
         logging.info(f"  {n_var} sequence(s) with detected variants")
     if n_merged > 0:

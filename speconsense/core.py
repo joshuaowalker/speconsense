@@ -551,6 +551,27 @@ def is_variant_position_with_composition(
     if variant_bases:
         return True, variant_bases, f"Variant alleles: {', '.join(variant_details)}"
 
+    # Debug: Check if this would be a variant WITHOUT HP normalization
+    # This helps identify cases where HP adjustment incorrectly eliminates variants
+    raw_total = sum(base_composition.get(b, 0) for b in ['A', 'C', 'G', 'T', '-'])
+    raw_sorted = sorted(
+        [(b, base_composition.get(b, 0)) for b in ['A', 'C', 'G', 'T', '-'] if base_composition.get(b, 0) > 0],
+        key=lambda x: x[1],
+        reverse=True
+    )
+    if len(raw_sorted) >= 2:
+        for base, count in raw_sorted[1:]:
+            freq = count / raw_total if raw_total > 0 else 0
+            if freq >= min_variant_frequency and count >= min_variant_count:
+                # Would be variant without HP normalization!
+                logging.debug(
+                    f"HP normalization eliminated variant at MSA pos {position_stats.msa_position}: "
+                    f"raw {base}:{count}/{raw_total}({freq:.1%}) meets threshold, "
+                    f"but effective composition={effective_composition}, "
+                    f"raw={base_composition}, hp={hp_composition}"
+                )
+                break
+
     return False, [], "No variants detected (after HP adjustment)"
 
 
