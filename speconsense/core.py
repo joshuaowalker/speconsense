@@ -10,8 +10,6 @@ import statistics
 import subprocess
 import sys
 import tempfile
-import math
-import itertools
 from typing import List, Set, Tuple, Optional, Dict, Any, NamedTuple
 from datetime import datetime
 
@@ -575,100 +573,6 @@ def is_variant_position_with_composition(
     return False, [], "No variants detected (after HP adjustment)"
 
 
-# ============================================================================
-# Mutual Information functions for correlated position selection
-# ============================================================================
-
-def calculate_entropy(alleles: List[str]) -> float:
-    """Calculate Shannon entropy of allele distribution.
-
-    Args:
-        alleles: List of allele values (e.g., ['A', 'A', 'C', 'T', 'A'])
-
-    Returns:
-        Entropy in bits (log base 2)
-    """
-    if not alleles:
-        return 0.0
-
-    n = len(alleles)
-    counts = defaultdict(int)
-    for a in alleles:
-        counts[a] += 1
-
-    entropy = 0.0
-    for count in counts.values():
-        if count > 0:
-            p = count / n
-            entropy -= p * math.log2(p)
-
-    return entropy
-
-
-def calculate_mutual_information(alleles1: List[str], alleles2: List[str]) -> float:
-    """Calculate mutual information between two positions.
-
-    MI(X, Y) = Σ p(x,y) × log2[p(x,y) / (p(x) × p(y))]
-
-    Args:
-        alleles1: Alleles at position 1 for each read
-        alleles2: Alleles at position 2 for each read (same order as alleles1)
-
-    Returns:
-        Mutual information in bits
-    """
-    if len(alleles1) != len(alleles2) or not alleles1:
-        return 0.0
-
-    n = len(alleles1)
-
-    # Joint distribution
-    joint_counts = defaultdict(int)
-    for a1, a2 in zip(alleles1, alleles2):
-        joint_counts[(a1, a2)] += 1
-
-    # Marginal distributions
-    counts1 = defaultdict(int)
-    counts2 = defaultdict(int)
-    for a1, a2 in zip(alleles1, alleles2):
-        counts1[a1] += 1
-        counts2[a2] += 1
-
-    # Calculate MI
-    mi = 0.0
-    for (a1, a2), joint_count in joint_counts.items():
-        p_joint = joint_count / n
-        p1 = counts1[a1] / n
-        p2 = counts2[a2] / n
-        if p_joint > 0 and p1 > 0 and p2 > 0:
-            mi += p_joint * math.log2(p_joint / (p1 * p2))
-
-    return mi
-
-
-def calculate_normalized_mi(alleles1: List[str], alleles2: List[str]) -> float:
-    """Calculate normalized mutual information in range [0, 1].
-
-    Uses min-entropy normalization: NMI = MI / min(H(X), H(Y))
-
-    Args:
-        alleles1: Alleles at position 1 for each read
-        alleles2: Alleles at position 2 for each read
-
-    Returns:
-        Normalized MI in range [0, 1]
-    """
-    mi = calculate_mutual_information(alleles1, alleles2)
-    h1 = calculate_entropy(alleles1)
-    h2 = calculate_entropy(alleles2)
-
-    min_h = min(h1, h2)
-    if min_h == 0:
-        return 0.0
-
-    return mi / min_h
-
-
 def calculate_within_cluster_error(
     haplotype_groups: Dict[str, Set[str]],
     read_alleles: Dict[str, Dict[int, str]],
@@ -788,15 +692,20 @@ def filter_qualifying_haplotypes(
 
 def reassign_to_nearest_haplotype(
     combo_to_reads: Dict[str, Set[str]],
-    qualifying_combos: Dict[str, Set[str]]
+    qualifying_combos: Dict[str, Set[str]],
+    read_alleles: Dict[str, Dict[int, str]],
+    all_variant_positions: List[int]
 ) -> Dict[str, Set[str]]:
     """Reassign reads from non-qualifying haplotypes to nearest qualifying haplotype.
 
-    Uses edit distance on combo strings to find the nearest match.
+    Uses edit distance at ALL variant positions, comparing each read's alleles
+    to each haplotype's consensus alleles.
 
     Args:
         combo_to_reads: Dict mapping all allele_combos -> set of read_ids
         qualifying_combos: Dict mapping qualifying allele_combos -> set of read_ids
+        read_alleles: Dict mapping read_id -> {msa_position -> allele}
+        all_variant_positions: List of all variant MSA positions
 
     Returns:
         Dict mapping qualifying allele_combos -> set of read_ids (with reassigned reads)
@@ -805,22 +714,46 @@ def reassign_to_nearest_haplotype(
     reassigned = {combo: set(reads) for combo, reads in qualifying_combos.items()}
     qualifying_combo_list = list(qualifying_combos.keys())
 
+    # Compute consensus allele at each position for each qualifying haplotype
+    haplotype_consensus = {}  # combo -> consensus allele string at all_variant_positions
+    for qual_combo, qual_reads in qualifying_combos.items():
+        consensus_alleles = []
+        for pos in all_variant_positions:
+            # Count alleles at this position
+            allele_counts = defaultdict(int)
+            for read_id in qual_reads:
+                allele = read_alleles.get(read_id, {}).get(pos, '-')
+                allele_counts[allele] += 1
+            # Consensus is most common allele
+            if allele_counts:
+                consensus_allele = max(allele_counts.items(), key=lambda x: x[1])[0]
+            else:
+                consensus_allele = '-'
+            consensus_alleles.append(consensus_allele)
+        haplotype_consensus[qual_combo] = ''.join(consensus_alleles)
+
+    # Reassign each read from non-qualifying haplotypes
     for combo, reads in combo_to_reads.items():
         if combo not in qualifying_combos:
-            # Find nearest qualifying haplotype by edit distance
-            min_distance = float('inf')
-            nearest_combo = None
+            for read_id in reads:
+                # Build this read's allele string at all variant positions
+                read_allele_str = ''.join(
+                    read_alleles.get(read_id, {}).get(pos, '-')
+                    for pos in all_variant_positions
+                )
 
-            for qual_combo in qualifying_combo_list:
-                result = edlib.align(combo, qual_combo)
-                distance = result['editDistance']
-                if distance < min_distance:
-                    min_distance = distance
-                    nearest_combo = qual_combo
+                # Find nearest qualifying haplotype by edit distance
+                min_distance = float('inf')
+                nearest_combo = None
+                for qual_combo in qualifying_combo_list:
+                    result = edlib.align(read_allele_str, haplotype_consensus[qual_combo])
+                    distance = result['editDistance']
+                    if distance < min_distance:
+                        min_distance = distance
+                        nearest_combo = qual_combo
 
-            # Reassign reads to nearest qualifying haplotype
-            if nearest_combo is not None:
-                reassigned[nearest_combo].update(reads)
+                if nearest_combo is not None:
+                    reassigned[nearest_combo].add(read_id)
 
     return reassigned
 
@@ -834,9 +767,9 @@ def select_correlated_positions(
 ) -> Tuple[List[Dict], str]:
     """Select a subset of variant positions that produce the cleanest haplotype clusters.
 
-    Two-stage approach:
-    1. Use NMI (normalized mutual information) as heuristic to generate candidate position sets
-    2. Evaluate each candidate by within-cluster error and select the best
+    Directly optimizes for minimal within-cluster error:
+    - For ≤10 positions: exhaustive search of all 2^n - 1 subsets
+    - For >10 positions: beam search with beam width 10
 
     The goal is to minimize within-cluster variation at non-phased positions,
     producing the most homogeneous haplotype clusters.
@@ -856,15 +789,6 @@ def select_correlated_positions(
     msa_positions = [v['msa_position'] for v in variant_positions]
     pos_to_variant = {v['msa_position']: v for v in variant_positions}
     all_positions_set = set(msa_positions)
-
-    # Extract alleles per position for NMI calculation
-    read_ids = list(read_alleles.keys())
-    position_alleles = {}  # msa_pos -> list of alleles (one per read, for NMI)
-    for msa_pos in msa_positions:
-        position_alleles[msa_pos] = [
-            read_alleles.get(read_id, {}).get(msa_pos, '-')
-            for read_id in read_ids
-        ]
 
     # Helper function to evaluate a candidate position set
     def evaluate_candidate(selected_msa_positions: List[int]) -> Tuple[bool, float, int, Dict[str, Set[str]]]:
@@ -886,7 +810,9 @@ def select_correlated_positions(
             return False, float('inf'), len(qualifying), qualifying
 
         # Simulate reassignment and calculate error
-        reassigned_groups = reassign_to_nearest_haplotype(combo_to_reads, qualifying)
+        reassigned_groups = reassign_to_nearest_haplotype(
+            combo_to_reads, qualifying, read_alleles, msa_positions
+        )
         error = calculate_within_cluster_error(
             reassigned_groups,
             read_alleles,
@@ -896,85 +822,19 @@ def select_correlated_positions(
 
         return True, error, len(qualifying), reassigned_groups
 
-    # Generate candidate position sets
-    candidates = []  # List of (positions_list, source_description)
+    # Generate and evaluate candidate position sets
     n_positions = len(msa_positions)
-
-    # For small number of positions, try all subsets
-    if n_positions <= 3:
-        from itertools import combinations
-        for r in range(1, n_positions + 1):
-            for combo in combinations(msa_positions, r):
-                candidates.append((list(combo), f"exhaustive-{r}"))
-    else:
-        # Use NMI-based heuristics for larger position sets
-
-        # Calculate pairwise NMI matrix
-        nmi_matrix = {}
-        logging.debug(f"Calculating pairwise NMI for {n_positions} variant positions...")
-
-        for i in range(n_positions):
-            for j in range(i + 1, n_positions):
-                pos_i = msa_positions[i]
-                pos_j = msa_positions[j]
-                nmi = calculate_normalized_mi(position_alleles[pos_i], position_alleles[pos_j])
-                nmi_matrix[(pos_i, pos_j)] = nmi
-                nmi_matrix[(pos_j, pos_i)] = nmi
-                logging.debug(f"  NMI({pos_i}, {pos_j}) = {nmi:.3f}")
-
-        # Candidate 1: Each single position
-        for pos in msa_positions:
-            candidates.append(([pos], "single"))
-
-        # Candidate 2: Top 3 pairs by NMI
-        pairs_by_nmi = sorted(
-            [(nmi_matrix[(msa_positions[i], msa_positions[j])], msa_positions[i], msa_positions[j])
-             for i in range(n_positions) for j in range(i + 1, n_positions)],
-            reverse=True
-        )
-        for nmi, pos_i, pos_j in pairs_by_nmi[:3]:
-            candidates.append(([pos_i, pos_j], f"pair-nmi={nmi:.3f}"))
-
-        # Candidate 3: Greedy NMI expansion from best pair
-        if pairs_by_nmi:
-            best_nmi, best_i, best_j = pairs_by_nmi[0]
-            greedy_selected = [best_i, best_j]
-            remaining = [p for p in msa_positions if p not in greedy_selected]
-
-            # Greedily add positions that maintain phasability
-            while remaining:
-                # Score candidates by average NMI with selected
-                candidate_scores = []
-                for pos in remaining:
-                    avg_nmi = sum(nmi_matrix.get((pos, s), 0) for s in greedy_selected) / len(greedy_selected)
-                    candidate_scores.append((avg_nmi, pos))
-                candidate_scores.sort(reverse=True)
-
-                added = False
-                for avg_nmi, pos in candidate_scores:
-                    test_positions = greedy_selected + [pos]
-                    is_phasable, _, _, _ = evaluate_candidate(test_positions)
-                    if is_phasable:
-                        greedy_selected.append(pos)
-                        remaining.remove(pos)
-                        added = True
-                        break
-
-                if not added:
-                    break
-
-            if len(greedy_selected) > 2:
-                candidates.append((greedy_selected, "greedy-nmi"))
-
-    # Evaluate all candidates and select best by within-cluster error
-    logging.debug(f"Evaluating {len(candidates)} candidate position sets...")
-
     best_candidate = None
     best_error = float('inf')
     best_info = None
 
-    for positions, source in candidates:
-        is_phasable, error, num_qualifying, qualifying = evaluate_candidate(positions)
+    EXHAUSTIVE_LIMIT = 10
+    BEAM_WIDTH = 10
+
+    def evaluate_and_track(positions: List[int], source: str) -> bool:
+        """Evaluate a candidate and update best if improved. Returns True if phasable."""
+        nonlocal best_candidate, best_error, best_info
+        is_phasable, error, num_qualifying, _ = evaluate_candidate(positions)
 
         positions_str = ','.join(str(p) for p in sorted(positions))
         if is_phasable:
@@ -984,9 +844,85 @@ def select_correlated_positions(
                 best_error = error
                 best_candidate = positions
                 best_info = (source, num_qualifying, error)
+            return True
         else:
             logging.debug(f"  [{source}] positions={{{positions_str}}}: "
                          f"not phasable ({num_qualifying} qualifying)")
+            return False
+
+    if n_positions <= EXHAUSTIVE_LIMIT:
+        # Exhaustive search: try all 2^n - 1 non-empty subsets
+        from itertools import combinations
+        total_candidates = 2 ** n_positions - 1
+        logging.debug(f"Exhaustive search: evaluating {total_candidates} subsets of {n_positions} positions...")
+
+        for r in range(1, n_positions + 1):
+            for combo in combinations(msa_positions, r):
+                evaluate_and_track(list(combo), f"exhaustive-{r}")
+    else:
+        # Beam search: iteratively build position sets, keeping top-k by error
+        from itertools import combinations
+        logging.debug(f"Beam search (width={BEAM_WIDTH}): {n_positions} positions...")
+
+        # Initialize beam with single positions
+        # beam entries: (error, positions_tuple)
+        beam = []
+        for pos in msa_positions:
+            is_phasable, error, num_qualifying, _ = evaluate_candidate([pos])
+            positions_str = str(pos)
+            if is_phasable:
+                logging.debug(f"  [beam-init] positions={{{positions_str}}}: "
+                             f"{num_qualifying} haplotypes, error={error:.4f}")
+                beam.append((error, (pos,)))
+                if error < best_error:
+                    best_error = error
+                    best_candidate = [pos]
+                    best_info = ("beam-1", num_qualifying, error)
+            else:
+                logging.debug(f"  [beam-init] positions={{{positions_str}}}: "
+                             f"not phasable ({num_qualifying} qualifying)")
+
+        # Sort and keep top BEAM_WIDTH
+        beam.sort(key=lambda x: x[0])
+        beam = beam[:BEAM_WIDTH]
+
+        # Iteratively expand beam
+        for size in range(2, n_positions + 1):
+            new_beam = []
+            seen = set()  # Avoid duplicate position sets
+
+            for _, positions in beam:
+                positions_set = set(positions)
+                # Try adding each position not already in this set
+                for pos in msa_positions:
+                    if pos in positions_set:
+                        continue
+                    new_positions = tuple(sorted(positions + (pos,)))
+                    if new_positions in seen:
+                        continue
+                    seen.add(new_positions)
+
+                    is_phasable, error, num_qualifying, _ = evaluate_candidate(list(new_positions))
+                    positions_str = ','.join(str(p) for p in new_positions)
+                    if is_phasable:
+                        logging.debug(f"  [beam-{size}] positions={{{positions_str}}}: "
+                                     f"{num_qualifying} haplotypes, error={error:.4f}")
+                        new_beam.append((error, new_positions))
+                        if error < best_error:
+                            best_error = error
+                            best_candidate = list(new_positions)
+                            best_info = (f"beam-{size}", num_qualifying, error)
+                    else:
+                        logging.debug(f"  [beam-{size}] positions={{{positions_str}}}: "
+                                     f"not phasable ({num_qualifying} qualifying)")
+
+            if not new_beam:
+                logging.debug(f"  Beam search stopped at size {size}: no phasable expansions")
+                break
+
+            # Sort and keep top BEAM_WIDTH for next iteration
+            new_beam.sort(key=lambda x: x[0])
+            beam = new_beam[:BEAM_WIDTH]
 
     if best_candidate is None:
         logging.info("No phasable position set found")
@@ -2422,7 +2358,10 @@ class SpecimenClusterer:
             # Reassign reads from non-qualifying haplotypes to nearest qualifying haplotype
             if non_qualifying_combos:
                 logging.debug(f"Reassigning {len(non_qualifying_combos)} non-qualifying haplotype(s)")
-                final_groups = reassign_to_nearest_haplotype(combo_to_reads, qualifying_combos)
+                final_groups = reassign_to_nearest_haplotype(
+                    combo_to_reads, qualifying_combos,
+                    read_to_position_alleles, variant_msa_positions
+                )
             else:
                 final_groups = qualifying_combos
 
