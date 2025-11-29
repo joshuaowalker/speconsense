@@ -554,6 +554,435 @@ def is_variant_position_with_composition(
     return False, [], "No variants detected (after HP adjustment)"
 
 
+# ============================================================================
+# Mutual Information functions for correlated position selection
+# ============================================================================
+
+def calculate_entropy(alleles: List[str]) -> float:
+    """Calculate Shannon entropy of allele distribution.
+
+    Args:
+        alleles: List of allele values (e.g., ['A', 'A', 'C', 'T', 'A'])
+
+    Returns:
+        Entropy in bits (log base 2)
+    """
+    if not alleles:
+        return 0.0
+
+    n = len(alleles)
+    counts = defaultdict(int)
+    for a in alleles:
+        counts[a] += 1
+
+    entropy = 0.0
+    for count in counts.values():
+        if count > 0:
+            p = count / n
+            entropy -= p * math.log2(p)
+
+    return entropy
+
+
+def calculate_mutual_information(alleles1: List[str], alleles2: List[str]) -> float:
+    """Calculate mutual information between two positions.
+
+    MI(X, Y) = Σ p(x,y) × log2[p(x,y) / (p(x) × p(y))]
+
+    Args:
+        alleles1: Alleles at position 1 for each read
+        alleles2: Alleles at position 2 for each read (same order as alleles1)
+
+    Returns:
+        Mutual information in bits
+    """
+    if len(alleles1) != len(alleles2) or not alleles1:
+        return 0.0
+
+    n = len(alleles1)
+
+    # Joint distribution
+    joint_counts = defaultdict(int)
+    for a1, a2 in zip(alleles1, alleles2):
+        joint_counts[(a1, a2)] += 1
+
+    # Marginal distributions
+    counts1 = defaultdict(int)
+    counts2 = defaultdict(int)
+    for a1, a2 in zip(alleles1, alleles2):
+        counts1[a1] += 1
+        counts2[a2] += 1
+
+    # Calculate MI
+    mi = 0.0
+    for (a1, a2), joint_count in joint_counts.items():
+        p_joint = joint_count / n
+        p1 = counts1[a1] / n
+        p2 = counts2[a2] / n
+        if p_joint > 0 and p1 > 0 and p2 > 0:
+            mi += p_joint * math.log2(p_joint / (p1 * p2))
+
+    return mi
+
+
+def calculate_normalized_mi(alleles1: List[str], alleles2: List[str]) -> float:
+    """Calculate normalized mutual information in range [0, 1].
+
+    Uses min-entropy normalization: NMI = MI / min(H(X), H(Y))
+
+    Args:
+        alleles1: Alleles at position 1 for each read
+        alleles2: Alleles at position 2 for each read
+
+    Returns:
+        Normalized MI in range [0, 1]
+    """
+    mi = calculate_mutual_information(alleles1, alleles2)
+    h1 = calculate_entropy(alleles1)
+    h2 = calculate_entropy(alleles2)
+
+    min_h = min(h1, h2)
+    if min_h == 0:
+        return 0.0
+
+    return mi / min_h
+
+
+def calculate_within_cluster_error(
+    haplotype_groups: Dict[str, Set[str]],
+    read_alleles: Dict[str, Dict[int, str]],
+    phasing_positions: Set[int],
+    all_variant_positions: Set[int]
+) -> float:
+    """Calculate within-cluster error for a given haplotype grouping.
+
+    Measures the average variation at non-phased positions within each haplotype.
+    Lower error indicates more homogeneous clusters.
+
+    Args:
+        haplotype_groups: Dict mapping allele_combo -> set of read_ids
+        read_alleles: Dict mapping read_id -> {msa_position -> allele}
+        phasing_positions: Set of MSA positions used for phasing
+        all_variant_positions: Set of all variant MSA positions
+
+    Returns:
+        Weighted average error rate across haplotypes (0.0 = perfect, 1.0 = maximum error)
+    """
+    non_phasing_positions = all_variant_positions - phasing_positions
+
+    if not non_phasing_positions or not haplotype_groups:
+        return 0.0
+
+    total_weighted_error = 0.0
+    total_reads = 0
+
+    for combo, read_ids in haplotype_groups.items():
+        if not read_ids:
+            continue
+
+        haplotype_error = 0.0
+        positions_counted = 0
+
+        for pos in non_phasing_positions:
+            # Count alleles at this position for reads in this haplotype
+            allele_counts = defaultdict(int)
+            for read_id in read_ids:
+                allele = read_alleles.get(read_id, {}).get(pos, '-')
+                allele_counts[allele] += 1
+
+            if not allele_counts:
+                continue
+
+            # Find consensus (most common) allele
+            total_at_pos = sum(allele_counts.values())
+            max_count = max(allele_counts.values())
+
+            # Error rate = fraction of reads NOT matching consensus
+            error_at_pos = (total_at_pos - max_count) / total_at_pos
+            haplotype_error += error_at_pos
+            positions_counted += 1
+
+        # Average error across non-phasing positions for this haplotype
+        if positions_counted > 0:
+            mean_haplotype_error = haplotype_error / positions_counted
+            total_weighted_error += mean_haplotype_error * len(read_ids)
+            total_reads += len(read_ids)
+
+    if total_reads == 0:
+        return 0.0
+
+    return total_weighted_error / total_reads
+
+
+def group_reads_by_allele_combo(
+    read_alleles: Dict[str, Dict[int, str]],
+    positions: List[int]
+) -> Dict[str, Set[str]]:
+    """Group reads by their allele combination at specified positions.
+
+    Args:
+        read_alleles: Dict mapping read_id -> {msa_position -> allele}
+        positions: List of MSA positions to use for grouping
+
+    Returns:
+        Dict mapping allele_combo string -> set of read_ids
+    """
+    combo_to_reads = defaultdict(set)
+    sorted_positions = sorted(positions)
+    for read_id, pos_alleles in read_alleles.items():
+        alleles = [pos_alleles.get(p, '-') for p in sorted_positions]
+        combo = '-'.join(alleles)
+        combo_to_reads[combo].add(read_id)
+    return dict(combo_to_reads)
+
+
+def filter_qualifying_haplotypes(
+    combo_to_reads: Dict[str, Set[str]],
+    total_reads: int,
+    min_count: int,
+    min_frequency: float
+) -> Tuple[Dict[str, Set[str]], Dict[str, Set[str]]]:
+    """Filter haplotypes to those meeting count and frequency thresholds.
+
+    Args:
+        combo_to_reads: Dict mapping allele_combo -> set of read_ids
+        total_reads: Total number of reads for frequency calculation
+        min_count: Minimum read count threshold
+        min_frequency: Minimum frequency threshold (0.0 to 1.0)
+
+    Returns:
+        Tuple of (qualifying_combos, non_qualifying_combos)
+    """
+    qualifying = {}
+    non_qualifying = {}
+    for combo, reads in combo_to_reads.items():
+        count = len(reads)
+        freq = count / total_reads if total_reads > 0 else 0
+        if count >= min_count and freq >= min_frequency:
+            qualifying[combo] = reads
+        else:
+            non_qualifying[combo] = reads
+    return qualifying, non_qualifying
+
+
+def reassign_to_nearest_haplotype(
+    combo_to_reads: Dict[str, Set[str]],
+    qualifying_combos: Dict[str, Set[str]]
+) -> Dict[str, Set[str]]:
+    """Reassign reads from non-qualifying haplotypes to nearest qualifying haplotype.
+
+    Uses edit distance on combo strings to find the nearest match.
+
+    Args:
+        combo_to_reads: Dict mapping all allele_combos -> set of read_ids
+        qualifying_combos: Dict mapping qualifying allele_combos -> set of read_ids
+
+    Returns:
+        Dict mapping qualifying allele_combos -> set of read_ids (with reassigned reads)
+    """
+    # Start with copies of qualifying haplotype read sets
+    reassigned = {combo: set(reads) for combo, reads in qualifying_combos.items()}
+    qualifying_combo_list = list(qualifying_combos.keys())
+
+    for combo, reads in combo_to_reads.items():
+        if combo not in qualifying_combos:
+            # Find nearest qualifying haplotype by edit distance
+            min_distance = float('inf')
+            nearest_combo = None
+
+            for qual_combo in qualifying_combo_list:
+                result = edlib.align(combo, qual_combo)
+                distance = result['editDistance']
+                if distance < min_distance:
+                    min_distance = distance
+                    nearest_combo = qual_combo
+
+            # Reassign reads to nearest qualifying haplotype
+            if nearest_combo is not None:
+                reassigned[nearest_combo].update(reads)
+
+    return reassigned
+
+
+def select_correlated_positions(
+    variant_positions: List[Dict],
+    read_alleles: Dict[str, Dict[int, str]],
+    min_haplotype_frequency: float,
+    min_haplotype_count: int,
+    total_reads: int
+) -> Tuple[List[Dict], str]:
+    """Select a subset of variant positions that produce the cleanest haplotype clusters.
+
+    Two-stage approach:
+    1. Use NMI (normalized mutual information) as heuristic to generate candidate position sets
+    2. Evaluate each candidate by within-cluster error and select the best
+
+    The goal is to minimize within-cluster variation at non-phased positions,
+    producing the most homogeneous haplotype clusters.
+
+    Args:
+        variant_positions: List of variant position dicts with 'msa_position' key
+        read_alleles: Dict mapping read_id -> {msa_position -> allele}
+        min_haplotype_frequency: Minimum frequency threshold for qualifying haplotype
+        min_haplotype_count: Minimum read count threshold for qualifying haplotype
+        total_reads: Total number of reads in cluster
+
+    Returns:
+        Tuple of (selected_positions, selection_reason)
+        - selected_positions: Subset of variant_positions to use for phasing
+        - selection_reason: Description of selection process for logging
+    """
+    msa_positions = [v['msa_position'] for v in variant_positions]
+    pos_to_variant = {v['msa_position']: v for v in variant_positions}
+    all_positions_set = set(msa_positions)
+
+    # Extract alleles per position for NMI calculation
+    read_ids = list(read_alleles.keys())
+    position_alleles = {}  # msa_pos -> list of alleles (one per read, for NMI)
+    for msa_pos in msa_positions:
+        position_alleles[msa_pos] = [
+            read_alleles.get(read_id, {}).get(msa_pos, '-')
+            for read_id in read_ids
+        ]
+
+    # Helper function to evaluate a candidate position set
+    def evaluate_candidate(selected_msa_positions: List[int]) -> Tuple[bool, float, int, Dict[str, Set[str]]]:
+        """Evaluate a candidate position set.
+
+        Simulates the full haplotype assignment logic including reassignment of
+        non-qualifying haplotypes to nearest qualifying haplotype. This gives
+        an accurate picture of the final error rate after phasing.
+
+        Returns:
+            (is_phasable, within_cluster_error, num_qualifying, reassigned_haplotypes)
+        """
+        combo_to_reads = group_reads_by_allele_combo(read_alleles, selected_msa_positions)
+        qualifying, _ = filter_qualifying_haplotypes(
+            combo_to_reads, total_reads, min_haplotype_count, min_haplotype_frequency
+        )
+
+        if len(qualifying) < 2:
+            return False, float('inf'), len(qualifying), qualifying
+
+        # Simulate reassignment and calculate error
+        reassigned_groups = reassign_to_nearest_haplotype(combo_to_reads, qualifying)
+        error = calculate_within_cluster_error(
+            reassigned_groups,
+            read_alleles,
+            set(selected_msa_positions),
+            all_positions_set
+        )
+
+        return True, error, len(qualifying), reassigned_groups
+
+    # Generate candidate position sets
+    candidates = []  # List of (positions_list, source_description)
+    n_positions = len(msa_positions)
+
+    # For small number of positions, try all subsets
+    if n_positions <= 3:
+        from itertools import combinations
+        for r in range(1, n_positions + 1):
+            for combo in combinations(msa_positions, r):
+                candidates.append((list(combo), f"exhaustive-{r}"))
+    else:
+        # Use NMI-based heuristics for larger position sets
+
+        # Calculate pairwise NMI matrix
+        nmi_matrix = {}
+        logging.debug(f"Calculating pairwise NMI for {n_positions} variant positions...")
+
+        for i in range(n_positions):
+            for j in range(i + 1, n_positions):
+                pos_i = msa_positions[i]
+                pos_j = msa_positions[j]
+                nmi = calculate_normalized_mi(position_alleles[pos_i], position_alleles[pos_j])
+                nmi_matrix[(pos_i, pos_j)] = nmi
+                nmi_matrix[(pos_j, pos_i)] = nmi
+                logging.debug(f"  NMI({pos_i}, {pos_j}) = {nmi:.3f}")
+
+        # Candidate 1: Each single position
+        for pos in msa_positions:
+            candidates.append(([pos], "single"))
+
+        # Candidate 2: Top 3 pairs by NMI
+        pairs_by_nmi = sorted(
+            [(nmi_matrix[(msa_positions[i], msa_positions[j])], msa_positions[i], msa_positions[j])
+             for i in range(n_positions) for j in range(i + 1, n_positions)],
+            reverse=True
+        )
+        for nmi, pos_i, pos_j in pairs_by_nmi[:3]:
+            candidates.append(([pos_i, pos_j], f"pair-nmi={nmi:.3f}"))
+
+        # Candidate 3: Greedy NMI expansion from best pair
+        if pairs_by_nmi:
+            best_nmi, best_i, best_j = pairs_by_nmi[0]
+            greedy_selected = [best_i, best_j]
+            remaining = [p for p in msa_positions if p not in greedy_selected]
+
+            # Greedily add positions that maintain phasability
+            while remaining:
+                # Score candidates by average NMI with selected
+                candidate_scores = []
+                for pos in remaining:
+                    avg_nmi = sum(nmi_matrix.get((pos, s), 0) for s in greedy_selected) / len(greedy_selected)
+                    candidate_scores.append((avg_nmi, pos))
+                candidate_scores.sort(reverse=True)
+
+                added = False
+                for avg_nmi, pos in candidate_scores:
+                    test_positions = greedy_selected + [pos]
+                    is_phasable, _, _, _ = evaluate_candidate(test_positions)
+                    if is_phasable:
+                        greedy_selected.append(pos)
+                        remaining.remove(pos)
+                        added = True
+                        break
+
+                if not added:
+                    break
+
+            if len(greedy_selected) > 2:
+                candidates.append((greedy_selected, "greedy-nmi"))
+
+    # Evaluate all candidates and select best by within-cluster error
+    logging.debug(f"Evaluating {len(candidates)} candidate position sets...")
+
+    best_candidate = None
+    best_error = float('inf')
+    best_info = None
+
+    for positions, source in candidates:
+        is_phasable, error, num_qualifying, qualifying = evaluate_candidate(positions)
+
+        positions_str = ','.join(str(p) for p in sorted(positions))
+        if is_phasable:
+            logging.debug(f"  [{source}] positions={{{positions_str}}}: "
+                         f"{num_qualifying} haplotypes, error={error:.4f}")
+            if error < best_error:
+                best_error = error
+                best_candidate = positions
+                best_info = (source, num_qualifying, error)
+        else:
+            logging.debug(f"  [{source}] positions={{{positions_str}}}: "
+                         f"not phasable ({num_qualifying} qualifying)")
+
+    if best_candidate is None:
+        logging.info("No phasable position set found")
+        return [], "No phasable position set found"
+
+    # Build result
+    selected_variants = [pos_to_variant[p] for p in sorted(best_candidate)]
+    source, num_haplotypes, error = best_info
+
+    reason = (f"Selected {len(best_candidate)}/{n_positions} positions "
+              f"(source={source}, haplotypes={num_haplotypes}, error={error:.4f})")
+
+    logging.info(f"Position selection: {reason}")
+
+    return selected_variants, reason
+
+
 class SpecimenClusterer:
     def __init__(self, min_identity: float = 0.9,
                  inflation: float = 4.0,
@@ -1893,13 +2322,13 @@ class SpecimenClusterer:
 
             # For each read, extract normalized alleles at variant positions
             # Normalized: homopolymer-equivalent positions use consensus base
-            read_to_alleles = {}
+            # Store as dict for later use by position selection algorithm
+            read_to_position_alleles = {}  # read_id -> {msa_pos -> allele}
             for read_id, alignment in read_to_alignment.items():
                 aligned_seq = alignment.aligned_sequence
                 score_aligned = alignment.score_aligned
 
-                # Extract normalized allele at each variant position
-                alleles = []
+                position_alleles = {}
                 for msa_pos in variant_msa_positions:
                     if msa_pos < len(aligned_seq):
                         allele = aligned_seq[msa_pos]
@@ -1910,94 +2339,74 @@ class SpecimenClusterer:
                                 # Homopolymer extension - use consensus base
                                 allele = consensus_aligned[msa_pos]
 
-                        alleles.append(allele)
+                        position_alleles[msa_pos] = allele
                     else:
                         # Read doesn't cover this position - treat as gap
-                        alleles.append('-')
+                        position_alleles[msa_pos] = '-'
 
-                # Create allele combination string
-                allele_combo = '-'.join(alleles)
-                read_to_alleles[read_id] = allele_combo
+                read_to_position_alleles[read_id] = position_alleles
 
-            # Group reads by allele combination
-            combo_to_reads = defaultdict(set)
-            for read_id, allele_combo in read_to_alleles.items():
-                combo_to_reads[allele_combo].add(read_id)
+            total_cluster_size = len(cluster_read_ids)
+
+            # Always run position selection when we have ≥2 variant positions
+            # This finds the optimal subset that minimizes within-cluster error
+            if len(variant_positions) >= 2:
+                logging.info(f"Running position selection on {len(variant_positions)} variant positions...")
+                selected_positions, selection_reason = select_correlated_positions(
+                    variant_positions,
+                    read_to_position_alleles,
+                    self.min_variant_frequency,
+                    self.min_variant_count,
+                    total_cluster_size
+                )
+
+                if not selected_positions:
+                    logging.info(f"Position selection failed: {selection_reason}")
+                    return [(None, cluster_read_ids)]
+
+                logging.info(f"Position selection: {selection_reason}")
+                positions_to_use = [v['msa_position'] for v in selected_positions]
+            else:
+                # Only 1 variant position - use it directly
+                logging.debug("Only 1 variant position, using directly")
+                positions_to_use = variant_msa_positions
+
+            # Group reads by allele combination at selected positions
+            combo_to_reads = group_reads_by_allele_combo(read_to_position_alleles, positions_to_use)
 
             # Debug: Report all allele combinations found
-            logging.debug(f"Phasing analysis: Found {len(combo_to_reads)} distinct haplotypes from {len(variant_positions)} variant positions")
+            logging.debug(f"Phasing analysis: Found {len(combo_to_reads)} distinct haplotypes from {len(positions_to_use)} positions")
             for combo, reads in sorted(combo_to_reads.items(), key=lambda x: len(x[1]), reverse=True):
-                logging.debug(f"  Haplotype '{combo}': {len(reads)} reads ({len(reads)/len(cluster_read_ids)*100:.1f}%)")
+                logging.debug(f"  Haplotype '{combo}': {len(reads)} reads ({len(reads)/total_cluster_size*100:.1f}%)")
 
-            # Apply haplotype-level thresholds to filter combinations
-            # This prevents creating subclusters that are too small to be useful
-            total_cluster_size = len(cluster_read_ids)
-            qualifying_combos = {}
-            non_qualifying_combos = {}
+            # Filter to qualifying haplotypes
+            qualifying_combos, non_qualifying_combos = filter_qualifying_haplotypes(
+                combo_to_reads, total_cluster_size, self.min_variant_count, self.min_variant_frequency
+            )
 
-            for combo, reads in combo_to_reads.items():
-                count = len(reads)
-                frequency = count / total_cluster_size if total_cluster_size > 0 else 0
+            # Log qualification results
+            for combo, reads in qualifying_combos.items():
+                logging.debug(f"  ✓ Haplotype '{combo}' qualifies: {len(reads)} reads ({len(reads)/total_cluster_size*100:.1f}%)")
+            for combo, reads in non_qualifying_combos.items():
+                logging.debug(f"  ✗ Haplotype '{combo}' does not qualify: {len(reads)} reads ({len(reads)/total_cluster_size*100:.1f}%)")
 
-                # Check if this haplotype meets both thresholds (relative to total cluster)
-                if count >= self.min_variant_count and frequency >= self.min_variant_frequency:
-                    qualifying_combos[combo] = reads
-                    logging.debug(f"  ✓ Haplotype '{combo}' qualifies: {count} reads ({frequency*100:.1f}%) "
-                                f"[>= {self.min_variant_count} reads AND >= {self.min_variant_frequency*100:.1f}%]")
-                else:
-                    non_qualifying_combos[combo] = reads
-                    # Determine which criterion failed
-                    count_ok = count >= self.min_variant_count
-                    freq_ok = frequency >= self.min_variant_frequency
-                    reason = []
-                    if not count_ok:
-                        reason.append(f"count {count} < {self.min_variant_count}")
-                    if not freq_ok:
-                        reason.append(f"freq {frequency*100:.1f}% < {self.min_variant_frequency*100:.1f}%")
-                    logging.debug(f"  ✗ Haplotype '{combo}' does not qualify: {count} reads ({frequency*100:.1f}%) "
-                                f"[{', '.join(reason)}]")
-
-            # If 0 or 1 qualifying haplotypes, don't split the cluster
+            # Need at least 2 qualifying haplotypes to split
             if len(qualifying_combos) <= 1:
-                logging.info(f"Phasing decision: NOT splitting cluster "
-                           f"({len(qualifying_combos)} qualifying haplotype(s) found, need >= 2)")
-                logging.debug(f"  Total haplotypes found: {len(combo_to_reads)}")
-                logging.debug(f"  Qualifying: {len(qualifying_combos)}")
-                logging.debug(f"  Non-qualifying: {len(non_qualifying_combos)}")
+                logging.info(f"Phasing decision: {len(qualifying_combos)} qualifying haplotype(s) found (need >= 2), not splitting")
                 return [(None, cluster_read_ids)]
 
             # At this point we have >= 2 qualifying haplotypes, so we will split
             logging.info(f"Phasing decision: SPLITTING cluster into {len(qualifying_combos)} haplotypes")
-            for combo, reads in sorted(qualifying_combos.items(), key=lambda x: len(x[1]), reverse=True):
-                logging.debug(f"  Qualifying haplotype '{combo}': {len(reads)} reads ({len(reads)/total_cluster_size*100:.1f}%)")
 
             # Reassign reads from non-qualifying haplotypes to nearest qualifying haplotype
-            # This prevents read loss while maintaining biological accuracy
             if non_qualifying_combos:
-                logging.debug(f"Reassigning {len(non_qualifying_combos)} non-qualifying haplotype(s):")
-                qualifying_combo_list = list(qualifying_combos.keys())
-
-                for non_qual_combo, non_qual_reads in non_qualifying_combos.items():
-                    # Find nearest qualifying haplotype using edlib (Levenshtein distance)
-                    min_distance = float('inf')
-                    nearest_combo = None
-
-                    for qual_combo in qualifying_combo_list:
-                        result = edlib.align(non_qual_combo, qual_combo)
-                        distance = result['editDistance']
-
-                        if distance < min_distance:
-                            min_distance = distance
-                            nearest_combo = qual_combo
-
-                    # Merge reads into nearest qualifying haplotype
-                    if nearest_combo is not None:
-                        qualifying_combos[nearest_combo].update(non_qual_reads)
-                        logging.debug(f"  '{non_qual_combo}' ({len(non_qual_reads)} reads) → "
-                                     f"'{nearest_combo}' (edit distance={min_distance})")
+                logging.debug(f"Reassigning {len(non_qualifying_combos)} non-qualifying haplotype(s)")
+                final_groups = reassign_to_nearest_haplotype(combo_to_reads, qualifying_combos)
+            else:
+                final_groups = qualifying_combos
 
             # Convert to list of tuples
-            result = [(combo, reads) for combo, reads in qualifying_combos.items()]
+            result = [(combo, reads) for combo, reads in final_groups.items()]
 
             # Sort by size (largest first) for consistency
             result.sort(key=lambda x: len(x[1]), reverse=True)
