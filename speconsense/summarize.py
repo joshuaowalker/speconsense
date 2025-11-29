@@ -9,6 +9,7 @@ import shutil
 import argparse
 import itertools
 import logging
+import datetime
 from typing import List, Dict, Tuple, Optional, NamedTuple
 from collections import defaultdict
 
@@ -97,6 +98,7 @@ class ClusterQualityData(NamedTuple):
     position_error_rates: List[float]  # Per-position error rates (0-1) in consensus space
     position_error_counts: List[int]  # Per-position error counts in consensus space
     read_identities: List[float]  # Per-read identity scores (0-1)
+    position_stats: Optional[List] = None  # Detailed PositionStats for debugging (optional)
 
 
 # FASTA field customization support
@@ -769,6 +771,7 @@ def analyze_positional_identity_outliers(
 
     position_error_rates = quality_data.position_error_rates
     position_error_counts = quality_data.position_error_counts
+    position_stats = quality_data.position_stats
 
     # Use global min_variant_frequency as threshold
     # Positions above this could be undetected/unphased variants
@@ -778,6 +781,26 @@ def analyze_positional_identity_outliers(
         for i, (rate, count) in enumerate(zip(position_error_rates, position_error_counts))
         if rate > threshold
     ]
+
+    # Build detailed outlier info including base composition
+    outlier_details = []
+    if position_stats:
+        for i, rate, count in outlier_positions:
+            if i < len(position_stats):
+                ps = position_stats[i]
+                outlier_details.append({
+                    'consensus_position': ps.consensus_position,
+                    'msa_position': ps.msa_position,
+                    'error_rate': rate,
+                    'error_count': count,
+                    'coverage': ps.coverage,
+                    'consensus_nucleotide': ps.consensus_nucleotide,
+                    'base_composition': dict(ps.base_composition),
+                    'homopolymer_composition': dict(ps.homopolymer_composition) if ps.homopolymer_composition else {},
+                    'sub_count': ps.sub_count,
+                    'ins_count': ps.ins_count,
+                    'del_count': ps.del_count,
+                })
 
     # Calculate statistics for outlier positions only
     if outlier_positions:
@@ -792,7 +815,10 @@ def analyze_positional_identity_outliers(
         'mean_outlier_error_rate': mean_outlier_error,
         'total_nucleotide_errors': total_nucleotide_errors,
         'outlier_threshold': threshold,
-        'outlier_positions': outlier_positions
+        'outlier_positions': outlier_positions,
+        'outlier_details': outlier_details,
+        'consensus_seq': quality_data.consensus_seq,
+        'ric': consensus_info.ric,
     }
 
 
@@ -1605,7 +1631,8 @@ def analyze_cluster_quality(
         consensus_seq=consensus_seq,
         position_error_rates=position_error_rates,
         position_error_counts=position_error_counts,
-        read_identities=read_identities
+        read_identities=read_identities,
+        position_stats=consensus_position_stats
     )
 
 
@@ -2384,6 +2411,158 @@ def build_fastq_lookup_table(source_dir: str = ".") -> Dict[str, List[str]]:
     return dict(lookup)
 
 
+def write_position_debug_file(
+    sequences_with_pos_outliers: List[Tuple],
+    summary_folder: str,
+    threshold: float
+):
+    """Write detailed debug information about high-error positions.
+
+    Creates a separate file with per-position base composition and error details
+    to help validate positional phasing and quality analysis.
+
+    Args:
+        sequences_with_pos_outliers: List of (ConsensusInfo, result_dict) tuples
+        summary_folder: Output directory for the debug file
+        threshold: Error rate threshold used for flagging positions
+    """
+    debug_path = os.path.join(summary_folder, 'position_errors_debug.txt')
+
+    with open(debug_path, 'w') as f:
+        f.write("POSITION ERROR DETAILED DEBUG REPORT\n")
+        f.write("=" * 80 + "\n\n")
+        f.write(f"Threshold: {threshold:.1%} (positions with error rate above this are flagged)\n")
+        f.write(f"Generated: {datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n\n")
+
+        if not sequences_with_pos_outliers:
+            f.write("No sequences with high-error positions found.\n")
+            return
+
+        # Sort by total nucleotide errors descending
+        sorted_seqs = sorted(
+            sequences_with_pos_outliers,
+            key=lambda x: x[1].get('total_nucleotide_errors', 0),
+            reverse=True
+        )
+
+        for cons, result in sorted_seqs:
+            # Handle merged sequences (component_name in result)
+            if 'component_name' in result:
+                display_name = f"{cons.sample_name} (component: {result['component_name']})"
+                ric = result.get('component_ric', cons.ric)
+            else:
+                display_name = cons.sample_name
+                ric = result.get('ric', cons.ric)
+
+            f.write("=" * 80 + "\n")
+            f.write(f"SEQUENCE: {display_name}\n")
+            f.write(f"RiC: {ric}\n")
+            f.write(f"High-error positions: {result['num_outlier_positions']}\n")
+            f.write(f"Mean error rate at flagged positions: {result['mean_outlier_error_rate']:.1%}\n")
+            f.write(f"Total nucleotide errors: {result['total_nucleotide_errors']}\n")
+            f.write("-" * 80 + "\n\n")
+
+            outlier_details = result.get('outlier_details', [])
+            if not outlier_details:
+                # Fall back to basic info if detailed stats not available
+                for pos, rate, count in result.get('outlier_positions', []):
+                    f.write(f"  Position {pos+1}: error_rate={rate:.1%}, error_count={count}\n")
+                f.write("\n")
+                continue
+
+            for detail in outlier_details:
+                cons_pos = detail['consensus_position']
+                msa_pos = detail.get('msa_position')
+                # Display as 1-indexed for user-friendliness
+                cons_pos_display = cons_pos + 1 if cons_pos is not None else "?"
+                msa_pos_display = msa_pos + 1 if msa_pos is not None else "?"
+
+                f.write(f"Position {cons_pos_display} (MSA: {msa_pos_display}):\n")
+                f.write(f"  Consensus base: {detail['consensus_nucleotide']}\n")
+                f.write(f"  Coverage: {detail['coverage']}\n")
+                f.write(f"  Error rate: {detail['error_rate']:.1%}\n")
+                f.write(f"  Error count: {detail['error_count']}\n")
+                f.write(f"  Substitutions: {detail['sub_count']}, Insertions: {detail['ins_count']}, Deletions: {detail['del_count']}\n")
+
+                # Format base composition (raw counts from MSA)
+                base_comp = detail['base_composition']
+                hp_comp = detail.get('homopolymer_composition', {})
+
+                if base_comp:
+                    total = sum(base_comp.values())
+                    comp_str = ", ".join(
+                        f"{base}:{count}({count/total*100:.0f}%)"
+                        for base, count in sorted(base_comp.items(), key=lambda x: -x[1])
+                        if count > 0
+                    )
+                    f.write(f"  Raw base composition: {comp_str}\n")
+
+                # Format homopolymer composition if present
+                if hp_comp and any(v > 0 for v in hp_comp.values()):
+                    hp_str = ", ".join(
+                        f"{base}:{count}"
+                        for base, count in sorted(hp_comp.items(), key=lambda x: -x[1])
+                        if count > 0
+                    )
+                    f.write(f"  Homopolymer length variants: {hp_str}\n")
+
+                    # Calculate and show effective composition (raw - HP adjustments)
+                    # HP variants are normalized away in error calculation
+                    if base_comp:
+                        effective_comp = {}
+                        for base in base_comp:
+                            raw = base_comp.get(base, 0)
+                            hp_adj = hp_comp.get(base, 0)
+                            effective = raw - hp_adj
+                            if effective > 0:
+                                effective_comp[base] = effective
+
+                        if effective_comp:
+                            eff_total = sum(effective_comp.values())
+                            eff_str = ", ".join(
+                                f"{base}:{count}({count/eff_total*100:.0f}%)"
+                                for base, count in sorted(effective_comp.items(), key=lambda x: -x[1])
+                                if count > 0
+                            )
+                            f.write(f"  Effective composition (HP-normalized): {eff_str}\n")
+
+                f.write("\n")
+
+            # Show context: consensus sequence around flagged positions
+            consensus_seq = result.get('consensus_seq', '')
+            if consensus_seq and outlier_details:
+                f.write("Consensus sequence context (flagged positions marked with *):\n")
+                # Mark positions in the sequence
+                marked_positions = set()
+                for detail in outlier_details:
+                    if detail['consensus_position'] is not None:
+                        marked_positions.add(detail['consensus_position'])
+
+                # Show sequence in chunks of 60 with position markers
+                chunk_size = 60
+                for chunk_start in range(0, len(consensus_seq), chunk_size):
+                    chunk_end = min(chunk_start + chunk_size, len(consensus_seq))
+                    chunk = consensus_seq[chunk_start:chunk_end]
+
+                    # Position line
+                    f.write(f"  {chunk_start+1:>5}  ")
+                    f.write(chunk)
+                    f.write(f"  {chunk_end}\n")
+
+                    # Marker line
+                    f.write("         ")
+                    for i in range(chunk_start, chunk_end):
+                        if i in marked_positions:
+                            f.write("*")
+                        else:
+                            f.write(" ")
+                    f.write("\n")
+
+                f.write("\n")
+
+    logging.info(f"Position error debug file written to: {debug_path}")
+
+
 def write_quality_report(final_consensus: List[ConsensusInfo],
                         all_raw_consensuses: List[Tuple[ConsensusInfo, str]],
                         summary_folder: str,
@@ -2495,6 +2674,10 @@ def write_quality_report(final_consensus: List[ConsensusInfo],
 
     # Sort positional outliers by total nucleotide errors (desc)
     sequences_with_pos_outliers.sort(key=lambda x: x[1].get('total_nucleotide_errors', 0), reverse=True)
+
+    # Write detailed position debug file
+    if sequences_with_pos_outliers:
+        write_position_debug_file(sequences_with_pos_outliers, summary_folder, min_variant_frequency)
 
     # Identify merged sequences with quality issues in components
     merged_with_issues = []
