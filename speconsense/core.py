@@ -285,9 +285,13 @@ def extract_alignments_from_msa(
         if enable_homopolymer_normalization:
             try:
                 # Use adjusted-identity to get homopolymer-normalized scoring
+                # IMPORTANT: seq1=read, seq2=consensus. This means:
+                #   - result.score_aligned shows HP extensions from READ's perspective
+                #   - result.score_aligned_seq2 shows HP extensions from CONSENSUS's perspective
+                # We use score_aligned since we want to identify which READ bases are extensions
                 result = score_alignment(
-                    read_aligned,
-                    consensus_aligned,
+                    read_aligned,      # seq1 - the read
+                    consensus_aligned, # seq2 - the consensus
                     HOMOPOLYMER_ADJUSTMENT_PARAMS
                 )
 
@@ -422,6 +426,8 @@ def analyze_positional_variation(
                 base_composition_matrix[msa_pos]['-'] += 1
 
             # Additionally track if this is a homopolymer extension
+            # NOTE: score_aligned is from the READ's perspective (seq1), which is what we want
+            # since we're asking whether this particular READ base is an HP extension
             if alignment.score_aligned and msa_pos < len(alignment.score_aligned):
                 if alignment.score_aligned[msa_pos] == '=':
                     # Homopolymer extension - track separately
