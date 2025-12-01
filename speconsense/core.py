@@ -338,13 +338,8 @@ def extract_alignments_from_msa(
     return alignments, consensus_ungapped, msa_to_consensus_pos
 
 
-def analyze_positional_variation(
-    alignments: List[ReadAlignment],
-    consensus_seq: str,
-    consensus_aligned: str,
-    msa_to_consensus_pos: Dict[int, Optional[int]],
-    overall_error_rate: float
-) -> List[PositionStats]:
+def analyze_positional_variation(alignments: List[ReadAlignment], consensus_aligned: str,
+                                 msa_to_consensus_pos: Dict[int, Optional[int]]) -> List[PositionStats]:
     """
     Analyze error rates at each position in the MSA with homopolymer tracking.
 
@@ -362,10 +357,8 @@ def analyze_positional_variation(
 
     Args:
         alignments: List of read alignments (with normalized metrics)
-        consensus_seq: Consensus sequence (ungapped)
         consensus_aligned: Consensus sequence (gapped, from MSA)
         msa_to_consensus_pos: Mapping from MSA position to consensus position
-        overall_error_rate: Overall error rate (currently unused, kept for compatibility)
 
     Returns:
         List of PositionStats for each MSA position with normalized base composition
@@ -1361,8 +1354,6 @@ class SpecimenClusterer:
                     'read_ids': merged_read_ids,
                     'initial_cluster_num': None,  # Multiple sources
                     'allele_combo': None,  # Multiple alleles merged
-                    'variant_positions': None,
-                    'num_variants': 0,
                     'merged_from': merged_from_list  # Track merge provenance
                 }
                 merged.append(merged_cluster)
@@ -1391,14 +1382,13 @@ class SpecimenClusterer:
                             found_primers: Optional[List[str]] = None,
                             rid: Optional[float] = None,
                             rid_min: Optional[float] = None,
-                            variant_positions: Optional[List[Dict]] = None,
                             actual_size: Optional[int] = None,
                             consensus_fasta_handle = None,
                             sampled_ids: Optional[Set[str]] = None,
                             msa: Optional[str] = None,
                             sorted_cluster_ids: Optional[List[str]] = None,
                             sorted_sampled_ids: Optional[List[str]] = None) -> None:
-        """Write cluster files: reads FASTQ, MSA, consensus FASTA, and variant debug files.
+        """Write cluster files: reads FASTQ, MSA, and consensus FASTA.
 
         Read identity metrics measure internal cluster consistency (not accuracy vs. ground truth):
         - rid: Mean read identity - measures average agreement between reads and consensus
@@ -1406,9 +1396,6 @@ class SpecimenClusterer:
 
         High identity values indicate homogeneous clusters with consistent reads.
         Low values may indicate heterogeneity, outliers, or poor consensus (especially at low RiC).
-
-        Variant positions indicate potential unphased biological variation that may
-        require cluster subdivision in future processing.
         """
         cluster_size = len(cluster)
         ric_size = min(actual_size or cluster_size, self.max_sample_size)
@@ -1421,15 +1408,6 @@ class SpecimenClusterer:
             info_parts.append(f"rid={rid*100:.1f}")
         if rid_min is not None:
             info_parts.append(f"rid_min={rid_min*100:.1f}")
-
-        # Add variant flags
-        if variant_positions is not None:
-            num_variants = len(variant_positions)
-            if num_variants > 0:
-                info_parts.append(f"has_variants=true")
-                info_parts.append(f"num_variants={num_variants}")
-            else:
-                info_parts.append(f"has_variants=false")
 
         if found_primers:
             info_parts.append(f"primers={','.join(found_primers)}")
@@ -1457,32 +1435,6 @@ class SpecimenClusterer:
             msa_file = os.path.join(self.debug_dir, f"{self.sample_name}-c{cluster_num}-RiC{ric_size}-msa.fasta")
             with open(msa_file, 'w') as f:
                 f.write(msa)
-
-        # Write variant positions to debug directory
-        if variant_positions and len(variant_positions) > 0:
-            variant_file = os.path.join(self.debug_dir, f"{self.sample_name}-c{cluster_num}-RiC{ric_size}-variants.txt")
-            with open(variant_file, 'w') as f:
-                f.write(f"Variant positions for {self.sample_name}-c{cluster_num}\n")
-                f.write(f"Total variants: {len(variant_positions)}\n\n")
-
-                for var in variant_positions:
-                    # Format position info
-                    if var['consensus_position'] is not None:
-                        pos_str = f"MSA:{var['msa_position']}/Consensus:{var['consensus_position']}"
-                    else:
-                        pos_str = f"MSA:{var['msa_position']}/Consensus:insertion"
-
-                    # Format base composition
-                    sorted_bases = sorted(var['base_composition'].items(), key=lambda x: x[1], reverse=True)
-                    comp_str = ', '.join([f"{base}:{count}" for base, count in sorted_bases[:4]])
-
-                    # Write variant info
-                    f.write(f"Position {pos_str}\n")
-                    f.write(f"  Coverage: {var['coverage']}\n")
-                    f.write(f"  Error rate: {var['error_rate']*100:.1f}%\n")
-                    f.write(f"  Base composition: {comp_str}\n")
-                    f.write(f"  Variant bases: {var['variant_bases']}\n")
-                    f.write(f"  Reason: {var['reason']}\n\n")
 
         # Write untrimmed consensus to debug directory
         with open(os.path.join(self.debug_dir, f"{self.sample_name}-c{cluster_num}-RiC{ric_size}-untrimmed.fasta"),
@@ -1648,8 +1600,7 @@ class SpecimenClusterer:
             else:
                 # Convert initial clusters to dict format for merge_similar_clusters
                 initial_cluster_dicts = [
-                    {'read_ids': cluster, 'initial_cluster_num': i, 'allele_combo': None,
-                     'variant_positions': None, 'num_variants': 0}
+                    {'read_ids': cluster, 'initial_cluster_num': i, 'allele_combo': None}
                     for i, cluster in enumerate(initial_clusters, 1)
                 ]
                 merged_dicts = self.merge_similar_clusters(initial_cluster_dicts, phase_name="Pre-phasing")
@@ -1767,9 +1718,7 @@ class SpecimenClusterer:
                     subcluster = {
                         'read_ids': haplotype_reads,
                         'initial_cluster_num': initial_idx,
-                        'allele_combo': allele_combo,
-                        'variant_positions': variant_positions if allele_combo else None,
-                        'num_variants': len(variant_positions) if variant_positions else 0
+                        'allele_combo': allele_combo
                     }
                     all_subclusters.append(subcluster)
 
@@ -1880,7 +1829,6 @@ class SpecimenClusterer:
                             found_primers=found_primers,
                             rid=rid,
                             rid_min=rid_min,
-                            variant_positions=None,  # Don't report variants in final output
                             actual_size=actual_size,
                             consensus_fasta_handle=consensus_fasta_handle,
                             sampled_ids=sampled_ids,
@@ -2130,13 +2078,7 @@ class SpecimenClusterer:
             consensus_aligned = ''.join(consensus_aligned)
 
             # Analyze positional variation (error_threshold parameter unused but kept for compatibility)
-            position_stats = analyze_positional_variation(
-                alignments,
-                consensus_seq,
-                consensus_aligned,
-                msa_to_consensus_pos,
-                overall_error_rate=0.0  # Unused, kept for compatibility
-            )
+            position_stats = analyze_positional_variation(alignments, consensus_aligned, msa_to_consensus_pos)
 
             # Identify variant positions
             variant_positions = []

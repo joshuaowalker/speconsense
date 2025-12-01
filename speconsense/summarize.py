@@ -88,8 +88,6 @@ class ConsensusInfo(NamedTuple):
     raw_ric: Optional[List[int]] = None  # RiC values of .raw source variants
     rid: Optional[float] = None  # Mean read identity (internal consistency metric)
     rid_min: Optional[float] = None  # Minimum read identity (worst-case read)
-    has_variants: Optional[bool] = None  # Whether variant positions were detected
-    num_variants: Optional[int] = None  # Number of variant positions detected
 
 
 class ClusterQualityData(NamedTuple):
@@ -191,26 +189,6 @@ class RidMinField(FastaField):
         return None
 
 
-class HasVariantsField(FastaField):
-    def __init__(self):
-        super().__init__('has_variants', 'Whether variant positions were detected')
-
-    def format_value(self, consensus: ConsensusInfo) -> Optional[str]:
-        if consensus.has_variants is not None:
-            return f"has_variants={'true' if consensus.has_variants else 'false'}"
-        return None
-
-
-class NumVariantsField(FastaField):
-    def __init__(self):
-        super().__init__('num_variants', 'Number of variant positions detected')
-
-    def format_value(self, consensus: ConsensusInfo) -> Optional[str]:
-        if consensus.num_variants is not None and consensus.num_variants > 0:
-            return f"num_variants={consensus.num_variants}"
-        return None
-
-
 class GroupField(FastaField):
     def __init__(self):
         super().__init__('group', 'Variant group number')
@@ -244,8 +222,6 @@ FASTA_FIELDS = {
     'snp': SnpField(),
     'rid': RidField(),
     'rid_min': RidMinField(),
-    'has_variants': HasVariantsField(),
-    'num_variants': NumVariantsField(),
     'primers': PrimersField(),
     'group': GroupField(),
     'variant': VariantField(),
@@ -255,8 +231,8 @@ FASTA_FIELDS = {
 FASTA_FIELD_PRESETS = {
     'default': ['size', 'ric', 'rawric', 'snp', 'primers'],
     'minimal': ['size', 'ric'],
-    'qc': ['size', 'ric', 'length', 'rid', 'has_variants', 'num_variants'],
-    'full': ['size', 'ric', 'length', 'rawric', 'snp', 'rid', 'has_variants', 'num_variants', 'primers'],
+    'qc': ['size', 'ric', 'length', 'rid'],
+    'full': ['size', 'ric', 'length', 'rawric', 'snp', 'rid', 'primers'],
     'id-only': [],
 }
 
@@ -473,15 +449,14 @@ def parse_consensus_header(header: str) -> Tuple[Optional[str], Optional[int], O
     """
     Extract information from Speconsense consensus FASTA header.
 
-    Parses read identity metrics and variant detection flags.
+    Parses read identity metrics.
 
     Returns:
-        Tuple of (sample_name, ric, size, primers, rid, rid_min,
-                  has_variants, num_variants)
+        Tuple of (sample_name, ric, size, primers, rid, rid_min)
     """
     sample_match = re.match(r'>([^ ]+) (.+)', header)
     if not sample_match:
-        return None, None, None, None, None, None, None, None
+        return None, None, None, None, None, None
 
     sample_name = sample_match.group(1)
     info_string = sample_match.group(2)
@@ -505,14 +480,7 @@ def parse_consensus_header(header: str) -> Tuple[Optional[str], Optional[int], O
     rid_min_match = re.search(r'rid_min=([\d.]+)', info_string)
     rid_min = float(rid_min_match.group(1)) / 100.0 if rid_min_match else None
 
-    # Extract variant detection flags
-    has_variants_match = re.search(r'has_variants=(true|false)', info_string)
-    has_variants = (has_variants_match.group(1) == 'true') if has_variants_match else None
-
-    num_variants_match = re.search(r'num_variants=(\d+)', info_string)
-    num_variants = int(num_variants_match.group(1)) if num_variants_match else None
-
-    return sample_name, ric, size, primers, rid, rid_min, has_variants, num_variants
+    return sample_name, ric, size, primers, rid, rid_min
 
 
 def load_consensus_sequences(source_folder: str, min_ric: int) -> List[ConsensusInfo]:
@@ -528,7 +496,7 @@ def load_consensus_sequences(source_folder: str, min_ric: int) -> List[Consensus
 
         with open(fasta_file, 'r') as f:
             for record in SeqIO.parse(f, "fasta"):
-                sample_name, ric, size, primers, rid, rid_min, has_variants, num_variants = \
+                sample_name, ric, size, primers, rid, rid_min = \
                     parse_consensus_header(f">{record.description}")
 
                 if sample_name and ric >= min_ric:
@@ -548,8 +516,6 @@ def load_consensus_sequences(source_folder: str, min_ric: int) -> List[Consensus
                         raw_ric=None,  # Not available in original speconsense output
                         rid=rid,  # Mean read identity if available
                         rid_min=rid_min,  # Minimum read identity if available
-                        has_variants=has_variants,  # From variant detection if available
-                        num_variants=num_variants  # From variant detection if available
                     )
                     consensus_list.append(consensus_info)
 
@@ -1173,8 +1139,6 @@ def create_consensus_from_msa(aligned_seqs: List, variants: List[ConsensusInfo])
         raw_ric=raw_ric_values,
         rid=largest_variant.rid,  # Preserve identity metrics from largest variant
         rid_min=largest_variant.rid_min,
-        has_variants=largest_variant.has_variants,  # Preserve variant flags from largest variant
-        num_variants=largest_variant.num_variants
     )
 
 
@@ -2067,10 +2031,8 @@ def create_output_structure(groups: Dict[int, List[ConsensusInfo]],
                 raw_ric=variant.raw_ric,  # Preserve raw_ric
                 rid=variant.rid,  # Preserve identity metrics
                 rid_min=variant.rid_min,
-                has_variants=variant.has_variants,  # Preserve variant flags
-                num_variants=variant.num_variants
             )
-            
+
             final_consensus.append(renamed_variant)
             group_naming.append((variant.sample_name, new_name))
         
@@ -2249,8 +2211,6 @@ def write_specimen_data_files(specimen_consensus: List[ConsensusInfo],
                         raw_ric=None,  # Pre-merge, not merged
                         rid=raw_info.rid,  # Preserve read identity metrics
                         rid_min=raw_info.rid_min,
-                        has_variants=raw_info.has_variants,  # Preserve variant flags
-                        num_variants=raw_info.num_variants
                     )
                     raw_file_consensuses.append((raw_consensus, raw_info.sample_name))
 
@@ -2670,11 +2630,6 @@ def write_quality_report(final_consensus: List[ConsensusInfo],
     # Sort merged issues by worst component quality
     merged_with_issues.sort(key=lambda x: x[2])
 
-    # Get variant detection info
-    sequences_with_variants = [cons for cons in final_consensus
-                              if cons.has_variants and cons.num_variants and cons.num_variants > 0]
-    sequences_with_variants.sort(key=lambda x: x.num_variants, reverse=True)
-
     # Write the report
     with open(quality_report_path, 'w') as f:
         # ====================================================================
@@ -2710,7 +2665,6 @@ def write_quality_report(final_consensus: List[ConsensusInfo],
 
         n_stat = len(outlier_results['statistical_outliers'])
         n_pos = len(sequences_with_pos_outliers)
-        n_var = len(sequences_with_variants)
         n_merged = len(merged_with_issues)
 
         # Count unique sequences flagged (use sample_name for deduplication)
@@ -2728,8 +2682,7 @@ def write_quality_report(final_consensus: List[ConsensusInfo],
 
         f.write(f"  Total flagged: {total_flagged} ({100*total_flagged/total_seqs:.1f}%)\n")
         f.write(f"    - Low read identity: {n_rid_issues} ({n_stat} sequences + {n_merged} merged)\n")
-        f.write(f"    - High-error positions: {n_pos}\n")
-        f.write(f"    - With detected variants: {n_var}\n\n")
+        f.write(f"    - High-error positions: {n_pos}\n\n")
 
         # ====================================================================
         # SECTION 3: READ IDENTITY ANALYSIS
@@ -2842,29 +2795,7 @@ def write_quality_report(final_consensus: List[ConsensusInfo],
             f.write("\n")
 
         # ====================================================================
-        # SECTION 5: VARIANT DETECTION
-        # ====================================================================
-        if n_var > 0:
-            f.write("=" * 80 + "\n")
-            f.write("VARIANT DETECTION\n")
-            f.write("=" * 80 + "\n\n")
-
-            f.write(f"Clusters with detected variant positions ({n_var}):\n")
-            f.write("Variants may indicate unphased heterozygous positions or mixed sequences.\n\n")
-
-            f.write(f"{'Sequence':<60} {'RiC':<6} {'Variants':<10}\n")
-            f.write("-" * 80 + "\n")
-
-            for cons in sequences_with_variants[:30]:  # Limit to 30
-                name_truncated = cons.sample_name[:59] if len(cons.sample_name) > 59 else cons.sample_name
-                f.write(f"{name_truncated:<60} {cons.ric:<6} {cons.num_variants:<10}\n")
-
-            if len(sequences_with_variants) > 30:
-                f.write(f"\n... and {len(sequences_with_variants) - 30} more sequences\n")
-            f.write("\n")
-
-        # ====================================================================
-        # SECTION 6: INTERPRETATION GUIDE
+        # SECTION 5: INTERPRETATION GUIDE
         # ====================================================================
         f.write("=" * 80 + "\n")
         f.write("INTERPRETATION GUIDE\n")
@@ -2885,11 +2816,6 @@ def write_quality_report(final_consensus: List[ConsensusInfo],
         f.write("  MeanErr: Average error rate at flagged positions\n")
         f.write("  TotalErr: Sum of errors at flagged positions\n\n")
 
-        f.write("Variant Detection:\n")
-        f.write("-" * 40 + "\n")
-        f.write("  Shows sequences with detected but unphased variants.\n")
-        f.write("  Variants are encoded using IUPAC ambiguity codes.\n\n")
-
 
     # Log summary
     logging.info(f"Quality report written to: {quality_report_path}")
@@ -2900,8 +2826,6 @@ def write_quality_report(final_consensus: List[ConsensusInfo],
 
     if n_pos > 0:
         logging.info(f"  {n_pos} sequence(s) with high-error positions")
-    if n_var > 0:
-        logging.info(f"  {n_var} sequence(s) with detected variants")
     if n_merged > 0:
         logging.info(f"  {n_merged} merged sequence(s) with component quality issues")
 
@@ -3054,8 +2978,6 @@ def process_single_specimen(file_consensuses: List[ConsensusInfo],
                 raw_ric=variant.raw_ric,  # Preserve raw_ric
                 rid=variant.rid,  # Preserve identity metrics
                 rid_min=variant.rid_min,
-                has_variants=variant.has_variants,  # Preserve variant flags
-                num_variants=variant.num_variants
             )
 
             final_consensus.append(renamed_variant)
