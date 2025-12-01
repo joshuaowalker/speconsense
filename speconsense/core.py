@@ -572,6 +572,126 @@ def is_variant_position_with_composition(
     return False, [], "No variants detected (after HP adjustment)"
 
 
+def call_iupac_ambiguities(
+    consensus: str,
+    alignments: List['ReadAlignment'],
+    msa_to_consensus_pos: Dict[int, Optional[int]],
+    min_variant_frequency: float = 0.20,
+    min_variant_count: int = 5
+) -> Tuple[str, int, List[Dict]]:
+    """
+    Replace consensus bases at variant positions with IUPAC ambiguity codes.
+
+    Analyzes positional variation in the MSA and identifies positions where
+    significant variation remains after phasing. At these positions, the
+    consensus base is replaced with the appropriate IUPAC code representing
+    all variant alleles that meet the threshold criteria.
+
+    Uses the same thresholds as phasing to ensure consistency. Homopolymer
+    length variation is excluded (only true nucleotide variants are considered).
+
+    Args:
+        consensus: Ungapped consensus sequence from SPOA
+        alignments: List of ReadAlignment objects from MSA
+        msa_to_consensus_pos: Mapping from MSA position to consensus position
+        min_variant_frequency: Minimum alternative allele frequency (default: 0.20)
+        min_variant_count: Minimum alternative allele read count (default: 5)
+
+    Returns:
+        Tuple of:
+        - Modified consensus sequence with IUPAC codes at variant positions
+        - Count of IUPAC positions introduced
+        - List of dicts with details about each IUPAC position:
+          {
+              'consensus_position': int,
+              'original_base': str,
+              'iupac_code': str,
+              'variant_bases': List[str],
+              'base_composition': Dict[str, int]
+          }
+    """
+    if not consensus or not alignments:
+        return consensus, 0, []
+
+    # Reconstruct consensus_aligned from consensus and msa_to_consensus_pos
+    # (same pattern as detect_variant_positions)
+    msa_length = max(msa_to_consensus_pos.keys()) + 1 if msa_to_consensus_pos else 0
+    if msa_length == 0:
+        return consensus, 0, []
+
+    consensus_aligned = []
+    for msa_pos in range(msa_length):
+        cons_pos = msa_to_consensus_pos.get(msa_pos)
+        if cons_pos is not None and cons_pos < len(consensus):
+            consensus_aligned.append(consensus[cons_pos])
+        else:
+            consensus_aligned.append('-')
+    consensus_aligned_str = ''.join(consensus_aligned)
+
+    # Analyze positional variation
+    position_stats = analyze_positional_variation(alignments, consensus_aligned_str, msa_to_consensus_pos)
+
+    # Build list of positions to replace
+    iupac_positions = []
+
+    for pos_stat in position_stats:
+        # Skip insertion columns (no consensus position)
+        if pos_stat.consensus_position is None:
+            continue
+
+        # Check if this position has significant variation
+        is_variant, variant_bases, reason = is_variant_position_with_composition(
+            pos_stat, min_variant_frequency, min_variant_count
+        )
+
+        if not is_variant:
+            continue
+
+        # Filter out gaps from variant bases (we can only represent nucleotide ambiguities)
+        nucleotide_variants = [b for b in variant_bases if b in 'ACGT']
+
+        if not nucleotide_variants:
+            # Only gaps met the threshold - skip this position
+            continue
+
+        # Get the consensus base at this position
+        cons_pos = pos_stat.consensus_position
+        consensus_base = consensus[cons_pos] if cons_pos < len(consensus) else None
+
+        if consensus_base is None or consensus_base not in 'ACGT':
+            continue
+
+        # Build set of all significant bases (consensus + variants)
+        all_bases = set(nucleotide_variants)
+        all_bases.add(consensus_base)
+
+        # Look up IUPAC code
+        iupac_code = IUPAC_CODES.get(frozenset(all_bases), 'N')
+
+        # Only record if we actually need an ambiguity code (more than one base)
+        if len(all_bases) > 1:
+            iupac_positions.append({
+                'consensus_position': cons_pos,
+                'original_base': consensus_base,
+                'iupac_code': iupac_code,
+                'variant_bases': nucleotide_variants,
+                'base_composition': pos_stat.base_composition
+            })
+
+    if not iupac_positions:
+        return consensus, 0, []
+
+    # Build modified consensus
+    consensus_list = list(consensus)
+    for pos_info in iupac_positions:
+        cons_pos = pos_info['consensus_position']
+        consensus_list[cons_pos] = pos_info['iupac_code']
+
+    modified_consensus = ''.join(consensus_list)
+
+    return modified_consensus, len(iupac_positions), iupac_positions
+
+
 def calculate_within_cluster_error(
     haplotype_groups: Dict[str, Set[str]],
     read_alleles: Dict[str, Dict[int, str]],
@@ -954,7 +1074,8 @@ class SpecimenClusterer:
                  outlier_identity_threshold: Optional[float] = None,
                  enable_secondpass_phasing: bool = True,
                  min_variant_frequency: float = 0.20,
-                 min_variant_count: int = 5):
+                 min_variant_count: int = 5,
+                 enable_iupac_calling: bool = True):
         self.min_identity = min_identity
         self.inflation = inflation
         self.min_size = min_size
@@ -979,6 +1100,7 @@ class SpecimenClusterer:
         self.enable_secondpass_phasing = enable_secondpass_phasing
         self.min_variant_frequency = min_variant_frequency
         self.min_variant_count = min_variant_count
+        self.enable_iupac_calling = enable_iupac_calling
         self.sequences = {}  # id -> sequence string
         self.records = {}  # id -> SeqRecord object
         self.id_map = {}  # short_id -> original_id
@@ -1017,6 +1139,7 @@ class SpecimenClusterer:
                 "enable_secondpass_phasing": self.enable_secondpass_phasing,
                 "min_variant_frequency": self.min_variant_frequency,
                 "min_variant_count": self.min_variant_count,
+                "enable_iupac_calling": self.enable_iupac_calling,
                 "orient_mode": self.orient_mode,
             },
             "input_file": self.input_file,
@@ -1387,7 +1510,8 @@ class SpecimenClusterer:
                             sampled_ids: Optional[Set[str]] = None,
                             msa: Optional[str] = None,
                             sorted_cluster_ids: Optional[List[str]] = None,
-                            sorted_sampled_ids: Optional[List[str]] = None) -> None:
+                            sorted_sampled_ids: Optional[List[str]] = None,
+                            iupac_count: int = 0) -> None:
         """Write cluster files: reads FASTQ, MSA, and consensus FASTA.
 
         Read identity metrics measure internal cluster consistency (not accuracy vs. ground truth):
@@ -1411,6 +1535,8 @@ class SpecimenClusterer:
 
         if found_primers:
             info_parts.append(f"primers={','.join(found_primers)}")
+        if iupac_count > 0:
+            info_parts.append(f"iupac={iupac_count}")
         info_str = " ".join(info_parts)
 
         # Write reads FASTQ to debug directory with new naming convention
@@ -1814,13 +1940,26 @@ class SpecimenClusterer:
                     # (already done in detection phase)
 
                     if consensus:
-                        # Perform primer trimming
+                        # Apply IUPAC ambiguity calling for unphased variant positions
+                        iupac_count = 0
+                        if self.enable_iupac_calling and result is not None:
+                            consensus, iupac_count, iupac_details = call_iupac_ambiguities(
+                                consensus=consensus,
+                                alignments=result.alignments,
+                                msa_to_consensus_pos=result.msa_to_consensus_pos,
+                                min_variant_frequency=self.min_variant_frequency,
+                                min_variant_count=self.min_variant_count
+                            )
+                            if iupac_count > 0:
+                                logging.debug(f"Cluster {final_idx}: Called {iupac_count} IUPAC ambiguity position(s)")
+
+                        # Perform primer trimming (on potentially modified consensus)
                         trimmed_consensus = None
                         found_primers = None
                         if hasattr(self, 'primers'):
                             trimmed_consensus, found_primers = self.trim_primers(consensus)
 
-                        # Write output files (no variant positions in output phase)
+                        # Write output files
                         self.write_cluster_files(
                             cluster_num=final_idx,
                             cluster=cluster,
@@ -1834,7 +1973,8 @@ class SpecimenClusterer:
                             sampled_ids=sampled_ids,
                             msa=msa,
                             sorted_cluster_ids=sorted_cluster_ids,
-                            sorted_sampled_ids=sorted_sampled_ids
+                            sorted_sampled_ids=sorted_sampled_ids,
+                            iupac_count=iupac_count
                         )
 
             # ============================================================
@@ -2748,6 +2888,8 @@ def main():
                         help="Disable homopolymer equivalence in cluster merging (only merge identical sequences)")
     parser.add_argument("--disable-cluster-merging", action="store_true",
                         help="Disable merging of clusters with identical consensus sequences")
+    parser.add_argument("--disable-iupac-calling", action="store_true",
+                        help="Disable IUPAC ambiguity code calling for unphased variant positions")
     parser.add_argument("--orient-mode", choices=["skip", "keep-all", "filter-failed"], default="skip",
                         help="Sequence orientation mode: skip (default, no orientation), keep-all (orient but keep failed), or filter-failed (orient and remove failed)")
     parser.add_argument("--log-level", default="INFO",
@@ -2781,7 +2923,8 @@ def main():
         outlier_identity_threshold=args.outlier_identity_threshold,
         enable_secondpass_phasing=not args.disable_secondpass_phasing,
         min_variant_frequency=args.min_variant_frequency,
-        min_variant_count=args.min_variant_count
+        min_variant_count=args.min_variant_count,
+        enable_iupac_calling=not args.disable_iupac_calling
     )
 
     # Log configuration

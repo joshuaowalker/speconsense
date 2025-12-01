@@ -1460,14 +1460,21 @@ def analyze_cluster_quality(
         logging.debug(f"No alignments found in MSA: {msa_file}")
         return None
 
-    # Verify consensus matches (allow minor differences due to trimming)
+    # Verify consensus matches: the passed-in consensus_seq may be trimmed (shorter) with IUPAC codes
+    # The MSA consensus is untrimmed (longer) without IUPAC codes
+    # Use edlib in HW mode to check if trimmed consensus is contained within MSA consensus
     if msa_consensus and msa_consensus != consensus_seq:
-        if msa_consensus not in consensus_seq and consensus_seq not in msa_consensus:
+        # Use edlib HW mode (semi-global) to find consensus_seq within msa_consensus
+        # This handles primer trimming (length difference) and IUPAC codes (via equivalencies)
+        result = edlib.align(consensus_seq, msa_consensus, mode="HW", task="distance",
+                             additionalEqualities=IUPAC_EQUIV)
+        edit_distance = result["editDistance"]
+        if edit_distance > 0:  # Any edits indicate a real mismatch
             logging.warning(f"Consensus mismatch in MSA file: {msa_file}")
-            logging.warning(f"  Expected length: {len(consensus_seq)}, MSA length: {len(msa_consensus)}")
+            logging.warning(f"  MSA length: {len(msa_consensus)}, consensus length: {len(consensus_seq)}, edit distance: {edit_distance}")
 
-    # Use MSA consensus as authoritative
-    consensus_seq = msa_consensus
+    # Use the passed-in consensus (with IUPAC codes) as authoritative for quality analysis
+    # This reflects the actual output sequence
     consensus_length = len(consensus_seq)
 
     if consensus_length == 0:
