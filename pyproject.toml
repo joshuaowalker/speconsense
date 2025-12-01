@@ -32,7 +32,6 @@ dependencies = [
     "biopython>=1.79",
     "tqdm>=4.62.0",
     "scipy>=1.7.0",
-    "matplotlib>=3.3.0",
     "adjusted-identity @ git+https://github.com/joshuaowalker/adjusted-identity.git@v0.2.0",
 ]
 
