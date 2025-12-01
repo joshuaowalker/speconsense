@@ -255,8 +255,8 @@ FASTA_FIELDS = {
 FASTA_FIELD_PRESETS = {
     'default': ['size', 'ric', 'rawric', 'snp', 'primers'],
     'minimal': ['size', 'ric'],
-    'qc': ['size', 'ric', 'length', 'rid', 'rid_min', 'has_variants', 'num_variants'],
-    'full': ['size', 'ric', 'length', 'rawric', 'snp', 'rid', 'rid_min', 'has_variants', 'num_variants', 'primers'],
+    'qc': ['size', 'ric', 'length', 'rid', 'has_variants', 'num_variants'],
+    'full': ['size', 'ric', 'length', 'rawric', 'snp', 'rid', 'has_variants', 'num_variants', 'primers'],
     'id-only': [],
 }
 
@@ -284,7 +284,7 @@ def parse_fasta_fields(spec: str) -> List[FastaField]:
                 - "default" (single preset)
                 - "minimal,qc" (preset union)
                 - "size,ric,primers" (field list)
-                - "minimal,rid,rid_min" (preset + fields)
+                - "minimal,rid" (preset + fields)
 
     Returns:
         List of FastaField objects in specified order, duplicates removed
@@ -368,7 +368,7 @@ def parse_arguments():
                              "(2) comma-separated field names (size, ric, length, rawric, "
                              "snp, rid, rid_min, primers, group, variant), or "
                              "(3) a combination of presets and fields (e.g., minimal,qc or "
-                             "minimal,rid,rid_min). Duplicates removed, order preserved "
+                             "minimal,rid). Duplicates removed, order preserved "
                              "left to right. Default: default")
 
     # Merge phase parameters
@@ -585,108 +585,61 @@ def load_metadata_from_json(source_folder: str, sample_name: str) -> Optional[Di
 
 
 def identify_outliers(final_consensus: List, all_raw_consensuses: List, source_folder: str) -> Dict:
-    """Identify sequences with quality issues using dual outlier detection.
+    """Identify sequences with low read identity using statistical outlier detection.
 
-    Uses two approaches:
-    1. Clustering threshold: Check if rid/rid_min below the outlier-identity-threshold
-       used during clustering (loaded from metadata.json)
-    2. Statistical outliers: Sequences with rid or rid_min below (mean - 2×std)
+    Flags sequences with mean read identity (rid) below (mean - 2×std) for the dataset.
+    This identifies the ~2.5% lowest values that may warrant review.
+
+    Note: rid_min (minimum read identity) is not used because single outlier reads
+    don't significantly impact consensus quality. Positional analysis better captures
+    systematic issues like mixed clusters or variants.
 
     Args:
         final_consensus: List of final consensus sequences
-        all_raw_consensuses: List of all raw consensus sequences (including merged variants)
-        source_folder: Source directory containing metadata files
+        all_raw_consensuses: List of all raw consensus sequences (unused, kept for API compatibility)
+        source_folder: Source directory (unused, kept for API compatibility)
 
     Returns:
-        Dictionary with outlier categorization:
+        Dictionary with:
         {
-            'below_clustering_threshold': List of (cons, threshold, metric_type, value),
-            'statistical_outliers': List of (cons, z_score, metric_type, value),
-            'both': List of (cons, threshold, z_score, metric_type, value),
-            'no_issues': List of consensus sequences with good quality
+            'statistical_outliers': List of (cons, rid),
+            'no_issues': List of consensus sequences with good quality,
+            'global_stats': {'mean_rid', 'std_rid', 'stat_threshold_rid'}
         }
     """
     # Calculate global statistics for all sequences with identity metrics
     all_rids = []
-    all_rid_mins = []
 
     for cons in final_consensus:
         if cons.rid is not None:
             all_rids.append(cons.rid)
-        if cons.rid_min is not None:
-            all_rid_mins.append(cons.rid_min)
 
     # Calculate mean and std for statistical outlier detection
     mean_rid = np.mean(all_rids) if all_rids else 1.0
     std_rid = np.std(all_rids) if len(all_rids) > 1 else 0.0
-    mean_rid_min = np.mean(all_rid_mins) if all_rid_mins else 1.0
-    std_rid_min = np.std(all_rid_mins) if len(all_rid_mins) > 1 else 0.0
 
-    # Thresholds for statistical outliers
+    # Threshold for statistical outliers (2 standard deviations below mean)
     stat_threshold_rid = mean_rid - 2 * std_rid
-    stat_threshold_rid_min = mean_rid_min - 2 * std_rid_min
 
     # Categorize sequences
-    below_clustering = []
     statistical = []
-    both_categories = []
     no_issues = []
 
     for cons in final_consensus:
         rid = cons.rid if cons.rid is not None else 1.0
-        rid_min = cons.rid_min if cons.rid_min is not None else 1.0
 
-        # Load metadata to get clustering threshold
-        metadata = load_metadata_from_json(source_folder, cons.sample_name)
-        clustering_threshold = None
-        if metadata and 'parameters' in metadata:
-            clustering_threshold = metadata['parameters'].get('outlier_identity_threshold')
-
-        # Check both criteria
-        below_cluster_thresh = False
-        is_stat_outlier = False
-        metric_type = None
-        value = None
-
-        if clustering_threshold is not None:
-            if rid < clustering_threshold or rid_min < clustering_threshold:
-                below_cluster_thresh = True
-                metric_type = 'rid' if rid < clustering_threshold else 'rid_min'
-                value = rid if rid < clustering_threshold else rid_min
-
-        if rid < stat_threshold_rid or rid_min < stat_threshold_rid_min:
-            is_stat_outlier = True
-            if metric_type is None:  # Only set if not already set
-                metric_type = 'rid' if rid < stat_threshold_rid else 'rid_min'
-                value = rid if rid < stat_threshold_rid else rid_min
-
-        # Categorize
-        if below_cluster_thresh and is_stat_outlier:
-            both_categories.append((cons, clustering_threshold, metric_type, value))
-        elif below_cluster_thresh:
-            below_clustering.append((cons, clustering_threshold, metric_type, value))
-        elif is_stat_outlier:
-            # Calculate z-score for reporting
-            if metric_type == 'rid':
-                z_score = (value - mean_rid) / std_rid if std_rid > 0 else 0
-            else:
-                z_score = (value - mean_rid_min) / std_rid_min if std_rid_min > 0 else 0
-            statistical.append((cons, z_score, metric_type, value))
+        if rid < stat_threshold_rid:
+            statistical.append((cons, rid))
         else:
             no_issues.append(cons)
 
     return {
-        'below_clustering_threshold': below_clustering,
         'statistical_outliers': statistical,
-        'both': both_categories,
         'no_issues': no_issues,
         'global_stats': {
             'mean_rid': mean_rid,
             'std_rid': std_rid,
-            'mean_rid_min': mean_rid_min,
-            'std_rid_min': std_rid_min,
-            'stat_threshold_rid': stat_threshold_rid,
-            'stat_threshold_rid_min': stat_threshold_rid_min
+            'stat_threshold_rid': stat_threshold_rid
         }
     }
 
@@ -1605,13 +1558,7 @@ def analyze_cluster_quality(
         logging.debug(f"Downsampled {len(read_identities_temp)} reads to {len(alignments)} for analysis")
 
     # Use core.py's canonical positional analysis
-    position_stats = analyze_positional_variation(
-        alignments,
-        consensus_seq,
-        consensus_aligned,
-        msa_to_consensus_pos,
-        0.0  # overall_error_rate (unused parameter)
-    )
+    position_stats = analyze_positional_variation(alignments, consensus_aligned, msa_to_consensus_pos)
 
     # Extract position error rates and counts for consensus positions only (skip insertion columns)
     consensus_position_stats = [ps for ps in position_stats if ps.consensus_position is not None]
@@ -2568,9 +2515,13 @@ def write_quality_report(final_consensus: List[ConsensusInfo],
                         summary_folder: str,
                         source_folder: str):
     """
-    Write quality report with rid/rid_min-native design and dual outlier detection.
+    Write quality report with rid-based dual outlier detection.
 
-    New structure:
+    Uses mean read identity (rid) for outlier detection. rid_min is not used
+    because single outlier reads don't significantly impact consensus quality;
+    positional analysis better captures systematic issues.
+
+    Structure:
     1. Executive Summary - High-level overview with attention flags
     2. Read Identity Analysis - Dual outlier detection (clustering threshold + statistical)
     3. Positional Identity Analysis - Sequences with problematic positions
@@ -2681,34 +2632,43 @@ def write_quality_report(final_consensus: List[ConsensusInfo],
 
     # Identify merged sequences with quality issues in components
     merged_with_issues = []
+    threshold_rid = outlier_results['global_stats']['stat_threshold_rid']
+
     for cons in final_consensus:
         is_merged = cons.snp_count is not None and cons.snp_count > 0
         if is_merged:
             raw_components = raw_lookup.get(cons.sample_name, [])
+            if not raw_components:
+                continue
+
+            # Collect all component info and calculate weighted average rid
+            components_info = []
             worst_rid = 1.0
-            worst_rid_min = 1.0
-            worst_component = None
+            total_ric = 0
+            weighted_rid_sum = 0
 
             for raw in raw_components:
                 rid = raw.rid if raw.rid is not None else 1.0
-                rid_min = raw.rid_min if raw.rid_min is not None else 1.0
-
-                if (rid, rid_min) < (worst_rid, worst_rid_min):
+                ric = raw.ric if raw.ric else 0
+                components_info.append((raw, rid, ric))
+                if rid < worst_rid:
                     worst_rid = rid
-                    worst_rid_min = rid_min
-                    worst_component = raw
+                if ric > 0:
+                    total_ric += ric
+                    weighted_rid_sum += rid * ric
+
+            # Calculate weighted average rid
+            weighted_avg_rid = weighted_rid_sum / total_ric if total_ric > 0 else 1.0
+
+            # Sort components by rid ascending
+            components_info.sort(key=lambda x: x[1])
 
             # Flag if worst component has concerning quality
-            # Use statistical thresholds from outlier_results
-            stats = outlier_results['global_stats']
-            threshold_rid = stats['stat_threshold_rid']
-            threshold_rid_min = stats['stat_threshold_rid_min']
-
-            if worst_component and (worst_rid < threshold_rid or worst_rid_min < threshold_rid_min):
-                merged_with_issues.append((cons, worst_component, worst_rid, worst_rid_min))
+            if worst_rid < threshold_rid:
+                merged_with_issues.append((cons, components_info, worst_rid, weighted_avg_rid))
 
     # Sort merged issues by worst component quality
-    merged_with_issues.sort(key=lambda x: (x[2], x[3]))
+    merged_with_issues.sort(key=lambda x: x[2])
 
     # Get variant detection info
     sequences_with_variants = [cons for cons in final_consensus
@@ -2743,14 +2703,11 @@ def write_quality_report(final_consensus: List[ConsensusInfo],
         # Global statistics
         stats = outlier_results['global_stats']
         f.write(f"Global Read Identity Statistics:\n")
-        f.write(f"  Mean rid:     {stats['mean_rid']:.1%} ± {stats['std_rid']:.1%}\n")
-        f.write(f"  Mean rid_min: {stats['mean_rid_min']:.1%} ± {stats['std_rid_min']:.1%}\n\n")
+        f.write(f"  Mean rid: {stats['mean_rid']:.1%} ± {stats['std_rid']:.1%}\n\n")
 
         # Sequences requiring attention
         f.write("Sequences Requiring Attention:\n")
 
-        n_both = len(outlier_results['both'])
-        n_cluster = len(outlier_results['below_clustering_threshold'])
         n_stat = len(outlier_results['statistical_outliers'])
         n_pos = len(sequences_with_pos_outliers)
         n_var = len(sequences_with_variants)
@@ -2758,11 +2715,7 @@ def write_quality_report(final_consensus: List[ConsensusInfo],
 
         # Count unique sequences flagged (use sample_name for deduplication)
         flagged_names = set()
-        for c, _, _, _ in outlier_results['both']:
-            flagged_names.add(c.sample_name)
-        for c, _, _, _ in outlier_results['below_clustering_threshold']:
-            flagged_names.add(c.sample_name)
-        for c, _, _, _ in outlier_results['statistical_outliers']:
+        for c, _ in outlier_results['statistical_outliers']:
             flagged_names.add(c.sample_name)
         for c, _ in sequences_with_pos_outliers:
             flagged_names.add(c.sample_name)
@@ -2770,77 +2723,73 @@ def write_quality_report(final_consensus: List[ConsensusInfo],
             flagged_names.add(c.sample_name)
         total_flagged = len(flagged_names)
 
+        # Count combined read identity issues (statistical outliers + merged with component issues)
+        n_rid_issues = n_stat + n_merged
+
         f.write(f"  Total flagged: {total_flagged} ({100*total_flagged/total_seqs:.1f}%)\n")
-        f.write(f"    - Below clustering threshold: {n_cluster}\n")
-        f.write(f"    - Statistical outliers: {n_stat}\n")
-        f.write(f"    - Both criteria: {n_both}\n")
+        f.write(f"    - Low read identity: {n_rid_issues} ({n_stat} sequences + {n_merged} merged)\n")
         f.write(f"    - High-error positions: {n_pos}\n")
-        f.write(f"    - With detected variants: {n_var}\n")
-        f.write(f"    - Merged with component issues: {n_merged}\n\n")
+        f.write(f"    - With detected variants: {n_var}\n\n")
 
         # ====================================================================
         # SECTION 3: READ IDENTITY ANALYSIS
         # ====================================================================
-        if n_both + n_cluster + n_stat > 0:
+        if n_rid_issues > 0:
             f.write("=" * 80 + "\n")
             f.write("READ IDENTITY ANALYSIS\n")
             f.write("=" * 80 + "\n\n")
 
-            f.write("This section reports sequences with low read identity using two approaches:\n")
-            f.write("1. Clustering threshold: Below the outlier-identity-threshold from metadata\n")
-            f.write("2. Statistical outliers: Below mean - 2×std for the dataset\n\n")
+            f.write("Sequences with mean read identity (rid) below mean - 2×std.\n")
+            f.write(f"Threshold: {stats['stat_threshold_rid']:.1%}\n\n")
 
-            f.write(f"Thresholds:\n")
-            f.write(f"  Statistical threshold (rid):     {stats['stat_threshold_rid']:.1%}\n")
-            f.write(f"  Statistical threshold (rid_min): {stats['stat_threshold_rid_min']:.1%}\n\n")
+            f.write(f"{'Sequence':<50} {'RiC':<6} {'rid':<8}\n")
+            f.write("-" * 64 + "\n")
 
-            # Table 3A: Both criteria
-            if n_both > 0:
-                f.write(f"Sequences failing both criteria ({n_both}):\n")
-                f.write("-" * 80 + "\n")
-                f.write(f"{'Sequence':<50} {'RiC':<6} {'rid':<8} {'rid_min':<8} {'Threshold':<10}\n")
-                f.write("-" * 80 + "\n")
+            # Build combined list: non-merged outliers + merged with issues
+            # Each entry is: (display_rid_for_sorting, is_merged, data)
+            # For non-merged: data = (cons, rid)
+            # For merged: data = (cons, components_info, worst_rid, weighted_avg_rid)
+            combined_entries = []
 
-                for cons, threshold, metric_type, value in outlier_results['both']:
-                    rid_str = f"{cons.rid:.1%}" if cons.rid is not None else "N/A"
-                    rid_min_str = f"{cons.rid_min:.1%}" if cons.rid_min is not None else "N/A"
-                    thresh_str = f"{threshold:.1%}" if threshold else "N/A"
+            # Add non-merged statistical outliers
+            for cons, rid in outlier_results['statistical_outliers']:
+                is_merged = cons.snp_count is not None and cons.snp_count > 0
+                if not is_merged:
+                    combined_entries.append((rid, False, (cons, rid)))
 
+            # Add merged sequences with issues
+            for entry in merged_with_issues:
+                cons, components_info, worst_rid, weighted_avg_rid = entry
+                combined_entries.append((worst_rid, True, entry))
+
+            # Sort by rid ascending (using worst component rid for merged)
+            combined_entries.sort(key=lambda x: x[0])
+
+            # Display entries
+            for _, is_merged, data in combined_entries:
+                if is_merged:
+                    cons, components_info, worst_rid, weighted_avg_rid = data
+                    # Parent row with [merged] tag and weighted average rid
+                    name = cons.sample_name
+                    name_with_tag = f"{name} [merged]"
+                    name_truncated = name_with_tag[:49] if len(name_with_tag) > 49 else name_with_tag
+                    rid_str = f"{weighted_avg_rid:.1%}"
+                    f.write(f"{name_truncated:<50} {cons.ric:<6} {rid_str:<8}\n")
+
+                    # Component rows (indented)
+                    for raw, comp_rid, comp_ric in components_info:
+                        # Extract cluster number from component name (e.g., "sample-c1" -> "c1")
+                        comp_name = raw.sample_name
+                        comp_display = f"  └─ {comp_name}"
+                        comp_truncated = comp_display[:49] if len(comp_display) > 49 else comp_display
+                        comp_rid_str = f"{comp_rid:.1%}"
+                        f.write(f"{comp_truncated:<50} {comp_ric:<6} {comp_rid_str:<8}\n")
+                else:
+                    cons, rid = data
                     name_truncated = cons.sample_name[:49] if len(cons.sample_name) > 49 else cons.sample_name
-                    f.write(f"{name_truncated:<50} {cons.ric:<6} {rid_str:<8} {rid_min_str:<8} {thresh_str:<10}\n")
-                f.write("\n")
-
-            # Table 3B: Below clustering threshold only
-            if n_cluster > 0:
-                f.write(f"Sequences below clustering threshold only ({n_cluster}):\n")
-                f.write("-" * 80 + "\n")
-                f.write(f"{'Sequence':<50} {'RiC':<6} {'rid':<8} {'rid_min':<8} {'Threshold':<10}\n")
-                f.write("-" * 80 + "\n")
-
-                for cons, threshold, metric_type, value in outlier_results['below_clustering_threshold']:
-                    rid_str = f"{cons.rid:.1%}" if cons.rid is not None else "N/A"
-                    rid_min_str = f"{cons.rid_min:.1%}" if cons.rid_min is not None else "N/A"
-                    thresh_str = f"{threshold:.1%}" if threshold else "N/A"
-
-                    name_truncated = cons.sample_name[:49] if len(cons.sample_name) > 49 else cons.sample_name
-                    f.write(f"{name_truncated:<50} {cons.ric:<6} {rid_str:<8} {rid_min_str:<8} {thresh_str:<10}\n")
-                f.write("\n")
-
-            # Table 3C: Statistical outliers only
-            if n_stat > 0:
-                f.write(f"Statistical outliers only ({n_stat}):\n")
-                f.write("-" * 80 + "\n")
-                f.write(f"{'Sequence':<50} {'RiC':<6} {'rid':<8} {'rid_min':<8} {'Z-score':<8}\n")
-                f.write("-" * 80 + "\n")
-
-                for cons, z_score, metric_type, value in outlier_results['statistical_outliers']:
-                    rid_str = f"{cons.rid:.1%}" if cons.rid is not None else "N/A"
-                    rid_min_str = f"{cons.rid_min:.1%}" if cons.rid_min is not None else "N/A"
-                    z_str = f"{z_score:.2f}"
-
-                    name_truncated = cons.sample_name[:49] if len(cons.sample_name) > 49 else cons.sample_name
-                    f.write(f"{name_truncated:<50} {cons.ric:<6} {rid_str:<8} {rid_min_str:<8} {z_str:<8}\n")
-                f.write("\n")
+                    rid_str = f"{rid:.1%}"
+                    f.write(f"{name_truncated:<50} {cons.ric:<6} {rid_str:<8}\n")
+            f.write("\n")
 
         # ====================================================================
         # SECTION 4: POSITIONAL IDENTITY ANALYSIS
@@ -2915,28 +2864,7 @@ def write_quality_report(final_consensus: List[ConsensusInfo],
             f.write("\n")
 
         # ====================================================================
-        # SECTION 6: MERGED SEQUENCE ANALYSIS
-        # ====================================================================
-        if n_merged > 0:
-            f.write("=" * 80 + "\n")
-            f.write("MERGED SEQUENCE ANALYSIS\n")
-            f.write("=" * 80 + "\n\n")
-
-            f.write(f"Merged sequences with quality issues in components ({n_merged}):\n")
-            f.write("At least one component has read identity below statistical thresholds.\n\n")
-
-            f.write(f"{'Sequence':<45} {'RiC':<6} {'Worst Component Info':<30}\n")
-            f.write("-" * 80 + "\n")
-
-            for cons, worst_comp, rid, rid_min in merged_with_issues:
-                name_truncated = cons.sample_name[:44] if len(cons.sample_name) > 44 else cons.sample_name
-                comp_info = f"{worst_comp.sample_name}: rid={rid:.1%}, rid_min={rid_min:.1%}"
-                comp_info_truncated = comp_info[:29] if len(comp_info) > 29 else comp_info
-                f.write(f"{name_truncated:<45} {cons.ric:<6} {comp_info_truncated:<30}\n")
-            f.write("\n")
-
-        # ====================================================================
-        # SECTION 7: INTERPRETATION GUIDE
+        # SECTION 6: INTERPRETATION GUIDE
         # ====================================================================
         f.write("=" * 80 + "\n")
         f.write("INTERPRETATION GUIDE\n")
@@ -2944,58 +2872,29 @@ def write_quality_report(final_consensus: List[ConsensusInfo],
 
         f.write("Read Identity Analysis:\n")
         f.write("-" * 40 + "\n")
-        f.write("  Two complementary approaches identify potential quality issues:\n\n")
-
-        f.write("  1. Clustering threshold (from metadata):\n")
-        f.write("     - Uses the same threshold that speconsense applied during clustering\n")
-        f.write("     - Sequences below this threshold had outlier reads removed\n")
-        f.write("     - Recommendation: Review if critical for your analysis\n\n")
-
-        f.write("  2. Statistical outliers (mean - 2×std):\n")
-        f.write("     - Identifies sequences that are unusually low for this dataset\n")
-        f.write("     - May indicate dataset-specific quality issues\n")
-        f.write("     - Recommendation: Compare with clustering threshold results\n\n")
-
-        f.write("  Sequences failing both criteria warrant closer inspection.\n")
-        f.write("  Optional: Review cluster_debug FASTQ files for detailed read analysis.\n\n")
+        f.write("  Threshold: mean - 2×std (statistical outliers)\n")
+        f.write("  RiC: Read-in-Cluster count\n")
+        f.write("  rid: Mean read identity to consensus\n")
+        f.write("  [merged]: Weighted average rid; components shown below\n\n")
 
         f.write("Positional Identity Analysis:\n")
         f.write("-" * 40 + "\n")
-        f.write("  Uses global threshold (--min-variant-frequency) to identify high-error positions.\n")
-        f.write("  Only analyzes sequences with RiC >= 2×min-variant-count (sufficient depth).\n")
-        f.write("  Positions with error rates above threshold may indicate:\n")
-        f.write("  - Undetected or unphased heterozygous positions\n")
-        f.write("  - True biological variation (SNPs)\n")
-        f.write("  - Systematic sequencing errors at specific positions\n")
-        f.write("  - Primer binding sites or homopolymer regions\n")
-        f.write("  TotalErr = sum of nucleotide errors at high-error positions.\n")
-        f.write("  Recommendation: Compare with variant detection results.\n\n")
+        f.write("  Threshold: --min-variant-frequency from metadata\n")
+        f.write("  Min RiC: 2 × --min-variant-count\n")
+        f.write("  #Pos: Count of positions exceeding error threshold\n")
+        f.write("  MeanErr: Average error rate at flagged positions\n")
+        f.write("  TotalErr: Sum of errors at flagged positions\n\n")
 
         f.write("Variant Detection:\n")
         f.write("-" * 40 + "\n")
-        f.write("  Detected variants may represent:\n")
-        f.write("  - Unphased heterozygous positions (expected in diploid organisms)\n")
-        f.write("  - Mixed samples or contamination\n")
-        f.write("  - Intra-species variation\n")
-        f.write("  Recommendation: Check if organism is expected to be heterozygous.\n\n")
+        f.write("  Shows sequences with detected but unphased variants.\n")
+        f.write("  Variants are encoded using IUPAC ambiguity codes.\n\n")
 
-        f.write("Merged Sequence Analysis:\n")
-        f.write("-" * 40 + "\n")
-        f.write("  Shows merged sequences where variants were combined using IUPAC codes.\n")
-        f.write("  Component quality issues may indicate:\n")
-        f.write("  - Low-abundance variants\n")
-        f.write("  - Sequencing artifacts\n")
-        f.write("  Recommendation: Review .raw variant files in variants/ subdirectory.\n")
-        f.write("  Optional: Consider adjusting --min-size or --min-ric thresholds.\n\n")
 
     # Log summary
     logging.info(f"Quality report written to: {quality_report_path}")
-    total_flagged = n_both + n_cluster + n_stat
-    if total_flagged > 0:
-        logging.info(f"  {total_flagged} sequence(s) flagged for review")
-        logging.info(f"    - {n_both} failing both outlier criteria")
-        logging.info(f"    - {n_cluster} below clustering threshold")
-        logging.info(f"    - {n_stat} statistical outliers")
+    if n_rid_issues > 0:
+        logging.info(f"  {n_rid_issues} sequence(s) flagged for read identity ({n_stat} direct + {n_merged} merged)")
     else:
         logging.info("  All sequences show good read identity")
 
