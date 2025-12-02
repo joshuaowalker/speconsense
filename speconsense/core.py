@@ -1536,7 +1536,7 @@ class SpecimenClusterer:
         if found_primers:
             info_parts.append(f"primers={','.join(found_primers)}")
         if iupac_count > 0:
-            info_parts.append(f"iupac={iupac_count}")
+            info_parts.append(f"ambig={iupac_count}")
         info_str = " ".join(info_parts)
 
         # Write reads FASTQ to debug directory with new naming convention

@@ -148,11 +148,23 @@ class RawRicField(FastaField):
 
 class SnpField(FastaField):
     def __init__(self):
-        super().__init__('snp', 'Number of IUPAC ambiguity positions')
+        super().__init__('snp', 'Number of IUPAC ambiguity positions from merging')
 
     def format_value(self, consensus: ConsensusInfo) -> Optional[str]:
         if consensus.snp_count is not None and consensus.snp_count > 0:
             return f"snp={consensus.snp_count}"
+        return None
+
+
+class AmbigField(FastaField):
+    def __init__(self):
+        super().__init__('ambig', 'Count of IUPAC ambiguity codes in consensus')
+
+    def format_value(self, consensus: ConsensusInfo) -> Optional[str]:
+        # Count non-ACGT characters in the sequence
+        ambig_count = sum(1 for c in consensus.sequence if c.upper() not in 'ACGT')
+        if ambig_count > 0:
+            return f"ambig={ambig_count}"
         return None
 
 
@@ -217,6 +229,7 @@ FASTA_FIELDS = {
     'length': LengthField(),
     'rawric': RawRicField(),
     'snp': SnpField(),
+    'ambig': AmbigField(),
     'rid': RidField(),
     'rid_min': RidMinField(),
     'primers': PrimersField(),
@@ -226,10 +239,10 @@ FASTA_FIELDS = {
 
 # Preset definitions
 FASTA_FIELD_PRESETS = {
-    'default': ['size', 'ric', 'rawric', 'snp', 'primers'],
+    'default': ['size', 'ric', 'rawric', 'snp', 'ambig', 'primers'],
     'minimal': ['size', 'ric'],
-    'qc': ['size', 'ric', 'length', 'rid'],
-    'full': ['size', 'ric', 'length', 'rawric', 'snp', 'rid', 'primers'],
+    'qc': ['size', 'ric', 'length', 'rid', 'ambig'],
+    'full': ['size', 'ric', 'length', 'rawric', 'snp', 'ambig', 'rid', 'primers'],
     'id-only': [],
 }
 
@@ -2508,21 +2521,23 @@ def write_quality_report(final_consensus: List[ConsensusInfo],
                 else:
                     display_name = cons.sample_name
                     ric_val = cons.ric
-                display_data.append((display_name, ric_val, result))
+                display_data.append((display_name, ric_val, cons, result))
 
             # Calculate column width based on longest name (minimum 40, cap at 70)
-            max_name_len = max(len(name) for name, _, _ in display_data) if display_data else 40
+            max_name_len = max(len(name) for name, _, _, _ in display_data) if display_data else 40
             name_col_width = min(max(max_name_len + 2, 40), 70)
 
-            f.write(f"{'Sequence':<{name_col_width}} {'RiC':<6} {'#Pos':<6} {'MeanErr':<8} {'TotalErr':<10}\n")
-            f.write("-" * (name_col_width + 32) + "\n")
+            f.write(f"{'Sequence':<{name_col_width}} {'RiC':<6} {'Ambig':<6} {'#Pos':<6} {'MeanErr':<8} {'TotalErr':<10}\n")
+            f.write("-" * (name_col_width + 38) + "\n")
 
-            for display_name, ric_val, result in display_data:
+            for display_name, ric_val, cons, result in display_data:
                 mean_err = result.get('mean_outlier_error_rate', 0.0)
                 total_err = result.get('total_nucleotide_errors', 0)
                 num_pos = result['num_outlier_positions']
+                # Count IUPAC ambiguity codes in the consensus sequence (non-ACGT characters)
+                ambig_count = sum(1 for c in cons.sequence if c.upper() not in 'ACGT')
 
-                f.write(f"{display_name:<{name_col_width}} {ric_val:<6} {num_pos:<6} "
+                f.write(f"{display_name:<{name_col_width}} {ric_val:<6} {ambig_count:<6} {num_pos:<6} "
                        f"{mean_err:<8.1%} {total_err:<10}\n")
 
             f.write("\n")
@@ -2545,6 +2560,7 @@ def write_quality_report(final_consensus: List[ConsensusInfo],
         f.write("-" * 40 + "\n")
         f.write("  Threshold: --min-variant-frequency from metadata\n")
         f.write("  Min RiC: 2 × --min-variant-count\n")
+        f.write("  Ambig: Count of IUPAC ambiguity codes in consensus\n")
         f.write("  #Pos: Count of positions exceeding error threshold\n")
         f.write("  MeanErr: Average error rate at flagged positions\n")
         f.write("  TotalErr: Sum of errors at flagged positions\n\n")
