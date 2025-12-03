@@ -1163,10 +1163,12 @@ class SpecimenClusterer:
         with open(metadata_file, 'w') as f:
             json.dump(metadata, f, indent=2)
 
-        logging.info(f"Wrote run metadata to {metadata_file}")
+        logging.debug(f"Wrote run metadata to {metadata_file}")
 
     def write_phasing_stats(self, initial_clusters_count: int, after_prephasing_merge_count: int,
-                           subclusters_count: int, merged_count: int, final_count: int) -> None:
+                           subclusters_count: int, merged_count: int, final_count: int,
+                           clusters_with_ambiguities: int = 0,
+                           total_ambiguity_positions: int = 0) -> None:
         """Write phasing statistics to JSON file after clustering completes.
 
         Args:
@@ -1175,6 +1177,8 @@ class SpecimenClusterer:
             subclusters_count: Number of sub-clusters after phasing
             merged_count: Number of clusters after post-phasing merge
             final_count: Number of final clusters after filtering
+            clusters_with_ambiguities: Number of clusters with at least one ambiguity code
+            total_ambiguity_positions: Total number of ambiguity positions across all clusters
         """
         phasing_stats = {
             "phasing_enabled": self.enable_secondpass_phasing,
@@ -1186,7 +1190,10 @@ class SpecimenClusterer:
             "prephasing_clusters_merged": after_prephasing_merge_count < initial_clusters_count,
             "clusters_split": subclusters_count > after_prephasing_merge_count,
             "postphasing_clusters_merged": merged_count < subclusters_count,
-            "net_change": final_count - initial_clusters_count
+            "net_change": final_count - initial_clusters_count,
+            "ambiguity_calling_enabled": self.enable_iupac_calling,
+            "clusters_with_ambiguities": clusters_with_ambiguities,
+            "total_ambiguity_positions": total_ambiguity_positions
         }
 
         # Write phasing stats to separate JSON file
@@ -1194,7 +1201,7 @@ class SpecimenClusterer:
         with open(stats_file, 'w') as f:
             json.dump(phasing_stats, f, indent=2)
 
-        logging.info(f"Wrote phasing statistics to {stats_file}")
+        logging.debug(f"Wrote phasing statistics to {stats_file}")
 
     def add_sequences(self, records: List[SeqIO.SeqRecord],
                       augment_records: Optional[List[SeqIO.SeqRecord]] = None) -> None:
@@ -1354,56 +1361,53 @@ class SpecimenClusterer:
         clusters = sorted(clusters, key=lambda c: len(c['read_ids']), reverse=True)
 
         # Generate a consensus sequence for each cluster
-        logging.info(f"{phase_name} merge: Generating consensus sequences...")
+        logging.debug(f"{phase_name} merge: Generating consensus sequences...")
         consensuses = []
         cluster_to_consensus = {}  # Map from cluster index to its consensus
 
-        with tqdm(total=len(clusters), desc="Generating cluster consensuses") as pbar:
-            for i, cluster_dict in enumerate(clusters):
-                cluster_reads = cluster_dict['read_ids']
+        for i, cluster_dict in enumerate(clusters):
+            cluster_reads = cluster_dict['read_ids']
 
-                # Sample from larger clusters to speed up consensus generation
-                if len(cluster_reads) > self.max_sample_size:
-                    # Sample by quality
-                    qualities = []
-                    for seq_id in cluster_reads:
-                        record = self.records[seq_id]
-                        mean_quality = statistics.mean(record.letter_annotations["phred_quality"])
-                        qualities.append((mean_quality, seq_id))
+            # Sample from larger clusters to speed up consensus generation
+            if len(cluster_reads) > self.max_sample_size:
+                # Sample by quality
+                qualities = []
+                for seq_id in cluster_reads:
+                    record = self.records[seq_id]
+                    mean_quality = statistics.mean(record.letter_annotations["phred_quality"])
+                    qualities.append((mean_quality, seq_id))
 
-                    # Sort by quality (descending), then by read ID (ascending) for deterministic tie-breaking
-                    sampled_ids = [seq_id for _, seq_id in
-                                   sorted(qualities, key=lambda x: (-x[0], x[1]))[:self.max_sample_size]]
-                    sampled_seqs = {seq_id: self.sequences[seq_id] for seq_id in sampled_ids}
-                else:
-                    # Sort all reads by quality for optimal SPOA ordering
-                    qualities = []
-                    for seq_id in cluster_reads:
-                        record = self.records[seq_id]
-                        mean_quality = statistics.mean(record.letter_annotations["phred_quality"])
-                        qualities.append((mean_quality, seq_id))
-                    sorted_ids = [seq_id for _, seq_id in
-                                  sorted(qualities, key=lambda x: (-x[0], x[1]))]
-                    sampled_seqs = {seq_id: self.sequences[seq_id] for seq_id in sorted_ids}
+                # Sort by quality (descending), then by read ID (ascending) for deterministic tie-breaking
+                sampled_ids = [seq_id for _, seq_id in
+                               sorted(qualities, key=lambda x: (-x[0], x[1]))[:self.max_sample_size]]
+                sampled_seqs = {seq_id: self.sequences[seq_id] for seq_id in sampled_ids}
+            else:
+                # Sort all reads by quality for optimal SPOA ordering
+                qualities = []
+                for seq_id in cluster_reads:
+                    record = self.records[seq_id]
+                    mean_quality = statistics.mean(record.letter_annotations["phred_quality"])
+                    qualities.append((mean_quality, seq_id))
+                sorted_ids = [seq_id for _, seq_id in
+                              sorted(qualities, key=lambda x: (-x[0], x[1]))]
+                sampled_seqs = {seq_id: self.sequences[seq_id] for seq_id in sorted_ids}
 
-                result = self.run_spoa(sampled_seqs)
+            result = self.run_spoa(sampled_seqs)
 
-                # Skip empty clusters (can occur when all sequences are filtered out)
-                if result is None:
-                    logging.warning(f"Cluster {i} produced no consensus (empty cluster), skipping")
-                    pbar.update(1)
-                    continue
+            # Skip empty clusters (can occur when all sequences are filtered out)
+            if result is None:
+                logging.warning(f"Cluster {i} produced no consensus (empty cluster), skipping")
+                continue
 
-                consensus = result.consensus
+            consensus = result.consensus
 
-                # Trim primers before comparison to merge clusters that differ only in primer regions
-                # The trimmed consensus is used only for comparison and discarded after merging
-                if hasattr(self, 'primers'):
-                    consensus, _ = self.trim_primers(consensus)  # Discard found_primers
+            # Trim primers before comparison to merge clusters that differ only in primer regions
+            # The trimmed consensus is used only for comparison and discarded after merging
+            if hasattr(self, 'primers'):
+                consensus, _ = self.trim_primers(consensus)  # Discard found_primers
 
-                consensuses.append(consensus)
-                cluster_to_consensus[i] = consensus
-                pbar.update(1)
+            consensuses.append(consensus)
+            cluster_to_consensus[i] = consensus
 
         consensus_to_clusters = defaultdict(list)
         
@@ -1738,7 +1742,7 @@ class SpecimenClusterer:
             # Process each merged cluster to detect variants and phase reads
             all_subclusters = []  # Will hold all phased sub-clusters with provenance
 
-            logging.info("Processing clusters for variant detection and phasing...")
+            logging.debug("Processing clusters for variant detection and phasing...")
 
             for initial_idx, cluster in enumerate(merged_initial_clusters, 1):
                 cluster_size = len(cluster)
@@ -1893,6 +1897,10 @@ class SpecimenClusterer:
             # PHASE 6: OUTPUT
             # ============================================================
             # Generate final consensus and write output files
+            # Track ambiguity calling statistics
+            total_ambiguity_positions = 0
+            clusters_with_ambiguities = 0
+
             consensus_output_file = os.path.join(self.output_dir, f"{self.sample_name}-all.fasta")
             with open(consensus_output_file, 'w') as consensus_fasta_handle:
                 for final_idx, cluster_dict in enumerate(large_clusters, 1):
@@ -1951,6 +1959,8 @@ class SpecimenClusterer:
                             )
                             if iupac_count > 0:
                                 logging.debug(f"Cluster {final_idx}: Called {iupac_count} IUPAC ambiguity position(s)")
+                                total_ambiguity_positions += iupac_count
+                                clusters_with_ambiguities += 1
 
                         # Perform primer trimming (on potentially modified consensus)
                         trimmed_consensus = None
@@ -1984,7 +1994,9 @@ class SpecimenClusterer:
                 after_prephasing_merge_count=len(merged_initial_clusters),
                 subclusters_count=len(all_subclusters),
                 merged_count=len(merged_subclusters),
-                final_count=len(large_clusters)
+                final_count=len(large_clusters),
+                clusters_with_ambiguities=clusters_with_ambiguities,
+                total_ambiguity_positions=total_ambiguity_positions
             )
 
     def _create_id_mapping(self) -> None:
@@ -2405,10 +2417,9 @@ class SpecimenClusterer:
                 )
 
                 if not selected_positions:
-                    logging.info(f"Position selection failed: {selection_reason}")
                     return [(None, cluster_read_ids)]
 
-                logging.info(f"Position selection: {selection_reason}")
+                # Note: select_phasing_positions_v2 already logged the selection result
                 positions_to_use = [v['msa_position'] for v in selected_positions]
             else:
                 # Only 1 variant position - use it directly
@@ -2514,8 +2525,8 @@ class SpecimenClusterer:
             if total_primers == 0:
                 logging.warning("No primers were loaded. Primer trimming will be disabled.")
             else:
-                logging.info(f"Loaded {total_primers} primers: {primer_count['forward']} forward, "
-                           f"{primer_count['reverse']} reverse, {primer_count['unknown']} unknown")
+                logging.debug(f"Loaded {total_primers} primers: {primer_count['forward']} forward, "
+                              f"{primer_count['reverse']} reverse, {primer_count['unknown']} unknown")
         except Exception as e:
             logging.error(f"Error loading primers: {str(e)}")
             raise
@@ -2996,7 +3007,7 @@ def main():
         auto_primer_path = os.path.join(input_dir, "primers.fasta")
 
         if os.path.exists(auto_primer_path):
-            logging.info(f"Found primers.fasta in input directory: {auto_primer_path}")
+            logging.debug(f"Found primers.fasta in input directory: {auto_primer_path}")
             clusterer.primers_file = os.path.abspath(auto_primer_path)
             clusterer.load_primers(auto_primer_path)
         else:
