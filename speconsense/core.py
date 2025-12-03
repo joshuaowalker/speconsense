@@ -40,7 +40,9 @@ from speconsense.msa import (
     analyze_positional_variation,
     is_variant_position_with_composition,
     call_iupac_ambiguities,
-    recursive_select_positions,
+    group_reads_by_single_position,
+    filter_qualifying_haplotypes,
+    calculate_within_cluster_error,
 )
 
 
@@ -1352,6 +1354,182 @@ class SpecimenClusterer:
             logging.warning(f"Failed to detect variant positions: {e}")
             return []
 
+    def recursive_phase_cluster(
+        self,
+        read_ids: Set[str],
+        read_sequences: Dict[str, str],
+        path: List[str],
+        depth: int = 0
+    ) -> Tuple[List[Tuple[List[str], str, Set[str]]], Set[str]]:
+        """Recursively phase a cluster, regenerating MSA at each level.
+
+        At each recursion level:
+        1. Generate new MSA for the current subset of reads
+        2. Detect variant positions in the new MSA
+        3. Find the best single-position split (minimum within-cluster error)
+        4. Recurse on qualifying subclusters, collecting deferred reads
+
+        This allows "scattered errors" to become detectable variants once
+        correlated reads are grouped together through earlier phasing.
+
+        Args:
+            read_ids: Set of read IDs to phase at this level
+            read_sequences: Dict mapping read_id -> sequence string
+            path: List of alleles representing the path to this node
+            depth: Current recursion depth (for logging)
+
+        Returns:
+            Tuple of (leaf_haplotypes, deferred_reads):
+            - leaf_haplotypes: List of (path, consensus_seq, read_ids) for leaf nodes
+            - deferred_reads: Set of read_ids that didn't qualify at any level
+        """
+        indent = "  " * depth
+        total_reads = len(read_ids)
+        path_str = '-'.join(path) if path else '(root)'
+
+        # Base case: cluster too small to split
+        if total_reads < self.min_variant_count * 2:
+            logging.debug(f"{indent}Leaf (too small): path={path_str}, reads={total_reads}")
+            # Generate consensus for this leaf
+            leaf_seqs = {rid: read_sequences[rid] for rid in read_ids}
+            result = self.run_spoa(leaf_seqs)
+            consensus = result.consensus if result else ""
+            return [(path, consensus, read_ids)], set()
+
+        # Generate MSA for this cluster
+        cluster_seqs = {rid: read_sequences[rid] for rid in read_ids}
+        result = self.run_spoa(cluster_seqs)
+
+        if result is None:
+            logging.debug(f"{indent}Leaf (SPOA failed): path={path_str}, reads={total_reads}")
+            return [(path, "", read_ids)], set()
+
+        consensus = result.consensus
+        alignments = result.alignments
+        msa_to_consensus_pos = result.msa_to_consensus_pos
+
+        # Detect variant positions in this new MSA
+        variant_positions = self.detect_variant_positions(alignments, consensus, msa_to_consensus_pos)
+
+        if not variant_positions:
+            logging.debug(f"{indent}Leaf (no variants): path={path_str}, reads={total_reads}")
+            return [(path, consensus, read_ids)], set()
+
+        logging.debug(f"{indent}Level {depth}: path={path_str}, reads={total_reads}, variants={len(variant_positions)}")
+
+        # Extract alleles at variant positions for each read
+        # Parse MSA to get consensus_aligned for normalized allele extraction
+        from io import StringIO
+        msa_handle = StringIO(result.msa_string)
+        records = list(SeqIO.parse(msa_handle, 'fasta'))
+
+        consensus_aligned = None
+        for record in records:
+            if 'Consensus' in record.description or 'Consensus' in record.id:
+                consensus_aligned = str(record.seq).upper()
+                break
+
+        if not consensus_aligned:
+            logging.debug(f"{indent}Leaf (no consensus in MSA): path={path_str}")
+            return [(path, consensus, read_ids)], set()
+
+        # Build mapping from read_id to alignment
+        read_to_alignment = {a.read_id: a for a in alignments}
+
+        # Extract normalized alleles at variant positions
+        variant_msa_positions = sorted([v['msa_position'] for v in variant_positions])
+        read_to_position_alleles = {}
+
+        for read_id in read_ids:
+            alignment = read_to_alignment.get(read_id)
+            if not alignment:
+                continue
+
+            aligned_seq = alignment.aligned_sequence
+            score_aligned = alignment.score_aligned
+
+            position_alleles = {}
+            for msa_pos in variant_msa_positions:
+                if msa_pos < len(aligned_seq):
+                    allele = aligned_seq[msa_pos]
+                    # Use normalized allele if homopolymer-equivalent
+                    if score_aligned and msa_pos < len(score_aligned):
+                        if score_aligned[msa_pos] == '=':
+                            allele = consensus_aligned[msa_pos]
+                    position_alleles[msa_pos] = allele
+                else:
+                    position_alleles[msa_pos] = '-'
+
+            read_to_position_alleles[read_id] = position_alleles
+
+        # Find the best single-position split
+        best_pos = None
+        best_error = float('inf')
+        best_qualifying = None
+        best_non_qualifying = None
+        all_positions = set(variant_msa_positions)
+
+        for pos in variant_msa_positions:
+            # Group reads by allele at this position
+            allele_groups = group_reads_by_single_position(
+                read_to_position_alleles, pos, set(read_to_position_alleles.keys())
+            )
+
+            # Filter to qualifying haplotypes
+            qualifying, non_qualifying = filter_qualifying_haplotypes(
+                allele_groups, total_reads, self.min_variant_count, self.min_variant_frequency
+            )
+
+            # Need at least 2 qualifying groups to consider this split
+            if len(qualifying) < 2:
+                continue
+
+            # Calculate within-cluster error for this split
+            error = calculate_within_cluster_error(
+                qualifying,
+                read_to_position_alleles,
+                {pos},
+                all_positions
+            )
+
+            if error < best_error:
+                best_error = error
+                best_pos = pos
+                best_qualifying = qualifying
+                best_non_qualifying = non_qualifying
+
+        # If no valid split found, this is a leaf node
+        if best_pos is None:
+            logging.debug(f"{indent}Leaf (no valid split): path={path_str}, reads={total_reads}")
+            return [(path, consensus, read_ids)], set()
+
+        # Log the split decision
+        qual_summary = ', '.join(f"{a}:{len(r)}" for a, r in sorted(best_qualifying.items()))
+        logging.debug(f"{indent}Split at pos {best_pos}: error={best_error:.4f}, qualifying=[{qual_summary}]")
+
+        # Collect deferred reads from non-qualifying groups at this level
+        all_deferred = set()
+        for allele, reads in best_non_qualifying.items():
+            all_deferred.update(reads)
+            if reads:
+                logging.debug(f"{indent}  Deferring {len(reads)} reads from allele '{allele}'")
+
+        # Recurse on each qualifying sub-cluster
+        all_leaves = []
+
+        for allele, sub_read_ids in sorted(best_qualifying.items()):
+            new_path = path + [allele]
+            sub_leaves, sub_deferred = self.recursive_phase_cluster(
+                sub_read_ids,
+                read_sequences,
+                new_path,
+                depth + 1
+            )
+            all_leaves.extend(sub_leaves)
+            all_deferred.update(sub_deferred)
+
+        return all_leaves, all_deferred
+
     def phase_reads_by_variants(
         self,
         msa_string: str,
@@ -1360,34 +1538,24 @@ class SpecimenClusterer:
         variant_positions: List[Dict],
         alignments: Optional[List[ReadAlignment]] = None
     ) -> List[Tuple[str, Set[str]]]:
-        """Phase reads into haplotypes based on variant positions with homopolymer normalization.
+        """Phase reads into haplotypes with recursive MSA regeneration.
 
-        Splits a cluster into sub-clusters where each sub-cluster represents reads
-        sharing the same alleles at all variant positions. Uses normalized alleles where
-        homopolymer-equivalent bases (score_aligned='=') are treated as the consensus base,
-        reducing spurious cluster splits due to homopolymer length variation.
-
-        Haplotype-level filtering prevents creation of too-small subclusters:
-        - Only haplotypes meeting min_variant_count AND min_variant_frequency are kept
-        - Frequency is calculated relative to total cluster size
-        - Reads with rare haplotypes are reassigned to the nearest qualifying haplotype
-        - If 0 or 1 qualifying haplotypes exist, the cluster is not split
-        - This prevents read loss and eliminates subclusters destined to be filtered
+        Splits a cluster into sub-clusters by recursively:
+        1. Generating new MSA for each subcluster
+        2. Rediscovering variant positions (previously "scattered errors" may become variants)
+        3. Splitting on the best single position
+        4. Reassigning deferred reads to nearest leaf consensus
 
         Args:
-            msa_string: MSA in FASTA format from SPOA (used if alignments not provided)
-            consensus_seq: Ungapped consensus sequence
-            cluster_read_ids: Set of read IDs in this cluster (for validation)
-            variant_positions: List of variant position dicts from detect_variant_positions()
-            alignments: Optional pre-parsed alignments (avoids reparsing)
+            msa_string: Initial MSA in FASTA format from SPOA (used for initial variant detection)
+            consensus_seq: Ungapped consensus sequence (unused, kept for API compatibility)
+            cluster_read_ids: Set of read IDs in this cluster
+            variant_positions: List of variant position dicts from initial detect_variant_positions()
+            alignments: Optional pre-parsed alignments (unused, kept for API compatibility)
 
         Returns:
             List of (allele_combo_string, read_id_set) tuples
             e.g., [("C-T-A", {id1, id2}), ("T-C-A", {id3, id4})]
-
-            Allele combination format: bases separated by hyphens, in MSA position order
-            Gap positions are represented as "-" (the gap character itself)
-            Uses normalized alleles (homopolymer-equivalent = consensus base)
 
             If cluster should not be split (0-1 qualifying haplotypes), returns:
             [(None, cluster_read_ids)]
@@ -1397,107 +1565,91 @@ class SpecimenClusterer:
             return [(None, cluster_read_ids)]
 
         try:
-            # Use pre-parsed alignments if provided, otherwise parse msa_string
-            if not alignments:
-                if not msa_string:
-                    return [(None, cluster_read_ids)]
-                # Homopolymer normalization is enabled unless explicitly disabled
-                enable_normalization = not self.disable_homopolymer_equivalence
-                alignments, _, _ = extract_alignments_from_msa(
-                    msa_string,
-                    enable_homopolymer_normalization=enable_normalization
-                )
+            # Build read_sequences dict for the cluster
+            read_sequences = {rid: self.sequences[rid] for rid in cluster_read_ids if rid in self.sequences}
 
-            if not alignments:
-                logging.warning("No alignments found in MSA for phasing")
+            if not read_sequences:
+                logging.warning("No sequences found for cluster reads")
                 return [(None, cluster_read_ids)]
 
-            # Parse MSA to get consensus_aligned for normalized allele extraction
-            from io import StringIO
-            msa_handle = StringIO(msa_string)
-            records = list(SeqIO.parse(msa_handle, 'fasta'))
+            logging.info(f"Recursive phasing with MSA regeneration: {len(variant_positions)} initial variants, {len(read_sequences)} reads")
 
-            # Find consensus sequence in MSA
-            consensus_aligned = None
-            for record in records:
-                if 'Consensus' in record.description or 'Consensus' in record.id:
-                    consensus_aligned = str(record.seq).upper()
-                    break
-
-            if not consensus_aligned:
-                logging.warning("No consensus found in MSA for phasing")
-                return [(None, cluster_read_ids)]
-
-            # Build mapping from read_id to alignment (for score_aligned access)
-            # TODO: When cluster_read_ids contains reads not in alignments (i.e., reads that
-            # weren't sampled for MSA generation), those reads are currently not included
-            # in haplotype assignment. This affects clusters with >max_sample_size reads
-            # that get phased into 2+ haplotypes. Future fix: align non-sampled reads to
-            # consensus using edlib and extract alleles at variant positions.
-            read_to_alignment = {
-                alignment.read_id: alignment
-                for alignment in alignments
-            }
-
-            # Extract MSA positions for variants (sorted by position)
-            variant_msa_positions = sorted([v['msa_position'] for v in variant_positions])
-
-            # For each read, extract normalized alleles at variant positions
-            # Normalized: homopolymer-equivalent positions use consensus base
-            # Store as dict for later use by position selection algorithm
-            read_to_position_alleles = {}  # read_id -> {msa_pos -> allele}
-            for read_id, alignment in read_to_alignment.items():
-                aligned_seq = alignment.aligned_sequence
-                score_aligned = alignment.score_aligned
-
-                position_alleles = {}
-                for msa_pos in variant_msa_positions:
-                    if msa_pos < len(aligned_seq):
-                        allele = aligned_seq[msa_pos]
-
-                        # Use normalized allele if homopolymer-equivalent
-                        if score_aligned and msa_pos < len(score_aligned):
-                            if score_aligned[msa_pos] == '=':
-                                # Homopolymer extension - use consensus base
-                                allele = consensus_aligned[msa_pos]
-
-                        position_alleles[msa_pos] = allele
-                    else:
-                        # Read doesn't cover this position - treat as gap
-                        position_alleles[msa_pos] = '-'
-
-                read_to_position_alleles[read_id] = position_alleles
-
-            # Use the number of reads actually in the MSA for frequency calculations.
-            # This may be less than len(cluster_read_ids) if sampling was applied.
-            # Using the wrong denominator would make haplotypes appear rarer than they are.
-            sampled_read_count = len(read_to_position_alleles)
-
-            # Use recursive hierarchical phasing
-            # This recursively splits on single positions, selecting the best position
-            # at each level based on minimum within-cluster error
-            haplotype_assignments, reason = recursive_select_positions(
-                read_to_position_alleles,
-                variant_msa_positions,
-                self.min_variant_frequency,
-                self.min_variant_count,
-                sampled_read_count,
-                min_cluster_size=self.min_variant_count  # Stop recursing below min_variant_count
+            # Run recursive phasing with MSA regeneration
+            leaves, deferred = self.recursive_phase_cluster(
+                set(read_sequences.keys()),
+                read_sequences,
+                path=[],
+                depth=0
             )
 
-            if not haplotype_assignments:
-                logging.info(f"Phasing decision: {reason}")
+            # Check if we got any splits
+            if len(leaves) <= 1 and not deferred:
+                if leaves:
+                    path, consensus, reads = leaves[0]
+                    if not path:  # Empty path means no splits happened
+                        return [(None, cluster_read_ids)]
                 return [(None, cluster_read_ids)]
 
-            # Phasing succeeded - log results
-            logging.info(f"Phasing decision: SPLITTING cluster into {len(haplotype_assignments)} haplotypes")
-            for i, (combo, reads) in enumerate(haplotype_assignments, 1):
+            # Handle case where we have only 1 leaf but with deferred reads
+            if len(leaves) == 1:
+                return [(None, cluster_read_ids)]
+
+            logging.info(f"Recursive phasing: {len(leaves)} leaf haplotypes, {len(deferred)} deferred reads")
+
+            # Reassign deferred reads to nearest leaf haplotype by consensus alignment
+            if deferred:
+                logging.debug(f"Reassigning {len(deferred)} deferred reads to nearest leaf consensus")
+
+                # For each deferred read, align to each leaf consensus and pick best match
+                leaf_reads_updated = {tuple(path): set(reads) for path, consensus, reads in leaves}
+                leaf_consensuses = {tuple(path): consensus for path, consensus, reads in leaves}
+
+                for read_id in deferred:
+                    if read_id not in read_sequences:
+                        continue
+
+                    read_seq = read_sequences[read_id]
+                    min_distance = float('inf')
+                    nearest_path = None
+
+                    for path_tuple, consensus in leaf_consensuses.items():
+                        if not consensus:
+                            continue
+                        result = edlib.align(read_seq, consensus)
+                        distance = result['editDistance']
+                        if distance < min_distance:
+                            min_distance = distance
+                            nearest_path = path_tuple
+
+                    if nearest_path is not None:
+                        leaf_reads_updated[nearest_path].add(read_id)
+
+                # Update leaves with reassigned reads
+                leaves = [(list(path), leaf_consensuses[path], reads)
+                          for path, reads in leaf_reads_updated.items()]
+
+            # Convert paths to allele combo strings and build result
+            result = []
+            sampled_read_count = len(read_sequences)
+
+            for path, consensus, reads in leaves:
+                combo = '-'.join(path) if path else 'unsplit'
+                result.append((combo, reads))
+
+            # Sort by size (largest first)
+            result.sort(key=lambda x: len(x[1]), reverse=True)
+
+            # Log results
+            logging.info(f"Phasing decision: SPLITTING cluster into {len(result)} haplotypes")
+            for i, (combo, reads) in enumerate(result, 1):
                 logging.debug(f"  Haplotype {i}: '{combo}' with {len(reads)} reads ({len(reads)/sampled_read_count*100:.1f}%)")
 
-            return haplotype_assignments
+            return result
 
         except Exception as e:
             logging.warning(f"Failed to phase reads by variants: {e}")
+            import traceback
+            logging.debug(traceback.format_exc())
             # On error, return all reads as single group
             return [(None, cluster_read_ids)]
 
