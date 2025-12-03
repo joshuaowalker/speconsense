@@ -748,33 +748,23 @@ class SpecimenClusterer:
         for initial_idx, cluster in enumerate(merged_clusters, 1):
             cluster_size = len(cluster)
 
-            # Sample sequences for consensus generation if needed
-            if cluster_size > self.max_sample_size:
-                logging.debug(f"Initial cluster {initial_idx}: Sampling {self.max_sample_size} from {cluster_size} reads")
-                qualities = []
-                for seq_id in cluster:
-                    record = self.records[seq_id]
-                    mean_quality = statistics.mean(record.letter_annotations["phred_quality"])
-                    qualities.append((mean_quality, seq_id))
-                # Sort by quality (descending), then by read ID (ascending) for deterministic tie-breaking
-                sorted_ids = [seq_id for _, seq_id in
-                              sorted(qualities, key=lambda x: (-x[0], x[1]))[:self.max_sample_size]]
-                sampled_ids = set(sorted_ids)  # Keep set for membership testing
-            else:
-                # Sort all reads by quality for optimal SPOA ordering
-                qualities = []
-                for seq_id in cluster:
-                    record = self.records[seq_id]
-                    mean_quality = statistics.mean(record.letter_annotations["phred_quality"])
-                    qualities.append((mean_quality, seq_id))
-                sorted_ids = [seq_id for _, seq_id in
-                              sorted(qualities, key=lambda x: (-x[0], x[1]))]
-                sampled_ids = cluster
+            # Sort all reads by quality for optimal SPOA ordering
+            # No sampling here - use all reads for accurate variant detection and phasing
+            # (sampling for output happens later in write_consensus_sequences)
+            qualities = []
+            for seq_id in cluster:
+                record = self.records[seq_id]
+                mean_quality = statistics.mean(record.letter_annotations["phred_quality"])
+                qualities.append((mean_quality, seq_id))
+            # Sort by quality (descending), then by read ID (ascending) for deterministic tie-breaking
+            sorted_ids = [seq_id for _, seq_id in
+                          sorted(qualities, key=lambda x: (-x[0], x[1]))]
+            cluster_ids = cluster  # All reads participate in MSA
 
             # Generate consensus and MSA
             # Pass sequences to SPOA in quality-descending order
-            sampled_seqs = {seq_id: self.sequences[seq_id] for seq_id in sorted_ids}
-            result = self.run_spoa(sampled_seqs)
+            cluster_seqs = {seq_id: self.sequences[seq_id] for seq_id in sorted_ids}
+            result = self.run_spoa(cluster_seqs)
 
             if result is None:
                 logging.warning(f"Initial cluster {initial_idx}: Failed to generate consensus, skipping")
@@ -791,15 +781,15 @@ class SpecimenClusterer:
             # Optional: Remove outlier reads and regenerate consensus
             if self.outlier_identity_threshold is not None:
                 keep_ids, outlier_ids = self.identify_outlier_reads(
-                    alignments, consensus, sampled_ids, self.outlier_identity_threshold
+                    alignments, consensus, cluster_ids, self.outlier_identity_threshold
                 )
 
                 if outlier_ids:
-                    logging.info(f"Initial cluster {initial_idx}: Removing {len(outlier_ids)}/{len(sampled_ids)} outlier reads, "
+                    logging.info(f"Initial cluster {initial_idx}: Removing {len(outlier_ids)}/{len(cluster_ids)} outlier reads, "
                                f"regenerating consensus")
 
-                    # Update sampled_ids to exclude outliers
-                    sampled_ids = keep_ids
+                    # Update cluster_ids to exclude outliers
+                    cluster_ids = keep_ids
 
                     # CRITICAL: Also remove outliers from the full cluster
                     # This ensures outliers don't reappear in phased haplotypes
@@ -808,7 +798,7 @@ class SpecimenClusterer:
                     # Regenerate consensus with filtered reads
                     # Re-sort by quality after outlier removal
                     qualities_filtered = []
-                    for seq_id in sampled_ids:
+                    for seq_id in cluster_ids:
                         record = self.records[seq_id]
                         mean_quality = statistics.mean(record.letter_annotations["phred_quality"])
                         qualities_filtered.append((mean_quality, seq_id))
@@ -816,8 +806,8 @@ class SpecimenClusterer:
                                           sorted(qualities_filtered, key=lambda x: (-x[0], x[1]))]
 
                     # Pass sequences to SPOA in quality-descending order
-                    sampled_seqs = {seq_id: self.sequences[seq_id] for seq_id in sorted_ids_filtered}
-                    result = self.run_spoa(sampled_seqs)
+                    cluster_seqs = {seq_id: self.sequences[seq_id] for seq_id in sorted_ids_filtered}
+                    result = self.run_spoa(cluster_seqs)
 
                     # Recalculate identity metrics
                     if result is not None:
