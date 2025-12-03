@@ -22,28 +22,14 @@ from tqdm import tqdm
 import numpy as np
 from io import StringIO
 
-# Import homopolymer-aware alignment functions from core
-from speconsense.core import extract_alignments_from_msa, ReadAlignment, analyze_positional_variation
+# Import homopolymer-aware alignment functions and IUPAC constants from msa module
+from speconsense.msa import (
+    extract_alignments_from_msa,
+    ReadAlignment,
+    analyze_positional_variation,
+    IUPAC_CODES,
+)
 
-
-# IUPAC nucleotide ambiguity codes mapping
-IUPAC_CODES = {
-    frozenset(['A']): 'A',
-    frozenset(['C']): 'C',
-    frozenset(['G']): 'G',
-    frozenset(['T']): 'T',
-    frozenset(['A', 'G']): 'R',
-    frozenset(['C', 'T']): 'Y',
-    frozenset(['G', 'C']): 'S',
-    frozenset(['A', 'T']): 'W',
-    frozenset(['G', 'T']): 'K',
-    frozenset(['A', 'C']): 'M',
-    frozenset(['C', 'G', 'T']): 'B',
-    frozenset(['A', 'G', 'T']): 'D',
-    frozenset(['A', 'C', 'T']): 'H',
-    frozenset(['A', 'C', 'G']): 'V',
-    frozenset(['A', 'C', 'G', 'T']): 'N',
-}
 
 # IUPAC equivalencies for edlib alignment
 # This allows edlib to treat IUPAC ambiguity codes as matching their constituent bases
