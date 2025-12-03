@@ -695,21 +695,28 @@ def calculate_within_cluster_error(
 ) -> float:
     """Calculate within-cluster error for a given haplotype grouping.
 
-    Measures the average variation at non-phased positions within each haplotype.
+    Measures the average variation at ALL variant positions within each haplotype,
+    including positions used for phasing. This ensures fair comparison across
+    different candidate position sets and captures heterogeneity introduced by
+    reassignment of non-qualifying haplotypes.
+
     Lower error indicates more homogeneous clusters.
 
     Args:
         haplotype_groups: Dict mapping allele_combo -> set of read_ids
         read_alleles: Dict mapping read_id -> {msa_position -> allele}
-        phasing_positions: Set of MSA positions used for phasing
-        all_variant_positions: Set of all variant MSA positions
+        phasing_positions: Set of MSA positions used for phasing (kept for API compatibility)
+        all_variant_positions: Set of all variant MSA positions (error measured at all of these)
 
     Returns:
         Weighted average error rate across haplotypes (0.0 = perfect, 1.0 = maximum error)
     """
-    non_phasing_positions = all_variant_positions - phasing_positions
+    # Measure error at ALL variant positions, not just non-phased ones.
+    # This ensures fair comparison across candidate position sets and captures
+    # heterogeneity introduced by reassignment at phasing positions.
+    measured_positions = all_variant_positions
 
-    if not non_phasing_positions or not haplotype_groups:
+    if not measured_positions or not haplotype_groups:
         return 0.0
 
     total_weighted_error = 0.0
@@ -722,7 +729,7 @@ def calculate_within_cluster_error(
         haplotype_error = 0.0
         positions_counted = 0
 
-        for pos in non_phasing_positions:
+        for pos in measured_positions:
             # Count alleles at this position for reads in this haplotype
             allele_counts = defaultdict(int)
             for read_id in read_ids:
@@ -741,7 +748,7 @@ def calculate_within_cluster_error(
             haplotype_error += error_at_pos
             positions_counted += 1
 
-        # Average error across non-phasing positions for this haplotype
+        # Average error across all variant positions for this haplotype
         if positions_counted > 0:
             mean_haplotype_error = haplotype_error / positions_counted
             total_weighted_error += mean_haplotype_error * len(read_ids)
@@ -905,7 +912,7 @@ def select_correlated_positions(
     all_positions_set = set(msa_positions)
 
     # Helper function to evaluate a candidate position set
-    def evaluate_candidate(selected_msa_positions: List[int]) -> Tuple[bool, float, int, Dict[str, Set[str]]]:
+    def evaluate_candidate(selected_msa_positions: List[int]) -> Tuple[bool, float, int, Dict[str, Set[str]], Dict[str, Set[str]]]:
         """Evaluate a candidate position set.
 
         Simulates the full haplotype assignment logic including reassignment of
@@ -913,15 +920,15 @@ def select_correlated_positions(
         an accurate picture of the final error rate after phasing.
 
         Returns:
-            (is_phasable, within_cluster_error, num_qualifying, reassigned_haplotypes)
+            (is_phasable, within_cluster_error, num_qualifying, reassigned_haplotypes, all_combos)
         """
         combo_to_reads = group_reads_by_allele_combo(read_alleles, selected_msa_positions)
-        qualifying, _ = filter_qualifying_haplotypes(
+        qualifying, non_qualifying = filter_qualifying_haplotypes(
             combo_to_reads, total_reads, min_haplotype_count, min_haplotype_frequency
         )
 
         if len(qualifying) < 2:
-            return False, float('inf'), len(qualifying), qualifying
+            return False, float('inf'), len(qualifying), qualifying, combo_to_reads
 
         # Simulate reassignment and calculate error
         reassigned_groups = reassign_to_nearest_haplotype(
@@ -934,7 +941,7 @@ def select_correlated_positions(
             all_positions_set
         )
 
-        return True, error, len(qualifying), reassigned_groups
+        return True, error, len(qualifying), reassigned_groups, combo_to_reads
 
     # Generate and evaluate candidate position sets
     n_positions = len(msa_positions)
@@ -948,7 +955,7 @@ def select_correlated_positions(
     def evaluate_and_track(positions: List[int], source: str) -> bool:
         """Evaluate a candidate and update best if improved. Returns True if phasable."""
         nonlocal best_candidate, best_error, best_info
-        is_phasable, error, num_qualifying, _ = evaluate_candidate(positions)
+        is_phasable, error, num_qualifying, _, all_combos = evaluate_candidate(positions)
 
         positions_str = ','.join(str(p) for p in sorted(positions))
         if is_phasable:
@@ -960,8 +967,20 @@ def select_correlated_positions(
                 best_info = (source, num_qualifying, error)
             return True
         else:
+            # Log detailed haplotype distribution to help diagnose why not phasable
+            combo_counts = [(combo, len(reads)) for combo, reads in all_combos.items()]
+            combo_counts.sort(key=lambda x: x[1], reverse=True)
+            # Show top haplotypes and their counts/frequencies
+            top_combos = combo_counts[:5]  # Show top 5
+            combo_details = ', '.join(
+                f"{combo}:{count}({count/total_reads*100:.1f}%)"
+                for combo, count in top_combos
+            )
+            if len(combo_counts) > 5:
+                combo_details += f", ... (+{len(combo_counts)-5} more)"
             logging.debug(f"  [{source}] positions={{{positions_str}}}: "
-                         f"not phasable ({num_qualifying} qualifying)")
+                         f"not phasable ({num_qualifying} qualifying, "
+                         f"{len(all_combos)} total combos: {combo_details})")
             return False
 
     if n_positions <= EXHAUSTIVE_LIMIT:
@@ -982,7 +1001,7 @@ def select_correlated_positions(
         # beam entries: (error, positions_tuple)
         beam = []
         for pos in msa_positions:
-            is_phasable, error, num_qualifying, _ = evaluate_candidate([pos])
+            is_phasable, error, num_qualifying, _, all_combos = evaluate_candidate([pos])
             positions_str = str(pos)
             if is_phasable:
                 logging.debug(f"  [beam-init] positions={{{positions_str}}}: "
@@ -993,8 +1012,19 @@ def select_correlated_positions(
                     best_candidate = [pos]
                     best_info = ("beam-1", num_qualifying, error)
             else:
+                # Log detailed haplotype distribution
+                combo_counts = [(combo, len(reads)) for combo, reads in all_combos.items()]
+                combo_counts.sort(key=lambda x: x[1], reverse=True)
+                top_combos = combo_counts[:5]
+                combo_details = ', '.join(
+                    f"{combo}:{count}({count/total_reads*100:.1f}%)"
+                    for combo, count in top_combos
+                )
+                if len(combo_counts) > 5:
+                    combo_details += f", ... (+{len(combo_counts)-5} more)"
                 logging.debug(f"  [beam-init] positions={{{positions_str}}}: "
-                             f"not phasable ({num_qualifying} qualifying)")
+                             f"not phasable ({num_qualifying} qualifying, "
+                             f"{len(all_combos)} total combos: {combo_details})")
 
         # Sort and keep top BEAM_WIDTH
         beam.sort(key=lambda x: x[0])
@@ -1016,7 +1046,7 @@ def select_correlated_positions(
                         continue
                     seen.add(new_positions)
 
-                    is_phasable, error, num_qualifying, _ = evaluate_candidate(list(new_positions))
+                    is_phasable, error, num_qualifying, _, all_combos = evaluate_candidate(list(new_positions))
                     positions_str = ','.join(str(p) for p in new_positions)
                     if is_phasable:
                         logging.debug(f"  [beam-{size}] positions={{{positions_str}}}: "
@@ -1027,8 +1057,19 @@ def select_correlated_positions(
                             best_candidate = list(new_positions)
                             best_info = (f"beam-{size}", num_qualifying, error)
                     else:
+                        # Log detailed haplotype distribution
+                        combo_counts = [(combo, len(reads)) for combo, reads in all_combos.items()]
+                        combo_counts.sort(key=lambda x: x[1], reverse=True)
+                        top_combos = combo_counts[:5]
+                        combo_details = ', '.join(
+                            f"{combo}:{count}({count/total_reads*100:.1f}%)"
+                            for combo, count in top_combos
+                        )
+                        if len(combo_counts) > 5:
+                            combo_details += f", ... (+{len(combo_counts)-5} more)"
                         logging.debug(f"  [beam-{size}] positions={{{positions_str}}}: "
-                                     f"not phasable ({num_qualifying} qualifying)")
+                                     f"not phasable ({num_qualifying} qualifying, "
+                                     f"{len(all_combos)} total combos: {combo_details})")
 
             if not new_beam:
                 logging.debug(f"  Beam search stopped at size {size}: no phasable expansions")

@@ -212,8 +212,8 @@ def test_within_cluster_error_imperfect_haplotypes():
     assert error > 0.0
 
 
-def test_within_cluster_error_empty_non_phased():
-    """Test when all variant positions are used for phasing (no non-phased positions)."""
+def test_within_cluster_error_perfect_homogeneity():
+    """Test when all reads in haplotype have identical alleles at all positions."""
     haplotype_groups = {
         'A-G': {'read1', 'read2'},
     }
@@ -230,7 +230,7 @@ def test_within_cluster_error_empty_non_phased():
         haplotype_groups, read_alleles, phasing_positions, all_variant_positions
     )
 
-    # No non-phased positions means 0 error
+    # Perfect homogeneity (all reads identical at all positions) means 0 error
     assert error == 0.0
 
 

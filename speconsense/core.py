@@ -1472,7 +1472,10 @@ class SpecimenClusterer:
 
                 read_to_position_alleles[read_id] = position_alleles
 
-            total_cluster_size = len(cluster_read_ids)
+            # Use the number of reads actually in the MSA for frequency calculations.
+            # This may be less than len(cluster_read_ids) if sampling was applied.
+            # Using the wrong denominator would make haplotypes appear rarer than they are.
+            sampled_read_count = len(read_to_position_alleles)
 
             # Always run position selection when we have ≥2 variant positions
             # This finds the optimal subset that minimizes within-cluster error
@@ -1483,7 +1486,7 @@ class SpecimenClusterer:
                     read_to_position_alleles,
                     self.min_variant_frequency,
                     self.min_variant_count,
-                    total_cluster_size
+                    sampled_read_count
                 )
 
                 if not selected_positions:
@@ -1502,18 +1505,18 @@ class SpecimenClusterer:
             # Debug: Report all allele combinations found
             logging.debug(f"Phasing analysis: Found {len(combo_to_reads)} distinct haplotypes from {len(positions_to_use)} positions")
             for combo, reads in sorted(combo_to_reads.items(), key=lambda x: len(x[1]), reverse=True):
-                logging.debug(f"  Haplotype '{combo}': {len(reads)} reads ({len(reads)/total_cluster_size*100:.1f}%)")
+                logging.debug(f"  Haplotype '{combo}': {len(reads)} reads ({len(reads)/sampled_read_count*100:.1f}%)")
 
             # Filter to qualifying haplotypes
             qualifying_combos, non_qualifying_combos = filter_qualifying_haplotypes(
-                combo_to_reads, total_cluster_size, self.min_variant_count, self.min_variant_frequency
+                combo_to_reads, sampled_read_count, self.min_variant_count, self.min_variant_frequency
             )
 
             # Log qualification results
             for combo, reads in qualifying_combos.items():
-                logging.debug(f"  ✓ Haplotype '{combo}' qualifies: {len(reads)} reads ({len(reads)/total_cluster_size*100:.1f}%)")
+                logging.debug(f"  ✓ Haplotype '{combo}' qualifies: {len(reads)} reads ({len(reads)/sampled_read_count*100:.1f}%)")
             for combo, reads in non_qualifying_combos.items():
-                logging.debug(f"  ✗ Haplotype '{combo}' does not qualify: {len(reads)} reads ({len(reads)/total_cluster_size*100:.1f}%)")
+                logging.debug(f"  ✗ Haplotype '{combo}' does not qualify: {len(reads)} reads ({len(reads)/sampled_read_count*100:.1f}%)")
 
             # Need at least 2 qualifying haplotypes to split
             if len(qualifying_combos) <= 1:
