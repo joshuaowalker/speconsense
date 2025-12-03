@@ -5,6 +5,35 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.6.0-dev] - Unreleased
+
+### Changed
+- **Code architecture refactoring** - Extracted MSA analysis functions into dedicated `msa.py` module
+  - Moved `IUPAC_CODES`, `ErrorPosition`, `ReadAlignment`, `PositionStats`, `MSAResult` data structures
+  - Moved `parse_score_aligned_for_errors`, `extract_alignments_from_msa`, `analyze_positional_variation` functions
+  - Moved variant phasing functions: `is_variant_position_with_composition`, `call_iupac_ambiguities`, `calculate_within_cluster_error`, `group_reads_by_allele_combo`, `filter_qualifying_haplotypes`, `reassign_to_nearest_haplotype`, `select_correlated_positions`
+  - Improves code organization and testability
+- **Refactored cluster() method** - Split 318-line monolithic method into 6 focused phase methods
+  - `_run_initial_clustering()` - Phase 1: MCL or greedy clustering
+  - `_run_prephasing_merge()` - Phase 2: Merge clusters before variant detection
+  - `_run_variant_phasing()` - Phase 3: Detect variants and phase reads
+  - `_run_postphasing_merge()` - Phase 4: Merge subclusters after phasing
+  - `_run_size_filtering()` - Phase 5: Apply size/ratio filters
+  - `_write_cluster_outputs()` - Phase 6: Generate output files
+  - Main `cluster()` method now orchestrates these phases cleanly
+- **Narrowed exception handling** - Replaced broad `except Exception` with specific exception types
+  - `run_spoa()`: Catches `FileNotFoundError`, `OSError`, `subprocess.CalledProcessError`, `RuntimeError`
+  - `identify_outlier_reads()`: Catches `ZeroDivisionError`, `AttributeError`, `TypeError`
+  - `calculate_read_identity()`: Catches `ZeroDivisionError`, `ValueError`, `TypeError`
+
+### Added
+- **Unit tests for variant phasing** - Added 14 new tests in `tests/test_variant_phasing.py`
+  - Tests for `is_variant_position_with_composition()` edge cases
+  - Tests for `calculate_within_cluster_error()` with various haplotype configurations
+  - Tests for `select_correlated_positions()` exhaustive and beam search modes
+  - Tests for `call_iupac_ambiguities()` basic functionality
+  - Tests for `IUPAC_CODES` mapping correctness
+
 ## [0.5.0] - 2025-11-06
 
 ### Added
