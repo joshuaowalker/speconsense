@@ -5,7 +5,9 @@ from speconsense.msa import (
     PositionStats,
     is_variant_position_with_composition,
     calculate_within_cluster_error,
-    select_correlated_positions,
+    recursive_select_positions,
+    group_reads_by_single_position,
+    filter_qualifying_haplotypes,
     call_iupac_ambiguities,
     ReadAlignment,
     ErrorPosition,
@@ -235,99 +237,199 @@ def test_within_cluster_error_perfect_homogeneity():
 
 
 # ==============================================================================
-# Tests for select_correlated_positions()
+# Tests for recursive_select_positions()
 # ==============================================================================
 
-def test_select_correlated_positions_exhaustive_small():
-    """Test exhaustive search with small number of positions (<=10)."""
-    # Create 5 variant positions - should use exhaustive search
-    variant_positions = [
-        {'msa_position': 0, 'consensus_position': 0},
-        {'msa_position': 10, 'consensus_position': 10},
-        {'msa_position': 20, 'consensus_position': 20},
-        {'msa_position': 30, 'consensus_position': 30},
-        {'msa_position': 40, 'consensus_position': 40},
-    ]
-
+def test_recursive_phasing_clear_biallelic():
+    """Test recursive phasing with clear biallelic structure."""
     # Create reads with clear haplotype structure at positions 0 and 10
     # Position 0: A/G, Position 10: C/T
     # Haplotype A-C: 40 reads, Haplotype G-T: 40 reads
-    # Other positions have random noise
     read_alleles = {}
     for i in range(40):
         read_alleles[f'read_AC_{i}'] = {0: 'A', 10: 'C', 20: 'A', 30: 'A', 40: 'A'}
     for i in range(40):
         read_alleles[f'read_GT_{i}'] = {0: 'G', 10: 'T', 20: 'A', 30: 'A', 40: 'A'}
 
-    selected, reason = select_correlated_positions(
-        variant_positions,
+    variant_positions = [0, 10, 20, 30, 40]
+
+    result, reason = recursive_select_positions(
         read_alleles,
+        variant_positions,
         min_haplotype_frequency=0.20,
         min_haplotype_count=5,
-        total_reads=80
+        total_reads=80,
+        min_cluster_size=5
     )
 
-    # Should select positions that give cleanest haplotype separation
-    assert len(selected) >= 1
-    assert 'exhaustive' in reason.lower()
+    # Should produce 2 haplotypes
+    assert len(result) == 2
+    # Each haplotype should have 40 reads
+    for combo, reads in result:
+        assert len(reads) == 40
 
 
-def test_select_correlated_positions_beam_search_large():
-    """Test beam search with many positions (>10)."""
-    # Create 15 variant positions - should use beam search
-    variant_positions = [
-        {'msa_position': i * 10, 'consensus_position': i * 10}
-        for i in range(15)
-    ]
-
-    # Create reads with clear haplotype structure at positions 0 and 10
+def test_recursive_phasing_hierarchical():
+    """Test hierarchical recursive phasing with nested structure."""
+    # Create 3 haplotypes:
+    # A-C: 50 reads
+    # G-C: 30 reads
+    # G-T: 20 reads
+    # First split should be on position 0 (A vs G), then within G split on position 10
     read_alleles = {}
     for i in range(50):
-        alleles = {p['msa_position']: 'A' for p in variant_positions}
-        alleles[0] = 'A'
-        alleles[10] = 'C'
-        read_alleles[f'read_AC_{i}'] = alleles
-    for i in range(50):
-        alleles = {p['msa_position']: 'A' for p in variant_positions}
-        alleles[0] = 'G'
-        alleles[10] = 'T'
-        read_alleles[f'read_GT_{i}'] = alleles
+        read_alleles[f'read_AC_{i}'] = {0: 'A', 10: 'C'}
+    for i in range(30):
+        read_alleles[f'read_GC_{i}'] = {0: 'G', 10: 'C'}
+    for i in range(20):
+        read_alleles[f'read_GT_{i}'] = {0: 'G', 10: 'T'}
 
-    selected, reason = select_correlated_positions(
-        variant_positions,
+    variant_positions = [0, 10]
+
+    result, reason = recursive_select_positions(
         read_alleles,
-        min_haplotype_frequency=0.20,
+        variant_positions,
+        min_haplotype_frequency=0.15,  # Lower to catch 20/100 = 20%
         min_haplotype_count=5,
-        total_reads=100
+        total_reads=100,
+        min_cluster_size=5
     )
 
-    assert len(selected) >= 1
-    assert 'beam' in reason.lower()
+    # Should produce 3 haplotypes through hierarchical splitting
+    assert len(result) >= 2  # May be 2 or 3 depending on thresholds
 
 
-def test_select_correlated_positions_single_position():
-    """Test with only one variant position."""
-    variant_positions = [
-        {'msa_position': 10, 'consensus_position': 10},
-    ]
+def test_recursive_phasing_no_split():
+    """Test recursive phasing when no valid split exists."""
+    # All reads have the same allele at all positions
+    read_alleles = {
+        f'read_{i}': {0: 'A', 10: 'C', 20: 'G'}
+        for i in range(100)
+    }
 
+    variant_positions = [0, 10, 20]
+
+    result, reason = recursive_select_positions(
+        read_alleles,
+        variant_positions,
+        min_haplotype_frequency=0.20,
+        min_haplotype_count=5,
+        total_reads=100,
+        min_cluster_size=5
+    )
+
+    # No valid split - should return empty
+    assert len(result) == 0
+    assert 'no valid split' in reason.lower()
+
+
+def test_recursive_phasing_with_deferred():
+    """Test deferred reassignment of non-qualifying reads."""
+    # Create reads where some won't meet threshold
+    # A-C: 45 reads (qualifying)
+    # G-T: 45 reads (qualifying)
+    # A-T: 5 reads (might not qualify, should be reassigned)
+    # G-C: 5 reads (might not qualify, should be reassigned)
+    read_alleles = {}
+    for i in range(45):
+        read_alleles[f'read_AC_{i}'] = {0: 'A', 10: 'C'}
+    for i in range(45):
+        read_alleles[f'read_GT_{i}'] = {0: 'G', 10: 'T'}
+    for i in range(5):
+        read_alleles[f'read_AT_{i}'] = {0: 'A', 10: 'T'}
+    for i in range(5):
+        read_alleles[f'read_GC_{i}'] = {0: 'G', 10: 'C'}
+
+    variant_positions = [0, 10]
+
+    result, reason = recursive_select_positions(
+        read_alleles,
+        variant_positions,
+        min_haplotype_frequency=0.20,  # 20% of 100 = 20 reads minimum
+        min_haplotype_count=10,
+        total_reads=100,
+        min_cluster_size=10
+    )
+
+    # Should still produce 2 haplotypes (the non-qualifying ones get deferred)
+    assert len(result) >= 2
+    # Total reads should be 100 (all reads assigned)
+    total_assigned = sum(len(reads) for _, reads in result)
+    assert total_assigned == 100
+
+
+def test_recursive_phasing_single_position():
+    """Test recursive phasing with only one variant position."""
     read_alleles = {
         'read1': {10: 'A'},
         'read2': {10: 'A'},
-        'read3': {10: 'G'},
+        'read3': {10: 'A'},
         'read4': {10: 'G'},
+        'read5': {10: 'G'},
+        'read6': {10: 'G'},
     }
 
-    selected, reason = select_correlated_positions(
-        variant_positions,
+    variant_positions = [10]
+
+    result, reason = recursive_select_positions(
         read_alleles,
+        variant_positions,
         min_haplotype_frequency=0.20,
-        min_haplotype_count=1,
-        total_reads=4
+        min_haplotype_count=2,
+        total_reads=6,
+        min_cluster_size=2
     )
 
-    # With single position, should return it if it creates valid haplotypes
-    assert len(selected) <= 1
+    # Should split into 2 haplotypes
+    assert len(result) == 2
+
+
+# ==============================================================================
+# Tests for group_reads_by_single_position()
+# ==============================================================================
+
+def test_group_reads_by_single_position():
+    """Test grouping reads by a single position."""
+    read_alleles = {
+        'read1': {0: 'A', 10: 'C'},
+        'read2': {0: 'A', 10: 'T'},
+        'read3': {0: 'G', 10: 'C'},
+        'read4': {0: 'G', 10: 'T'},
+    }
+
+    # Group by position 0
+    groups = group_reads_by_single_position(
+        read_alleles,
+        position=0,
+        read_ids={'read1', 'read2', 'read3', 'read4'}
+    )
+
+    assert 'A' in groups
+    assert 'G' in groups
+    assert groups['A'] == {'read1', 'read2'}
+    assert groups['G'] == {'read3', 'read4'}
+
+
+def test_group_reads_by_single_position_subset():
+    """Test grouping only a subset of reads."""
+    read_alleles = {
+        'read1': {0: 'A'},
+        'read2': {0: 'A'},
+        'read3': {0: 'G'},
+        'read4': {0: 'G'},
+    }
+
+    # Only consider read1 and read3
+    groups = group_reads_by_single_position(
+        read_alleles,
+        position=0,
+        read_ids={'read1', 'read3'}
+    )
+
+    assert 'A' in groups
+    assert 'G' in groups
+    assert groups['A'] == {'read1'}
+    assert groups['G'] == {'read3'}
 
 
 # ==============================================================================

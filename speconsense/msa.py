@@ -760,28 +760,6 @@ def calculate_within_cluster_error(
     return total_weighted_error / total_reads
 
 
-def group_reads_by_allele_combo(
-    read_alleles: Dict[str, Dict[int, str]],
-    positions: List[int]
-) -> Dict[str, Set[str]]:
-    """Group reads by their allele combination at specified positions.
-
-    Args:
-        read_alleles: Dict mapping read_id -> {msa_position -> allele}
-        positions: List of MSA positions to use for grouping
-
-    Returns:
-        Dict mapping allele_combo string -> set of read_ids
-    """
-    combo_to_reads = defaultdict(set)
-    sorted_positions = sorted(positions)
-    for read_id, pos_alleles in read_alleles.items():
-        alleles = [pos_alleles.get(p, '-') for p in sorted_positions]
-        combo = '-'.join(alleles)
-        combo_to_reads[combo].add(read_id)
-    return dict(combo_to_reads)
-
-
 def filter_qualifying_haplotypes(
     combo_to_reads: Dict[str, Set[str]],
     total_reads: int,
@@ -811,285 +789,272 @@ def filter_qualifying_haplotypes(
     return qualifying, non_qualifying
 
 
-def reassign_to_nearest_haplotype(
-    combo_to_reads: Dict[str, Set[str]],
-    qualifying_combos: Dict[str, Set[str]],
+def group_reads_by_single_position(
     read_alleles: Dict[str, Dict[int, str]],
-    all_variant_positions: List[int]
+    position: int,
+    read_ids: Set[str]
 ) -> Dict[str, Set[str]]:
-    """Reassign reads from non-qualifying haplotypes to nearest qualifying haplotype.
-
-    Uses edit distance at ALL variant positions, comparing each read's alleles
-    to each haplotype's consensus alleles.
+    """Group a subset of reads by their allele at a single position.
 
     Args:
-        combo_to_reads: Dict mapping all allele_combos -> set of read_ids
-        qualifying_combos: Dict mapping qualifying allele_combos -> set of read_ids
         read_alleles: Dict mapping read_id -> {msa_position -> allele}
-        all_variant_positions: List of all variant MSA positions
+        position: MSA position to group by
+        read_ids: Subset of read IDs to consider
 
     Returns:
-        Dict mapping qualifying allele_combos -> set of read_ids (with reassigned reads)
+        Dict mapping allele -> set of read_ids
     """
-    # Start with copies of qualifying haplotype read sets
-    reassigned = {combo: set(reads) for combo, reads in qualifying_combos.items()}
-    qualifying_combo_list = list(qualifying_combos.keys())
-
-    # Compute consensus allele at each position for each qualifying haplotype
-    haplotype_consensus = {}  # combo -> consensus allele string at all_variant_positions
-    for qual_combo, qual_reads in qualifying_combos.items():
-        consensus_alleles = []
-        for pos in all_variant_positions:
-            # Count alleles at this position
-            allele_counts = defaultdict(int)
-            for read_id in qual_reads:
-                allele = read_alleles.get(read_id, {}).get(pos, '-')
-                allele_counts[allele] += 1
-            # Consensus is most common allele
-            if allele_counts:
-                consensus_allele = max(allele_counts.items(), key=lambda x: x[1])[0]
-            else:
-                consensus_allele = '-'
-            consensus_alleles.append(consensus_allele)
-        haplotype_consensus[qual_combo] = ''.join(consensus_alleles)
-
-    # Reassign each read from non-qualifying haplotypes
-    for combo, reads in combo_to_reads.items():
-        if combo not in qualifying_combos:
-            for read_id in reads:
-                # Build this read's allele string at all variant positions
-                read_allele_str = ''.join(
-                    read_alleles.get(read_id, {}).get(pos, '-')
-                    for pos in all_variant_positions
-                )
-
-                # Find nearest qualifying haplotype by edit distance
-                min_distance = float('inf')
-                nearest_combo = None
-                for qual_combo in qualifying_combo_list:
-                    result = edlib.align(read_allele_str, haplotype_consensus[qual_combo])
-                    distance = result['editDistance']
-                    if distance < min_distance:
-                        min_distance = distance
-                        nearest_combo = qual_combo
-
-                if nearest_combo is not None:
-                    reassigned[nearest_combo].add(read_id)
-
-    return reassigned
+    allele_to_reads = defaultdict(set)
+    for read_id in read_ids:
+        allele = read_alleles.get(read_id, {}).get(position, '-')
+        allele_to_reads[allele].add(read_id)
+    return dict(allele_to_reads)
 
 
-def select_correlated_positions(
-    variant_positions: List[Dict],
+def recursive_phase_reads(
+    read_ids: Set[str],
     read_alleles: Dict[str, Dict[int, str]],
+    remaining_positions: Set[int],
+    all_positions: Set[int],
     min_haplotype_frequency: float,
     min_haplotype_count: int,
-    total_reads: int
-) -> Tuple[List[Dict], str]:
-    """Select a subset of variant positions that produce the cleanest haplotype clusters.
+    min_cluster_size: int,
+    path: List[str],
+    depth: int = 0
+) -> Tuple[List[Tuple[List[str], Set[str]]], Set[str]]:
+    """Recursively phase reads by splitting on single positions.
 
-    Directly optimizes for minimal within-cluster error:
-    - For <=10 positions: exhaustive search of all 2^n - 1 subsets
-    - For >10 positions: beam search with beam width 10
-
-    The goal is to minimize within-cluster variation at non-phased positions,
-    producing the most homogeneous haplotype clusters.
+    At each level, evaluates all remaining positions and selects the one
+    that produces the minimum within-cluster error when splitting. Only
+    qualifying haplotypes (meeting count and frequency thresholds) continue
+    to the next recursion level. Non-qualifying reads are collected and
+    deferred for reassignment at the end.
 
     Args:
-        variant_positions: List of variant position dicts with 'msa_position' key
+        read_ids: Set of read IDs to phase at this level
         read_alleles: Dict mapping read_id -> {msa_position -> allele}
-        min_haplotype_frequency: Minimum frequency threshold for qualifying haplotype
-        min_haplotype_count: Minimum read count threshold for qualifying haplotype
-        total_reads: Total number of reads in cluster
+        remaining_positions: Set of MSA positions available for splitting
+        all_positions: Set of all variant MSA positions (for error calculation)
+        min_haplotype_frequency: Minimum frequency for qualifying haplotype
+        min_haplotype_count: Minimum count for qualifying haplotype
+        min_cluster_size: Stop recursing when cluster size falls below this
+        path: List of alleles representing the path to this node
+        depth: Current recursion depth (for logging)
 
     Returns:
-        Tuple of (selected_positions, selection_reason)
-        - selected_positions: Subset of variant_positions to use for phasing
-        - selection_reason: Description of selection process for logging
+        Tuple of (leaf_haplotypes, deferred_reads):
+        - leaf_haplotypes: List of (path, read_ids) for leaf nodes
+        - deferred_reads: Set of read_ids that didn't qualify at any level
     """
-    msa_positions = [v['msa_position'] for v in variant_positions]
-    pos_to_variant = {v['msa_position']: v for v in variant_positions}
-    all_positions_set = set(msa_positions)
+    indent = "  " * depth
+    total_reads = len(read_ids)
 
-    # Helper function to evaluate a candidate position set
-    def evaluate_candidate(selected_msa_positions: List[int]) -> Tuple[bool, float, int, Dict[str, Set[str]], Dict[str, Set[str]]]:
-        """Evaluate a candidate position set.
+    # Base case: no positions left or cluster too small
+    if not remaining_positions or total_reads < min_cluster_size:
+        path_str = '-'.join(path) if path else '(root)'
+        logging.debug(f"{indent}Leaf node: path={path_str}, reads={total_reads}")
+        return [(path, read_ids)], set()
 
-        Simulates the full haplotype assignment logic including reassignment of
-        non-qualifying haplotypes to nearest qualifying haplotype. This gives
-        an accurate picture of the final error rate after phasing.
-
-        Returns:
-            (is_phasable, within_cluster_error, num_qualifying, reassigned_haplotypes, all_combos)
-        """
-        combo_to_reads = group_reads_by_allele_combo(read_alleles, selected_msa_positions)
-        qualifying, non_qualifying = filter_qualifying_haplotypes(
-            combo_to_reads, total_reads, min_haplotype_count, min_haplotype_frequency
-        )
-
-        if len(qualifying) < 2:
-            return False, float('inf'), len(qualifying), qualifying, combo_to_reads
-
-        # Simulate reassignment and calculate error
-        reassigned_groups = reassign_to_nearest_haplotype(
-            combo_to_reads, qualifying, read_alleles, msa_positions
-        )
-        error = calculate_within_cluster_error(
-            reassigned_groups,
-            read_alleles,
-            set(selected_msa_positions),
-            all_positions_set
-        )
-
-        return True, error, len(qualifying), reassigned_groups, combo_to_reads
-
-    # Generate and evaluate candidate position sets
-    n_positions = len(msa_positions)
-    best_candidate = None
+    # Evaluate each position for splitting
+    best_pos = None
     best_error = float('inf')
-    best_info = None
+    best_qualifying = None
+    best_non_qualifying = None
 
-    EXHAUSTIVE_LIMIT = 10
-    BEAM_WIDTH = 10
+    for pos in remaining_positions:
+        # Group reads by allele at this position
+        allele_groups = group_reads_by_single_position(read_alleles, pos, read_ids)
 
-    def evaluate_and_track(positions: List[int], source: str) -> bool:
-        """Evaluate a candidate and update best if improved. Returns True if phasable."""
-        nonlocal best_candidate, best_error, best_info
-        is_phasable, error, num_qualifying, _, all_combos = evaluate_candidate(positions)
+        # Filter to qualifying haplotypes
+        qualifying, non_qualifying = filter_qualifying_haplotypes(
+            allele_groups, total_reads, min_haplotype_count, min_haplotype_frequency
+        )
 
-        positions_str = ','.join(str(p) for p in sorted(positions))
-        if is_phasable:
-            logging.debug(f"  [{source}] positions={{{positions_str}}}: "
-                         f"{num_qualifying} haplotypes, error={error:.4f}")
-            if error < best_error:
-                best_error = error
-                best_candidate = positions
-                best_info = (source, num_qualifying, error)
-            return True
-        else:
-            # Log detailed haplotype distribution to help diagnose why not phasable
-            combo_counts = [(combo, len(reads)) for combo, reads in all_combos.items()]
-            combo_counts.sort(key=lambda x: x[1], reverse=True)
-            # Show top haplotypes and their counts/frequencies
-            top_combos = combo_counts[:5]  # Show top 5
-            combo_details = ', '.join(
-                f"{combo}:{count}({count/total_reads*100:.1f}%)"
-                for combo, count in top_combos
+        # Need at least 2 qualifying haplotypes to consider this split
+        if len(qualifying) < 2:
+            continue
+
+        # Calculate within-cluster error for this split
+        error = calculate_within_cluster_error(
+            qualifying,
+            read_alleles,
+            {pos},
+            all_positions
+        )
+
+        if error < best_error:
+            best_error = error
+            best_pos = pos
+            best_qualifying = qualifying
+            best_non_qualifying = non_qualifying
+
+    # If no valid split found, this is a leaf node
+    if best_pos is None:
+        path_str = '-'.join(path) if path else '(root)'
+        logging.debug(f"{indent}Leaf (no valid split): path={path_str}, reads={total_reads}")
+        return [(path, read_ids)], set()
+
+    # Log the split decision
+    qual_summary = ', '.join(f"{a}:{len(r)}" for a, r in sorted(best_qualifying.items()))
+    logging.debug(f"{indent}Split at pos {best_pos}: error={best_error:.4f}, qualifying=[{qual_summary}]")
+
+    # Collect deferred reads from non-qualifying groups at this level
+    all_deferred = set()
+    for allele, reads in best_non_qualifying.items():
+        all_deferred.update(reads)
+        if reads:
+            logging.debug(f"{indent}  Deferring {len(reads)} reads from allele '{allele}'")
+
+    # Recurse on each qualifying sub-cluster
+    all_leaves = []
+    new_remaining = remaining_positions - {best_pos}
+
+    for allele, sub_reads in sorted(best_qualifying.items()):
+        new_path = path + [allele]
+        sub_leaves, sub_deferred = recursive_phase_reads(
+            sub_reads,
+            read_alleles,
+            new_remaining,
+            all_positions,
+            min_haplotype_frequency,
+            min_haplotype_count,
+            min_cluster_size,
+            new_path,
+            depth + 1
+        )
+        all_leaves.extend(sub_leaves)
+        all_deferred.update(sub_deferred)
+
+    return all_leaves, all_deferred
+
+
+def recursive_select_positions(
+    read_alleles: Dict[str, Dict[int, str]],
+    variant_positions: List[int],
+    min_haplotype_frequency: float,
+    min_haplotype_count: int,
+    total_reads: int,
+    min_cluster_size: int = 10
+) -> Tuple[List[Tuple[str, Set[str]]], str]:
+    """Phase reads using recursive single-position splitting.
+
+    Replaces the exhaustive/beam search approach with a hierarchical
+    recursive algorithm. At each level, selects the single best position
+    for splitting based on minimum within-cluster error. Recurses on
+    qualifying sub-clusters until no valid splits remain.
+
+    Non-qualifying reads are deferred during recursion and reassigned
+    to the nearest leaf haplotype at the end.
+
+    Args:
+        read_alleles: Dict mapping read_id -> {msa_position -> allele}
+        variant_positions: List of variant MSA positions
+        min_haplotype_frequency: Minimum frequency for qualifying haplotype
+        min_haplotype_count: Minimum count for qualifying haplotype
+        total_reads: Total number of reads for frequency calculation
+        min_cluster_size: Stop recursing when cluster size falls below this
+
+    Returns:
+        Tuple of (haplotype_assignments, reason):
+        - haplotype_assignments: List of (allele_combo, read_ids) tuples
+        - reason: Description of the phasing process for logging
+
+        If no valid phasing exists, returns ([], "reason")
+    """
+    if not variant_positions or not read_alleles:
+        return [], "No variant positions or reads"
+
+    all_read_ids = set(read_alleles.keys())
+    all_positions = set(variant_positions)
+
+    logging.info(f"Recursive phasing: {len(variant_positions)} positions, {total_reads} reads")
+
+    # Run recursive phasing
+    leaves, deferred = recursive_phase_reads(
+        all_read_ids,
+        read_alleles,
+        all_positions,
+        all_positions,
+        min_haplotype_frequency,
+        min_haplotype_count,
+        min_cluster_size,
+        path=[],
+        depth=0
+    )
+
+    # Check if we got any splits
+    if len(leaves) <= 1 and not deferred:
+        # No splits occurred - return empty to indicate not phasable
+        if leaves:
+            path, reads = leaves[0]
+            if not path:  # Empty path means no splits happened
+                return [], "No valid splits found at any position"
+        return [], "No valid splits found"
+
+    # Handle case where we have only 1 leaf but with deferred reads
+    if len(leaves) == 1:
+        # All reads ended up in one leaf - not useful phasing
+        return [], "All reads ended up in single haplotype"
+
+    logging.info(f"Recursive phasing: {len(leaves)} leaf haplotypes, {len(deferred)} deferred reads")
+
+    # Reassign deferred reads to nearest leaf haplotype
+    if deferred:
+        logging.debug(f"Reassigning {len(deferred)} deferred reads to nearest leaf haplotype")
+
+        # Build consensus allele for each leaf haplotype at ALL variant positions
+        leaf_consensus = {}
+        for path, leaf_reads in leaves:
+            consensus_alleles = []
+            for pos in sorted(all_positions):
+                allele_counts = defaultdict(int)
+                for read_id in leaf_reads:
+                    allele = read_alleles.get(read_id, {}).get(pos, '-')
+                    allele_counts[allele] += 1
+                if allele_counts:
+                    consensus_allele = max(allele_counts.items(), key=lambda x: x[1])[0]
+                else:
+                    consensus_allele = '-'
+                consensus_alleles.append(consensus_allele)
+            leaf_consensus[tuple(path)] = ''.join(consensus_alleles)
+
+        # Reassign each deferred read
+        leaf_reads_updated = {tuple(path): set(reads) for path, reads in leaves}
+        sorted_positions = sorted(all_positions)
+
+        for read_id in deferred:
+            # Build this read's allele string
+            read_allele_str = ''.join(
+                read_alleles.get(read_id, {}).get(pos, '-')
+                for pos in sorted_positions
             )
-            if len(combo_counts) > 5:
-                combo_details += f", ... (+{len(combo_counts)-5} more)"
-            logging.debug(f"  [{source}] positions={{{positions_str}}}: "
-                         f"not phasable ({num_qualifying} qualifying, "
-                         f"{len(all_combos)} total combos: {combo_details})")
-            return False
 
-    if n_positions <= EXHAUSTIVE_LIMIT:
-        # Exhaustive search: try all 2^n - 1 non-empty subsets
-        from itertools import combinations
-        total_candidates = 2 ** n_positions - 1
-        logging.debug(f"Exhaustive search: evaluating {total_candidates} subsets of {n_positions} positions...")
+            # Find nearest leaf by edit distance
+            min_distance = float('inf')
+            nearest_path = None
+            for path_tuple, consensus in leaf_consensus.items():
+                result = edlib.align(read_allele_str, consensus)
+                distance = result['editDistance']
+                if distance < min_distance:
+                    min_distance = distance
+                    nearest_path = path_tuple
 
-        for r in range(1, n_positions + 1):
-            for combo in combinations(msa_positions, r):
-                evaluate_and_track(list(combo), f"exhaustive-{r}")
-    else:
-        # Beam search: iteratively build position sets, keeping top-k by error
-        from itertools import combinations
-        logging.debug(f"Beam search (width={BEAM_WIDTH}): {n_positions} positions...")
+            if nearest_path is not None:
+                leaf_reads_updated[nearest_path].add(read_id)
 
-        # Initialize beam with single positions
-        # beam entries: (error, positions_tuple)
-        beam = []
-        for pos in msa_positions:
-            is_phasable, error, num_qualifying, _, all_combos = evaluate_candidate([pos])
-            positions_str = str(pos)
-            if is_phasable:
-                logging.debug(f"  [beam-init] positions={{{positions_str}}}: "
-                             f"{num_qualifying} haplotypes, error={error:.4f}")
-                beam.append((error, (pos,)))
-                if error < best_error:
-                    best_error = error
-                    best_candidate = [pos]
-                    best_info = ("beam-1", num_qualifying, error)
-            else:
-                # Log detailed haplotype distribution
-                combo_counts = [(combo, len(reads)) for combo, reads in all_combos.items()]
-                combo_counts.sort(key=lambda x: x[1], reverse=True)
-                top_combos = combo_counts[:5]
-                combo_details = ', '.join(
-                    f"{combo}:{count}({count/total_reads*100:.1f}%)"
-                    for combo, count in top_combos
-                )
-                if len(combo_counts) > 5:
-                    combo_details += f", ... (+{len(combo_counts)-5} more)"
-                logging.debug(f"  [beam-init] positions={{{positions_str}}}: "
-                             f"not phasable ({num_qualifying} qualifying, "
-                             f"{len(all_combos)} total combos: {combo_details})")
+        # Update leaves with reassigned reads
+        leaves = [(list(path), reads) for path, reads in leaf_reads_updated.items()]
 
-        # Sort and keep top BEAM_WIDTH
-        beam.sort(key=lambda x: x[0])
-        beam = beam[:BEAM_WIDTH]
+    # Convert paths to allele combo strings and build result
+    result = []
+    for path, reads in leaves:
+        combo = '-'.join(path) if path else 'unsplit'
+        result.append((combo, reads))
 
-        # Iteratively expand beam
-        for size in range(2, n_positions + 1):
-            new_beam = []
-            seen = set()  # Avoid duplicate position sets
+    # Sort by size (largest first)
+    result.sort(key=lambda x: len(x[1]), reverse=True)
 
-            for _, positions in beam:
-                positions_set = set(positions)
-                # Try adding each position not already in this set
-                for pos in msa_positions:
-                    if pos in positions_set:
-                        continue
-                    new_positions = tuple(sorted(positions + (pos,)))
-                    if new_positions in seen:
-                        continue
-                    seen.add(new_positions)
+    reason = f"Recursive phasing: {len(result)} haplotypes from hierarchical splitting"
+    logging.info(reason)
 
-                    is_phasable, error, num_qualifying, _, all_combos = evaluate_candidate(list(new_positions))
-                    positions_str = ','.join(str(p) for p in new_positions)
-                    if is_phasable:
-                        logging.debug(f"  [beam-{size}] positions={{{positions_str}}}: "
-                                     f"{num_qualifying} haplotypes, error={error:.4f}")
-                        new_beam.append((error, new_positions))
-                        if error < best_error:
-                            best_error = error
-                            best_candidate = list(new_positions)
-                            best_info = (f"beam-{size}", num_qualifying, error)
-                    else:
-                        # Log detailed haplotype distribution
-                        combo_counts = [(combo, len(reads)) for combo, reads in all_combos.items()]
-                        combo_counts.sort(key=lambda x: x[1], reverse=True)
-                        top_combos = combo_counts[:5]
-                        combo_details = ', '.join(
-                            f"{combo}:{count}({count/total_reads*100:.1f}%)"
-                            for combo, count in top_combos
-                        )
-                        if len(combo_counts) > 5:
-                            combo_details += f", ... (+{len(combo_counts)-5} more)"
-                        logging.debug(f"  [beam-{size}] positions={{{positions_str}}}: "
-                                     f"not phasable ({num_qualifying} qualifying, "
-                                     f"{len(all_combos)} total combos: {combo_details})")
-
-            if not new_beam:
-                logging.debug(f"  Beam search stopped at size {size}: no phasable expansions")
-                break
-
-            # Sort and keep top BEAM_WIDTH for next iteration
-            new_beam.sort(key=lambda x: x[0])
-            beam = new_beam[:BEAM_WIDTH]
-
-    if best_candidate is None:
-        logging.info("No phasable position set found")
-        return [], "No phasable position set found"
-
-    # Build result
-    selected_variants = [pos_to_variant[p] for p in sorted(best_candidate)]
-    source, num_haplotypes, error = best_info
-
-    reason = (f"Selected {len(best_candidate)}/{n_positions} positions "
-              f"(source={source}, haplotypes={num_haplotypes}, error={error:.4f})")
-
-    logging.info(f"Position selection: {reason}")
-
-    return selected_variants, reason
+    return result, reason

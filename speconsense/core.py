@@ -40,11 +40,7 @@ from speconsense.msa import (
     analyze_positional_variation,
     is_variant_position_with_composition,
     call_iupac_ambiguities,
-    calculate_within_cluster_error,
-    group_reads_by_allele_combo,
-    filter_qualifying_haplotypes,
-    reassign_to_nearest_haplotype,
-    select_correlated_positions,
+    recursive_select_positions,
 )
 
 
@@ -1477,77 +1473,28 @@ class SpecimenClusterer:
             # Using the wrong denominator would make haplotypes appear rarer than they are.
             sampled_read_count = len(read_to_position_alleles)
 
-            # Always run position selection when we have ≥2 variant positions
-            # This finds the optimal subset that minimizes within-cluster error
-            if len(variant_positions) >= 2:
-                logging.info(f"Running position selection on {len(variant_positions)} variant positions...")
-                selected_positions, selection_reason = select_correlated_positions(
-                    variant_positions,
-                    read_to_position_alleles,
-                    self.min_variant_frequency,
-                    self.min_variant_count,
-                    sampled_read_count
-                )
-
-                if not selected_positions:
-                    return [(None, cluster_read_ids)]
-
-                # Note: select_phasing_positions_v2 already logged the selection result
-                positions_to_use = [v['msa_position'] for v in selected_positions]
-            else:
-                # Only 1 variant position - use it directly
-                logging.debug("Only 1 variant position, using directly")
-                positions_to_use = variant_msa_positions
-
-            # Group reads by allele combination at selected positions
-            combo_to_reads = group_reads_by_allele_combo(read_to_position_alleles, positions_to_use)
-
-            # Debug: Report all allele combinations found
-            logging.debug(f"Phasing analysis: Found {len(combo_to_reads)} distinct haplotypes from {len(positions_to_use)} positions")
-            for combo, reads in sorted(combo_to_reads.items(), key=lambda x: len(x[1]), reverse=True):
-                logging.debug(f"  Haplotype '{combo}': {len(reads)} reads ({len(reads)/sampled_read_count*100:.1f}%)")
-
-            # Filter to qualifying haplotypes
-            qualifying_combos, non_qualifying_combos = filter_qualifying_haplotypes(
-                combo_to_reads, sampled_read_count, self.min_variant_count, self.min_variant_frequency
+            # Use recursive hierarchical phasing
+            # This recursively splits on single positions, selecting the best position
+            # at each level based on minimum within-cluster error
+            haplotype_assignments, reason = recursive_select_positions(
+                read_to_position_alleles,
+                variant_msa_positions,
+                self.min_variant_frequency,
+                self.min_variant_count,
+                sampled_read_count,
+                min_cluster_size=self.min_variant_count  # Stop recursing below min_variant_count
             )
 
-            # Log qualification results
-            for combo, reads in qualifying_combos.items():
-                logging.debug(f"  ✓ Haplotype '{combo}' qualifies: {len(reads)} reads ({len(reads)/sampled_read_count*100:.1f}%)")
-            for combo, reads in non_qualifying_combos.items():
-                logging.debug(f"  ✗ Haplotype '{combo}' does not qualify: {len(reads)} reads ({len(reads)/sampled_read_count*100:.1f}%)")
-
-            # Need at least 2 qualifying haplotypes to split
-            if len(qualifying_combos) <= 1:
-                logging.info(f"Phasing decision: {len(qualifying_combos)} qualifying haplotype(s) found (need >= 2), not splitting")
+            if not haplotype_assignments:
+                logging.info(f"Phasing decision: {reason}")
                 return [(None, cluster_read_ids)]
 
-            # At this point we have >= 2 qualifying haplotypes, so we will split
-            logging.info(f"Phasing decision: SPLITTING cluster into {len(qualifying_combos)} haplotypes")
+            # Phasing succeeded - log results
+            logging.info(f"Phasing decision: SPLITTING cluster into {len(haplotype_assignments)} haplotypes")
+            for i, (combo, reads) in enumerate(haplotype_assignments, 1):
+                logging.debug(f"  Haplotype {i}: '{combo}' with {len(reads)} reads ({len(reads)/sampled_read_count*100:.1f}%)")
 
-            # Reassign reads from non-qualifying haplotypes to nearest qualifying haplotype
-            if non_qualifying_combos:
-                logging.debug(f"Reassigning {len(non_qualifying_combos)} non-qualifying haplotype(s)")
-                final_groups = reassign_to_nearest_haplotype(
-                    combo_to_reads, qualifying_combos,
-                    read_to_position_alleles, variant_msa_positions
-                )
-            else:
-                final_groups = qualifying_combos
-
-            # Convert to list of tuples
-            result = [(combo, reads) for combo, reads in final_groups.items()]
-
-            # Sort by size (largest first) for consistency
-            result.sort(key=lambda x: len(x[1]), reverse=True)
-
-            # Final summary with per-haplotype counts
-            logging.info(f"Phasing complete: Split {len(cluster_read_ids)} reads into {len(result)} haplotypes")
-            for i, (combo, reads) in enumerate(result, 1):
-                logging.debug(f"  Haplotype {i}: '{combo}' with {len(reads)} reads ({len(reads)/len(cluster_read_ids)*100:.1f}%)")
-
-            return result
+            return haplotype_assignments
 
         except Exception as e:
             logging.warning(f"Failed to phase reads by variants: {e}")
