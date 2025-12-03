@@ -285,10 +285,9 @@ def extract_alignments_from_msa(
         if enable_homopolymer_normalization:
             try:
                 # Use adjusted-identity to get homopolymer-normalized scoring
-                # IMPORTANT: seq1=read, seq2=consensus. This means:
-                #   - result.score_aligned shows HP extensions from READ's perspective
-                #   - result.score_aligned_seq2 shows HP extensions from CONSENSUS's perspective
-                # We use score_aligned since we want to identify which READ bases are extensions
+                # IMPORTANT: seq1=read, seq2=consensus. The score_aligned visualization
+                # is asymmetric and shows HP extensions from seq1's (the READ's) perspective.
+                # This is what we want since we're identifying which READ bases are extensions.
                 result = score_alignment(
                     read_aligned,      # seq1 - the read
                     consensus_aligned, # seq2 - the consensus
@@ -2865,14 +2864,16 @@ def main():
                         help="Minimum size ratio between a cluster and the largest cluster (default: 0.2, 0 to disable)")
     parser.add_argument("--max-sample-size", type=int, default=500,
                         help="Maximum cluster size for consensus (default: 500)")
-    parser.add_argument("--outlier-identity-threshold", type=float, default=None,
-                        help="Identity threshold for outlier removal (e.g., 0.95 for 95%% identity). "
-                             "Reads with identity below this threshold will be removed and consensus regenerated. "
-                             "Auto-calculated as (1 + min_identity) / 2 if not specified. "
-                             "For min_identity=0.9, default is 0.95.")
-    parser.add_argument("--disable-secondpass-phasing", action="store_true",
-                        help="Disable second-pass variant phasing (enabled by default). "
-                             "First-pass MCL clustering already handles most variants.")
+    parser.add_argument("--outlier-identity", type=float, default=None,
+                        help="Minimum read-to-consensus identity to keep a read (default: auto). "
+                             "Reads below this threshold are removed as outliers before final "
+                             "consensus generation. Auto-calculated as (1 + min_identity) / 2. "
+                             "This threshold is typically higher than --min-identity because "
+                             "the consensus is error-corrected through averaging.")
+    parser.add_argument("--disable-position-phasing", action="store_true",
+                        help="Disable position-based variant phasing (enabled by default). "
+                             "MCL graph clustering already separates most variants; this "
+                             "second pass analyzes MSA positions to phase remaining variants.")
     parser.add_argument("--min-variant-frequency", type=float, default=0.20,
                         help="Minimum alternative allele frequency to call variant (default: 0.20 for 20%%)")
     parser.add_argument("--min-variant-count", type=int, default=5,
@@ -2888,7 +2889,7 @@ def main():
                         help="Disable homopolymer equivalence in cluster merging (only merge identical sequences)")
     parser.add_argument("--disable-cluster-merging", action="store_true",
                         help="Disable merging of clusters with identical consensus sequences")
-    parser.add_argument("--disable-iupac-calling", action="store_true",
+    parser.add_argument("--disable-ambiguity-calling", action="store_true",
                         help="Disable IUPAC ambiguity code calling for unphased variant positions")
     parser.add_argument("--orient-mode", choices=["skip", "keep-all", "filter-failed"], default="skip",
                         help="Sequence orientation mode: skip (default, no orientation), keep-all (orient but keep failed), or filter-failed (orient and remove failed)")
@@ -2920,23 +2921,23 @@ def main():
         disable_homopolymer_equivalence=args.disable_homopolymer_equivalence,
         disable_cluster_merging=args.disable_cluster_merging,
         output_dir=args.output_dir,
-        outlier_identity_threshold=args.outlier_identity_threshold,
-        enable_secondpass_phasing=not args.disable_secondpass_phasing,
+        outlier_identity_threshold=args.outlier_identity,
+        enable_secondpass_phasing=not args.disable_position_phasing,
         min_variant_frequency=args.min_variant_frequency,
         min_variant_count=args.min_variant_count,
-        enable_iupac_calling=not args.disable_iupac_calling
+        enable_iupac_calling=not args.disable_ambiguity_calling
     )
 
     # Log configuration
-    if args.outlier_identity_threshold is not None:
-        logging.info(f"Outlier removal enabled: min_identity_threshold={args.outlier_identity_threshold*100:.1f}% (user-specified)")
+    if args.outlier_identity is not None:
+        logging.info(f"Outlier removal enabled: outlier_identity={args.outlier_identity*100:.1f}% (user-specified)")
     else:
         # Auto-calculated threshold
         auto_threshold = (1.0 + args.min_identity) / 2.0
-        logging.info(f"Outlier removal enabled: min_identity_threshold={auto_threshold*100:.1f}% (auto-calculated from min_identity={args.min_identity*100:.1f}%)")
+        logging.info(f"Outlier removal enabled: outlier_identity={auto_threshold*100:.1f}% (auto-calculated from min_identity={args.min_identity*100:.1f}%)")
 
-    if not args.disable_secondpass_phasing:
-        logging.info(f"Second-pass variant phasing enabled: min_freq={args.min_variant_frequency:.0%}, "
+    if not args.disable_position_phasing:
+        logging.info(f"Position-based variant phasing enabled: min_freq={args.min_variant_frequency:.0%}, "
                     f"min_count={args.min_variant_count}")
 
     # Set additional attributes for metadata
