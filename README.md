@@ -392,7 +392,7 @@ By default, Speconsense automatically detects and separates biological variants 
 
 1. **Variant detection**: After initial clustering, Speconsense analyzes positional variation using multiple sequence alignment. Positions where the minor allele frequency exceeds the threshold (default 20%) and meets minimum read count requirements are identified as variant positions.
 
-2. **Position selection**: When multiple variant positions are detected, Speconsense uses normalized mutual information (NMI) and within-cluster error optimization to select the optimal subset of positions for phasing. This prevents over-fragmentation from noise positions.
+2. **Position selection**: When multiple variant positions are detected, Speconsense selects the single best position for splitting (minimizing within-cluster error), then recursively regenerates MSA for each subcluster to discover additional variant positions. This hierarchical approach prevents over-fragmentation while allowing deep phasing when supported by the data.
 
 3. **Haplotype separation**: Reads are grouped by their allele combinations at selected variant positions. Each unique combination becomes a separate sub-cluster (haplotype).
 
