@@ -1873,7 +1873,7 @@ def write_consensus_fastq(consensus: ConsensusInfo,
             # Remove empty output file
             try:
                 os.unlink(fastq_output_path)
-            except:
+            except OSError:
                 pass
             
     except Exception as e:
