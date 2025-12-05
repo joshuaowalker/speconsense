@@ -8,10 +8,12 @@ Speconsense is a specialized tool for generating high-quality consensus sequence
 
 The key features of Speconsense include:
 - Robust clustering of amplicon reads using either Markov Clustering (MCL) graph-based or greedy algorithms
+- **Automatic variant phasing**: Detects variant positions within clusters and splits reads into separate haplotypes
 - Automatic merging of clusters with identical or similar consensus sequences
 - High-quality consensus generation using SPOA
 - Primer trimming for clean consensus sequences
-- Stability assessment through subsampling
+- Read identity metrics for quality assessment
+- IUPAC ambiguity codes for unphased heterozygous positions
 - Optimized for fungal amplicon datasets but suitable for any amplicon sequencing application
 
 ## Installation
@@ -94,7 +96,7 @@ speconsense input.fastq --algorithm greedy
 # Set minimum cluster size
 speconsense input.fastq --min-size 10
 
-# Set minimum identity threshold for clustering
+# Set minimum identity threshold for clustering (default: 0.9)
 speconsense input.fastq --min-identity 0.85
 
 # Control the maximum sample size for consensus generation
@@ -102,6 +104,9 @@ speconsense input.fastq --max-sample-size 500
 
 # Specify output directory (default: clusters)
 speconsense input.fastq --output-dir results/
+
+# Disable automatic variant phasing
+speconsense input.fastq --disable-position-phasing
 
 # Using short form for output directory
 speconsense input.fastq -O my_results/
@@ -242,32 +247,33 @@ Consensus sequence headers contain metadata fields separated by spaces:
 
 **Optional Fields:**
 - `rawric=N+N+...` - RiC values of .raw source variants (pre-merge, largest-first, only present in merged variants from speconsense-summarize)
-- `snp=N` - Number of SNP positions with IUPAC ambiguity codes (only present in merged variants from speconsense-summarize)
+- `snp=N` - Number of SNP positions from IUPAC merging (only present in merged variants from speconsense-summarize)
+- `ambig=N` - Count of IUPAC ambiguity codes in consensus (Y, R, W, S, K, M, etc.)
 - `length=N` - Sequence length in bases (available via --fasta-fields option)
 - `primers=list` - Comma-separated list of detected primer names (e.g., `primers=ITS1F,ITS4`)
-- `p50diff=X.X` - Median (p50) edit distance from stability assessment (available via --fasta-fields qc preset)
-- `p95diff=X.X` - 95th percentile (p95) edit distance from stability assessment (available via --fasta-fields qc preset)
+- `rid=X.X` - Mean read identity percentage (0-100%, available via --fasta-fields qc preset)
+- `rid_min=X.X` - Minimum read identity percentage (worst-case read, available via --fasta-fields qc preset)
 - `group=N` - Variant group number (available via --fasta-fields option)
 - `variant=vN` - Variant identifier within group (available via --fasta-fields option, only for variants)
 
 **Example Headers:**
 ```
 # Simple consensus from speconsense (debug files):
->sample-c1 size=50 ric=45 p50diff=2.1 p95diff=4.8 primers=ITS1F,ITS4
+>sample-c1 size=50 ric=45 rid=97.2 rid_min=94.1 primers=ITS1F,ITS4
 
 # Merged variant from speconsense-summarize (default fields):
->sample-1 size=250 ric=250 rawric=100+89+61 snp=2 primers=ITS1F,ITS4
+>sample-1 size=250 ric=250 rawric=100+89+61 snp=2 ambig=2 primers=ITS1F,ITS4
 
 # With QC preset (--fasta-fields qc):
->sample-1 size=250 ric=250 length=589 p50diff=0.0 p95diff=2.0
+>sample-1 size=250 ric=250 length=589 rid=98.5 ambig=1
 ```
 
 **Notes:**
 - Use `--fasta-fields` option to customize which fields appear in output headers (see [Customizing FASTA Header Fields](#customizing-fasta-header-fields))
-- Stability metrics (`p50diff`, `p95diff`) are available in speconsense debug files and can be included in summarize output via `--fasta-fields qc`
-- Field name changes from earlier versions: `merged_ric` → `rawric`, `median_diff` → `p50diff`, `p95_diff` → `p95diff`
+- Read identity metrics (`rid`, `rid_min`) reflect homopolymer-normalized sequence identity
+- Field name changes from earlier versions: `merged_ric` → `rawric`, `p50diff`/`p95diff` → `rid`/`rid_min`
 - Variant merging only occurs between sequences with identical primer sets
-- SNP counts reflect IUPAC ambiguity positions in consensus sequences
+- `snp` counts positions where IUPAC codes were introduced during merging; `ambig` counts total ambiguity codes in the final sequence
 
 ## Algorithm Details
 
@@ -357,23 +363,70 @@ For maximum flexibility in detecting rare variants and contaminants, disable fil
 
 Consensus sequences are generated using SPOA (SIMD Partial Order Alignment) which efficiently handles the error profile of nanopore reads. For larger clusters, a random subset of reads (controlled by `--max-sample-size`) is used to generate the consensus.
 
-### Stability Assessment
+### Read Identity and Variance Metrics
 
-To evaluate the reliability of consensus sequences, Speconsense performs stability assessment by:
-1. Generating multiple consensus sequences from random subsets of the cluster
-2. Measuring the adjusted identity between each subsample consensus and the full consensus
-3. Converting identity scores to distance metrics for stability reporting
-4. Reporting the median and 95th percentile distances as stability metrics
+To evaluate the reliability of consensus sequences, Speconsense calculates read identity metrics by:
+1. Aligning all reads in a cluster to the consensus sequence using SPOA multiple sequence alignment
+2. Computing per-read identity scores with homopolymer normalization
+3. Reporting mean read identity (`rid`) and minimum read identity (`rid_min`)
 
-Sequences with higher than expected distance should be checked for bioinformatic contamination and/or underlying biological variation, as these may indicate mixed clusters or other issues with the data.
+**Key metrics:**
+- `rid` - Mean read identity: The average identity of all reads to the consensus (0-100%). Higher values indicate more homogeneous clusters.
+- `rid_min` - Minimum read identity: The worst-case read identity. Low values may indicate outliers or mixed clusters.
 
-**Adjusted Identity Scoring**: Speconsense uses the adjusted-identity algorithm with homopolymer normalization for more accurate sequence comparisons. This means that differences in homopolymer run lengths (e.g., AAA vs AAAAA) are treated as identical, which is particularly important for nanopore sequencing data where homopolymer length calling can be inconsistent.
+**Homopolymer-normalized identity**: Speconsense uses the adjusted-identity algorithm with homopolymer normalization for more accurate sequence comparisons. This means that differences in homopolymer run lengths (e.g., AAA vs AAAAA) are treated as identical, which is particularly important for nanopore sequencing data where homopolymer length calling can be inconsistent. The identity metrics exclude homopolymer length differences, so low `rid` values indicate true substitutions or structural indels rather than sequencing artifacts.
+
+**Automatic variant detection**: By default, Speconsense analyzes positional variation within clusters to detect true biological variants vs sequencing errors. Positions where variant alleles exceed the minimum frequency threshold are flagged as variant positions, and reads are automatically separated into distinct haplotypes (see [Automatic Variant Phasing](#automatic-variant-phasing)).
 
 ### Primer Trimming
 
 When a primers file is provided via `--primers`, Speconsense will identify and trim primer sequences from the 5' and 3' ends of consensus sequences, producing clean amplicon sequences for downstream analysis.
 
 **Automatic primer detection**: If `--primers` is not specified, Speconsense will automatically look for `primers.fasta` in the same directory as the input FASTQ file. If found, primer trimming will be enabled automatically.
+
+### Automatic Variant Phasing
+
+By default, Speconsense automatically detects and separates biological variants within clusters. This feature is particularly useful for heterozygous samples or mixed-species amplicons.
+
+**How variant phasing works:**
+
+1. **Variant detection**: After initial clustering, Speconsense analyzes positional variation using multiple sequence alignment. Positions where the minor allele frequency exceeds the threshold (default 20%) and meets minimum read count requirements are identified as variant positions.
+
+2. **Position selection**: When multiple variant positions are detected, Speconsense selects the single best position for splitting (minimizing within-cluster error), then recursively regenerates MSA for each subcluster to discover additional variant positions. This hierarchical approach prevents over-fragmentation while allowing deep phasing when supported by the data.
+
+3. **Haplotype separation**: Reads are grouped by their allele combinations at selected variant positions. Each unique combination becomes a separate sub-cluster (haplotype).
+
+4. **Haplotype filtering**: Small haplotypes that don't meet minimum thresholds are reassigned to the nearest qualifying haplotype, preventing read loss.
+
+5. **IUPAC ambiguity calling**: When only one haplotype qualifies (insufficient support for phasing), variant positions are encoded using IUPAC ambiguity codes (e.g., `Y` for C/T, `R` for A/G) rather than forcing a potentially incorrect consensus call.
+
+**Key parameters:**
+- `--min-variant-frequency` - Minimum minor allele frequency to consider a position variant (default: 0.20 = 20%)
+- `--min-variant-count` - Minimum read count for minor allele (default: 5)
+- `--disable-position-phasing` - Disable variant phasing entirely
+- `--disable-ambiguity-calling` - Disable IUPAC codes for unphased variants
+
+**Example:**
+```bash
+# Default behavior: variant phasing enabled
+speconsense input.fastq
+
+# More permissive variant detection (lower frequency threshold)
+speconsense input.fastq --min-variant-frequency 0.15
+
+# Disable variant phasing
+speconsense input.fastq --disable-position-phasing
+```
+
+**When to use variant phasing (default):**
+- Heterozygous specimens where you want to separate alleles
+- Samples with potential mixed-species amplification
+- Quality control to identify clusters with internal heterogeneity
+
+**When to disable variant phasing:**
+- Homozygous samples where variation indicates sequencing errors only
+- When you prefer merged IUPAC consensus over separate haplotypes
+- For faster processing when variant separation is not needed
 
 ## Advanced Post-Processing
 
@@ -444,19 +497,19 @@ Control which metadata fields appear in FASTA headers using the `--fasta-fields`
 ```bash
 # Default preset (current behavior)
 speconsense-summarize --fasta-fields default
-# Output: >sample-1 size=638 ric=638 rawric=333+305 snp=1 primers=5'-ITS1F,3'-ITS4_RC
+# Output: >sample-1 size=638 ric=638 rawric=333+305 snp=1 ambig=1 primers=5'-ITS1F,3'-ITS4_RC
 
 # Minimal headers - just the essentials
 speconsense-summarize --fasta-fields minimal
 # Output: >sample-1 size=638 ric=638
 
-# QC preset - includes stability metrics and length
+# QC preset - includes read identity and length
 speconsense-summarize --fasta-fields qc
-# Output: >sample-1 size=638 ric=638 length=589 p50diff=0.0 p95diff=2.0
+# Output: >sample-1 size=638 ric=638 length=589 rid=98.5 ambig=1
 
 # Full metadata (all available fields)
 speconsense-summarize --fasta-fields full
-# Output: >sample-1 size=638 ric=638 length=589 rawric=333+305 snp=1 p50diff=0.0 p95diff=2.0 primers=...
+# Output: >sample-1 size=638 ric=638 length=589 rawric=333+305 snp=1 ambig=1 rid=98.5 primers=...
 
 # ID only (no metadata)
 speconsense-summarize --fasta-fields id-only
@@ -469,7 +522,7 @@ speconsense-summarize --fasta-fields id-only
 speconsense-summarize --fasta-fields size,ric,primers
 
 # Combine presets and fields
-speconsense-summarize --fasta-fields minimal,p50diff,p95diff
+speconsense-summarize --fasta-fields minimal,rid
 
 # Combine multiple presets
 speconsense-summarize --fasta-fields minimal,qc
@@ -480,16 +533,17 @@ speconsense-summarize --fasta-fields minimal,qc
 - `ric` - Reads in consensus
 - `length` - Sequence length in bases
 - `rawric` - RiC values of .raw source variants (only when merged)
-- `snp` - Number of IUPAC ambiguity positions (only when >0)
-- `p50diff` - Median stability difference (when available)
-- `p95diff` - 95th percentile stability difference (when available)
+- `snp` - Number of IUPAC positions from merging (only when >0)
+- `ambig` - Count of IUPAC ambiguity codes in consensus
+- `rid` - Mean read identity percentage (when available)
+- `rid_min` - Minimum read identity percentage (when available)
 - `primers` - Detected primer names (when detected)
 - `group` - Variant group number
 - `variant` - Variant identifier within group (only for variants)
 
 **Use cases:**
 - **Downstream tool compatibility**: Use `minimal` or `id-only` for tools expecting simple headers
-- **Quality control**: Use `qc` preset to include stability metrics for assessing consensus quality
+- **Quality control**: Use `qc` preset to include read identity metrics for assessing consensus quality
 - **File size optimization**: Use `minimal` to reduce file size for large datasets
 - **Custom workflows**: Combine presets and fields for workflow-specific needs
 
@@ -504,71 +558,58 @@ Speconsense-summarize automatically generates a `quality_report.txt` file to hel
 
 **What the Report Includes:**
 
-**1. Elevated Variation (High Priority Section):**
-- Sequences where p50diff > 0 or p95diff > 0
-- Includes both unmerged sequences and merged sequences with problematic components
-- Sorted by (p50diff, p95diff) descending for easy prioritization
-- p50diff > 0 indicates **systematic heterogeneity** - more than half of stability trials produced variant consensuses
-- p95diff > 0 (with p50diff = 0) indicates **outlier variation** - only worst 5% of trials showed variation
+**1. Statistical Outliers (Low Read Identity):**
+- Sequences with mean read identity (`rid`) below the statistical threshold
+- Threshold is calculated as: mean - 2×standard deviation across all sequences
+- These represent the ~2.5% of sequences with lowest internal consistency
+- May indicate mixed clusters, contamination, or problematic consensus
 
-**2. Small Components (Lower Priority Section):**
-- Merged sequences where at least one component had RiC < 21
-- Small components lack stability metrics (too few reads for subsampling)
-- May represent low-abundance variants or contamination
+**2. Sequences with IUPAC Ambiguity Codes:**
+- Sequences containing IUPAC ambiguity codes (Y, R, W, S, K, M, etc.)
+- May result from merging or from unphased heterozygous positions
+- Count shown in `ambig` field
 
-**Understanding Stability Metrics:**
+**Understanding Read Identity Metrics:**
 
-Stability assessment works by:
-1. Generating 100 consensus sequences from random subsets of the cluster (20 reads each)
-2. Measuring edit distance between each subsample consensus and the full consensus
-3. Reporting median (p50diff) and 95th percentile (p95diff) distances
+Read identity assessment works by:
+1. Aligning all reads in a cluster to the consensus using SPOA multiple sequence alignment
+2. Computing per-read identity with homopolymer normalization
+3. Reporting mean identity (`rid`) and minimum identity (`rid_min`)
 
-**Key points about distance calculation:**
-- Uses homopolymer normalization - differences like AAA vs AAAAA don't count as variation
-- Therefore, elevated metrics indicate **substitutions or indels**, not homopolymer issues
-- p50diff > 0 is much more concerning than p95diff > 0
-- Both metrics = 0 indicates excellent consensus stability
-
-**For Merged Sequences:**
-- Merged sequences themselves don't have stability metrics (can't subsample IUPAC consensus)
-- Report shows stability of the **worst component** (.raw file) that was merged
-- Only included if: (A) a component has elevated variation, OR (B) a component is too small (RiC < 21)
+**Key points about identity calculation:**
+- Uses homopolymer normalization - differences like AAA vs AAAAA don't reduce identity
+- Therefore, low identity indicates **true substitutions or structural indels**
+- `rid` typically ranges from 95-99% for good quality clusters
+- `rid_min` shows the worst-case read - very low values may indicate outlier reads
 
 **Example Report Entry:**
 ```
-Type    Sequence                                              RiC    p50diff  p95diff  Notes
+Type    Sequence                                              RiC    rid      Notes
 ------------------------------------------------------------------------------------------------
-        specimen-1                                            450        2.1      4.8  Consensus instability
-MERGED  specimen-2                                            320        1.5      3.2  raw1: p50=1.5, p95=3.2 (RiC=180)
-        specimen-3                                            215        0.0      2.0  Outlier variation
+STAT    specimen-1                                            450    93.2     Statistical outlier (rid below threshold)
+        specimen-2                                            320    97.8     Contains 2 ambiguity codes
 ```
 
 **Recommended Actions:**
 
-**For p50diff > 0 (HIGH PRIORITY):**
+**For Statistical Outliers (low rid):**
 - Review cluster using `cluster_debug/` FASTQ files in source directory
 - Check for biological variation (multiple true variants) vs bioinformatic contamination
-- Consider stricter clustering parameters (`--min-identity` or `--inflation` in speconsense)
+- Variant phasing is enabled by default; consider adjusting `--min-variant-frequency` if variants weren't separated
 - May require manual curation or re-demultiplexing
 
-**For p95diff > 0 only (outlier variation):**
-- Review if sequence is critical for your analysis
-- Often acceptable - may just be rare sequencing errors
-- Consider the biological context and downstream use case
-
-**For Merged with Small Components:**
-- Review whether small components should have been filtered earlier
-- Consider adjusting `--min-size` or `--min-cluster-ratio` in speconsense
-- Consider stricter `--min-ric` threshold in speconsense-summarize
-- Check if small components represent real low-abundance variants (sensical by themselves)
+**For Sequences with Ambiguity Codes:**
+- Review whether ambiguity represents true heterozygosity or merging artifact
+- Consider adjusting merge parameters if too many variants are being merged
+- Check if variant phasing would produce cleaner separate haplotypes
 
 **Workflow Integration:**
 
 The quality report is designed for efficient triage:
-1. Scan from top to bottom - most critical issues appear first
-2. Focus on HIGH PRIORITY sequences with p50diff > 0
-3. Use component information to decide whether to review .raw files
-4. Defer small component issues to lower priority unless critical to analysis
+1. Statistical outliers are flagged automatically based on global thresholds
+2. Review flagged sequences starting with lowest `rid` values
+3. Use `rid_min` to identify sequences with problematic individual reads
+4. Consider re-processing with variant phasing for mixed clusters
 
 For high-throughput workflows (e.g., 100K sequences/year), this prioritization ensures human review time focuses on the most actionable quality issues.
 
@@ -792,55 +833,88 @@ This comprehensive logging allows users to understand exactly how the pipeline p
 ## Full Command Line Options
 
 ```
-usage: speconsense.py [-h] [--augment-input AUGMENT_INPUT] [--algorithm {graph,greedy}] [--min-identity MIN_IDENTITY]
-                     [--inflation INFLATION] [--min-size MIN_SIZE] [--min-cluster-ratio MIN_CLUSTER_RATIO]
-                     [--max-sample-size MAX_SAMPLE_SIZE] [--presample PRESAMPLE]
-                     [--k-nearest-neighbors K_NEAREST_NEIGHBORS] [--primers PRIMERS]
-                     [-O OUTPUT_DIR] [--stability-trials STABILITY_TRIALS] [--stability-sample STABILITY_SAMPLE]
-                     [--disable-stability] [--disable-homopolymer-equivalence]
-                     [--orient-mode {skip,keep-all,filter-failed}]
-                     [--log-level {DEBUG,INFO,WARNING,ERROR,CRITICAL}] [--version]
-                     input_file
+usage: speconsense [-h] [--augment-input AUGMENT_INPUT]
+                   [--algorithm {graph,greedy}] [--min-identity MIN_IDENTITY]
+                   [--inflation INFLATION] [--min-size MIN_SIZE]
+                   [--min-cluster-ratio MIN_CLUSTER_RATIO]
+                   [--max-sample-size MAX_SAMPLE_SIZE]
+                   [--outlier-identity OUTLIER_IDENTITY]
+                   [--disable-position-phasing]
+                   [--min-variant-frequency MIN_VARIANT_FREQUENCY]
+                   [--min-variant-count MIN_VARIANT_COUNT]
+                   [--presample PRESAMPLE]
+                   [--k-nearest-neighbors K_NEAREST_NEIGHBORS]
+                   [--primers PRIMERS] [-O OUTPUT_DIR]
+                   [--disable-homopolymer-equivalence]
+                   [--disable-cluster-merging] [--disable-ambiguity-calling]
+                   [--orient-mode {skip,keep-all,filter-failed}]
+                   [--log-level {DEBUG,INFO,WARNING,ERROR,CRITICAL}]
+                   [--version]
+                   input_file
 
-Markov Clustering-based clustering of nanopore amplicon reads
+MCL-based clustering of nanopore amplicon reads
 
 positional arguments:
   input_file            Input FASTQ file
 
-optional arguments:
+options:
   -h, --help            show this help message and exit
   --augment-input AUGMENT_INPUT
-                        Additional FASTQ/FASTA file with sequences recovered after primary demultiplexing
+                        Additional FASTQ/FASTA file with sequences recovered
+                        after primary demultiplexing (e.g., from specimine)
   --algorithm {graph,greedy}
                         Clustering algorithm to use (default: graph)
   --min-identity MIN_IDENTITY
-                        Minimum sequence identity threshold (default: 0.85)
+                        Minimum sequence identity threshold for clustering
+                        (default: 0.9)
   --inflation INFLATION
                         MCL inflation parameter (default: 4.0)
   --min-size MIN_SIZE   Minimum cluster size (default: 5, 0 to disable)
   --min-cluster-ratio MIN_CLUSTER_RATIO
-                        Minimum size ratio between a cluster and the largest cluster (default: 0.2, 0 to disable)
+                        Minimum size ratio between a cluster and the largest
+                        cluster (default: 0.2, 0 to disable)
   --max-sample-size MAX_SAMPLE_SIZE
                         Maximum cluster size for consensus (default: 500)
+  --outlier-identity OUTLIER_IDENTITY
+                        Minimum read-to-consensus identity to keep a read
+                        (default: auto). Reads below this threshold are
+                        removed as outliers before final consensus generation.
+                        Auto-calculated as (1 + min_identity) / 2.
+  --disable-position-phasing
+                        Disable position-based variant phasing (enabled by
+                        default). MCL clustering already separates most
+                        variants; this second pass analyzes MSA positions to
+                        phase remaining variants.
+  --min-variant-frequency MIN_VARIANT_FREQUENCY
+                        Minimum alternative allele frequency to call variant
+                        (default: 0.20 for 20%)
+  --min-variant-count MIN_VARIANT_COUNT
+                        Minimum alternative allele read count to call variant
+                        (default: 5)
   --presample PRESAMPLE
-                        Presample size for initial reads (default: 1000, 0 to disable)
+                        Presample size for initial reads (default: 1000, 0 to
+                        disable)
   --k-nearest-neighbors K_NEAREST_NEIGHBORS
-                        Number of nearest neighbors for graph construction (default: 5)
-  --primers PRIMERS     FASTA file containing primer sequences (default: looks for primers.fasta in input file directory)
+                        Number of nearest neighbors for graph construction
+                        (default: 5)
+  --primers PRIMERS     FASTA file containing primer sequences (default: looks
+                        for primers.fasta in input file directory)
   -O OUTPUT_DIR, --output-dir OUTPUT_DIR
                         Output directory for all files (default: clusters)
-  --stability-trials STABILITY_TRIALS
-                        Number of sampling trials to assess stability (default: 100)
-  --stability-sample STABILITY_SAMPLE
-                        Size of stability samples (default: 20)
-  --disable-stability   Disable stability assessment
   --disable-homopolymer-equivalence
-                        Disable homopolymer equivalence in cluster merging (only merge identical sequences)
+                        Disable homopolymer equivalence in cluster merging
+                        (only merge identical sequences)
+  --disable-cluster-merging
+                        Disable merging of clusters with identical consensus
+                        sequences
+  --disable-ambiguity-calling
+                        Disable IUPAC ambiguity code calling for unphased
+                        variant positions
   --orient-mode {skip,keep-all,filter-failed}
-                        Sequence orientation mode: skip (default, no orientation), keep-all (orient but keep failed),
-                        or filter-failed (orient and remove failed). Requires primers file with position annotations.
+                        Sequence orientation mode: skip (default, no
+                        orientation), keep-all (orient but keep failed), or
+                        filter-failed (orient and remove failed)
   --log-level {DEBUG,INFO,WARNING,ERROR,CRITICAL}
-                        Set logging level (default: INFO)
   --version             Show program's version number and exit
 ```
 
@@ -871,28 +945,26 @@ options:
   --fasta-fields FASTA_FIELDS
                         FASTA header fields to output. Can be: (1) a preset name (default,
                         minimal, qc, full, id-only), (2) comma-separated field names (size,
-                        ric, length, rawric, snp, p50diff, p95diff, primers, group, variant),
+                        ric, length, rawric, snp, rid, rid_min, primers, group, variant),
                         or (3) a combination of presets and fields (e.g., minimal,qc or
-                        minimal,p50diff,p95diff). Duplicates removed, order preserved left to
-                        right. Default: default
+                        minimal,rid). Duplicates removed, order preserved left to right.
+                        Default: default
   --merge-snp           Enable SNP-based merging (default: True)
   --merge-indel-length MERGE_INDEL_LENGTH
-                        Maximum length of individual structural indels allowed in merging
+                        Maximum length of individual indels allowed in merging
                         (default: 0 = disabled)
   --merge-position-count MERGE_POSITION_COUNT
-                        Maximum total SNP+structural indel positions allowed in merging
-                        (default: 2)
+                        Maximum total SNP+indel positions allowed in merging (default: 2)
   --merge-min-size-ratio MERGE_MIN_SIZE_RATIO
-                        Minimum size ratio (smaller/larger) for merging clusters (default:
-                        0.0 = disabled)
+                        Minimum size ratio (smaller/larger) for merging clusters
+                        (default: 0.0 = disabled)
   --disable-homopolymer-equivalence
                         Disable homopolymer equivalence in merging (treat AAA vs AAAA as
                         different)
   --group-identity GROUP_IDENTITY, --variant-group-identity GROUP_IDENTITY
                         Identity threshold for variant grouping using HAC (default: 0.9)
   --select-max-variants SELECT_MAX_VARIANTS, --max-variants SELECT_MAX_VARIANTS
-                        Maximum number of additional variants to output per group (default:
-                        -1 = no limit)
+                        Maximum total variants to output per group (default: -1 = no limit)
   --select-max-groups SELECT_MAX_GROUPS, --max-groups SELECT_MAX_GROUPS
                         Maximum number of groups to output per specimen (default: -1 = all
                         groups)

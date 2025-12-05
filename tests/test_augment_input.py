@@ -89,7 +89,7 @@ class TestAugmentInput:
         result = subprocess.run([
             sys.executable, core_script_path,
             'test_main.fastq', '--augment-input', 'nonexistent.fastq',
-            '--min-size', '2', '--algorithm', 'greedy', '--disable-stability'
+            '--min-size', '2', '--algorithm', 'greedy'
         ], capture_output=True, text=True)
         
         assert result.returncode == 1, "Should fail with exit code 1 for nonexistent file"
@@ -102,7 +102,7 @@ class TestAugmentInput:
         result = subprocess.run([
             sys.executable, core_script_path,
             'test_main.fastq', '--augment-input', 'test_augment.fasta',
-            '--min-size', '2', '--algorithm', 'greedy', '--disable-stability',
+            '--min-size', '2', '--algorithm', 'greedy',
             '--log-level', 'INFO'
         ], capture_output=True, text=True)
         
@@ -117,9 +117,9 @@ class TestAugmentInput:
         result = subprocess.run([
             sys.executable, core_script_path,
             'test_main.fastq', '--augment-input', 'test_augment.fasta',
-            '--min-size', '2', '--algorithm', 'greedy', '--disable-stability'
+            '--min-size', '2', '--algorithm', 'greedy'
         ], capture_output=True, text=True)
-        
+
         assert result.returncode == 0, "Speconsense should succeed"
         assert os.path.exists('clusters/test_main-all.fasta'), "Main output file should be created"
         assert os.path.exists('clusters/cluster_debug'), "Debug directory should be created"
@@ -131,11 +131,11 @@ class TestAugmentInput:
         result = subprocess.run([
             sys.executable, core_script_path,
             'test_main.fastq', '--augment-input', 'test_augment.fasta',
-            '--min-size', '2', '--algorithm', 'greedy', '--disable-stability'
+            '--min-size', '2', '--algorithm', 'greedy'
         ], capture_output=True, text=True)
-        
+
         assert result.returncode == 0, "Speconsense should succeed"
-        
+
         # Check cluster debug files
         debug_files = [f for f in os.listdir('clusters/cluster_debug') 
                       if f.endswith('-reads.fastq') or f.endswith('-reads.fasta')]
@@ -154,11 +154,11 @@ class TestAugmentInput:
         result = subprocess.run([
             sys.executable, core_script_path,
             'test_main.fastq', '--augment-input', 'test_augment.fasta',
-            '--min-size', '2', '--algorithm', 'greedy', '--disable-stability'
+            '--min-size', '2', '--algorithm', 'greedy'
         ], capture_output=True, text=True)
-        
+
         assert result.returncode == 0, "Speconsense should succeed"
-        
+
         # Run summarize
         result = subprocess.run([
             sys.executable, summarize_script_path,
@@ -176,15 +176,15 @@ class TestAugmentInput:
         subprocess.run([
             sys.executable, core_script_path,
             'test_main.fastq', '--augment-input', 'test_augment.fasta',
-            '--min-size', '2', '--algorithm', 'greedy', '--disable-stability'
+            '--min-size', '2', '--algorithm', 'greedy'
         ], capture_output=True, text=True)
-        
+
         # Run summarize
         subprocess.run([
             sys.executable, summarize_script_path,
             '--source', 'clusters', '--log-level', 'INFO'
         ], capture_output=True, text=True)
-        
+
         # Check that augmented sequence is in final FASTQ output
         fastq_files = os.listdir('__Summary__/FASTQ Files')
         assert len(fastq_files) > 0, "Should create summary FASTQ files"
@@ -201,15 +201,15 @@ class TestAugmentInput:
         subprocess.run([
             sys.executable, core_script_path,
             'test_main.fastq', '--augment-input', 'test_augment.fasta',
-            '--min-size', '2', '--algorithm', 'greedy', '--disable-stability'
+            '--min-size', '2', '--algorithm', 'greedy'
         ], capture_output=True, text=True)
-        
+
         # Run summarize
         subprocess.run([
             sys.executable, summarize_script_path,
             '--source', 'clusters', '--log-level', 'INFO'
         ], capture_output=True, text=True)
-        
+
         # Check final FASTA header shows correct counts
         fasta_files = [f for f in os.listdir('__Summary__') 
                       if f.endswith('.fasta') and f != 'summary.fasta']
@@ -231,9 +231,9 @@ class TestAugmentInput:
         result = subprocess.run([
             sys.executable, core_script_path,
             'test_main.fastq', '--augment-input', 'test_augment.fasta',
-            '--min-size', '1', '--algorithm', 'greedy', '--disable-stability'
+            '--min-size', '1', '--algorithm', 'greedy'
         ], capture_output=True, text=True)
-        
+
         # Should warn about empty augment file
         assert "No sequences found in augment input file" in result.stderr
 

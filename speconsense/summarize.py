@@ -4,10 +4,12 @@ import os
 import re
 import glob
 import csv
+import json
 import shutil
 import argparse
 import itertools
 import logging
+import datetime
 from typing import List, Dict, Tuple, Optional, NamedTuple
 from collections import defaultdict
 
@@ -17,26 +19,17 @@ from adjusted_identity import score_alignment, AdjustmentParams
 import tempfile
 import subprocess
 from tqdm import tqdm
+import numpy as np
+from io import StringIO
 
+# Import homopolymer-aware alignment functions and IUPAC constants from msa module
+from speconsense.msa import (
+    extract_alignments_from_msa,
+    ReadAlignment,
+    analyze_positional_variation,
+    IUPAC_CODES,
+)
 
-# IUPAC nucleotide ambiguity codes mapping
-IUPAC_CODES = {
-    frozenset(['A']): 'A',
-    frozenset(['C']): 'C',
-    frozenset(['G']): 'G',
-    frozenset(['T']): 'T',
-    frozenset(['A', 'G']): 'R',
-    frozenset(['C', 'T']): 'Y',
-    frozenset(['G', 'C']): 'S',
-    frozenset(['A', 'T']): 'W',
-    frozenset(['G', 'T']): 'K',
-    frozenset(['A', 'C']): 'M',
-    frozenset(['C', 'G', 'T']): 'B',
-    frozenset(['A', 'G', 'T']): 'D',
-    frozenset(['A', 'C', 'T']): 'H',
-    frozenset(['A', 'C', 'G']): 'V',
-    frozenset(['A', 'C', 'G', 'T']): 'N',
-}
 
 # IUPAC equivalencies for edlib alignment
 # This allows edlib to treat IUPAC ambiguity codes as matching their constituent bases
@@ -76,8 +69,17 @@ class ConsensusInfo(NamedTuple):
     snp_count: Optional[int] = None  # Number of SNPs from IUPAC consensus generation
     primers: Optional[List[str]] = None  # List of detected primer names
     raw_ric: Optional[List[int]] = None  # RiC values of .raw source variants
-    p50_diff: Optional[float] = None  # Median edit distance from stability assessment
-    p95_diff: Optional[float] = None  # 95th percentile edit distance from stability
+    rid: Optional[float] = None  # Mean read identity (internal consistency metric)
+    rid_min: Optional[float] = None  # Minimum read identity (worst-case read)
+
+
+class ClusterQualityData(NamedTuple):
+    """Quality metrics for a cluster (no visualization matrix)."""
+    consensus_seq: str
+    position_error_rates: List[float]  # Per-position error rates (0-1) in consensus space
+    position_error_counts: List[int]  # Per-position error counts in consensus space
+    read_identities: List[float]  # Per-read identity scores (0-1)
+    position_stats: Optional[List] = None  # Detailed PositionStats for debugging (optional)
 
 
 # FASTA field customization support
@@ -132,7 +134,7 @@ class RawRicField(FastaField):
 
 class SnpField(FastaField):
     def __init__(self):
-        super().__init__('snp', 'Number of IUPAC ambiguity positions')
+        super().__init__('snp', 'Number of IUPAC ambiguity positions from merging')
 
     def format_value(self, consensus: ConsensusInfo) -> Optional[str]:
         if consensus.snp_count is not None and consensus.snp_count > 0:
@@ -140,23 +142,15 @@ class SnpField(FastaField):
         return None
 
 
-class P50DiffField(FastaField):
+class AmbigField(FastaField):
     def __init__(self):
-        super().__init__('p50diff', 'Median (p50) edit distance from stability')
+        super().__init__('ambig', 'Count of IUPAC ambiguity codes in consensus')
 
     def format_value(self, consensus: ConsensusInfo) -> Optional[str]:
-        if consensus.p50_diff is not None:
-            return f"p50diff={consensus.p50_diff:.1f}"
-        return None
-
-
-class P95DiffField(FastaField):
-    def __init__(self):
-        super().__init__('p95diff', '95th percentile edit distance')
-
-    def format_value(self, consensus: ConsensusInfo) -> Optional[str]:
-        if consensus.p95_diff is not None:
-            return f"p95diff={consensus.p95_diff:.1f}"
+        # Count non-ACGT characters in the sequence
+        ambig_count = sum(1 for c in consensus.sequence if c.upper() not in 'ACGT')
+        if ambig_count > 0:
+            return f"ambig={ambig_count}"
         return None
 
 
@@ -167,6 +161,26 @@ class PrimersField(FastaField):
     def format_value(self, consensus: ConsensusInfo) -> Optional[str]:
         if consensus.primers:
             return f"primers={','.join(consensus.primers)}"
+        return None
+
+
+class RidField(FastaField):
+    def __init__(self):
+        super().__init__('rid', 'Mean read identity (percentage)')
+
+    def format_value(self, consensus: ConsensusInfo) -> Optional[str]:
+        if consensus.rid is not None:
+            return f"rid={consensus.rid*100:.1f}"
+        return None
+
+
+class RidMinField(FastaField):
+    def __init__(self):
+        super().__init__('rid_min', 'Minimum read identity (percentage)')
+
+    def format_value(self, consensus: ConsensusInfo) -> Optional[str]:
+        if consensus.rid_min is not None:
+            return f"rid_min={consensus.rid_min*100:.1f}"
         return None
 
 
@@ -201,8 +215,9 @@ FASTA_FIELDS = {
     'length': LengthField(),
     'rawric': RawRicField(),
     'snp': SnpField(),
-    'p50diff': P50DiffField(),
-    'p95diff': P95DiffField(),
+    'ambig': AmbigField(),
+    'rid': RidField(),
+    'rid_min': RidMinField(),
     'primers': PrimersField(),
     'group': GroupField(),
     'variant': VariantField(),
@@ -210,10 +225,10 @@ FASTA_FIELDS = {
 
 # Preset definitions
 FASTA_FIELD_PRESETS = {
-    'default': ['size', 'ric', 'rawric', 'snp', 'primers'],
+    'default': ['size', 'ric', 'rawric', 'snp', 'ambig', 'primers'],
     'minimal': ['size', 'ric'],
-    'qc': ['size', 'ric', 'length', 'p50diff', 'p95diff'],
-    'full': ['size', 'ric', 'length', 'rawric', 'snp', 'p50diff', 'p95diff', 'primers'],
+    'qc': ['size', 'ric', 'length', 'rid', 'ambig'],
+    'full': ['size', 'ric', 'length', 'rawric', 'snp', 'ambig', 'rid', 'primers'],
     'id-only': [],
 }
 
@@ -241,7 +256,7 @@ def parse_fasta_fields(spec: str) -> List[FastaField]:
                 - "default" (single preset)
                 - "minimal,qc" (preset union)
                 - "size,ric,primers" (field list)
-                - "minimal,p50diff,p95diff" (preset + fields)
+                - "minimal,rid" (preset + fields)
 
     Returns:
         List of FastaField objects in specified order, duplicates removed
@@ -323,9 +338,9 @@ def parse_arguments():
                         help="FASTA header fields to output. Can be: "
                              "(1) a preset name (default, minimal, qc, full, id-only), "
                              "(2) comma-separated field names (size, ric, length, rawric, "
-                             "snp, p50diff, p95diff, primers, group, variant), or "
+                             "snp, rid, rid_min, primers, group, variant), or "
                              "(3) a combination of presets and fields (e.g., minimal,qc or "
-                             "minimal,p50diff,p95diff). Duplicates removed, order preserved "
+                             "minimal,rid). Duplicates removed, order preserved "
                              "left to right. Default: default")
 
     # Merge phase parameters
@@ -415,13 +430,15 @@ def setup_logging(log_level: str, log_file: str = None):
 
 
 def parse_consensus_header(header: str) -> Tuple[Optional[str], Optional[int], Optional[int],
-                                                   Optional[List[str]], Optional[float], Optional[float]]:
+                                                   Optional[List[str]], Optional[float], Optional[float],
+                                                   Optional[bool], Optional[int]]:
     """
     Extract information from Speconsense consensus FASTA header.
 
-    Now includes optional stability metrics (p50diff, p95diff) for use in output headers.
-    Accepts both new field names (p50diff, p95diff) and legacy names (median_diff, p95_diff)
-    for backward compatibility during transition.
+    Parses read identity metrics.
+
+    Returns:
+        Tuple of (sample_name, ric, size, primers, rid, rid_min)
     """
     sample_match = re.match(r'>([^ ]+) (.+)', header)
     if not sample_match:
@@ -442,17 +459,14 @@ def parse_consensus_header(header: str) -> Tuple[Optional[str], Optional[int], O
     primers_match = re.search(r'primers=([^,\s]+(?:,[^,\s]+)*)', info_string)
     primers = primers_match.group(1).split(',') if primers_match else None
 
-    # Extract stability metrics - accept both new (p50diff, p95diff) and legacy (median_diff, p95_diff) names
-    p50_diff_match = re.search(r'(?:p50diff|median_diff)=([\d.]+)', info_string)
-    p50_diff = float(p50_diff_match.group(1)) if p50_diff_match else None
+    # Extract read identity metrics (percentages in headers, convert to fractions)
+    rid_match = re.search(r'rid=([\d.]+)', info_string)
+    rid = float(rid_match.group(1)) / 100.0 if rid_match else None
 
-    p95_diff_match = re.search(r'p95diff=([\d.]+)', info_string)
-    if not p95_diff_match:
-        # Try legacy name
-        p95_diff_match = re.search(r'p95_diff=([\d.]+)', info_string)
-    p95_diff = float(p95_diff_match.group(1)) if p95_diff_match else None
+    rid_min_match = re.search(r'rid_min=([\d.]+)', info_string)
+    rid_min = float(rid_min_match.group(1)) / 100.0 if rid_min_match else None
 
-    return sample_name, ric, size, primers, p50_diff, p95_diff
+    return sample_name, ric, size, primers, rid, rid_min
 
 
 def load_consensus_sequences(source_folder: str, min_ric: int) -> List[ConsensusInfo]:
@@ -468,7 +482,8 @@ def load_consensus_sequences(source_folder: str, min_ric: int) -> List[Consensus
 
         with open(fasta_file, 'r') as f:
             for record in SeqIO.parse(f, "fasta"):
-                sample_name, ric, size, primers, p50_diff, p95_diff = parse_consensus_header(f">{record.description}")
+                sample_name, ric, size, primers, rid, rid_min = \
+                    parse_consensus_header(f">{record.description}")
 
                 if sample_name and ric >= min_ric:
                     # Extract cluster ID from sample name (e.g., "sample-c1" -> "c1")
@@ -485,13 +500,231 @@ def load_consensus_sequences(source_folder: str, min_ric: int) -> List[Consensus
                         snp_count=None,  # No SNP info from original speconsense output
                         primers=primers,
                         raw_ric=None,  # Not available in original speconsense output
-                        p50_diff=p50_diff,  # From stability assessment if available
-                        p95_diff=p95_diff   # From stability assessment if available
+                        rid=rid,  # Mean read identity if available
+                        rid_min=rid_min,  # Minimum read identity if available
                     )
                     consensus_list.append(consensus_info)
 
     logging.info(f"Loaded {len(consensus_list)} consensus sequences from {len(fasta_files)} files")
     return consensus_list
+
+
+def load_metadata_from_json(source_folder: str, sample_name: str) -> Optional[Dict]:
+    """Load metadata JSON file for a consensus sequence.
+
+    Args:
+        source_folder: Source directory containing cluster_debug folder
+        sample_name: Sample name (e.g., "sample-c1")
+
+    Returns:
+        Dictionary with metadata, or None if file not found or error
+    """
+    # Construct path to metadata file
+    debug_dir = os.path.join(source_folder, "cluster_debug")
+    metadata_file = os.path.join(debug_dir, f"{sample_name}-metadata.json")
+
+    if not os.path.exists(metadata_file):
+        logging.debug(f"Metadata file not found: {metadata_file}")
+        return None
+
+    try:
+        with open(metadata_file, 'r') as f:
+            metadata = json.load(f)
+        return metadata
+    except Exception as e:
+        logging.warning(f"Failed to load metadata from {metadata_file}: {e}")
+        return None
+
+
+def identify_outliers(final_consensus: List, all_raw_consensuses: List, source_folder: str) -> Dict:
+    """Identify sequences with low read identity using statistical outlier detection.
+
+    Flags sequences with mean read identity (rid) below (mean - 2×std) for the dataset.
+    This identifies the ~2.5% lowest values that may warrant review.
+
+    Note: rid_min (minimum read identity) is not used because single outlier reads
+    don't significantly impact consensus quality. Positional analysis better captures
+    systematic issues like mixed clusters or variants.
+
+    Args:
+        final_consensus: List of final consensus sequences
+        all_raw_consensuses: List of all raw consensus sequences (unused, kept for API compatibility)
+        source_folder: Source directory (unused, kept for API compatibility)
+
+    Returns:
+        Dictionary with:
+        {
+            'statistical_outliers': List of (cons, rid),
+            'no_issues': List of consensus sequences with good quality,
+            'global_stats': {'mean_rid', 'std_rid', 'stat_threshold_rid'}
+        }
+    """
+    # Calculate global statistics for all sequences with identity metrics
+    all_rids = []
+
+    for cons in final_consensus:
+        if cons.rid is not None:
+            all_rids.append(cons.rid)
+
+    # Calculate mean and std for statistical outlier detection
+    mean_rid = np.mean(all_rids) if all_rids else 1.0
+    std_rid = np.std(all_rids) if len(all_rids) > 1 else 0.0
+
+    # Threshold for statistical outliers (2 standard deviations below mean)
+    stat_threshold_rid = mean_rid - 2 * std_rid
+
+    # Categorize sequences
+    statistical = []
+    no_issues = []
+
+    for cons in final_consensus:
+        rid = cons.rid if cons.rid is not None else 1.0
+
+        if rid < stat_threshold_rid:
+            statistical.append((cons, rid))
+        else:
+            no_issues.append(cons)
+
+    return {
+        'statistical_outliers': statistical,
+        'no_issues': no_issues,
+        'global_stats': {
+            'mean_rid': mean_rid,
+            'std_rid': std_rid,
+            'stat_threshold_rid': stat_threshold_rid
+        }
+    }
+
+
+def analyze_positional_identity_outliers(
+    consensus_info,
+    source_folder: str,
+    min_variant_frequency: float,
+    min_variant_count: int
+) -> Optional[Dict]:
+    """Analyze positional error rates and identify high-error positions.
+
+    Args:
+        consensus_info: ConsensusInfo object for the sequence
+        source_folder: Source directory containing cluster_debug folder
+        min_variant_frequency: Global threshold for flagging positions (from metadata)
+        min_variant_count: Minimum variant count for phasing (from metadata)
+
+    Returns:
+        Dictionary with positional analysis:
+        {
+            'num_outlier_positions': int,
+            'mean_outlier_error_rate': float,  # Mean error rate across outlier positions only
+            'total_nucleotide_errors': int,    # Sum of error counts at outlier positions
+            'outlier_threshold': float,
+            'outlier_positions': List of (position, error_rate, error_count) tuples
+        }
+        Returns None if MSA file not found or analysis fails
+
+        Note: Error rates already exclude homopolymer length differences due to
+        homopolymer normalization in analyze_positional_variation()
+    """
+    # Skip analysis for low-RiC sequences (insufficient data for meaningful statistics)
+    # Need at least 2 * min_variant_count to confidently phase two variants
+    min_ric_threshold = 2 * min_variant_count
+    if consensus_info.ric < min_ric_threshold:
+        logging.debug(f"Skipping positional analysis for {consensus_info.sample_name}: "
+                     f"RiC {consensus_info.ric} < {min_ric_threshold}")
+        return None
+
+    # Construct path to MSA file
+    debug_dir = os.path.join(source_folder, "cluster_debug")
+
+    # Try to find the MSA file
+    # MSA files use the original cluster naming (e.g., "specimen-c1")
+    # not the summarized naming (e.g., "specimen-1.v1")
+    msa_file = None
+
+    # Extract specimen name and cluster ID
+    # consensus_info.sample_name might be "specimen-1.v1" (summarized)
+    # consensus_info.cluster_id should be "-c1" (original cluster)
+
+    # Build the base name from specimen + cluster_id
+    # If sample_name is "ONT01.23-...-1.v1" and cluster_id is "-c1"
+    # we need to reconstruct "ONT01.23-...-c1"
+
+    sample_name = consensus_info.sample_name
+    cluster_id = consensus_info.cluster_id
+
+    # Remove any HAC group/variant suffix from sample_name to get specimen base
+    # Pattern: "-\d+\.v\d+" (e.g., "-1.v1")
+    specimen_base = re.sub(r'-\d+\.v\d+$', '', sample_name)
+
+    # Reconstruct original cluster name
+    original_cluster_name = f"{specimen_base}{cluster_id}"
+
+    # Look for the MSA file with correct extension
+    msa_fasta = os.path.join(debug_dir, f"{original_cluster_name}-RiC{consensus_info.ric}-msa.fasta")
+    if os.path.exists(msa_fasta):
+        msa_file = msa_fasta
+
+    if not msa_file:
+        logging.debug(f"No MSA file found for {original_cluster_name}")
+        return None
+
+    # Analyze cluster quality using core.py's positional analysis
+    quality_data = analyze_cluster_quality(msa_file, consensus_info.sequence)
+
+    if not quality_data or not quality_data.position_error_rates:
+        logging.debug(f"Failed to analyze cluster quality for {original_cluster_name}")
+        return None
+
+    position_error_rates = quality_data.position_error_rates
+    position_error_counts = quality_data.position_error_counts
+    position_stats = quality_data.position_stats
+
+    # Use global min_variant_frequency as threshold
+    # Positions above this could be undetected/unphased variants
+    threshold = min_variant_frequency
+    outlier_positions = [
+        (i, rate, count)
+        for i, (rate, count) in enumerate(zip(position_error_rates, position_error_counts))
+        if rate > threshold
+    ]
+
+    # Build detailed outlier info including base composition
+    outlier_details = []
+    if position_stats:
+        for i, rate, count in outlier_positions:
+            if i < len(position_stats):
+                ps = position_stats[i]
+                outlier_details.append({
+                    'consensus_position': ps.consensus_position,
+                    'msa_position': ps.msa_position,
+                    'error_rate': rate,
+                    'error_count': count,
+                    'coverage': ps.coverage,
+                    'consensus_nucleotide': ps.consensus_nucleotide,
+                    'base_composition': dict(ps.base_composition),
+                    'homopolymer_composition': dict(ps.homopolymer_composition) if ps.homopolymer_composition else {},
+                    'sub_count': ps.sub_count,
+                    'ins_count': ps.ins_count,
+                    'del_count': ps.del_count,
+                })
+
+    # Calculate statistics for outlier positions only
+    if outlier_positions:
+        mean_outlier_error = np.mean([rate for _, rate, _ in outlier_positions])
+        total_nucleotide_errors = sum(count for _, _, count in outlier_positions)
+    else:
+        mean_outlier_error = 0.0
+        total_nucleotide_errors = 0
+
+    return {
+        'num_outlier_positions': len(outlier_positions),
+        'mean_outlier_error_rate': mean_outlier_error,
+        'total_nucleotide_errors': total_nucleotide_errors,
+        'outlier_threshold': threshold,
+        'outlier_positions': outlier_positions,
+        'outlier_details': outlier_details,
+        'consensus_seq': quality_data.consensus_seq,
+        'ric': consensus_info.ric,
+    }
 
 
 def run_spoa_msa(sequences: List[str]) -> List:
@@ -890,8 +1123,8 @@ def create_consensus_from_msa(aligned_seqs: List, variants: List[ConsensusInfo])
         snp_count=snp_count if snp_count > 0 else None,
         primers=largest_variant.primers,
         raw_ric=raw_ric_values,
-        p50_diff=None,  # Merged sequence - original stability metrics don't apply
-        p95_diff=None
+        rid=largest_variant.rid,  # Preserve identity metrics from largest variant
+        rid_min=largest_variant.rid_min,
     )
 
 
@@ -1180,6 +1413,133 @@ def calculate_adjusted_identity_distance(seq1: str, seq2: str) -> float:
     return 1.0 - score_result.identity
 
 
+# ============================================================================
+# Alignment Matrix Visualization Functions
+# ============================================================================
+
+def analyze_cluster_quality(
+    msa_file: str,
+    consensus_seq: str,
+    max_reads: Optional[int] = None
+) -> Optional[ClusterQualityData]:
+    """
+    Analyze cluster quality using core.py's analyze_positional_variation().
+
+    Uses the canonical positional analysis from core.py to ensure consistent
+    treatment of homopolymer length differences across the pipeline.
+
+    Args:
+        msa_file: Path to MSA FASTA file
+        consensus_seq: Ungapped consensus sequence
+        max_reads: Maximum reads to include (for downsampling large clusters)
+
+    Returns:
+        ClusterQualityData with position error rates and read identities, or None if failed
+    """
+    if not os.path.exists(msa_file):
+        logging.debug(f"MSA file not found: {msa_file}")
+        return None
+
+    # Load MSA file content
+    try:
+        with open(msa_file, 'r') as f:
+            msa_string = f.read()
+    except Exception as e:
+        logging.debug(f"Failed to read MSA file {msa_file}: {e}")
+        return None
+
+    # Extract alignments from MSA using core.py function with homopolymer normalization
+    # This returns ReadAlignment objects with score_aligned field
+    alignments, msa_consensus, msa_to_consensus_pos = extract_alignments_from_msa(
+        msa_string,
+        enable_homopolymer_normalization=True
+    )
+
+    if not alignments:
+        logging.debug(f"No alignments found in MSA: {msa_file}")
+        return None
+
+    # Verify consensus matches: the passed-in consensus_seq may be trimmed (shorter) with IUPAC codes
+    # The MSA consensus is untrimmed (longer) without IUPAC codes
+    # Use edlib in HW mode to check if trimmed consensus is contained within MSA consensus
+    if msa_consensus and msa_consensus != consensus_seq:
+        # Use edlib HW mode (semi-global) to find consensus_seq within msa_consensus
+        # This handles primer trimming (length difference) and IUPAC codes (via equivalencies)
+        result = edlib.align(consensus_seq, msa_consensus, mode="HW", task="distance",
+                             additionalEqualities=IUPAC_EQUIV)
+        edit_distance = result["editDistance"]
+        if edit_distance > 0:  # Any edits indicate a real mismatch
+            logging.warning(f"Consensus mismatch in MSA file: {msa_file}")
+            logging.warning(f"  MSA length: {len(msa_consensus)}, consensus length: {len(consensus_seq)}, edit distance: {edit_distance}")
+
+    # Use the passed-in consensus (with IUPAC codes) as authoritative for quality analysis
+    # This reflects the actual output sequence
+    consensus_length = len(consensus_seq)
+
+    if consensus_length == 0:
+        logging.debug(f"Empty consensus sequence: {msa_file}")
+        return None
+
+    # Get consensus aligned sequence by parsing MSA string
+    msa_handle = StringIO(msa_string)
+    records = list(SeqIO.parse(msa_handle, 'fasta'))
+    consensus_aligned = None
+    for record in records:
+        if 'Consensus' in record.description or 'Consensus' in record.id:
+            consensus_aligned = str(record.seq).upper()
+            break
+
+    if consensus_aligned is None:
+        logging.debug(f"No consensus found in MSA: {msa_file}")
+        return None
+
+    # Downsample reads if needed
+    if max_reads and len(alignments) > max_reads:
+        # Sort by read identity (using normalized edit distance) and take worst reads first, then best
+        # This gives us a representative sample showing the quality range
+        read_identities_temp = []
+        for alignment in alignments:
+            # Use normalized edit distance for identity calculation
+            identity = 1.0 - (alignment.normalized_edit_distance / consensus_length) if consensus_length > 0 else 0.0
+            read_identities_temp.append((identity, alignment))
+
+        # Sort by identity
+        read_identities_temp.sort(key=lambda x: x[0])
+
+        # Take worst half and best half
+        n_worst = max_reads // 2
+        n_best = max_reads - n_worst
+        sampled = read_identities_temp[:n_worst] + read_identities_temp[-n_best:]
+
+        alignments = [alignment for _, alignment in sampled]
+        logging.debug(f"Downsampled {len(read_identities_temp)} reads to {len(alignments)} for analysis")
+
+    # Use core.py's canonical positional analysis
+    position_stats = analyze_positional_variation(alignments, consensus_aligned, msa_to_consensus_pos)
+
+    # Extract position error rates and counts for consensus positions only (skip insertion columns)
+    consensus_position_stats = [ps for ps in position_stats if ps.consensus_position is not None]
+    # Sort by consensus position to ensure correct order
+    consensus_position_stats.sort(key=lambda ps: ps.consensus_position)
+    position_error_rates = [ps.error_rate for ps in consensus_position_stats]
+    position_error_counts = [ps.error_count for ps in consensus_position_stats]
+
+    # Calculate per-read identities from alignments
+    read_identities = []
+    for alignment in alignments:
+        # Use normalized edit distance for identity calculation
+        identity = 1.0 - (alignment.normalized_edit_distance / consensus_length) if consensus_length > 0 else 0.0
+        read_identities.append(identity)
+
+    return ClusterQualityData(
+        consensus_seq=consensus_seq,
+        position_error_rates=position_error_rates,
+        position_error_counts=position_error_counts,
+        read_identities=read_identities,
+        position_stats=consensus_position_stats
+    )
+
+
 def perform_hac_clustering(consensus_list: List[ConsensusInfo], 
                           variant_group_identity: float) -> Dict[int, List[ConsensusInfo]]:
     """
@@ -1401,10 +1761,10 @@ def create_output_structure(groups: Dict[int, List[ConsensusInfo]],
                 snp_count=variant.snp_count,  # Preserve SNP count from original
                 primers=variant.primers,  # Preserve primers
                 raw_ric=variant.raw_ric,  # Preserve raw_ric
-                p50_diff=variant.p50_diff,  # Preserve stability metrics
-                p95_diff=variant.p95_diff
+                rid=variant.rid,  # Preserve identity metrics
+                rid_min=variant.rid_min,
             )
-            
+
             final_consensus.append(renamed_variant)
             group_naming.append((variant.sample_name, new_name))
         
@@ -1513,7 +1873,7 @@ def write_consensus_fastq(consensus: ConsensusInfo,
             # Remove empty output file
             try:
                 os.unlink(fastq_output_path)
-            except:
+            except OSError:
                 pass
             
     except Exception as e:
@@ -1581,8 +1941,8 @@ def write_specimen_data_files(specimen_consensus: List[ConsensusInfo],
                         snp_count=None,  # Pre-merge, no SNPs from merging
                         primers=raw_info.primers,
                         raw_ric=None,  # Pre-merge, not merged
-                        p50_diff=raw_info.p50_diff,  # Preserve stability metrics
-                        p95_diff=raw_info.p95_diff
+                        rid=raw_info.rid,  # Preserve read identity metrics
+                        rid_min=raw_info.rid_min,
                     )
                     raw_file_consensuses.append((raw_consensus, raw_info.sample_name))
 
@@ -1690,23 +2050,182 @@ def build_fastq_lookup_table(source_dir: str = ".") -> Dict[str, List[str]]:
     return dict(lookup)
 
 
+def write_position_debug_file(
+    sequences_with_pos_outliers: List[Tuple],
+    summary_folder: str,
+    threshold: float
+):
+    """Write detailed debug information about high-error positions.
+
+    Creates a separate file with per-position base composition and error details
+    to help validate positional phasing and quality analysis.
+
+    Args:
+        sequences_with_pos_outliers: List of (ConsensusInfo, result_dict) tuples
+        summary_folder: Output directory for the debug file
+        threshold: Error rate threshold used for flagging positions
+    """
+    debug_path = os.path.join(summary_folder, 'position_errors_debug.txt')
+
+    with open(debug_path, 'w') as f:
+        f.write("POSITION ERROR DETAILED DEBUG REPORT\n")
+        f.write("=" * 80 + "\n\n")
+        f.write(f"Threshold: {threshold:.1%} (positions with error rate above this are flagged)\n")
+        f.write(f"Generated: {datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n\n")
+
+        if not sequences_with_pos_outliers:
+            f.write("No sequences with high-error positions found.\n")
+            return
+
+        # Sort by total nucleotide errors descending
+        sorted_seqs = sorted(
+            sequences_with_pos_outliers,
+            key=lambda x: x[1].get('total_nucleotide_errors', 0),
+            reverse=True
+        )
+
+        for cons, result in sorted_seqs:
+            # Handle merged sequences (component_name in result)
+            if 'component_name' in result:
+                display_name = f"{cons.sample_name} (component: {result['component_name']})"
+                ric = result.get('component_ric', cons.ric)
+            else:
+                display_name = cons.sample_name
+                ric = result.get('ric', cons.ric)
+
+            f.write("=" * 80 + "\n")
+            f.write(f"SEQUENCE: {display_name}\n")
+            f.write(f"RiC: {ric}\n")
+            f.write(f"High-error positions: {result['num_outlier_positions']}\n")
+            f.write(f"Mean error rate at flagged positions: {result['mean_outlier_error_rate']:.1%}\n")
+            f.write(f"Total nucleotide errors: {result['total_nucleotide_errors']}\n")
+            f.write("-" * 80 + "\n\n")
+
+            outlier_details = result.get('outlier_details', [])
+            if not outlier_details:
+                # Fall back to basic info if detailed stats not available
+                for pos, rate, count in result.get('outlier_positions', []):
+                    f.write(f"  Position {pos+1}: error_rate={rate:.1%}, error_count={count}\n")
+                f.write("\n")
+                continue
+
+            for detail in outlier_details:
+                cons_pos = detail['consensus_position']
+                msa_pos = detail.get('msa_position')
+                # Display as 1-indexed for user-friendliness
+                cons_pos_display = cons_pos + 1 if cons_pos is not None else "?"
+                msa_pos_display = msa_pos + 1 if msa_pos is not None else "?"
+
+                f.write(f"Position {cons_pos_display} (MSA: {msa_pos_display}):\n")
+                f.write(f"  Consensus base: {detail['consensus_nucleotide']}\n")
+                f.write(f"  Coverage: {detail['coverage']}\n")
+                f.write(f"  Error rate: {detail['error_rate']:.1%}\n")
+                f.write(f"  Error count: {detail['error_count']}\n")
+                f.write(f"  Substitutions: {detail['sub_count']}, Insertions: {detail['ins_count']}, Deletions: {detail['del_count']}\n")
+
+                # Format base composition (raw counts from MSA)
+                base_comp = detail['base_composition']
+                hp_comp = detail.get('homopolymer_composition', {})
+
+                if base_comp:
+                    total = sum(base_comp.values())
+                    comp_str = ", ".join(
+                        f"{base}:{count}({count/total*100:.0f}%)"
+                        for base, count in sorted(base_comp.items(), key=lambda x: -x[1])
+                        if count > 0
+                    )
+                    f.write(f"  Raw base composition: {comp_str}\n")
+
+                # Format homopolymer composition if present
+                if hp_comp and any(v > 0 for v in hp_comp.values()):
+                    hp_str = ", ".join(
+                        f"{base}:{count}"
+                        for base, count in sorted(hp_comp.items(), key=lambda x: -x[1])
+                        if count > 0
+                    )
+                    f.write(f"  Homopolymer length variants: {hp_str}\n")
+
+                    # Calculate and show effective composition (raw - HP adjustments)
+                    # HP variants are normalized away in error calculation
+                    if base_comp:
+                        effective_comp = {}
+                        for base in base_comp:
+                            raw = base_comp.get(base, 0)
+                            hp_adj = hp_comp.get(base, 0)
+                            effective = raw - hp_adj
+                            if effective > 0:
+                                effective_comp[base] = effective
+
+                        if effective_comp:
+                            eff_total = sum(effective_comp.values())
+                            eff_str = ", ".join(
+                                f"{base}:{count}({count/eff_total*100:.0f}%)"
+                                for base, count in sorted(effective_comp.items(), key=lambda x: -x[1])
+                                if count > 0
+                            )
+                            f.write(f"  Effective composition (HP-normalized): {eff_str}\n")
+
+                f.write("\n")
+
+            # Show context: consensus sequence around flagged positions
+            consensus_seq = result.get('consensus_seq', '')
+            if consensus_seq and outlier_details:
+                f.write("Consensus sequence context (flagged positions marked with *):\n")
+                # Mark positions in the sequence
+                marked_positions = set()
+                for detail in outlier_details:
+                    if detail['consensus_position'] is not None:
+                        marked_positions.add(detail['consensus_position'])
+
+                # Show sequence in chunks of 60 with position markers
+                chunk_size = 60
+                for chunk_start in range(0, len(consensus_seq), chunk_size):
+                    chunk_end = min(chunk_start + chunk_size, len(consensus_seq))
+                    chunk = consensus_seq[chunk_start:chunk_end]
+
+                    # Position line
+                    f.write(f"  {chunk_start+1:>5}  ")
+                    f.write(chunk)
+                    f.write(f"  {chunk_end}\n")
+
+                    # Marker line
+                    f.write("         ")
+                    for i in range(chunk_start, chunk_end):
+                        if i in marked_positions:
+                            f.write("*")
+                        else:
+                            f.write(" ")
+                    f.write("\n")
+
+                f.write("\n")
+
+    logging.info(f"Position error debug file written to: {debug_path}")
+
+
 def write_quality_report(final_consensus: List[ConsensusInfo],
                         all_raw_consensuses: List[Tuple[ConsensusInfo, str]],
-                        summary_folder: str):
+                        summary_folder: str,
+                        source_folder: str):
     """
-    Write quality report highlighting sequences with potential concerns.
+    Write quality report with rid-based dual outlier detection.
 
-    Focuses on:
-    - Sequences with elevated stability metrics (p50diff > 0 or p95diff > 0)
-    - Merged sequences where components have quality issues
+    Uses mean read identity (rid) for outlier detection. rid_min is not used
+    because single outlier reads don't significantly impact consensus quality;
+    positional analysis better captures systematic issues.
 
-    Report prioritizes by (p50diff, p95diff) descending to surface the most
-    actionable quality issues first.
+    Structure:
+    1. Executive Summary - High-level overview with attention flags
+    2. Read Identity Analysis - Dual outlier detection (clustering threshold + statistical)
+    3. Positional Identity Analysis - Sequences with problematic positions
+    4. Variant Detection - Clusters with detected variants
+    5. Merged Sequence Analysis - Quality issues in merged components
+    6. Interpretation Guide - Actionable guidance with neutral tone
 
     Args:
         final_consensus: List of final consensus sequences
         all_raw_consensuses: List of (raw_consensus, original_name) tuples
         summary_folder: Output directory for report
+        source_folder: Source directory containing cluster_debug with MSA files
     """
     from datetime import datetime
 
@@ -1715,7 +2234,6 @@ def write_quality_report(final_consensus: List[ConsensusInfo],
     # Build .raw lookup: map merged sequence names to their .raw components
     raw_lookup = {}
     for raw_cons, original_name in all_raw_consensuses:
-        # Extract base name (remove .raw1, .raw2, etc.)
         base_match = re.match(r'(.+?)\.raw\d+$', raw_cons.sample_name)
         if base_match:
             base_name = base_match.group(1)
@@ -1723,228 +2241,329 @@ def write_quality_report(final_consensus: List[ConsensusInfo],
                 raw_lookup[base_name] = []
             raw_lookup[base_name].append(raw_cons)
 
-    # Separate sequences by type and quality
-    unmerged_with_variation = []
-    merged_with_variation = []
-    merged_with_small_components = []
-    total_with_stability = 0
-    total_merged = 0
-    total_without_stability = 0
+    # Identify outliers using dual detection
+    outlier_results = identify_outliers(final_consensus, all_raw_consensuses, source_folder)
 
+    # Load min_variant_frequency and min_variant_count from metadata
+    # These parameters are used as thresholds for positional outlier detection
+    min_variant_frequency = None
+    min_variant_count = None
+
+    # Try to load from first available consensus sequence metadata
     for cons in final_consensus:
-        # Check if merged (has SNP count)
+        # Extract specimen base name (metadata files are named by specimen, not cluster)
+        sample_name = cons.sample_name
+        specimen_base = re.sub(r'-\d+\.v\d+$', '', sample_name)
+
+        metadata = load_metadata_from_json(source_folder, specimen_base)
+        if metadata and 'parameters' in metadata:
+            params = metadata['parameters']
+            min_variant_frequency = params.get('min_variant_frequency', 0.2)
+            min_variant_count = params.get('min_variant_count', 5)
+            break
+
+    # Fallback to defaults if not found
+    if min_variant_frequency is None:
+        min_variant_frequency = 0.2
+        logging.warning("Could not load min_variant_frequency from metadata, using default: 0.2")
+    if min_variant_count is None:
+        min_variant_count = 5
+        logging.warning("Could not load min_variant_count from metadata, using default: 5")
+
+    # Analyze positional identity for all sequences
+    # For merged sequences, analyze their .raw components instead (which have MSA files)
+    pos_identity_results = {}
+    sequences_with_pos_outliers = []
+
+    # Collect all sequences to analyze
+    # Use dict to deduplicate by sample_name (ConsensusInfo is unhashable due to list fields)
+    sequences_to_analyze = {}
+    for cons in final_consensus:
+        sequences_to_analyze[cons.sample_name] = cons
+
+    # For merged sequences, analyze their .raw components (which have MSA files)
+    # For unmerged sequences, analyze them directly
+    logging.info("Analyzing positional identity for quality report...")
+    for cons in tqdm(sequences_to_analyze.values(), desc="Analyzing positional identity", unit="seq"):
         is_merged = cons.snp_count is not None and cons.snp_count > 0
 
         if is_merged:
-            total_merged += 1
-            # Get component raw sequences
+            # Analyze the raw components for this merged sequence
             raw_components = raw_lookup.get(cons.sample_name, [])
+            worst_result = None
+            worst_outliers = 0
 
-            # Check for variation in components
-            has_variation = False
-            has_small_component = False
-            worst_p50 = 0
-            worst_p95 = 0
-            worst_component = None
-            smallest_component = None
-            smallest_ric = float('inf')
+            for raw_cons in raw_components:
+                result = analyze_positional_identity_outliers(
+                    raw_cons, source_folder, min_variant_frequency, min_variant_count
+                )
+                if result:
+                    result['component_name'] = raw_cons.sample_name
+                    result['component_ric'] = raw_cons.ric
+                    if result['num_outlier_positions'] > worst_outliers:
+                        worst_outliers = result['num_outlier_positions']
+                        worst_result = result
+
+            # Report the worst component for this merged sequence
+            if worst_result and worst_result['num_outlier_positions'] > 0:
+                sequences_with_pos_outliers.append((cons, worst_result))
+        else:
+            # Unmerged sequence - analyze directly
+            result = analyze_positional_identity_outliers(
+                cons, source_folder, min_variant_frequency, min_variant_count
+            )
+            if result and result['num_outlier_positions'] > 0:
+                sequences_with_pos_outliers.append((cons, result))
+
+    # Sort positional outliers by total nucleotide errors (desc)
+    sequences_with_pos_outliers.sort(key=lambda x: x[1].get('total_nucleotide_errors', 0), reverse=True)
+
+    # Write detailed position debug file
+    if sequences_with_pos_outliers:
+        write_position_debug_file(sequences_with_pos_outliers, summary_folder, min_variant_frequency)
+
+    # Identify merged sequences with quality issues in components
+    merged_with_issues = []
+    threshold_rid = outlier_results['global_stats']['stat_threshold_rid']
+
+    for cons in final_consensus:
+        is_merged = cons.snp_count is not None and cons.snp_count > 0
+        if is_merged:
+            raw_components = raw_lookup.get(cons.sample_name, [])
+            if not raw_components:
+                continue
+
+            # Collect all component info and calculate weighted average rid
+            components_info = []
+            worst_rid = 1.0
+            total_ric = 0
+            weighted_rid_sum = 0
 
             for raw in raw_components:
-                # Track stability metrics
-                if raw.p50_diff is not None or raw.p95_diff is not None:
-                    total_with_stability += 1
-                    p50 = raw.p50_diff if raw.p50_diff else 0
-                    p95 = raw.p95_diff if raw.p95_diff else 0
+                rid = raw.rid if raw.rid is not None else 1.0
+                ric = raw.ric if raw.ric else 0
+                components_info.append((raw, rid, ric))
+                if rid < worst_rid:
+                    worst_rid = rid
+                if ric > 0:
+                    total_ric += ric
+                    weighted_rid_sum += rid * ric
 
-                    if p50 > 0 or p95 > 0:
-                        has_variation = True
-                        if (p50, p95) > (worst_p50, worst_p95):
-                            worst_p50 = p50
-                            worst_p95 = p95
-                            worst_component = raw
-                else:
-                    total_without_stability += 1
+            # Calculate weighted average rid
+            weighted_avg_rid = weighted_rid_sum / total_ric if total_ric > 0 else 1.0
 
-                # Track small components (RiC < 21)
-                if raw.ric < 21:
-                    has_small_component = True
-                    if raw.ric < smallest_ric:
-                        smallest_ric = raw.ric
-                        smallest_component = raw
+            # Sort components by rid ascending
+            components_info.sort(key=lambda x: x[1])
 
-            # Categorize merged sequence
-            if has_variation:
-                merged_with_variation.append((cons, worst_component, worst_p50, worst_p95))
-            elif has_small_component:
-                merged_with_small_components.append((cons, smallest_component))
-        else:
-            # Unmerged sequence
-            has_p50 = cons.p50_diff is not None
-            has_p95 = cons.p95_diff is not None
+            # Flag if worst component has concerning quality
+            if worst_rid < threshold_rid:
+                merged_with_issues.append((cons, components_info, worst_rid, weighted_avg_rid))
 
-            if has_p50 or has_p95:
-                total_with_stability += 1
-                if (cons.p50_diff and cons.p50_diff > 0) or (cons.p95_diff and cons.p95_diff > 0):
-                    unmerged_with_variation.append(cons)
-            else:
-                total_without_stability += 1
+    # Sort merged issues by worst component quality
+    merged_with_issues.sort(key=lambda x: x[2])
 
-    # Combine and sort all elevated variation (unmerged + merged)
-    # Create unified list with sort keys
-    all_elevated = []
-
-    for cons in unmerged_with_variation:
-        p50 = cons.p50_diff if cons.p50_diff else 0
-        p95 = cons.p95_diff if cons.p95_diff else 0
-        all_elevated.append(('unmerged', cons, p50, p95, None))
-
-    for cons, worst_comp, p50, p95 in merged_with_variation:
-        all_elevated.append(('merged', cons, p50, p95, worst_comp))
-
-    # Sort by (p50, p95) descending
-    all_elevated.sort(key=lambda x: (x[2], x[3]), reverse=True)
-
-    # Sort small component merged sequences by RiC descending
-    merged_with_small_components.sort(key=lambda x: x[0].ric, reverse=True)
-
-    # Count statistics
-    high_priority_count = sum(1 for item in all_elevated if item[2] > 0)
-    outlier_count = sum(1 for item in all_elevated if item[2] == 0 and item[3] > 0)
-
-    # Write report
+    # Write the report
     with open(quality_report_path, 'w') as f:
-        # Header
+        # ====================================================================
+        # SECTION 1: HEADER
+        # ====================================================================
         f.write("=" * 80 + "\n")
         f.write("QUALITY REPORT - speconsense-summarize\n")
+        f.write("=" * 80 + "\n")
         f.write(f"Generated: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n")
-        f.write(f"Source: {summary_folder}\n")
+        f.write(f"Source: {source_folder}\n")
         f.write("=" * 80 + "\n\n")
 
-        # Summary section
-        f.write("SUMMARY\n")
-        f.write("-" * 80 + "\n")
-        f.write(f"Total sequences analyzed: {len(final_consensus)}\n")
-        f.write(f"  With stability metrics:    {total_with_stability} ({100*total_with_stability/len(final_consensus):.1f}%)\n")
-        f.write(f"  Merged sequences:           {total_merged} ({100*total_merged/len(final_consensus):.1f}%)\n")
-        f.write(f"  Too small for stability:   {total_without_stability} ({100*total_without_stability/len(final_consensus):.1f}%)\n")
-        f.write("\n")
+        # ====================================================================
+        # SECTION 2: EXECUTIVE SUMMARY
+        # ====================================================================
+        f.write("EXECUTIVE SUMMARY\n")
+        f.write("-" * 80 + "\n\n")
 
-        f.write("Quality concerns:\n")
-        f.write(f"  Elevated variation:                 {len(all_elevated)} sequences\n")
-        f.write(f"    - HIGH PRIORITY (p50diff > 0):    {high_priority_count} sequences\n")
-        f.write(f"    - Outlier (p95diff > 0 only):     {outlier_count} sequences\n")
-        f.write(f"  Merged with small components:       {len(merged_with_small_components)} sequences\n")
-        f.write("\n")
+        total_seqs = len(final_consensus)
+        total_merged = sum(1 for cons in final_consensus
+                          if cons.snp_count is not None and cons.snp_count > 0)
 
-        # Elevated variation section (unmerged + merged with variation)
-        if all_elevated:
+        f.write(f"Total sequences: {total_seqs}\n")
+        f.write(f"Merged sequences: {total_merged} ({100*total_merged/total_seqs:.1f}%)\n\n")
+
+        # Global statistics
+        stats = outlier_results['global_stats']
+        f.write(f"Global Read Identity Statistics:\n")
+        f.write(f"  Mean rid: {stats['mean_rid']:.1%} ± {stats['std_rid']:.1%}\n\n")
+
+        # Sequences requiring attention
+        f.write("Sequences Requiring Attention:\n")
+
+        n_stat = len(outlier_results['statistical_outliers'])
+        n_pos = len(sequences_with_pos_outliers)
+        n_merged = len(merged_with_issues)
+
+        # Count unique sequences flagged (use sample_name for deduplication)
+        flagged_names = set()
+        for c, _ in outlier_results['statistical_outliers']:
+            flagged_names.add(c.sample_name)
+        for c, _ in sequences_with_pos_outliers:
+            flagged_names.add(c.sample_name)
+        for c, _, _, _ in merged_with_issues:
+            flagged_names.add(c.sample_name)
+        total_flagged = len(flagged_names)
+
+        # Count combined read identity issues (statistical outliers + merged with component issues)
+        n_rid_issues = n_stat + n_merged
+
+        f.write(f"  Total flagged: {total_flagged} ({100*total_flagged/total_seqs:.1f}%)\n")
+        f.write(f"    - Low read identity: {n_rid_issues} ({n_stat} sequences + {n_merged} merged)\n")
+        f.write(f"    - High-error positions: {n_pos}\n\n")
+
+        # ====================================================================
+        # SECTION 3: READ IDENTITY ANALYSIS
+        # ====================================================================
+        if n_rid_issues > 0:
             f.write("=" * 80 + "\n")
-            f.write("ELEVATED VARIATION (HIGH PRIORITY)\n")
+            f.write("READ IDENTITY ANALYSIS\n")
             f.write("=" * 80 + "\n\n")
-            f.write("Sequences with p50diff > 0 or p95diff > 0.\n")
-            f.write("Merged sequences evaluated by worst component stability.\n\n")
 
-            f.write(f"{'Type':<7s} {'Sequence':<53s} {'RiC':>6s} {'p50diff':>8s} {'p95diff':>8s}  {'Notes':<30s}\n")
-            f.write("-" * 120 + "\n")
+            f.write("Sequences with mean read identity (rid) below mean - 2×std.\n")
+            f.write(f"Threshold: {stats['stat_threshold_rid']:.1%}\n\n")
 
-            for seq_type, cons, p50, p95, worst_comp in all_elevated:
-                p50_str = f"{p50:.1f}" if p50 is not None else "N/A"
-                p95_str = f"{p95:.1f}" if p95 is not None else "N/A"
+            f.write(f"{'Sequence':<50} {'RiC':<6} {'rid':<8}\n")
+            f.write("-" * 64 + "\n")
 
-                if seq_type == 'unmerged':
-                    type_label = ""
-                    if p50 > 0:
-                        notes = "Consensus instability"
-                    else:
-                        notes = "Outlier variation"
+            # Build combined list: non-merged outliers + merged with issues
+            # Each entry is: (display_rid_for_sorting, is_merged, data)
+            # For non-merged: data = (cons, rid)
+            # For merged: data = (cons, components_info, worst_rid, weighted_avg_rid)
+            combined_entries = []
+
+            # Add non-merged statistical outliers
+            for cons, rid in outlier_results['statistical_outliers']:
+                is_merged = cons.snp_count is not None and cons.snp_count > 0
+                if not is_merged:
+                    combined_entries.append((rid, False, (cons, rid)))
+
+            # Add merged sequences with issues
+            for entry in merged_with_issues:
+                cons, components_info, worst_rid, weighted_avg_rid = entry
+                combined_entries.append((worst_rid, True, entry))
+
+            # Sort by rid ascending (using worst component rid for merged)
+            combined_entries.sort(key=lambda x: x[0])
+
+            # Display entries
+            for _, is_merged, data in combined_entries:
+                if is_merged:
+                    cons, components_info, worst_rid, weighted_avg_rid = data
+                    # Parent row with [merged] tag and weighted average rid
+                    name = cons.sample_name
+                    name_with_tag = f"{name} [merged]"
+                    name_truncated = name_with_tag[:49] if len(name_with_tag) > 49 else name_with_tag
+                    rid_str = f"{weighted_avg_rid:.1%}"
+                    f.write(f"{name_truncated:<50} {cons.ric:<6} {rid_str:<8}\n")
+
+                    # Component rows (indented)
+                    for raw, comp_rid, comp_ric in components_info:
+                        # Extract cluster number from component name (e.g., "sample-c1" -> "c1")
+                        comp_name = raw.sample_name
+                        comp_display = f"  └─ {comp_name}"
+                        comp_truncated = comp_display[:49] if len(comp_display) > 49 else comp_display
+                        comp_rid_str = f"{comp_rid:.1%}"
+                        f.write(f"{comp_truncated:<50} {comp_ric:<6} {comp_rid_str:<8}\n")
                 else:
-                    type_label = "MERGED"
-                    # Show worst component info
-                    if worst_comp:
-                        raw_name = worst_comp.sample_name.split('.')[-1]  # Get .raw1, .raw2, etc.
-                        notes = f"{raw_name}: p50={worst_comp.p50_diff if worst_comp.p50_diff else 0:.1f}, p95={worst_comp.p95_diff if worst_comp.p95_diff else 0:.1f} (RiC={worst_comp.ric})"
-                    else:
-                        notes = "Component has variation"
+                    cons, rid = data
+                    name_truncated = cons.sample_name[:49] if len(cons.sample_name) > 49 else cons.sample_name
+                    rid_str = f"{rid:.1%}"
+                    f.write(f"{name_truncated:<50} {cons.ric:<6} {rid_str:<8}\n")
+            f.write("\n")
 
-                f.write(f"{type_label:<7s} {cons.sample_name:<53s} {cons.ric:6d} {p50_str:>8s} {p95_str:>8s}  {notes:<30s}\n")
+        # ====================================================================
+        # SECTION 4: POSITIONAL IDENTITY ANALYSIS
+        # ====================================================================
+        if n_pos > 0:
+            f.write("=" * 80 + "\n")
+            f.write("POSITIONAL IDENTITY ANALYSIS\n")
+            f.write("=" * 80 + "\n\n")
+
+            f.write("Sequences with high-error positions (error rate > threshold at specific positions):\n")
+            f.write(f"Threshold: {min_variant_frequency:.1%} (--min-variant-frequency from metadata)\n")
+            f.write(f"Min RiC: {2 * min_variant_count} (2 × --min-variant-count)\n")
+            f.write("Positions above threshold may indicate undetected/unphased variants.\n")
+            f.write("For merged sequences, shows worst component.\n\n")
+
+            # Sort by total nucleotide errors (descending)
+            sorted_pos_outliers = sorted(
+                sequences_with_pos_outliers,
+                key=lambda x: x[1].get('total_nucleotide_errors', 0),
+                reverse=True
+            )
+
+            # Calculate display names and find max length for dynamic column width
+            display_data = []
+            for cons, result in sorted_pos_outliers:
+                if 'component_name' in result:
+                    component_suffix = result['component_name'].split('.')[-1] if '.' in result['component_name'] else ''
+                    display_name = f"{cons.sample_name} ({component_suffix})"
+                    ric_val = result.get('component_ric', cons.ric)
+                else:
+                    display_name = cons.sample_name
+                    ric_val = cons.ric
+                display_data.append((display_name, ric_val, cons, result))
+
+            # Calculate column width based on longest name (minimum 40, cap at 70)
+            max_name_len = max(len(name) for name, _, _, _ in display_data) if display_data else 40
+            name_col_width = min(max(max_name_len + 2, 40), 70)
+
+            f.write(f"{'Sequence':<{name_col_width}} {'RiC':<6} {'Ambig':<6} {'#Pos':<6} {'MeanErr':<8} {'TotalErr':<10}\n")
+            f.write("-" * (name_col_width + 38) + "\n")
+
+            for display_name, ric_val, cons, result in display_data:
+                mean_err = result.get('mean_outlier_error_rate', 0.0)
+                total_err = result.get('total_nucleotide_errors', 0)
+                num_pos = result['num_outlier_positions']
+                # Count IUPAC ambiguity codes in the consensus sequence (non-ACGT characters)
+                ambig_count = sum(1 for c in cons.sequence if c.upper() not in 'ACGT')
+
+                f.write(f"{display_name:<{name_col_width}} {ric_val:<6} {ambig_count:<6} {num_pos:<6} "
+                       f"{mean_err:<8.1%} {total_err:<10}\n")
 
             f.write("\n")
-        else:
-            f.write("=" * 80 + "\n")
-            f.write("ELEVATED VARIATION (HIGH PRIORITY)\n")
-            f.write("=" * 80 + "\n\n")
-            f.write("No sequences with elevated stability metrics detected.\n")
-            f.write("All sequences show excellent consensus stability.\n\n")
 
-        # Merged sequences with small components section
-        if merged_with_small_components:
-            f.write("=" * 80 + "\n")
-            f.write("MERGED SEQUENCES WITH SMALL COMPONENTS (lower concern)\n")
-            f.write("=" * 80 + "\n\n")
-            f.write("At least one component too small for stability metrics (RiC < 21).\n\n")
-
-            f.write(f"{'Sequence':<60s} {'RiC':>6s} {'SNPs':>5s}  {'Small Components':<40s}\n")
-            f.write("-" * 120 + "\n")
-
-            for cons, small_comp in merged_with_small_components:
-                snp_str = f"{cons.snp_count}" if cons.snp_count is not None else "N/A"
-
-                # Get all small components for this sequence
-                raw_components = raw_lookup.get(cons.sample_name, [])
-                small_comps = [r for r in raw_components if r.ric < 21]
-
-                # Format small components
-                if small_comps:
-                    small_comps.sort(key=lambda x: x.ric)  # Smallest first
-                    comp_strs = []
-                    for raw in small_comps:
-                        raw_name = raw.sample_name.split('.')[-1]  # Get .raw1, .raw2, etc.
-                        comp_strs.append(f"{raw_name} (RiC={raw.ric})")
-                    components = ", ".join(comp_strs)
-                else:
-                    components = "N/A"
-
-                f.write(f"{cons.sample_name:<60s} {cons.ric:6d} {snp_str:>5s}  {components:<40s}\n")
-
-            f.write("\n")
-
-        # Interpretation guide
+        # ====================================================================
+        # SECTION 5: INTERPRETATION GUIDE
+        # ====================================================================
         f.write("=" * 80 + "\n")
         f.write("INTERPRETATION GUIDE\n")
         f.write("=" * 80 + "\n\n")
 
-        f.write("ELEVATED VARIATION SECTION:\n")
-        f.write("  p50diff > 0 (HIGH PRIORITY):\n")
-        f.write("    - More than half of stability trials produced variant consensuses\n")
-        f.write("    - Indicates unresolved heterogeneity or mixed sequences in cluster\n")
-        f.write("    - ACTION: Review cluster using cluster_debug FASTQ files\n")
-        f.write("    - CONSIDER: Stricter clustering parameters or manual curation\n\n")
+        f.write("Read Identity Analysis:\n")
+        f.write("-" * 40 + "\n")
+        f.write("  Threshold: mean - 2×std (statistical outliers)\n")
+        f.write("  RiC: Read-in-Cluster count\n")
+        f.write("  rid: Mean read identity to consensus\n")
+        f.write("  [merged]: Weighted average rid; components shown below\n\n")
 
-        f.write("  p50diff = 0, p95diff > 0 (outlier):\n")
-        f.write("    - Median trials stable, but worst 5% showed variation\n")
-        f.write("    - May indicate rare substitutions or indels\n")
-        f.write("    - ACTION: Review if sequence is critical; often acceptable\n\n")
+        f.write("Positional Identity Analysis:\n")
+        f.write("-" * 40 + "\n")
+        f.write("  Threshold: --min-variant-frequency from metadata\n")
+        f.write("  Min RiC: 2 × --min-variant-count\n")
+        f.write("  Ambig: Count of IUPAC ambiguity codes in consensus\n")
+        f.write("  #Pos: Count of positions exceeding error threshold\n")
+        f.write("  MeanErr: Average error rate at flagged positions\n")
+        f.write("  TotalErr: Sum of errors at flagged positions\n\n")
 
-        f.write("  MERGED sequences in this section:\n")
-        f.write("    - At least one component has elevated variation\n")
-        f.write("    - Shown with worst component's stability metrics\n")
-        f.write("    - ACTION: Review .raw variant files to assess merge appropriateness\n\n")
 
-        f.write("SMALL COMPONENTS SECTION:\n")
-        f.write("  - Merged sequences with at least one component RiC < 21\n")
-        f.write("  - Small components lack stability metrics (too few reads)\n")
-        f.write("  - May represent low-abundance variants or contamination\n")
-        f.write("  - ACTION: Consider if small components should have been filtered\n")
-        f.write("  - CONSIDER: Adjusting --min-size or --min-ric thresholds in speconsense\n")
-
+    # Log summary
     logging.info(f"Quality report written to: {quality_report_path}")
-    if all_elevated:
-        logging.info(f"  {high_priority_count} HIGH priority sequence(s) require review (p50diff > 0)")
-        logging.info(f"  {outlier_count} sequence(s) with outlier variation (p95diff > 0 only)")
+    if n_rid_issues > 0:
+        logging.info(f"  {n_rid_issues} sequence(s) flagged for read identity ({n_stat} direct + {n_merged} merged)")
     else:
-        logging.info("  All sequences show excellent consensus stability")
-    if merged_with_small_components:
-        logging.info(f"  {len(merged_with_small_components)} merged sequence(s) with small components")
+        logging.info("  All sequences show good read identity")
+
+    if n_pos > 0:
+        logging.info(f"  {n_pos} sequence(s) with high-error positions")
+    if n_merged > 0:
+        logging.info(f"  {n_merged} merged sequence(s) with component quality issues")
+
 
 
 def write_output_files(final_consensus: List[ConsensusInfo],
@@ -2092,8 +2711,8 @@ def process_single_specimen(file_consensuses: List[ConsensusInfo],
                 snp_count=variant.snp_count,  # Preserve SNP count from merging
                 primers=variant.primers,  # Preserve primers
                 raw_ric=variant.raw_ric,  # Preserve raw_ric
-                p50_diff=variant.p50_diff,  # Preserve stability metrics
-                p95_diff=variant.p95_diff
+                rid=variant.rid,  # Preserve identity metrics
+                rid_min=variant.rid_min,
             )
 
             final_consensus.append(renamed_variant)
@@ -2204,7 +2823,8 @@ def main():
     write_quality_report(
         all_final_consensus,
         all_raw_consensuses,
-        args.summary_dir
+        args.summary_dir,
+        args.source
     )
 
     logging.info(f"Enhanced summarization completed successfully")
