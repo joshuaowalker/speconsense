@@ -172,14 +172,15 @@ class TestCreateOverlapConsensusFromMsa:
     def test_prefix_suffix_produces_union(self):
         """Merging prefix/suffix overlap should produce union of both.
 
-        NOTE: SPOA's global alignment doesn't handle the prefix/suffix case well.
-        For true prefix/suffix overlaps (seq1 has unique prefix, seq2 has unique suffix),
-        the MSA may not properly align the shared region. This test documents current
-        behavior - future work may use pairwise alignment for better results.
+        SPOA local alignment (-l 0) correctly handles prefix/suffix overlaps,
+        producing clean terminal gaps and the expected union-length consensus.
+        ITS1_WITH_5_8S (470bp) + ITS2_WITH_5_8S (470bp) sharing 250bp 5.8S
+        should produce a 690bp merged consensus (220 + 250 + 220).
         """
         from speconsense.summarize import ConsensusInfo
 
-        aligned_seqs = run_spoa_msa([ITS1_WITH_5_8S, ITS2_WITH_5_8S])
+        # Use local alignment mode (0) as used in actual overlap merging workflow
+        aligned_seqs = run_spoa_msa([ITS1_WITH_5_8S, ITS2_WITH_5_8S], alignment_mode=0)
 
         variants = [
             ConsensusInfo(
@@ -212,12 +213,10 @@ class TestCreateOverlapConsensusFromMsa:
 
         merged = create_overlap_consensus_from_msa(aligned_seqs, variants)
 
-        # Current behavior: SPOA global alignment may produce suboptimal results
-        # for prefix/suffix case. The merged sequence will exist but may be shorter
-        # than ideal due to alignment artifacts.
-        # For containment case (one sequence inside another), this works well.
-        assert len(merged.sequence) >= 400  # At least longer than either input
-        # Combined metrics should still be correct
+        # SPOA local alignment produces correct union-length consensus
+        # ITS1 unique (220) + 5.8S shared (250) + ITS2 unique (220) = 690bp
+        assert len(merged.sequence) == 690
+        # Combined metrics should be correct
         assert merged.size == 150
         assert merged.ric == 150
 
