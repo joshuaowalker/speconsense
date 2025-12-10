@@ -2102,7 +2102,9 @@ def create_output_structure(groups: Dict[int, List[ConsensusInfo]],
         
         for variant_idx, variant in enumerate(selected_variants):
             # All variants get .v suffix (primary is .v1, additional are .v2, .v3, etc.)
-            new_name = f"{variant.sample_name.split('-c')[0]}-{group_idx}.v{variant_idx + 1}"
+            # Use rsplit to split on the LAST '-c' (specimen names may contain '-c')
+            specimen_base = variant.sample_name.rsplit('-c', 1)[0]
+            new_name = f"{specimen_base}-{group_idx}.v{variant_idx + 1}"
             
             # Create new ConsensusInfo with updated name
             renamed_variant = ConsensusInfo(
@@ -3054,7 +3056,9 @@ def process_single_specimen(file_consensuses: List[ConsensusInfo],
 
         for variant_idx, variant in enumerate(selected_variants):
             # All variants get .v suffix (primary is .v1, additional are .v2, .v3, etc.)
-            new_name = f"{variant.sample_name.split('-c')[0]}-{group_idx + 1}.v{variant_idx + 1}"
+            # Use rsplit to split on the LAST '-c' (specimen names may contain '-c')
+            specimen_base = variant.sample_name.rsplit('-c', 1)[0]
+            new_name = f"{specimen_base}-{group_idx + 1}.v{variant_idx + 1}"
 
             # Create new ConsensusInfo with updated name
             renamed_variant = ConsensusInfo(
