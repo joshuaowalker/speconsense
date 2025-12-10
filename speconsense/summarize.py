@@ -15,7 +15,7 @@ from collections import defaultdict
 
 import edlib
 from Bio import SeqIO
-from adjusted_identity import score_alignment, AdjustmentParams
+from adjusted_identity import score_alignment, AdjustmentParams, align_and_score
 import tempfile
 import subprocess
 from tqdm import tqdm
@@ -354,6 +354,8 @@ def parse_arguments():
                         help="Minimum size ratio (smaller/larger) for merging clusters (default: 0.0 = disabled)")
     parser.add_argument("--disable-homopolymer-equivalence", action="store_true",
                         help="Disable homopolymer equivalence in merging (treat AAA vs AAAA as different)")
+    parser.add_argument("--min-merge-overlap", type=int, default=200,
+                        help="Minimum overlap in bp for merging sequences of different lengths (default: 200, 0 to disable)")
 
     # Backward compatibility: support old --snp-merge-limit parameter
     parser.add_argument("--snp-merge-limit", type=int, dest="_snp_merge_limit_deprecated",
@@ -727,12 +729,16 @@ def analyze_positional_identity_outliers(
     }
 
 
-def run_spoa_msa(sequences: List[str]) -> List:
+def run_spoa_msa(sequences: List[str], alignment_mode: int = 1) -> List:
     """
     Run SPOA to create multiple sequence alignment.
 
     Args:
         sequences: List of DNA sequence strings
+        alignment_mode: SPOA alignment mode:
+            0 = local (Smith-Waterman) - best for overlap merging
+            1 = global (Needleman-Wunsch) - default, for same-length sequences
+            2 = semi-global - alternative for overlap merging
 
     Returns:
         List of SeqRecord objects with aligned sequences (including gaps)
@@ -750,9 +756,9 @@ def run_spoa_msa(sequences: List[str]) -> List:
             SeqIO.write(records, temp_input, "fasta")
             temp_input.flush()
 
-            # Run SPOA with alignment output (-r 2) and global alignment mode (-l 1)
+            # Run SPOA with alignment output (-r 2) and specified alignment mode
             result = subprocess.run(
-                ['spoa', temp_input.name, '-r', '2', '-l', '1'],
+                ['spoa', temp_input.name, '-r', '2', '-l', str(alignment_mode)],
                 capture_output=True,
                 text=True,
                 check=True
@@ -975,6 +981,141 @@ def analyze_msa_columns(aligned_seqs: List) -> dict:
     }
 
 
+def analyze_msa_columns_overlap_aware(aligned_seqs: List, min_overlap_bp: int,
+                                       original_lengths: List[int]) -> dict:
+    """
+    Analyze MSA columns, distinguishing terminal gaps from structural indels.
+
+    Terminal gaps (from length differences at sequence ends) are NOT counted
+    as structural indels when sequences have sufficient overlap in their
+    shared region. This enables merging sequences from primer pools with
+    different endpoints.
+
+    Args:
+        aligned_seqs: List of aligned sequences from SPOA
+        min_overlap_bp: Minimum overlap required (0 to disable overlap mode)
+        original_lengths: Original ungapped sequence lengths
+
+    Returns dict with:
+        'snp_count': SNPs in overlap region
+        'structural_indel_count': Structural indels in overlap region only
+        'structural_indel_length': Length of longest structural indel
+        'homopolymer_indel_count': Homopolymer indels (anywhere)
+        'homopolymer_indel_length': Length of longest homopolymer indel
+        'terminal_gap_columns': Number of terminal gap columns (not counted as structural)
+        'overlap_bp': Size of overlap region in base pairs
+        'indel_count': Total events (backward compatibility)
+        'max_indel_length': Max event length (backward compatibility)
+    """
+    alignment_length = len(aligned_seqs[0].seq)
+
+    # Step 1: Find content region for each sequence (first non-gap to last non-gap)
+    content_regions = []  # List of (start, end) tuples
+    for seq in aligned_seqs:
+        seq_str = str(seq.seq)
+        # Find first and last non-gap positions
+        first_base = next((i for i, c in enumerate(seq_str) if c != '-'), 0)
+        last_base = alignment_length - 1 - next(
+            (i for i, c in enumerate(reversed(seq_str)) if c != '-'), 0
+        )
+        content_regions.append((first_base, last_base))
+
+    # Step 2: Calculate overlap region (intersection of all content regions)
+    overlap_start = max(start for start, _ in content_regions)
+    overlap_end = min(end for _, end in content_regions)
+
+    # Calculate actual overlap in base pairs (count only columns where all have bases)
+    overlap_bp = 0
+    if overlap_end >= overlap_start:
+        for col_idx in range(overlap_start, overlap_end + 1):
+            column = [str(seq.seq[col_idx]) for seq in aligned_seqs]
+            if all(c != '-' for c in column):
+                overlap_bp += 1
+
+    # Determine effective threshold for containment cases
+    shorter_len = min(original_lengths)
+    effective_threshold = min(min_overlap_bp, shorter_len)
+
+    # Step 3: Count SNPs only within overlap region
+    snp_count = 0
+    for col_idx in range(overlap_start, overlap_end + 1):
+        column = [str(seq.seq[col_idx]) for seq in aligned_seqs]
+        unique_bases = set(c for c in column if c != '-')
+        has_gap = '-' in column
+
+        # SNP position: multiple different bases with NO gaps
+        if len(unique_bases) > 1 and not has_gap:
+            snp_count += 1
+
+    # Step 4: Identify indel events, but only count those within overlap region
+    indel_events = identify_indel_events(aligned_seqs, alignment_length)
+
+    # Step 5: Classify each event and determine if it's in overlap region
+    structural_events = []
+    homopolymer_events = []
+    terminal_gap_columns = 0
+
+    for start_col, end_col in indel_events:
+        # Check if this event is entirely within the overlap region
+        is_in_overlap = (start_col >= overlap_start and end_col <= overlap_end)
+
+        # Check if this is a terminal gap event (at the boundary of a content region)
+        is_terminal = False
+        for seq_start, seq_end in content_regions:
+            # Terminal if event is adjacent to or outside a sequence's content region
+            if end_col < seq_start or start_col > seq_end:
+                is_terminal = True
+                break
+            # Also terminal if event is at the very edge of content
+            if start_col == seq_start or end_col == seq_end:
+                # Check if the gaps in this event are from this sequence's terminal
+                for col_idx in range(start_col, end_col + 1):
+                    column = [str(seq.seq[col_idx]) for seq in aligned_seqs]
+                    for i, (s, e) in enumerate(content_regions):
+                        if col_idx < s or col_idx > e:
+                            if column[i] == '-':
+                                is_terminal = True
+                                break
+                    if is_terminal:
+                        break
+
+        if is_terminal and overlap_bp >= effective_threshold:
+            # Terminal gap from length difference - don't count as structural
+            terminal_gap_columns += (end_col - start_col + 1)
+        elif is_homopolymer_event(aligned_seqs, start_col, end_col):
+            homopolymer_events.append((start_col, end_col))
+        else:
+            # Only count as structural if within overlap region
+            if is_in_overlap:
+                structural_events.append((start_col, end_col))
+            else:
+                # Outside overlap - this is a terminal gap
+                terminal_gap_columns += (end_col - start_col + 1)
+
+    # Step 6: Calculate statistics
+    structural_indel_count = len(structural_events)
+    homopolymer_indel_count = len(homopolymer_events)
+
+    structural_indel_length = max((end - start + 1 for start, end in structural_events), default=0)
+    homopolymer_indel_length = max((end - start + 1 for start, end in homopolymer_events), default=0)
+
+    # Backward compatibility
+    total_indel_count = structural_indel_count + homopolymer_indel_count
+    max_indel_length = max(structural_indel_length, homopolymer_indel_length)
+
+    return {
+        'snp_count': snp_count,
+        'structural_indel_count': structural_indel_count,
+        'structural_indel_length': structural_indel_length,
+        'homopolymer_indel_count': homopolymer_indel_count,
+        'homopolymer_indel_length': homopolymer_indel_length,
+        'terminal_gap_columns': terminal_gap_columns,
+        'overlap_bp': overlap_bp,
+        'indel_count': total_indel_count,  # Backward compatibility
+        'max_indel_length': max_indel_length  # Backward compatibility
+    }
+
+
 def generate_all_subsets_by_size(variants: List[ConsensusInfo]) -> List[Tuple[int, ...]]:
     """
     Generate all possible non-empty subsets of variant indices.
@@ -1128,6 +1269,123 @@ def create_consensus_from_msa(aligned_seqs: List, variants: List[ConsensusInfo])
     )
 
 
+def create_overlap_consensus_from_msa(aligned_seqs: List, variants: List[ConsensusInfo]) -> ConsensusInfo:
+    """
+    Generate consensus from MSA where sequences may have different lengths.
+
+    For overlap merging (primer pools with different endpoints):
+    - In overlap region: Use size-weighted majority voting
+    - In non-overlap regions: Keep content from whichever sequence(s) have it
+
+    This produces a consensus spanning the union of all input sequences.
+
+    Args:
+        aligned_seqs: MSA sequences with gaps as '-'
+        variants: Original ConsensusInfo objects (for size weighting)
+
+    Returns:
+        ConsensusInfo with merged consensus sequence spanning full length
+    """
+    consensus_seq = []
+    snp_count = 0
+    alignment_length = len(aligned_seqs[0].seq)
+
+    # Find content region for each sequence
+    content_regions = []
+    for seq in aligned_seqs:
+        seq_str = str(seq.seq)
+        first_base = next((i for i, c in enumerate(seq_str) if c != '-'), 0)
+        last_base = alignment_length - 1 - next(
+            (i for i, c in enumerate(reversed(seq_str)) if c != '-'), 0
+        )
+        content_regions.append((first_base, last_base))
+
+    # Calculate overlap region
+    overlap_start = max(start for start, _ in content_regions)
+    overlap_end = min(end for _, end in content_regions)
+
+    # Process each column
+    for col_idx in range(alignment_length):
+        column = [str(seq.seq[col_idx]) for seq in aligned_seqs]
+
+        # Determine which sequences have content at this position
+        seqs_with_content = []
+        for i, (start, end) in enumerate(content_regions):
+            if start <= col_idx <= end:
+                seqs_with_content.append(i)
+
+        if not seqs_with_content:
+            # No sequence has content here (shouldn't happen in valid MSA)
+            continue
+
+        # Check if we're in the overlap region
+        in_overlap = overlap_start <= col_idx <= overlap_end
+
+        if in_overlap:
+            # Overlap region: use size-weighted majority voting (like original)
+            votes_with_size = [(column[i], variants[i].size) for i in seqs_with_content]
+
+            votes = defaultdict(int)
+            for base, size in votes_with_size:
+                votes[base.upper()] += size
+
+            gap_votes = votes.get('-', 0)
+            base_votes = {b: v for b, v in votes.items() if b != '-'}
+            total_base_votes = sum(base_votes.values())
+
+            if total_base_votes > gap_votes:
+                if len(base_votes) == 1:
+                    consensus_seq.append(list(base_votes.keys())[0])
+                else:
+                    represented_bases = set(base_votes.keys())
+                    iupac_code = IUPAC_CODES.get(frozenset(represented_bases), 'N')
+                    consensus_seq.append(iupac_code)
+                    snp_count += 1
+            # else: majority wants gap in overlap, omit position
+        else:
+            # Non-overlap region: keep content from available sequences
+            # (don't let gap votes from sequences that don't extend here remove content)
+            bases_only = [column[i] for i in seqs_with_content if column[i] != '-']
+
+            if bases_only:
+                # Weight by size for consistency
+                votes = defaultdict(int)
+                for i in seqs_with_content:
+                    if column[i] != '-':
+                        votes[column[i].upper()] += variants[i].size
+
+                if len(votes) == 1:
+                    consensus_seq.append(list(votes.keys())[0])
+                else:
+                    represented_bases = set(votes.keys())
+                    iupac_code = IUPAC_CODES.get(frozenset(represented_bases), 'N')
+                    consensus_seq.append(iupac_code)
+                    snp_count += 1
+
+    # Create merged ConsensusInfo
+    consensus_sequence = ''.join(consensus_seq)
+    total_size = sum(v.size for v in variants)
+    total_ric = sum(v.ric for v in variants)
+    raw_ric_values = sorted([v.ric for v in variants], reverse=True) if len(variants) > 1 else None
+
+    # Use name from largest variant
+    largest_variant = max(variants, key=lambda v: v.size)
+
+    return ConsensusInfo(
+        sample_name=largest_variant.sample_name,
+        cluster_id=largest_variant.cluster_id,
+        sequence=consensus_sequence,
+        ric=total_ric,
+        size=total_size,
+        file_path=largest_variant.file_path,
+        snp_count=snp_count if snp_count > 0 else None,
+        primers=largest_variant.primers,
+        raw_ric=raw_ric_values,
+        rid=largest_variant.rid,
+        rid_min=largest_variant.rid_min,
+    )
+
+
 def merge_group_with_msa(variants: List[ConsensusInfo], args) -> Tuple[List[ConsensusInfo], Dict, int]:
     """
     Find largest mergeable subset of variants using MSA-based evaluation with exhaustive search.
@@ -1186,8 +1444,11 @@ def merge_group_with_msa(variants: List[ConsensusInfo], args) -> Tuple[List[Cons
         logging.debug(f"Evaluating {len(candidates)} variants for merging (exhaustive subset search)")
 
         # Run SPOA MSA on candidates
+        # Use local alignment mode (0) for overlap merging to get clean terminal gaps
+        # Use global alignment mode (1) for standard same-length merging
         sequences = [v.sequence for v in candidates]
-        aligned_seqs = run_spoa_msa(sequences)
+        spoa_mode = 0 if args.min_merge_overlap > 0 else 1
+        aligned_seqs = run_spoa_msa(sequences, alignment_mode=spoa_mode)
 
         logging.debug(f"Generated MSA with length {len(aligned_seqs[0].seq)}")
 
@@ -1203,7 +1464,22 @@ def merge_group_with_msa(variants: List[ConsensusInfo], args) -> Tuple[List[Cons
             subset_aligned = [aligned_seqs[i] for i in subset_indices]
 
             # Analyze MSA for this subset
-            variant_stats = analyze_msa_columns(subset_aligned)
+            if args.min_merge_overlap > 0:
+                # Use overlap-aware analysis for primer pool scenarios
+                original_lengths = [len(v.sequence) for v in subset_variants]
+                variant_stats = analyze_msa_columns_overlap_aware(
+                    subset_aligned, args.min_merge_overlap, original_lengths
+                )
+
+                # Check overlap requirement
+                shorter_len = min(original_lengths)
+                effective_threshold = min(args.min_merge_overlap, shorter_len)
+                if variant_stats['overlap_bp'] < effective_threshold:
+                    # Insufficient overlap - skip this subset
+                    continue
+            else:
+                # Use standard analysis
+                variant_stats = analyze_msa_columns(subset_aligned)
 
             # Check compatibility against merge limits
             if is_compatible_subset(variant_stats, args):
@@ -1217,14 +1493,26 @@ def merge_group_with_msa(variants: List[ConsensusInfo], args) -> Tuple[List[Cons
                         parts.append(f"{variant_stats['structural_indel_count']} structural indels")
                     if variant_stats['homopolymer_indel_count'] > 0:
                         parts.append(f"{variant_stats['homopolymer_indel_count']} homopolymer indels")
+                    if args.min_merge_overlap > 0 and variant_stats.get('terminal_gap_columns', 0) > 0:
+                        parts.append(f"{variant_stats['terminal_gap_columns']} terminal gap cols")
 
                     variant_desc = ", ".join(parts) if parts else "identical sequences"
-                    logging.info(f"Found mergeable subset of {len(subset_indices)} variants: {variant_desc}")
+                    if args.min_merge_overlap > 0:
+                        logging.info(f"Found mergeable subset of {len(subset_indices)} variants "
+                                   f"(overlap={variant_stats.get('overlap_bp', 'N/A')}bp): {variant_desc}")
+                    else:
+                        logging.info(f"Found mergeable subset of {len(subset_indices)} variants: {variant_desc}")
 
                 # Create merged consensus
-                merged_consensus = create_consensus_from_msa(
-                    subset_aligned, subset_variants
-                )
+                if args.min_merge_overlap > 0:
+                    # Use overlap-aware consensus generation
+                    merged_consensus = create_overlap_consensus_from_msa(
+                        subset_aligned, subset_variants
+                    )
+                else:
+                    merged_consensus = create_consensus_from_msa(
+                        subset_aligned, subset_variants
+                    )
 
                 # Track merge provenance
                 traceability = {
@@ -1413,6 +1701,54 @@ def calculate_adjusted_identity_distance(seq1: str, seq2: str) -> float:
     return 1.0 - score_result.identity
 
 
+def calculate_overlap_aware_distance(seq1: str, seq2: str, min_overlap_bp: int) -> float:
+    """
+    Calculate distance that accounts for partial overlaps between sequences.
+
+    When sequences have sufficient overlap with good identity, returns the
+    overlap-region distance. Otherwise falls back to global distance.
+
+    For containment cases where one sequence is shorter than min_overlap_bp,
+    uses the shorter sequence length as the effective threshold.
+
+    Args:
+        seq1, seq2: DNA sequences (may have different lengths)
+        min_overlap_bp: Minimum overlap required in base pairs
+
+    Returns:
+        Distance (0.0 to 1.0) based on overlap region if sufficient,
+        otherwise global distance from calculate_adjusted_identity_distance()
+    """
+    if not seq1 or not seq2:
+        return 1.0  # Maximum distance
+
+    if seq1 == seq2:
+        return 0.0
+
+    # Use align_and_score which handles bidirectional alignment internally
+    result = align_and_score(seq1, seq2, STANDARD_ADJUSTMENT_PARAMS)
+
+    # Calculate overlap in base pairs
+    # Coverage is fraction of each sequence used in alignment
+    len1, len2 = len(seq1), len(seq2)
+    shorter_len = min(len1, len2)
+
+    # Overlap is the minimum of the two coverages times the respective lengths
+    # For containment, the shorter sequence should be fully covered
+    overlap_bp = int(min(result.seq1_coverage * len1, result.seq2_coverage * len2))
+
+    # Effective threshold: for containment cases, allow merge if short sequence is fully covered
+    effective_threshold = min(min_overlap_bp, shorter_len)
+
+    if overlap_bp >= effective_threshold:
+        # Sufficient overlap - use overlap identity for distance
+        return 1.0 - result.identity
+    else:
+        # Insufficient overlap - fall back to global distance
+        # This will typically be high due to terminal gaps
+        return calculate_adjusted_identity_distance(seq1, seq2)
+
+
 # ============================================================================
 # Alignment Matrix Visualization Functions
 # ============================================================================
@@ -1540,31 +1876,49 @@ def analyze_cluster_quality(
     )
 
 
-def perform_hac_clustering(consensus_list: List[ConsensusInfo], 
-                          variant_group_identity: float) -> Dict[int, List[ConsensusInfo]]:
+def perform_hac_clustering(consensus_list: List[ConsensusInfo],
+                          variant_group_identity: float,
+                          min_overlap_bp: int = 0) -> Dict[int, List[ConsensusInfo]]:
     """
     Perform Hierarchical Agglomerative Clustering using complete linkage.
     Separates specimens from variants based on identity threshold.
     Returns groups of consensus sequences.
+
+    When min_overlap_bp > 0, uses overlap-aware distance calculation that
+    allows sequences of different lengths to be grouped together if they
+    share sufficient overlap with good identity.
     """
     if len(consensus_list) <= 1:
         return {0: consensus_list}
 
-    logging.debug(f"Performing HAC clustering with {variant_group_identity} identity threshold")
+    if min_overlap_bp > 0:
+        logging.debug(f"Performing HAC clustering with {variant_group_identity} identity threshold "
+                     f"(overlap-aware mode, min_overlap={min_overlap_bp}bp)")
+    else:
+        logging.debug(f"Performing HAC clustering with {variant_group_identity} identity threshold")
 
     n = len(consensus_list)
     distance_threshold = 1.0 - variant_group_identity
-    
+
     # Initialize each sequence as its own cluster
     clusters = [[i] for i in range(n)]
-    
+
     # Build initial distance matrix between individual sequences
     seq_distances = {}
     for i, j in itertools.combinations(range(n), 2):
-        dist = calculate_adjusted_identity_distance(
-            consensus_list[i].sequence,
-            consensus_list[j].sequence
-        )
+        if min_overlap_bp > 0:
+            # Use overlap-aware distance for primer pool scenarios
+            dist = calculate_overlap_aware_distance(
+                consensus_list[i].sequence,
+                consensus_list[j].sequence,
+                min_overlap_bp
+            )
+        else:
+            # Use standard global distance
+            dist = calculate_adjusted_identity_distance(
+                consensus_list[i].sequence,
+                consensus_list[j].sequence
+            )
         seq_distances[(i, j)] = dist
         seq_distances[(j, i)] = dist
     
@@ -2653,7 +3007,9 @@ def process_single_specimen(file_consensuses: List[ConsensusInfo],
     logging.info(f"Processing specimen from file: {file_name}")
 
     # Phase 1: HAC clustering to separate variant groups (moved before merging!)
-    variant_groups = perform_hac_clustering(file_consensuses, args.group_identity)
+    variant_groups = perform_hac_clustering(
+        file_consensuses, args.group_identity, min_overlap_bp=args.min_merge_overlap
+    )
 
     # Filter to max groups if specified
     if args.select_max_groups > 0 and len(variant_groups) > args.select_max_groups:
