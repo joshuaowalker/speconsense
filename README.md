@@ -575,10 +575,10 @@ Speconsense-summarize automatically generates a `quality_report.txt` file to hel
 - Count shown in `ambig` field
 
 **3. Overlap Merge Analysis:**
-- Lists specimens where overlap merging occurred (different-length sequences merged)
+- Lists specimens where partial overlap merging occurred (different-length sequences with shared overlap region)
 - Shows merge iterations, overlap percentages, and prefix/suffix extensions
 - Flags edge cases (overlap near threshold, large length ratios >3:1)
-- Only appears when overlap merges with extensions occurred
+- Only includes partial overlaps (prefix or suffix extension >0); excludes full containment merges
 
 **Understanding Read Identity Metrics:**
 
@@ -805,7 +805,7 @@ When using multiple primers targeting the same locus ("primer pools"), reads may
 
 **Parameters:**
 - `--min-merge-overlap N`: Minimum overlap in bp (default: 200, 0 to disable)
-- `--group-identity`: Identity threshold for overlap region (default: 0.9)
+- `--group-identity`: Identity threshold for HAC grouping, also used for overlap region identity (default: 0.9)
 
 **Example:**
 ```bash
@@ -827,7 +827,7 @@ speconsense-summarize --source clusters --min-merge-overlap 100
 **Output indicators:**
 - Log messages show `(overlap=Xbp, prefix=Ybp, suffix=Zbp)` for overlap merges
 - FASTA headers include `rawlen=X+Y` showing original sequence lengths
-- Quality report includes "OVERLAP MERGE ANALYSIS" section
+- Quality report includes "OVERLAP MERGE ANALYSIS" section with details on partial overlaps
 
 **Containment handling:**
 When a shorter sequence is fully contained within a longer one (e.g., ITS2 within full ITS), the merge is allowed if `overlap >= min(threshold, shorter_length)`.
