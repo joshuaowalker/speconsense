@@ -2944,14 +2944,18 @@ def write_quality_report(final_consensus: List[ConsensusInfo],
         # ====================================================================
         # SECTION 2.5: OVERLAP MERGE ANALYSIS
         # ====================================================================
-        if overlap_merges:
+        # Only include merges that extended beyond full overlap (prefix > 0 or suffix > 0)
+        # Full merges (prefix=0, suffix=0) would have occurred without overlap mode
+        true_overlap_merges = [m for m in overlap_merges if m.prefix_bp > 0 or m.suffix_bp > 0]
+
+        if true_overlap_merges:
             f.write("=" * 80 + "\n")
             f.write("OVERLAP MERGE ANALYSIS\n")
             f.write("=" * 80 + "\n\n")
 
             # Group merges by specimen
             specimen_merges = {}
-            for merge_info in overlap_merges:
+            for merge_info in true_overlap_merges:
                 if merge_info.specimen not in specimen_merges:
                     specimen_merges[merge_info.specimen] = []
                 specimen_merges[merge_info.specimen].append(merge_info)
@@ -2996,7 +3000,7 @@ def write_quality_report(final_consensus: List[ConsensusInfo],
 
             # Edge case warnings
             warnings = []
-            for merge_info in overlap_merges:
+            for merge_info in true_overlap_merges:
                 # Warn if overlap is within 10% of threshold
                 if merge_info.overlap_bp < min_merge_overlap * 1.1:
                     shorter_len = min(merge_info.input_lengths)
