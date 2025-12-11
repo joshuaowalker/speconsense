@@ -1618,7 +1618,7 @@ def merge_group_with_msa(variants: List[ConsensusInfo], args) -> Tuple[List[Cons
                     # Track overlap merge for quality reporting
                     if args.min_merge_overlap > 0 and len(subset_indices) > 1:
                         # Extract specimen name (remove cluster suffix like -c1)
-                        specimen = merged_consensus.sample_name.rsplit('-', 1)[0] if '-' in merged_consensus.sample_name else merged_consensus.sample_name
+                        specimen = merged_consensus.sample_name.rsplit('-c', 1)[0] if '-c' in merged_consensus.sample_name else merged_consensus.sample_name
                         overlap_merges.append(OverlapMergeInfo(
                             specimen=specimen,
                             iteration=iteration,
