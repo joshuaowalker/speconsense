@@ -305,3 +305,49 @@ class TestOverlapMergeIntegration:
         assert "suffix=" in result.stderr, "Log should contain 'suffix=' in new format"
         # Old format should not appear
         assert "terminal gap cols" not in result.stderr, "Log should not use old 'terminal gap cols' format"
+
+    def test_quality_report_overlap_section(self, temp_output_dir):
+        """
+        Test that quality report contains overlap merge analysis section.
+
+        The section should include:
+        - Count of specimens with overlap merges
+        - Details for each specimen: clusters, lengths, RiC, overlap, extensions
+        - Iterative merge rounds for multi-round merges
+        """
+        result = run_summarize(str(TEST_DATA_DIR), temp_output_dir)
+        assert result.returncode == 0, f"Command failed: {result.stderr}"
+
+        quality_report = os.path.join(temp_output_dir, "quality_report.txt")
+        assert os.path.exists(quality_report), "Quality report should exist"
+
+        with open(quality_report, 'r') as f:
+            report_content = f.read()
+
+        # Check section header exists
+        assert "OVERLAP MERGE ANALYSIS" in report_content, \
+            "Quality report should contain overlap merge section"
+
+        # Check specimen count
+        assert "3 specimen(s) had overlap merges" in report_content, \
+            "Should report 3 specimens with overlap merges"
+
+        # Check specimen details are present
+        assert "test-prefix (" in report_content, \
+            "Report should include test-prefix specimen"
+        assert "test-core-overlap (" in report_content, \
+            "Report should include test-core-overlap specimen"
+        assert "test-prefix-suffix-full (" in report_content, \
+            "Report should include test-prefix-suffix-full specimen"
+
+        # Check iterative merge is indicated
+        assert "iterative" in report_content, \
+            "Report should indicate iterative merging for multi-round merges"
+
+        # Check merge details format
+        assert "Overlap:" in report_content, \
+            "Report should show overlap in bp"
+        assert "Extensions:" in report_content, \
+            "Report should show prefix/suffix extensions"
+        assert "% of shorter sequence" in report_content, \
+            "Report should show overlap as percentage"

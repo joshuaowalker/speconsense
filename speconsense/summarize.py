@@ -84,6 +84,19 @@ class ClusterQualityData(NamedTuple):
     position_stats: Optional[List] = None  # Detailed PositionStats for debugging (optional)
 
 
+class OverlapMergeInfo(NamedTuple):
+    """Information about a single overlap merge event for quality reporting."""
+    specimen: str           # Specimen name
+    iteration: int          # Merge iteration (1 = first pass, 2+ = iterative)
+    input_clusters: List[str]   # Cluster IDs involved in merge
+    input_lengths: List[int]    # Original sequence lengths
+    input_rics: List[int]       # RiC values of input sequences
+    overlap_bp: int             # Overlap region size in bp
+    prefix_bp: int              # Extension before overlap
+    suffix_bp: int              # Extension after overlap
+    output_length: int          # Final merged sequence length
+
+
 # FASTA field customization support
 # Allows users to control which metadata fields appear in FASTA headers
 
@@ -1442,7 +1455,7 @@ def create_overlap_consensus_from_msa(aligned_seqs: List, variants: List[Consens
     )
 
 
-def merge_group_with_msa(variants: List[ConsensusInfo], args) -> Tuple[List[ConsensusInfo], Dict, int]:
+def merge_group_with_msa(variants: List[ConsensusInfo], args) -> Tuple[List[ConsensusInfo], Dict, int, List[OverlapMergeInfo]]:
     """
     Find largest mergeable subset of variants using MSA-based evaluation with exhaustive search.
 
@@ -1468,18 +1481,20 @@ def merge_group_with_msa(variants: List[ConsensusInfo], args) -> Tuple[List[Cons
         args: Command-line arguments with merge parameters
 
     Returns:
-        (merged_variants, merge_traceability, potentially_suboptimal) where:
+        (merged_variants, merge_traceability, potentially_suboptimal, overlap_merges) where:
         - merged_variants is list of merged ConsensusInfo objects
         - traceability maps merged names to original cluster names
         - potentially_suboptimal is 1 if group had >MAX variants, 0 otherwise
+        - overlap_merges is list of OverlapMergeInfo for quality reporting
     """
     if len(variants) == 1:
-        return variants, {}, 0
+        return variants, {}, 0, []
 
     # Track if this group is potentially suboptimal (too many variants for global optimum)
     potentially_suboptimal = 1 if len(variants) > MAX_MSA_MERGE_VARIANTS else 0
 
     all_traceability = {}
+    overlap_merges = []  # Track overlap merge events for quality reporting
 
     # For iterative merging in overlap mode, we may need multiple rounds
     current_variants = variants
@@ -1627,6 +1642,22 @@ def merge_group_with_msa(variants: List[ConsensusInfo], args) -> Tuple[List[Cons
                     }
                     all_traceability.update(traceability)
 
+                    # Track overlap merge for quality reporting
+                    if args.min_merge_overlap > 0 and len(subset_indices) > 1:
+                        # Extract specimen name (remove cluster suffix like -c1)
+                        specimen = merged_consensus.sample_name.rsplit('-', 1)[0] if '-' in merged_consensus.sample_name else merged_consensus.sample_name
+                        overlap_merges.append(OverlapMergeInfo(
+                            specimen=specimen,
+                            iteration=iteration,
+                            input_clusters=[v.sample_name for v in subset_variants],
+                            input_lengths=[len(v.sequence) for v in subset_variants],
+                            input_rics=[v.ric for v in subset_variants],
+                            overlap_bp=variant_stats.get('overlap_bp', 0),
+                            prefix_bp=variant_stats.get('prefix_bp', 0),
+                            suffix_bp=variant_stats.get('suffix_bp', 0),
+                            output_length=len(merged_consensus.sequence)
+                        ))
+
                     # Add merged consensus to results
                     merged_results.append(merged_consensus)
 
@@ -1659,7 +1690,7 @@ def merge_group_with_msa(variants: List[ConsensusInfo], args) -> Tuple[List[Cons
                 logging.debug(f"Iterative merging complete after {iteration} iterations")
             break
 
-    return merged_results, all_traceability, potentially_suboptimal
+    return merged_results, all_traceability, potentially_suboptimal, overlap_merges
 
 
 def bases_match_with_iupac(base1: str, base2: str) -> bool:
@@ -2692,7 +2723,9 @@ def write_position_debug_file(
 def write_quality_report(final_consensus: List[ConsensusInfo],
                         all_raw_consensuses: List[Tuple[ConsensusInfo, str]],
                         summary_folder: str,
-                        source_folder: str):
+                        source_folder: str,
+                        overlap_merges: List[OverlapMergeInfo] = None,
+                        min_merge_overlap: int = 200):
     """
     Write quality report with rid-based dual outlier detection.
 
@@ -2702,18 +2735,23 @@ def write_quality_report(final_consensus: List[ConsensusInfo],
 
     Structure:
     1. Executive Summary - High-level overview with attention flags
-    2. Read Identity Analysis - Dual outlier detection (clustering threshold + statistical)
-    3. Positional Identity Analysis - Sequences with problematic positions
-    4. Variant Detection - Clusters with detected variants
-    5. Merged Sequence Analysis - Quality issues in merged components
-    6. Interpretation Guide - Actionable guidance with neutral tone
+    2. Overlap Merge Analysis - Details of overlap merges (when applicable)
+    3. Read Identity Analysis - Dual outlier detection (clustering threshold + statistical)
+    4. Positional Identity Analysis - Sequences with problematic positions
+    5. Variant Detection - Clusters with detected variants
+    6. Merged Sequence Analysis - Quality issues in merged components
+    7. Interpretation Guide - Actionable guidance with neutral tone
 
     Args:
         final_consensus: List of final consensus sequences
         all_raw_consensuses: List of (raw_consensus, original_name) tuples
         summary_folder: Output directory for report
         source_folder: Source directory containing cluster_debug with MSA files
+        overlap_merges: List of OverlapMergeInfo objects describing overlap merges
+        min_merge_overlap: Threshold used for overlap merging (for edge case warnings)
     """
+    if overlap_merges is None:
+        overlap_merges = []
     from datetime import datetime
 
     quality_report_path = os.path.join(summary_folder, 'quality_report.txt')
@@ -2902,6 +2940,87 @@ def write_quality_report(final_consensus: List[ConsensusInfo],
         f.write(f"  Total flagged: {total_flagged} ({100*total_flagged/total_seqs:.1f}%)\n")
         f.write(f"    - Low read identity: {n_rid_issues} ({n_stat} sequences + {n_merged} merged)\n")
         f.write(f"    - High-error positions: {n_pos}\n\n")
+
+        # ====================================================================
+        # SECTION 2.5: OVERLAP MERGE ANALYSIS
+        # ====================================================================
+        if overlap_merges:
+            f.write("=" * 80 + "\n")
+            f.write("OVERLAP MERGE ANALYSIS\n")
+            f.write("=" * 80 + "\n\n")
+
+            # Group merges by specimen
+            specimen_merges = {}
+            for merge_info in overlap_merges:
+                if merge_info.specimen not in specimen_merges:
+                    specimen_merges[merge_info.specimen] = []
+                specimen_merges[merge_info.specimen].append(merge_info)
+
+            f.write(f"{len(specimen_merges)} specimen(s) had overlap merges:\n\n")
+
+            # Sort specimens by name
+            for specimen in sorted(specimen_merges.keys()):
+                merges = specimen_merges[specimen]
+                merge_count = len(merges)
+                max_iteration = max(m.iteration for m in merges)
+
+                if max_iteration > 1:
+                    f.write(f"{specimen} ({merge_count} merge(s), iterative):\n")
+                else:
+                    f.write(f"{specimen} ({merge_count} merge(s)):\n")
+
+                # Sort by iteration
+                for merge_info in sorted(merges, key=lambda m: m.iteration):
+                    iter_prefix = f"  Round {merge_info.iteration}: " if max_iteration > 1 else "  "
+
+                    # Format input clusters
+                    input_parts = []
+                    for i, (cluster, length, ric) in enumerate(zip(
+                        merge_info.input_clusters,
+                        merge_info.input_lengths,
+                        merge_info.input_rics
+                    )):
+                        # Extract cluster ID (e.g., "c1" from "specimen-c1")
+                        cluster_id = cluster.rsplit('-', 1)[-1] if '-' in cluster else cluster
+                        input_parts.append(f"{cluster_id} ({length}bp, RiC={ric})")
+
+                    f.write(f"{iter_prefix}Merged: {' + '.join(input_parts)} -> {merge_info.output_length}bp\n")
+
+                    # Calculate overlap as percentage of shorter sequence
+                    shorter_len = min(merge_info.input_lengths)
+                    overlap_pct = (merge_info.overlap_bp / shorter_len * 100) if shorter_len > 0 else 0
+                    f.write(f"    Overlap: {merge_info.overlap_bp}bp ({overlap_pct:.0f}% of shorter sequence)\n")
+                    f.write(f"    Extensions: prefix={merge_info.prefix_bp}bp, suffix={merge_info.suffix_bp}bp\n")
+
+                f.write("\n")
+
+            # Edge case warnings
+            warnings = []
+            for merge_info in overlap_merges:
+                # Warn if overlap is within 10% of threshold
+                if merge_info.overlap_bp < min_merge_overlap * 1.1:
+                    shorter_len = min(merge_info.input_lengths)
+                    # But not if overlap equals shorter sequence (containment case)
+                    if merge_info.overlap_bp < shorter_len:
+                        warnings.append(
+                            f"{merge_info.specimen}: Small overlap relative to threshold "
+                            f"({merge_info.overlap_bp}bp, threshold={min_merge_overlap}bp)"
+                        )
+
+                # Warn if large length ratio (>3:1)
+                max_len = max(merge_info.input_lengths)
+                min_len = min(merge_info.input_lengths)
+                if max_len > min_len * 3:
+                    warnings.append(
+                        f"{merge_info.specimen}: Large length ratio "
+                        f"({max_len}bp / {min_len}bp = {max_len/min_len:.1f}x)"
+                    )
+
+            if warnings:
+                f.write("Attention:\n")
+                for warning in warnings:
+                    f.write(f"  * {warning}\n")
+                f.write("\n")
 
         # ====================================================================
         # SECTION 3: READ IDENTITY ANALYSIS
@@ -3123,10 +3242,10 @@ def write_output_files(final_consensus: List[ConsensusInfo],
 
 
 def process_single_specimen(file_consensuses: List[ConsensusInfo],
-                           args) -> Tuple[List[ConsensusInfo], Dict[str, List[str]], Dict, int]:
+                           args) -> Tuple[List[ConsensusInfo], Dict[str, List[str]], Dict, int, List[OverlapMergeInfo]]:
     """
     Process a single specimen file: HAC cluster, MSA-based merge per group, and select final variants.
-    Returns final consensus list, merge traceability, naming info, and limited_count for this specimen.
+    Returns final consensus list, merge traceability, naming info, limited_count, and overlap merge info.
 
     Architecture (Phase 3):
     1. HAC clustering to separate variant groups (primary vs contaminants)
@@ -3134,7 +3253,7 @@ def process_single_specimen(file_consensuses: List[ConsensusInfo],
     3. Select representative variants per group
     """
     if not file_consensuses:
-        return [], {}, {}, 0
+        return [], {}, {}, 0, []
 
     file_name = os.path.basename(file_consensuses[0].file_path)
     logging.info(f"Processing specimen from file: {file_name}")
@@ -3160,12 +3279,14 @@ def process_single_specimen(file_consensuses: List[ConsensusInfo],
     merged_groups = {}
     all_merge_traceability = {}
     total_limited_count = 0
+    all_overlap_merges = []
 
     for group_id, group_members in variant_groups.items():
-        merged, traceability, limited_count = merge_group_with_msa(group_members, args)
+        merged, traceability, limited_count, overlap_merges = merge_group_with_msa(group_members, args)
         merged_groups[group_id] = merged
         all_merge_traceability.update(traceability)
         total_limited_count += limited_count
+        all_overlap_merges.extend(overlap_merges)
 
     # Phase 3: Select representative variants for each group in this specimen
     final_consensus = []
@@ -3202,7 +3323,7 @@ def process_single_specimen(file_consensuses: List[ConsensusInfo],
     logging.info(f"Processed {file_name}: {len(final_consensus)} final variants across {len(merged_groups)} groups")
     logging.info("")  # Empty line for readability between specimens
 
-    return final_consensus, all_merge_traceability, naming_info, total_limited_count
+    return final_consensus, all_merge_traceability, naming_info, total_limited_count, all_overlap_merges
 
 
 def main():
@@ -3254,6 +3375,7 @@ def main():
     all_merge_traceability = {}
     all_naming_info = {}
     all_raw_consensuses = []  # Collect .raw files from all specimens
+    all_overlap_merges = []  # Collect overlap merge info for quality reporting
     total_limited_merges = 0
 
     sorted_file_paths = sorted(file_groups.keys())
@@ -3261,7 +3383,7 @@ def main():
         file_consensuses = file_groups[file_path]
 
         # Process specimen
-        final_consensus, merge_traceability, naming_info, limited_count = process_single_specimen(
+        final_consensus, merge_traceability, naming_info, limited_count, overlap_merges = process_single_specimen(
             file_consensuses, args
         )
 
@@ -3281,6 +3403,7 @@ def main():
         all_final_consensus.extend(final_consensus)
         all_merge_traceability.update(merge_traceability)
         all_raw_consensuses.extend(specimen_raw_consensuses)
+        all_overlap_merges.extend(overlap_merges)
         total_limited_merges += limited_count
 
         # Update naming info with unique keys per specimen
@@ -3303,7 +3426,9 @@ def main():
         all_final_consensus,
         all_raw_consensuses,
         args.summary_dir,
-        args.source
+        args.source,
+        all_overlap_merges,
+        args.min_merge_overlap
     )
 
     logging.info(f"Enhanced summarization completed successfully")
