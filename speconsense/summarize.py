@@ -2942,91 +2942,6 @@ def write_quality_report(final_consensus: List[ConsensusInfo],
         f.write(f"    - High-error positions: {n_pos}\n\n")
 
         # ====================================================================
-        # SECTION 2.5: OVERLAP MERGE ANALYSIS
-        # ====================================================================
-        # Only include merges that extended beyond full overlap (prefix > 0 or suffix > 0)
-        # Full merges (prefix=0, suffix=0) would have occurred without overlap mode
-        true_overlap_merges = [m for m in overlap_merges if m.prefix_bp > 0 or m.suffix_bp > 0]
-
-        if true_overlap_merges:
-            f.write("=" * 80 + "\n")
-            f.write("OVERLAP MERGE ANALYSIS\n")
-            f.write("=" * 80 + "\n\n")
-
-            # Group merges by specimen
-            specimen_merges = {}
-            for merge_info in true_overlap_merges:
-                if merge_info.specimen not in specimen_merges:
-                    specimen_merges[merge_info.specimen] = []
-                specimen_merges[merge_info.specimen].append(merge_info)
-
-            f.write(f"{len(specimen_merges)} specimen(s) had overlap merges:\n\n")
-
-            # Sort specimens by name
-            for specimen in sorted(specimen_merges.keys()):
-                merges = specimen_merges[specimen]
-                merge_count = len(merges)
-                max_iteration = max(m.iteration for m in merges)
-
-                if max_iteration > 1:
-                    f.write(f"{specimen} ({merge_count} merge(s), iterative):\n")
-                else:
-                    f.write(f"{specimen} ({merge_count} merge(s)):\n")
-
-                # Sort by iteration
-                for merge_info in sorted(merges, key=lambda m: m.iteration):
-                    iter_prefix = f"  Round {merge_info.iteration}: " if max_iteration > 1 else "  "
-
-                    # Format input clusters
-                    input_parts = []
-                    for i, (cluster, length, ric) in enumerate(zip(
-                        merge_info.input_clusters,
-                        merge_info.input_lengths,
-                        merge_info.input_rics
-                    )):
-                        # Extract cluster ID (e.g., "c1" from "specimen-c1")
-                        cluster_id = cluster.rsplit('-', 1)[-1] if '-' in cluster else cluster
-                        input_parts.append(f"{cluster_id} ({length}bp, RiC={ric})")
-
-                    f.write(f"{iter_prefix}Merged: {' + '.join(input_parts)} -> {merge_info.output_length}bp\n")
-
-                    # Calculate overlap as percentage of shorter sequence
-                    shorter_len = min(merge_info.input_lengths)
-                    overlap_pct = (merge_info.overlap_bp / shorter_len * 100) if shorter_len > 0 else 0
-                    f.write(f"    Overlap: {merge_info.overlap_bp}bp ({overlap_pct:.0f}% of shorter sequence)\n")
-                    f.write(f"    Extensions: prefix={merge_info.prefix_bp}bp, suffix={merge_info.suffix_bp}bp\n")
-
-                f.write("\n")
-
-            # Edge case warnings
-            warnings = []
-            for merge_info in true_overlap_merges:
-                # Warn if overlap is within 10% of threshold
-                if merge_info.overlap_bp < min_merge_overlap * 1.1:
-                    shorter_len = min(merge_info.input_lengths)
-                    # But not if overlap equals shorter sequence (containment case)
-                    if merge_info.overlap_bp < shorter_len:
-                        warnings.append(
-                            f"{merge_info.specimen}: Small overlap relative to threshold "
-                            f"({merge_info.overlap_bp}bp, threshold={min_merge_overlap}bp)"
-                        )
-
-                # Warn if large length ratio (>3:1)
-                max_len = max(merge_info.input_lengths)
-                min_len = min(merge_info.input_lengths)
-                if max_len > min_len * 3:
-                    warnings.append(
-                        f"{merge_info.specimen}: Large length ratio "
-                        f"({max_len}bp / {min_len}bp = {max_len/min_len:.1f}x)"
-                    )
-
-            if warnings:
-                f.write("Attention:\n")
-                for warning in warnings:
-                    f.write(f"  * {warning}\n")
-                f.write("\n")
-
-        # ====================================================================
         # SECTION 3: READ IDENTITY ANALYSIS
         # ====================================================================
         if n_rid_issues > 0:
@@ -3139,7 +3054,92 @@ def write_quality_report(final_consensus: List[ConsensusInfo],
             f.write("\n")
 
         # ====================================================================
-        # SECTION 5: INTERPRETATION GUIDE
+        # SECTION 5: OVERLAP MERGE ANALYSIS
+        # ====================================================================
+        # Only include merges that extended beyond full overlap (prefix > 0 or suffix > 0)
+        # Full merges (prefix=0, suffix=0) would have occurred without overlap mode
+        true_overlap_merges = [m for m in overlap_merges if m.prefix_bp > 0 or m.suffix_bp > 0]
+
+        if true_overlap_merges:
+            f.write("=" * 80 + "\n")
+            f.write("OVERLAP MERGE ANALYSIS\n")
+            f.write("=" * 80 + "\n\n")
+
+            # Group merges by specimen
+            specimen_merges = {}
+            for merge_info in true_overlap_merges:
+                if merge_info.specimen not in specimen_merges:
+                    specimen_merges[merge_info.specimen] = []
+                specimen_merges[merge_info.specimen].append(merge_info)
+
+            f.write(f"{len(specimen_merges)} specimen(s) had overlap merges:\n\n")
+
+            # Sort specimens by name
+            for specimen in sorted(specimen_merges.keys()):
+                merges = specimen_merges[specimen]
+                merge_count = len(merges)
+                max_iteration = max(m.iteration for m in merges)
+
+                if max_iteration > 1:
+                    f.write(f"{specimen} ({merge_count} merge(s), iterative):\n")
+                else:
+                    f.write(f"{specimen} ({merge_count} merge(s)):\n")
+
+                # Sort by iteration
+                for merge_info in sorted(merges, key=lambda m: m.iteration):
+                    iter_prefix = f"  Round {merge_info.iteration}: " if max_iteration > 1 else "  "
+
+                    # Format input clusters
+                    input_parts = []
+                    for i, (cluster, length, ric) in enumerate(zip(
+                        merge_info.input_clusters,
+                        merge_info.input_lengths,
+                        merge_info.input_rics
+                    )):
+                        # Extract cluster ID (e.g., "c1" from "specimen-c1")
+                        cluster_id = cluster.rsplit('-', 1)[-1] if '-' in cluster else cluster
+                        input_parts.append(f"{cluster_id} ({length}bp, RiC={ric})")
+
+                    f.write(f"{iter_prefix}Merged: {' + '.join(input_parts)} -> {merge_info.output_length}bp\n")
+
+                    # Calculate overlap as percentage of shorter sequence
+                    shorter_len = min(merge_info.input_lengths)
+                    overlap_pct = (merge_info.overlap_bp / shorter_len * 100) if shorter_len > 0 else 0
+                    f.write(f"    Overlap: {merge_info.overlap_bp}bp ({overlap_pct:.0f}% of shorter sequence)\n")
+                    f.write(f"    Extensions: prefix={merge_info.prefix_bp}bp, suffix={merge_info.suffix_bp}bp\n")
+
+                f.write("\n")
+
+            # Edge case warnings
+            warnings = []
+            for merge_info in true_overlap_merges:
+                # Warn if overlap is within 10% of threshold
+                if merge_info.overlap_bp < min_merge_overlap * 1.1:
+                    shorter_len = min(merge_info.input_lengths)
+                    # But not if overlap equals shorter sequence (containment case)
+                    if merge_info.overlap_bp < shorter_len:
+                        warnings.append(
+                            f"{merge_info.specimen}: Small overlap relative to threshold "
+                            f"({merge_info.overlap_bp}bp, threshold={min_merge_overlap}bp)"
+                        )
+
+                # Warn if large length ratio (>3:1)
+                max_len = max(merge_info.input_lengths)
+                min_len = min(merge_info.input_lengths)
+                if max_len > min_len * 3:
+                    warnings.append(
+                        f"{merge_info.specimen}: Large length ratio "
+                        f"({max_len}bp / {min_len}bp = {max_len/min_len:.1f}x)"
+                    )
+
+            if warnings:
+                f.write("Attention:\n")
+                for warning in warnings:
+                    f.write(f"  * {warning}\n")
+                f.write("\n")
+
+        # ====================================================================
+        # SECTION 6: INTERPRETATION GUIDE
         # ====================================================================
         f.write("=" * 80 + "\n")
         f.write("INTERPRETATION GUIDE\n")
