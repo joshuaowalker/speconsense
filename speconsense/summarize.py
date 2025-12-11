@@ -71,6 +71,7 @@ class ConsensusInfo(NamedTuple):
     raw_ric: Optional[List[int]] = None  # RiC values of .raw source variants
     rid: Optional[float] = None  # Mean read identity (internal consistency metric)
     rid_min: Optional[float] = None  # Minimum read identity (worst-case read)
+    merge_indel_count: Optional[int] = None  # Number of indels consumed by merging (for cumulative tracking)
 
 
 class ClusterQualityData(NamedTuple):
@@ -1149,7 +1150,7 @@ def generate_all_subsets_by_size(variants: List[ConsensusInfo]) -> List[Tuple[in
     return [subset for _, subset in candidates]
 
 
-def is_compatible_subset(variant_stats: dict, args) -> bool:
+def is_compatible_subset(variant_stats: dict, args, prior_positions: dict = None) -> bool:
     """
     Check if variant statistics are within merge limits.
 
@@ -1159,7 +1160,16 @@ def is_compatible_subset(variant_stats: dict, args) -> bool:
 
     When --disable-homopolymer-equivalence is set, homopolymer indels are treated
     the same as structural indels and count against merge limits.
+
+    Args:
+        variant_stats: Statistics from MSA analysis (snp_count, indel counts, etc.)
+        args: Command-line arguments with merge parameters
+        prior_positions: Optional dict with cumulative counts from prior merge rounds
+                        {'snp_count': N, 'indel_count': M} - these are added to
+                        current stats when checking limits for iterative merging
     """
+    if prior_positions is None:
+        prior_positions = {'snp_count': 0, 'indel_count': 0}
 
     # Check SNP limit
     if variant_stats['snp_count'] > 0 and not args.merge_snp:
@@ -1183,8 +1193,9 @@ def is_compatible_subset(variant_stats: dict, args) -> bool:
         if indel_length > args.merge_indel_length:
             return False
 
-    # Check total position count
-    total_positions = variant_stats['snp_count'] + indel_count
+    # Check total position count (including prior merge rounds)
+    total_positions = (variant_stats['snp_count'] + prior_positions['snp_count'] +
+                      indel_count + prior_positions['indel_count'])
     if total_positions > args.merge_position_count:
         return False
 
@@ -1396,9 +1407,16 @@ def merge_group_with_msa(variants: List[ConsensusInfo], args) -> Tuple[List[Cons
     3. Exhaustively evaluate ALL subsets by total size (descending)
     4. Merge the best compatible subset found
     5. Remove merged variants and repeat with remaining
+    6. When overlap mode is enabled, iterate the entire process on merged results
+       until no more merges happen (handles prefix+suffix+full scenarios)
 
     This approach guarantees optimal results when N ≤ MAX_MSA_MERGE_VARIANTS.
     For N > MAX, processes top MAX per round (potentially suboptimal globally).
+
+    Iterative merging (overlap mode only):
+    - After first pass, merged results are fed back for another round
+    - Cumulative SNP/indel counts are tracked across rounds
+    - Continues until no merges occur in a round
 
     Args:
         variants: List of ConsensusInfo from HAC group
@@ -1416,126 +1434,177 @@ def merge_group_with_msa(variants: List[ConsensusInfo], args) -> Tuple[List[Cons
     # Track if this group is potentially suboptimal (too many variants for global optimum)
     potentially_suboptimal = 1 if len(variants) > MAX_MSA_MERGE_VARIANTS else 0
 
-    # Sort variants by size (largest first)
-    remaining_variants = sorted(variants, key=lambda v: v.size, reverse=True)
-    merged_results = []
     all_traceability = {}
 
-    while remaining_variants:
-        # Take up to MAX_MSA_MERGE_VARIANTS candidates
-        candidates = remaining_variants[:MAX_MSA_MERGE_VARIANTS]
+    # For iterative merging in overlap mode, we may need multiple rounds
+    current_variants = variants
+    iteration = 0
+    max_iterations = 10  # Safety limit to prevent infinite loops
 
-        # Apply size ratio filter if enabled (relative to largest in batch)
-        if args.merge_min_size_ratio > 0:
-            largest_size = candidates[0].size
-            filtered_candidates = [v for v in candidates
-                                  if (v.size / largest_size) >= args.merge_min_size_ratio]
-            if len(filtered_candidates) < len(candidates):
-                filtered_count = len(candidates) - len(filtered_candidates)
-                logging.debug(f"Filtered out {filtered_count} variants with size ratio < {args.merge_min_size_ratio} relative to largest (size={largest_size})")
-                candidates = filtered_candidates
+    while iteration < max_iterations:
+        iteration += 1
 
-        # Single candidate - just pass through
-        if len(candidates) == 1:
-            merged_results.append(candidates[0])
-            remaining_variants.remove(candidates[0])
-            continue
+        # Sort variants by size (largest first)
+        remaining_variants = sorted(current_variants, key=lambda v: v.size, reverse=True)
+        merged_results = []
+        merges_this_iteration = 0
 
-        logging.debug(f"Evaluating {len(candidates)} variants for merging (exhaustive subset search)")
+        while remaining_variants:
+            # Take up to MAX_MSA_MERGE_VARIANTS candidates
+            candidates = remaining_variants[:MAX_MSA_MERGE_VARIANTS]
 
-        # Run SPOA MSA on candidates
-        # Use local alignment mode (0) for overlap merging to get clean terminal gaps
-        # Use global alignment mode (1) for standard same-length merging
-        sequences = [v.sequence for v in candidates]
-        spoa_mode = 0 if args.min_merge_overlap > 0 else 1
-        aligned_seqs = run_spoa_msa(sequences, alignment_mode=spoa_mode)
+            # Apply size ratio filter if enabled (relative to largest in batch)
+            if args.merge_min_size_ratio > 0:
+                largest_size = candidates[0].size
+                filtered_candidates = [v for v in candidates
+                                      if (v.size / largest_size) >= args.merge_min_size_ratio]
+                if len(filtered_candidates) < len(candidates):
+                    filtered_count = len(candidates) - len(filtered_candidates)
+                    logging.debug(f"Filtered out {filtered_count} variants with size ratio < {args.merge_min_size_ratio} relative to largest (size={largest_size})")
+                    candidates = filtered_candidates
 
-        logging.debug(f"Generated MSA with length {len(aligned_seqs[0].seq)}")
+            # Single candidate - just pass through
+            if len(candidates) == 1:
+                merged_results.append(candidates[0])
+                remaining_variants.remove(candidates[0])
+                continue
 
-        # Generate ALL subsets sorted by total size (exhaustive search)
-        all_subsets = generate_all_subsets_by_size(candidates)
-
-        logging.debug(f"Evaluating {len(all_subsets)} candidate subsets")
-
-        # Find first (largest) compatible subset
-        merged_this_round = False
-        for subset_indices in all_subsets:
-            subset_variants = [candidates[i] for i in subset_indices]
-            subset_aligned = [aligned_seqs[i] for i in subset_indices]
-
-            # Analyze MSA for this subset
-            if args.min_merge_overlap > 0:
-                # Use overlap-aware analysis for primer pool scenarios
-                original_lengths = [len(v.sequence) for v in subset_variants]
-                variant_stats = analyze_msa_columns_overlap_aware(
-                    subset_aligned, args.min_merge_overlap, original_lengths
-                )
-
-                # Check overlap requirement
-                shorter_len = min(original_lengths)
-                effective_threshold = min(args.min_merge_overlap, shorter_len)
-                if variant_stats['overlap_bp'] < effective_threshold:
-                    # Insufficient overlap - skip this subset
-                    continue
+            if iteration > 1:
+                logging.debug(f"Iteration {iteration}: Evaluating {len(candidates)} variants for merging")
             else:
-                # Use standard analysis
-                variant_stats = analyze_msa_columns(subset_aligned)
+                logging.debug(f"Evaluating {len(candidates)} variants for merging (exhaustive subset search)")
 
-            # Check compatibility against merge limits
-            if is_compatible_subset(variant_stats, args):
-                # Only log "mergeable subset" message for actual merges (>1 variant)
-                if len(subset_indices) > 1:
-                    # Build detailed variant description
-                    parts = []
-                    if variant_stats['snp_count'] > 0:
-                        parts.append(f"{variant_stats['snp_count']} SNPs")
-                    if variant_stats['structural_indel_count'] > 0:
-                        parts.append(f"{variant_stats['structural_indel_count']} structural indels")
-                    if variant_stats['homopolymer_indel_count'] > 0:
-                        parts.append(f"{variant_stats['homopolymer_indel_count']} homopolymer indels")
-                    if args.min_merge_overlap > 0 and variant_stats.get('terminal_gap_columns', 0) > 0:
-                        parts.append(f"{variant_stats['terminal_gap_columns']} terminal gap cols")
+            # Run SPOA MSA on candidates
+            # Use local alignment mode (0) for overlap merging to get clean terminal gaps
+            # Use global alignment mode (1) for standard same-length merging
+            sequences = [v.sequence for v in candidates]
+            spoa_mode = 0 if args.min_merge_overlap > 0 else 1
+            aligned_seqs = run_spoa_msa(sequences, alignment_mode=spoa_mode)
 
-                    variant_desc = ", ".join(parts) if parts else "identical sequences"
-                    if args.min_merge_overlap > 0:
-                        logging.info(f"Found mergeable subset of {len(subset_indices)} variants "
-                                   f"(overlap={variant_stats.get('overlap_bp', 'N/A')}bp): {variant_desc}")
-                    else:
-                        logging.info(f"Found mergeable subset of {len(subset_indices)} variants: {variant_desc}")
+            logging.debug(f"Generated MSA with length {len(aligned_seqs[0].seq)}")
 
-                # Create merged consensus
+            # Generate ALL subsets sorted by total size (exhaustive search)
+            all_subsets = generate_all_subsets_by_size(candidates)
+
+            logging.debug(f"Evaluating {len(all_subsets)} candidate subsets")
+
+            # Find first (largest) compatible subset
+            merged_this_round = False
+            for subset_indices in all_subsets:
+                subset_variants = [candidates[i] for i in subset_indices]
+                subset_aligned = [aligned_seqs[i] for i in subset_indices]
+
+                # Analyze MSA for this subset
                 if args.min_merge_overlap > 0:
-                    # Use overlap-aware consensus generation
-                    merged_consensus = create_overlap_consensus_from_msa(
-                        subset_aligned, subset_variants
+                    # Use overlap-aware analysis for primer pool scenarios
+                    original_lengths = [len(v.sequence) for v in subset_variants]
+                    variant_stats = analyze_msa_columns_overlap_aware(
+                        subset_aligned, args.min_merge_overlap, original_lengths
                     )
+
+                    # Check overlap requirement
+                    shorter_len = min(original_lengths)
+                    effective_threshold = min(args.min_merge_overlap, shorter_len)
+                    if variant_stats['overlap_bp'] < effective_threshold:
+                        # Insufficient overlap - skip this subset
+                        continue
                 else:
-                    merged_consensus = create_consensus_from_msa(
-                        subset_aligned, subset_variants
-                    )
+                    # Use standard analysis
+                    variant_stats = analyze_msa_columns(subset_aligned)
 
-                # Track merge provenance
-                traceability = {
-                    merged_consensus.sample_name: [v.sample_name for v in subset_variants]
-                }
-                all_traceability.update(traceability)
+                # Calculate cumulative positions from input sequences (for iterative merging)
+                # Each sequence may carry positions from prior merges
+                prior_snps = sum(v.snp_count or 0 for v in subset_variants)
+                prior_indels = sum(v.merge_indel_count or 0 for v in subset_variants)
+                prior_positions = {'snp_count': prior_snps, 'indel_count': prior_indels}
 
-                # Add merged consensus to results
-                merged_results.append(merged_consensus)
+                # Check compatibility against merge limits (including cumulative positions)
+                if is_compatible_subset(variant_stats, args, prior_positions):
+                    # Only log "mergeable subset" message for actual merges (>1 variant)
+                    if len(subset_indices) > 1:
+                        # Build detailed variant description
+                        parts = []
+                        if variant_stats['snp_count'] > 0:
+                            parts.append(f"{variant_stats['snp_count']} SNPs")
+                        if variant_stats['structural_indel_count'] > 0:
+                            parts.append(f"{variant_stats['structural_indel_count']} structural indels")
+                        if variant_stats['homopolymer_indel_count'] > 0:
+                            parts.append(f"{variant_stats['homopolymer_indel_count']} homopolymer indels")
+                        if args.min_merge_overlap > 0 and variant_stats.get('terminal_gap_columns', 0) > 0:
+                            parts.append(f"{variant_stats['terminal_gap_columns']} terminal gap cols")
 
-                # Remove merged variants from remaining pool
-                for v in subset_variants:
-                    if v in remaining_variants:
-                        remaining_variants.remove(v)
+                        variant_desc = ", ".join(parts) if parts else "identical sequences"
+                        iter_prefix = f"Iteration {iteration}: " if iteration > 1 else ""
+                        if args.min_merge_overlap > 0:
+                            logging.info(f"{iter_prefix}Found mergeable subset of {len(subset_indices)} variants "
+                                       f"(overlap={variant_stats.get('overlap_bp', 'N/A')}bp): {variant_desc}")
+                        else:
+                            logging.info(f"{iter_prefix}Found mergeable subset of {len(subset_indices)} variants: {variant_desc}")
 
-                merged_this_round = True
-                break
+                        # Calculate total positions for cumulative tracking
+                        # Total = prior positions from input sequences + new positions from this merge
+                        if args.disable_homopolymer_equivalence:
+                            this_merge_indels = variant_stats['structural_indel_count'] + variant_stats['homopolymer_indel_count']
+                        else:
+                            this_merge_indels = variant_stats['structural_indel_count']
+                        total_snps = prior_snps + variant_stats['snp_count']
+                        total_indels = prior_indels + this_merge_indels
 
-        # If no merge found, keep largest variant as-is and continue
-        if not merged_this_round:
-            logging.debug(f"No compatible merge found for largest variant (size={candidates[0].size})")
-            merged_results.append(candidates[0])
-            remaining_variants.remove(candidates[0])
+                    # Create merged consensus
+                    if args.min_merge_overlap > 0:
+                        # Use overlap-aware consensus generation
+                        merged_consensus = create_overlap_consensus_from_msa(
+                            subset_aligned, subset_variants
+                        )
+                    else:
+                        merged_consensus = create_consensus_from_msa(
+                            subset_aligned, subset_variants
+                        )
+
+                    # Update merged consensus with cumulative position counts for iterative tracking
+                    if len(subset_indices) > 1:
+                        merged_consensus = merged_consensus._replace(
+                            snp_count=total_snps if total_snps > 0 else None,
+                            merge_indel_count=total_indels if total_indels > 0 else None
+                        )
+
+                    # Track merge provenance
+                    traceability = {
+                        merged_consensus.sample_name: [v.sample_name for v in subset_variants]
+                    }
+                    all_traceability.update(traceability)
+
+                    # Add merged consensus to results
+                    merged_results.append(merged_consensus)
+
+                    # Remove merged variants from remaining pool
+                    for v in subset_variants:
+                        if v in remaining_variants:
+                            remaining_variants.remove(v)
+
+                    merged_this_round = True
+                    if len(subset_indices) > 1:
+                        merges_this_iteration += 1
+                    break
+
+            # If no merge found, keep largest variant as-is and continue
+            if not merged_this_round:
+                logging.debug(f"No compatible merge found for largest variant (size={candidates[0].size})")
+                merged_results.append(candidates[0])
+                remaining_variants.remove(candidates[0])
+
+        # Check if we should do another iteration (overlap mode only)
+        if args.min_merge_overlap > 0 and merges_this_iteration > 0 and len(merged_results) > 1:
+            # More merges might be possible with the new merged sequences
+            # Cumulative positions are tracked per-sequence via snp_count and merge_indel_count
+            logging.debug(f"Iteration {iteration} complete: {merges_this_iteration} merges, "
+                         f"{len(merged_results)} variants remaining, trying another round")
+            current_variants = merged_results
+        else:
+            # No more iterations needed
+            if iteration > 1:
+                logging.debug(f"Iterative merging complete after {iteration} iterations")
+            break
 
     return merged_results, all_traceability, potentially_suboptimal
 
@@ -1880,22 +1949,35 @@ def perform_hac_clustering(consensus_list: List[ConsensusInfo],
                           variant_group_identity: float,
                           min_overlap_bp: int = 0) -> Dict[int, List[ConsensusInfo]]:
     """
-    Perform Hierarchical Agglomerative Clustering using complete linkage.
+    Perform Hierarchical Agglomerative Clustering.
     Separates specimens from variants based on identity threshold.
     Returns groups of consensus sequences.
 
-    When min_overlap_bp > 0, uses overlap-aware distance calculation that
+    Linkage strategy:
+    - When min_overlap_bp > 0 (overlap mode): Uses SINGLE linkage, which groups
+      sequences if ANY pair has sufficient overlap. This allows prefix+suffix+full
+      scenarios where partials only overlap with the full sequence, not each other.
+    - When min_overlap_bp == 0 (standard mode): Uses COMPLETE linkage, which
+      requires ALL pairs to be within threshold. More conservative for same-length
+      sequences.
+
+    When min_overlap_bp > 0, also uses overlap-aware distance calculation that
     allows sequences of different lengths to be grouped together if they
     share sufficient overlap with good identity.
     """
     if len(consensus_list) <= 1:
         return {0: consensus_list}
 
+    # Determine linkage strategy based on overlap mode
+    use_single_linkage = min_overlap_bp > 0
+    linkage_type = "single" if use_single_linkage else "complete"
+
     if min_overlap_bp > 0:
         logging.debug(f"Performing HAC clustering with {variant_group_identity} identity threshold "
-                     f"(overlap-aware mode, min_overlap={min_overlap_bp}bp)")
+                     f"({linkage_type} linkage, overlap-aware mode, min_overlap={min_overlap_bp}bp)")
     else:
-        logging.debug(f"Performing HAC clustering with {variant_group_identity} identity threshold")
+        logging.debug(f"Performing HAC clustering with {variant_group_identity} identity threshold "
+                     f"({linkage_type} linkage)")
 
     n = len(consensus_list)
     distance_threshold = 1.0 - variant_group_identity
@@ -1923,8 +2005,12 @@ def perform_hac_clustering(consensus_list: List[ConsensusInfo],
         seq_distances[(j, i)] = dist
     
     def cluster_distance(cluster1: List[int], cluster2: List[int]) -> float:
-        """Calculate complete linkage distance between two clusters."""
-        max_dist = 0.0
+        """Calculate linkage distance between two clusters.
+
+        Uses single linkage (min) for overlap mode, complete linkage (max) otherwise.
+        Single linkage allows transitive grouping through a bridge sequence.
+        """
+        distances = []
         for i in cluster1:
             for j in cluster2:
                 if i < j:
@@ -1933,8 +2019,12 @@ def perform_hac_clustering(consensus_list: List[ConsensusInfo],
                     dist = seq_distances[(j, i)]
                 else:
                     dist = 0.0
-                max_dist = max(max_dist, dist)
-        return max_dist
+                distances.append(dist)
+
+        if use_single_linkage:
+            return min(distances)  # Single linkage: closest pair
+        else:
+            return max(distances)  # Complete linkage: furthest pair
     
     # Perform hierarchical clustering
     while len(clusters) > 1:
