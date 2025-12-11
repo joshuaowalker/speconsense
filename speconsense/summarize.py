@@ -69,6 +69,7 @@ class ConsensusInfo(NamedTuple):
     snp_count: Optional[int] = None  # Number of SNPs from IUPAC consensus generation
     primers: Optional[List[str]] = None  # List of detected primer names
     raw_ric: Optional[List[int]] = None  # RiC values of .raw source variants
+    raw_len: Optional[List[int]] = None  # Lengths of merged source sequences
     rid: Optional[float] = None  # Mean read identity (internal consistency metric)
     rid_min: Optional[float] = None  # Minimum read identity (worst-case read)
     merge_indel_count: Optional[int] = None  # Number of indels consumed by merging (for cumulative tracking)
@@ -130,6 +131,17 @@ class RawRicField(FastaField):
         if consensus.raw_ric and len(consensus.raw_ric) > 0:
             ric_values = sorted(consensus.raw_ric, reverse=True)
             return f"rawric={'+'.join(str(r) for r in ric_values)}"
+        return None
+
+
+class RawLenField(FastaField):
+    def __init__(self):
+        super().__init__('rawlen', 'Lengths of merged source sequences')
+
+    def format_value(self, consensus: ConsensusInfo) -> Optional[str]:
+        if consensus.raw_len and len(consensus.raw_len) > 0:
+            len_values = sorted(consensus.raw_len, reverse=True)
+            return f"rawlen={'+'.join(str(l) for l in len_values)}"
         return None
 
 
@@ -215,6 +227,7 @@ FASTA_FIELDS = {
     'ric': RicField(),
     'length': LengthField(),
     'rawric': RawRicField(),
+    'rawlen': RawLenField(),
     'snp': SnpField(),
     'ambig': AmbigField(),
     'rid': RidField(),
@@ -226,10 +239,10 @@ FASTA_FIELDS = {
 
 # Preset definitions
 FASTA_FIELD_PRESETS = {
-    'default': ['size', 'ric', 'rawric', 'snp', 'ambig', 'primers'],
+    'default': ['size', 'ric', 'rawric', 'rawlen', 'snp', 'ambig', 'primers'],
     'minimal': ['size', 'ric'],
     'qc': ['size', 'ric', 'length', 'rid', 'ambig'],
-    'full': ['size', 'ric', 'length', 'rawric', 'snp', 'ambig', 'rid', 'primers'],
+    'full': ['size', 'ric', 'length', 'rawric', 'rawlen', 'snp', 'ambig', 'rid', 'primers'],
     'id-only': [],
 }
 
@@ -1005,6 +1018,9 @@ def analyze_msa_columns_overlap_aware(aligned_seqs: List, min_overlap_bp: int,
         'homopolymer_indel_length': Length of longest homopolymer indel
         'terminal_gap_columns': Number of terminal gap columns (not counted as structural)
         'overlap_bp': Size of overlap region in base pairs
+        'prefix_bp': Extension before overlap region (for logging)
+        'suffix_bp': Extension after overlap region (for logging)
+        'content_regions': List of (start, end) tuples per sequence (for span logging)
         'indel_count': Total events (backward compatibility)
         'max_indel_length': Max event length (backward compatibility)
     """
@@ -1024,6 +1040,12 @@ def analyze_msa_columns_overlap_aware(aligned_seqs: List, min_overlap_bp: int,
     # Step 2: Calculate overlap region (intersection of all content regions)
     overlap_start = max(start for start, _ in content_regions)
     overlap_end = min(end for _, end in content_regions)
+
+    # Calculate union region (for prefix/suffix extension reporting)
+    union_start = min(start for start, _ in content_regions)
+    union_end = max(end for _, end in content_regions)
+    prefix_bp = overlap_start - union_start
+    suffix_bp = union_end - overlap_end
 
     # Calculate actual overlap in base pairs (count only columns where all have bases)
     overlap_bp = 0
@@ -1112,6 +1134,9 @@ def analyze_msa_columns_overlap_aware(aligned_seqs: List, min_overlap_bp: int,
         'homopolymer_indel_length': homopolymer_indel_length,
         'terminal_gap_columns': terminal_gap_columns,
         'overlap_bp': overlap_bp,
+        'prefix_bp': prefix_bp,
+        'suffix_bp': suffix_bp,
+        'content_regions': content_regions,
         'indel_count': total_indel_count,  # Backward compatibility
         'max_indel_length': max_indel_length  # Backward compatibility
     }
@@ -1262,6 +1287,15 @@ def create_consensus_from_msa(aligned_seqs: List, variants: List[ConsensusInfo])
     total_ric = sum(v.ric for v in variants)
     raw_ric_values = sorted([v.ric for v in variants], reverse=True) if len(variants) > 1 else None
 
+    # Collect lengths, preserving any prior merge history
+    raw_len_values = []
+    for v in variants:
+        if v.raw_len:
+            raw_len_values.extend(v.raw_len)  # Flatten prior merge history
+        else:
+            raw_len_values.append(len(v.sequence))
+    raw_len_values = sorted(raw_len_values, reverse=True) if len(variants) > 1 else None
+
     # Use name from largest variant
     largest_variant = max(variants, key=lambda v: v.size)
 
@@ -1275,6 +1309,7 @@ def create_consensus_from_msa(aligned_seqs: List, variants: List[ConsensusInfo])
         snp_count=snp_count if snp_count > 0 else None,
         primers=largest_variant.primers,
         raw_ric=raw_ric_values,
+        raw_len=raw_len_values,
         rid=largest_variant.rid,  # Preserve identity metrics from largest variant
         rid_min=largest_variant.rid_min,
     )
@@ -1379,6 +1414,15 @@ def create_overlap_consensus_from_msa(aligned_seqs: List, variants: List[Consens
     total_ric = sum(v.ric for v in variants)
     raw_ric_values = sorted([v.ric for v in variants], reverse=True) if len(variants) > 1 else None
 
+    # Collect lengths, preserving any prior merge history
+    raw_len_values = []
+    for v in variants:
+        if v.raw_len:
+            raw_len_values.extend(v.raw_len)  # Flatten prior merge history
+        else:
+            raw_len_values.append(len(v.sequence))
+    raw_len_values = sorted(raw_len_values, reverse=True) if len(variants) > 1 else None
+
     # Use name from largest variant
     largest_variant = max(variants, key=lambda v: v.size)
 
@@ -1392,6 +1436,7 @@ def create_overlap_consensus_from_msa(aligned_seqs: List, variants: List[Consens
         snp_count=snp_count if snp_count > 0 else None,
         primers=largest_variant.primers,
         raw_ric=raw_ric_values,
+        raw_len=raw_len_values,
         rid=largest_variant.rid,
         rid_min=largest_variant.rid_min,
     )
@@ -1530,14 +1575,22 @@ def merge_group_with_msa(variants: List[ConsensusInfo], args) -> Tuple[List[Cons
                             parts.append(f"{variant_stats['structural_indel_count']} structural indels")
                         if variant_stats['homopolymer_indel_count'] > 0:
                             parts.append(f"{variant_stats['homopolymer_indel_count']} homopolymer indels")
-                        if args.min_merge_overlap > 0 and variant_stats.get('terminal_gap_columns', 0) > 0:
-                            parts.append(f"{variant_stats['terminal_gap_columns']} terminal gap cols")
 
                         variant_desc = ", ".join(parts) if parts else "identical sequences"
                         iter_prefix = f"Iteration {iteration}: " if iteration > 1 else ""
                         if args.min_merge_overlap > 0:
+                            # Include prefix/suffix extension info for overlap merges
+                            prefix_bp = variant_stats.get('prefix_bp', 0)
+                            suffix_bp = variant_stats.get('suffix_bp', 0)
                             logging.info(f"{iter_prefix}Found mergeable subset of {len(subset_indices)} variants "
-                                       f"(overlap={variant_stats.get('overlap_bp', 'N/A')}bp): {variant_desc}")
+                                       f"(overlap={variant_stats.get('overlap_bp', 'N/A')}bp, "
+                                       f"prefix={prefix_bp}bp, suffix={suffix_bp}bp): {variant_desc}")
+
+                            # DEBUG: Show span details for each sequence in the merge
+                            content_regions = variant_stats.get('content_regions', [])
+                            if content_regions:
+                                spans = [f"seq{i+1}=({s},{e})" for i, (s, e) in enumerate(content_regions)]
+                                logging.debug(f"Merge spans: {', '.join(spans)}")
                         else:
                             logging.info(f"{iter_prefix}Found mergeable subset of {len(subset_indices)} variants: {variant_desc}")
 
@@ -2195,21 +2248,9 @@ def create_output_structure(groups: Dict[int, List[ConsensusInfo]],
             # Use rsplit to split on the LAST '-c' (specimen names may contain '-c')
             specimen_base = variant.sample_name.rsplit('-c', 1)[0]
             new_name = f"{specimen_base}-{group_idx}.v{variant_idx + 1}"
-            
-            # Create new ConsensusInfo with updated name
-            renamed_variant = ConsensusInfo(
-                sample_name=new_name,
-                cluster_id=variant.cluster_id,
-                sequence=variant.sequence,
-                ric=variant.ric,
-                size=variant.size,
-                file_path=variant.file_path,
-                snp_count=variant.snp_count,  # Preserve SNP count from original
-                primers=variant.primers,  # Preserve primers
-                raw_ric=variant.raw_ric,  # Preserve raw_ric
-                rid=variant.rid,  # Preserve identity metrics
-                rid_min=variant.rid_min,
-            )
+
+            # Use _replace to preserve all fields while updating sample_name
+            renamed_variant = variant._replace(sample_name=new_name)
 
             final_consensus.append(renamed_variant)
             group_naming.append((variant.sample_name, new_name))
@@ -3150,20 +3191,8 @@ def process_single_specimen(file_consensuses: List[ConsensusInfo],
             specimen_base = variant.sample_name.rsplit('-c', 1)[0]
             new_name = f"{specimen_base}-{group_idx + 1}.v{variant_idx + 1}"
 
-            # Create new ConsensusInfo with updated name
-            renamed_variant = ConsensusInfo(
-                sample_name=new_name,
-                cluster_id=variant.cluster_id,
-                sequence=variant.sequence,
-                ric=variant.ric,
-                size=variant.size,
-                file_path=variant.file_path,
-                snp_count=variant.snp_count,  # Preserve SNP count from merging
-                primers=variant.primers,  # Preserve primers
-                raw_ric=variant.raw_ric,  # Preserve raw_ric
-                rid=variant.rid,  # Preserve identity metrics
-                rid_min=variant.rid_min,
-            )
+            # Use _replace to preserve all fields while updating sample_name
+            renamed_variant = variant._replace(sample_name=new_name)
 
             final_consensus.append(renamed_variant)
             group_naming.append((variant.sample_name, new_name))

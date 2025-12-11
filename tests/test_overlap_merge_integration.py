@@ -245,3 +245,63 @@ class TestOverlapMergeIntegration:
         for filename in specimen_files:
             filepath = os.path.join(temp_output_dir, filename)
             assert os.path.exists(filepath), f"Expected specimen file not created: {filename}"
+
+    def test_rawlen_field_in_output(self, temp_output_dir):
+        """
+        Test that rawlen field appears in output with correct values.
+
+        rawlen shows the original sequence lengths before merging.
+        """
+        result = run_summarize(str(TEST_DATA_DIR), temp_output_dir)
+        assert result.returncode == 0, f"Command failed: {result.stderr}"
+
+        summary_fasta = os.path.join(temp_output_dir, "summary.fasta")
+        headers = parse_fasta_headers(summary_fasta)
+
+        # Check test-prefix has rawlen (2-way merge)
+        prefix_headers = [h for h in headers if h[0].startswith("test-prefix-") and not h[0].startswith("test-prefix-suffix")]
+        assert len(prefix_headers) == 1
+        name, attrs = prefix_headers[0]
+        assert "rawlen" in attrs, "rawlen field missing for merged variant"
+        rawlen_parts = attrs["rawlen"].split("+")
+        assert len(rawlen_parts) == 2, f"Expected 2 lengths for 2-way merge, got {len(rawlen_parts)}"
+
+    def test_rawlen_accumulates_through_iterative_merge(self, temp_output_dir):
+        """
+        Test that rawlen shows all original lengths through iterative merges.
+
+        For 3-way iterative merge (A+B→merged, merged+C→final),
+        rawlen should show all 3 original lengths, not just the final 2.
+        """
+        result = run_summarize(str(TEST_DATA_DIR), temp_output_dir)
+        assert result.returncode == 0, f"Command failed: {result.stderr}"
+
+        summary_fasta = os.path.join(temp_output_dir, "summary.fasta")
+        headers = parse_fasta_headers(summary_fasta)
+
+        # Check test-prefix-suffix-full has 3 lengths in rawlen
+        psf_headers = [h for h in headers if h[0].startswith("test-prefix-suffix-full")]
+        assert len(psf_headers) == 1
+        name, attrs = psf_headers[0]
+
+        assert "rawlen" in attrs, "rawlen field missing for iteratively merged variant"
+        rawlen_parts = attrs["rawlen"].split("+")
+        assert len(rawlen_parts) == 3, f"Expected 3 lengths for 3-way iterative merge, got {len(rawlen_parts)}: {attrs['rawlen']}"
+
+        # All lengths should be positive integers
+        for part in rawlen_parts:
+            length = int(part)
+            assert length > 0, f"Invalid length in rawlen: {part}"
+
+    def test_logging_shows_prefix_suffix(self, temp_output_dir):
+        """
+        Test that log output uses prefix/suffix format instead of terminal gap cols.
+        """
+        result = run_summarize(str(TEST_DATA_DIR), temp_output_dir)
+        assert result.returncode == 0, f"Command failed: {result.stderr}"
+
+        # Check stderr for new logging format
+        assert "prefix=" in result.stderr, "Log should contain 'prefix=' in new format"
+        assert "suffix=" in result.stderr, "Log should contain 'suffix=' in new format"
+        # Old format should not appear
+        assert "terminal gap cols" not in result.stderr, "Log should not use old 'terminal gap cols' format"
