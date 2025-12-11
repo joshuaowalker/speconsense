@@ -58,12 +58,14 @@ def test_merge_behavior_with_full_hac_context():
         shutil_module.copy(test_file, dest_file)
 
         # Run speconsense-summarize with default parameters
+        # Disable overlap merge (--min-merge-overlap 0) to test original behavior
         result = subprocess.run(
             [
                 "speconsense-summarize",
                 "--source", source_dir,
                 "--summary-dir", summary_dir,
-                "--min-ric", "3"  # Include c4, c7, c8, c9 (all have ric >= 3)
+                "--min-ric", "3",  # Include c4, c7, c8, c9 (all have ric >= 3)
+                "--min-merge-overlap", "0"  # Disable overlap merge for this test
             ],
             capture_output=True,
             text=True

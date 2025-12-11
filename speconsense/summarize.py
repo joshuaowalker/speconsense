@@ -15,7 +15,7 @@ from collections import defaultdict
 
 import edlib
 from Bio import SeqIO
-from adjusted_identity import score_alignment, AdjustmentParams
+from adjusted_identity import score_alignment, AdjustmentParams, align_and_score
 import tempfile
 import subprocess
 from tqdm import tqdm
@@ -29,6 +29,9 @@ from speconsense.msa import (
     analyze_positional_variation,
     IUPAC_CODES,
 )
+
+# Import shared types
+from speconsense.types import ConsensusInfo, OverlapMergeInfo
 
 
 # IUPAC equivalencies for edlib alignment
@@ -56,21 +59,6 @@ STANDARD_ADJUSTMENT_PARAMS = AdjustmentParams(
 # Beyond this limit, subset evaluation becomes computationally impractical
 # (2^N subsets to evaluate - 2^10 = 1024 is manageable, 2^20 = 1M+ is not)
 MAX_MSA_MERGE_VARIANTS = 10
-
-
-class ConsensusInfo(NamedTuple):
-    """Information about a consensus sequence from speconsense output."""
-    sample_name: str
-    cluster_id: str
-    sequence: str
-    ric: int
-    size: int
-    file_path: str
-    snp_count: Optional[int] = None  # Number of SNPs from IUPAC consensus generation
-    primers: Optional[List[str]] = None  # List of detected primer names
-    raw_ric: Optional[List[int]] = None  # RiC values of .raw source variants
-    rid: Optional[float] = None  # Mean read identity (internal consistency metric)
-    rid_min: Optional[float] = None  # Minimum read identity (worst-case read)
 
 
 class ClusterQualityData(NamedTuple):
@@ -129,6 +117,17 @@ class RawRicField(FastaField):
         if consensus.raw_ric and len(consensus.raw_ric) > 0:
             ric_values = sorted(consensus.raw_ric, reverse=True)
             return f"rawric={'+'.join(str(r) for r in ric_values)}"
+        return None
+
+
+class RawLenField(FastaField):
+    def __init__(self):
+        super().__init__('rawlen', 'Lengths of merged source sequences')
+
+    def format_value(self, consensus: ConsensusInfo) -> Optional[str]:
+        if consensus.raw_len and len(consensus.raw_len) > 0:
+            len_values = sorted(consensus.raw_len, reverse=True)
+            return f"rawlen={'+'.join(str(l) for l in len_values)}"
         return None
 
 
@@ -214,6 +213,7 @@ FASTA_FIELDS = {
     'ric': RicField(),
     'length': LengthField(),
     'rawric': RawRicField(),
+    'rawlen': RawLenField(),
     'snp': SnpField(),
     'ambig': AmbigField(),
     'rid': RidField(),
@@ -225,10 +225,10 @@ FASTA_FIELDS = {
 
 # Preset definitions
 FASTA_FIELD_PRESETS = {
-    'default': ['size', 'ric', 'rawric', 'snp', 'ambig', 'primers'],
+    'default': ['size', 'ric', 'rawric', 'rawlen', 'snp', 'ambig', 'primers'],
     'minimal': ['size', 'ric'],
     'qc': ['size', 'ric', 'length', 'rid', 'ambig'],
-    'full': ['size', 'ric', 'length', 'rawric', 'snp', 'ambig', 'rid', 'primers'],
+    'full': ['size', 'ric', 'length', 'rawric', 'rawlen', 'snp', 'ambig', 'rid', 'primers'],
     'id-only': [],
 }
 
@@ -354,6 +354,8 @@ def parse_arguments():
                         help="Minimum size ratio (smaller/larger) for merging clusters (default: 0.0 = disabled)")
     parser.add_argument("--disable-homopolymer-equivalence", action="store_true",
                         help="Disable homopolymer equivalence in merging (treat AAA vs AAAA as different)")
+    parser.add_argument("--min-merge-overlap", type=int, default=200,
+                        help="Minimum overlap in bp for merging sequences of different lengths (default: 200, 0 to disable)")
 
     # Backward compatibility: support old --snp-merge-limit parameter
     parser.add_argument("--snp-merge-limit", type=int, dest="_snp_merge_limit_deprecated",
@@ -727,12 +729,16 @@ def analyze_positional_identity_outliers(
     }
 
 
-def run_spoa_msa(sequences: List[str]) -> List:
+def run_spoa_msa(sequences: List[str], alignment_mode: int = 1) -> List:
     """
     Run SPOA to create multiple sequence alignment.
 
     Args:
         sequences: List of DNA sequence strings
+        alignment_mode: SPOA alignment mode:
+            0 = local (Smith-Waterman) - best for overlap merging
+            1 = global (Needleman-Wunsch) - default, for same-length sequences
+            2 = semi-global - alternative for overlap merging
 
     Returns:
         List of SeqRecord objects with aligned sequences (including gaps)
@@ -750,9 +756,9 @@ def run_spoa_msa(sequences: List[str]) -> List:
             SeqIO.write(records, temp_input, "fasta")
             temp_input.flush()
 
-            # Run SPOA with alignment output (-r 2) and global alignment mode (-l 1)
+            # Run SPOA with alignment output (-r 2) and specified alignment mode
             result = subprocess.run(
-                ['spoa', temp_input.name, '-r', '2', '-l', '1'],
+                ['spoa', temp_input.name, '-r', '2', '-l', str(alignment_mode)],
                 capture_output=True,
                 text=True,
                 check=True
@@ -975,6 +981,153 @@ def analyze_msa_columns(aligned_seqs: List) -> dict:
     }
 
 
+def analyze_msa_columns_overlap_aware(aligned_seqs: List, min_overlap_bp: int,
+                                       original_lengths: List[int]) -> dict:
+    """
+    Analyze MSA columns, distinguishing terminal gaps from structural indels.
+
+    Terminal gaps (from length differences at sequence ends) are NOT counted
+    as structural indels when sequences have sufficient overlap in their
+    shared region. This enables merging sequences from primer pools with
+    different endpoints.
+
+    Args:
+        aligned_seqs: List of aligned sequences from SPOA
+        min_overlap_bp: Minimum overlap required (0 to disable overlap mode)
+        original_lengths: Original ungapped sequence lengths
+
+    Returns dict with:
+        'snp_count': SNPs in overlap region
+        'structural_indel_count': Structural indels in overlap region only
+        'structural_indel_length': Length of longest structural indel
+        'homopolymer_indel_count': Homopolymer indels (anywhere)
+        'homopolymer_indel_length': Length of longest homopolymer indel
+        'terminal_gap_columns': Number of terminal gap columns (not counted as structural)
+        'overlap_bp': Size of overlap region in base pairs
+        'prefix_bp': Extension before overlap region (for logging)
+        'suffix_bp': Extension after overlap region (for logging)
+        'content_regions': List of (start, end) tuples per sequence (for span logging)
+        'indel_count': Total events (backward compatibility)
+        'max_indel_length': Max event length (backward compatibility)
+    """
+    alignment_length = len(aligned_seqs[0].seq)
+
+    # Step 1: Find content region for each sequence (first non-gap to last non-gap)
+    content_regions = []  # List of (start, end) tuples
+    for seq in aligned_seqs:
+        seq_str = str(seq.seq)
+        # Find first and last non-gap positions
+        first_base = next((i for i, c in enumerate(seq_str) if c != '-'), 0)
+        last_base = alignment_length - 1 - next(
+            (i for i, c in enumerate(reversed(seq_str)) if c != '-'), 0
+        )
+        content_regions.append((first_base, last_base))
+
+    # Step 2: Calculate overlap region (intersection of all content regions)
+    overlap_start = max(start for start, _ in content_regions)
+    overlap_end = min(end for _, end in content_regions)
+
+    # Calculate union region (for prefix/suffix extension reporting)
+    union_start = min(start for start, _ in content_regions)
+    union_end = max(end for _, end in content_regions)
+    prefix_bp = overlap_start - union_start
+    suffix_bp = union_end - overlap_end
+
+    # Calculate actual overlap in base pairs (count only columns where all have bases)
+    overlap_bp = 0
+    if overlap_end >= overlap_start:
+        for col_idx in range(overlap_start, overlap_end + 1):
+            column = [str(seq.seq[col_idx]) for seq in aligned_seqs]
+            if all(c != '-' for c in column):
+                overlap_bp += 1
+
+    # Determine effective threshold for containment cases
+    shorter_len = min(original_lengths)
+    effective_threshold = min(min_overlap_bp, shorter_len)
+
+    # Step 3: Count SNPs only within overlap region
+    snp_count = 0
+    for col_idx in range(overlap_start, overlap_end + 1):
+        column = [str(seq.seq[col_idx]) for seq in aligned_seqs]
+        unique_bases = set(c for c in column if c != '-')
+        has_gap = '-' in column
+
+        # SNP position: multiple different bases with NO gaps
+        if len(unique_bases) > 1 and not has_gap:
+            snp_count += 1
+
+    # Step 4: Identify indel events, but only count those within overlap region
+    indel_events = identify_indel_events(aligned_seqs, alignment_length)
+
+    # Step 5: Classify each event and determine if it's in overlap region
+    structural_events = []
+    homopolymer_events = []
+    terminal_gap_columns = 0
+
+    for start_col, end_col in indel_events:
+        # Check if this event is entirely within the overlap region
+        is_in_overlap = (start_col >= overlap_start and end_col <= overlap_end)
+
+        # Check if this is a terminal gap event (at the boundary of a content region)
+        is_terminal = False
+        for seq_start, seq_end in content_regions:
+            # Terminal if event is adjacent to or outside a sequence's content region
+            if end_col < seq_start or start_col > seq_end:
+                is_terminal = True
+                break
+            # Also terminal if event is at the very edge of content
+            if start_col == seq_start or end_col == seq_end:
+                # Check if the gaps in this event are from this sequence's terminal
+                for col_idx in range(start_col, end_col + 1):
+                    column = [str(seq.seq[col_idx]) for seq in aligned_seqs]
+                    for i, (s, e) in enumerate(content_regions):
+                        if col_idx < s or col_idx > e:
+                            if column[i] == '-':
+                                is_terminal = True
+                                break
+                    if is_terminal:
+                        break
+
+        if is_terminal and overlap_bp >= effective_threshold:
+            # Terminal gap from length difference - don't count as structural
+            terminal_gap_columns += (end_col - start_col + 1)
+        elif is_homopolymer_event(aligned_seqs, start_col, end_col):
+            homopolymer_events.append((start_col, end_col))
+        else:
+            # Only count as structural if within overlap region
+            if is_in_overlap:
+                structural_events.append((start_col, end_col))
+            else:
+                # Outside overlap - this is a terminal gap
+                terminal_gap_columns += (end_col - start_col + 1)
+
+    # Step 6: Calculate statistics
+    structural_indel_count = len(structural_events)
+    homopolymer_indel_count = len(homopolymer_events)
+
+    structural_indel_length = max((end - start + 1 for start, end in structural_events), default=0)
+    homopolymer_indel_length = max((end - start + 1 for start, end in homopolymer_events), default=0)
+
+    # Backward compatibility
+    total_indel_count = structural_indel_count + homopolymer_indel_count
+    max_indel_length = max(structural_indel_length, homopolymer_indel_length)
+
+    return {
+        'snp_count': snp_count,
+        'structural_indel_count': structural_indel_count,
+        'structural_indel_length': structural_indel_length,
+        'homopolymer_indel_count': homopolymer_indel_count,
+        'homopolymer_indel_length': homopolymer_indel_length,
+        'terminal_gap_columns': terminal_gap_columns,
+        'overlap_bp': overlap_bp,
+        'prefix_bp': prefix_bp,
+        'suffix_bp': suffix_bp,
+        'content_regions': content_regions,
+        'indel_count': total_indel_count,  # Backward compatibility
+        'max_indel_length': max_indel_length  # Backward compatibility
+    }
+
+
 def generate_all_subsets_by_size(variants: List[ConsensusInfo]) -> List[Tuple[int, ...]]:
     """
     Generate all possible non-empty subsets of variant indices.
@@ -1008,7 +1161,7 @@ def generate_all_subsets_by_size(variants: List[ConsensusInfo]) -> List[Tuple[in
     return [subset for _, subset in candidates]
 
 
-def is_compatible_subset(variant_stats: dict, args) -> bool:
+def is_compatible_subset(variant_stats: dict, args, prior_positions: dict = None) -> bool:
     """
     Check if variant statistics are within merge limits.
 
@@ -1018,7 +1171,16 @@ def is_compatible_subset(variant_stats: dict, args) -> bool:
 
     When --disable-homopolymer-equivalence is set, homopolymer indels are treated
     the same as structural indels and count against merge limits.
+
+    Args:
+        variant_stats: Statistics from MSA analysis (snp_count, indel counts, etc.)
+        args: Command-line arguments with merge parameters
+        prior_positions: Optional dict with cumulative counts from prior merge rounds
+                        {'snp_count': N, 'indel_count': M} - these are added to
+                        current stats when checking limits for iterative merging
     """
+    if prior_positions is None:
+        prior_positions = {'snp_count': 0, 'indel_count': 0}
 
     # Check SNP limit
     if variant_stats['snp_count'] > 0 and not args.merge_snp:
@@ -1042,8 +1204,9 @@ def is_compatible_subset(variant_stats: dict, args) -> bool:
         if indel_length > args.merge_indel_length:
             return False
 
-    # Check total position count
-    total_positions = variant_stats['snp_count'] + indel_count
+    # Check total position count (including prior merge rounds)
+    total_positions = (variant_stats['snp_count'] + prior_positions['snp_count'] +
+                      indel_count + prior_positions['indel_count'])
     if total_positions > args.merge_position_count:
         return False
 
@@ -1110,6 +1273,15 @@ def create_consensus_from_msa(aligned_seqs: List, variants: List[ConsensusInfo])
     total_ric = sum(v.ric for v in variants)
     raw_ric_values = sorted([v.ric for v in variants], reverse=True) if len(variants) > 1 else None
 
+    # Collect lengths, preserving any prior merge history
+    raw_len_values = []
+    for v in variants:
+        if v.raw_len:
+            raw_len_values.extend(v.raw_len)  # Flatten prior merge history
+        else:
+            raw_len_values.append(len(v.sequence))
+    raw_len_values = sorted(raw_len_values, reverse=True) if len(variants) > 1 else None
+
     # Use name from largest variant
     largest_variant = max(variants, key=lambda v: v.size)
 
@@ -1123,12 +1295,140 @@ def create_consensus_from_msa(aligned_seqs: List, variants: List[ConsensusInfo])
         snp_count=snp_count if snp_count > 0 else None,
         primers=largest_variant.primers,
         raw_ric=raw_ric_values,
+        raw_len=raw_len_values,
         rid=largest_variant.rid,  # Preserve identity metrics from largest variant
         rid_min=largest_variant.rid_min,
     )
 
 
-def merge_group_with_msa(variants: List[ConsensusInfo], args) -> Tuple[List[ConsensusInfo], Dict, int]:
+def create_overlap_consensus_from_msa(aligned_seqs: List, variants: List[ConsensusInfo]) -> ConsensusInfo:
+    """
+    Generate consensus from MSA where sequences may have different lengths.
+
+    For overlap merging (primer pools with different endpoints):
+    - In overlap region: Use size-weighted majority voting
+    - In non-overlap regions: Keep content from whichever sequence(s) have it
+
+    This produces a consensus spanning the union of all input sequences.
+
+    Args:
+        aligned_seqs: MSA sequences with gaps as '-'
+        variants: Original ConsensusInfo objects (for size weighting)
+
+    Returns:
+        ConsensusInfo with merged consensus sequence spanning full length
+    """
+    consensus_seq = []
+    snp_count = 0
+    alignment_length = len(aligned_seqs[0].seq)
+
+    # Find content region for each sequence
+    content_regions = []
+    for seq in aligned_seqs:
+        seq_str = str(seq.seq)
+        first_base = next((i for i, c in enumerate(seq_str) if c != '-'), 0)
+        last_base = alignment_length - 1 - next(
+            (i for i, c in enumerate(reversed(seq_str)) if c != '-'), 0
+        )
+        content_regions.append((first_base, last_base))
+
+    # Calculate overlap region
+    overlap_start = max(start for start, _ in content_regions)
+    overlap_end = min(end for _, end in content_regions)
+
+    # Process each column
+    for col_idx in range(alignment_length):
+        column = [str(seq.seq[col_idx]) for seq in aligned_seqs]
+
+        # Determine which sequences have content at this position
+        seqs_with_content = []
+        for i, (start, end) in enumerate(content_regions):
+            if start <= col_idx <= end:
+                seqs_with_content.append(i)
+
+        if not seqs_with_content:
+            # No sequence has content here (shouldn't happen in valid MSA)
+            continue
+
+        # Check if we're in the overlap region
+        in_overlap = overlap_start <= col_idx <= overlap_end
+
+        if in_overlap:
+            # Overlap region: use size-weighted majority voting (like original)
+            votes_with_size = [(column[i], variants[i].size) for i in seqs_with_content]
+
+            votes = defaultdict(int)
+            for base, size in votes_with_size:
+                votes[base.upper()] += size
+
+            gap_votes = votes.get('-', 0)
+            base_votes = {b: v for b, v in votes.items() if b != '-'}
+            total_base_votes = sum(base_votes.values())
+
+            if total_base_votes > gap_votes:
+                if len(base_votes) == 1:
+                    consensus_seq.append(list(base_votes.keys())[0])
+                else:
+                    represented_bases = set(base_votes.keys())
+                    iupac_code = IUPAC_CODES.get(frozenset(represented_bases), 'N')
+                    consensus_seq.append(iupac_code)
+                    snp_count += 1
+            # else: majority wants gap in overlap, omit position
+        else:
+            # Non-overlap region: keep content from available sequences
+            # (don't let gap votes from sequences that don't extend here remove content)
+            bases_only = [column[i] for i in seqs_with_content if column[i] != '-']
+
+            if bases_only:
+                # Weight by size for consistency
+                votes = defaultdict(int)
+                for i in seqs_with_content:
+                    if column[i] != '-':
+                        votes[column[i].upper()] += variants[i].size
+
+                if len(votes) == 1:
+                    consensus_seq.append(list(votes.keys())[0])
+                else:
+                    represented_bases = set(votes.keys())
+                    iupac_code = IUPAC_CODES.get(frozenset(represented_bases), 'N')
+                    consensus_seq.append(iupac_code)
+                    snp_count += 1
+
+    # Create merged ConsensusInfo
+    consensus_sequence = ''.join(consensus_seq)
+    total_size = sum(v.size for v in variants)
+    total_ric = sum(v.ric for v in variants)
+    raw_ric_values = sorted([v.ric for v in variants], reverse=True) if len(variants) > 1 else None
+
+    # Collect lengths, preserving any prior merge history
+    raw_len_values = []
+    for v in variants:
+        if v.raw_len:
+            raw_len_values.extend(v.raw_len)  # Flatten prior merge history
+        else:
+            raw_len_values.append(len(v.sequence))
+    raw_len_values = sorted(raw_len_values, reverse=True) if len(variants) > 1 else None
+
+    # Use name from largest variant
+    largest_variant = max(variants, key=lambda v: v.size)
+
+    return ConsensusInfo(
+        sample_name=largest_variant.sample_name,
+        cluster_id=largest_variant.cluster_id,
+        sequence=consensus_sequence,
+        ric=total_ric,
+        size=total_size,
+        file_path=largest_variant.file_path,
+        snp_count=snp_count if snp_count > 0 else None,
+        primers=largest_variant.primers,
+        raw_ric=raw_ric_values,
+        raw_len=raw_len_values,
+        rid=largest_variant.rid,
+        rid_min=largest_variant.rid_min,
+    )
+
+
+def merge_group_with_msa(variants: List[ConsensusInfo], args) -> Tuple[List[ConsensusInfo], Dict, int, List[OverlapMergeInfo]]:
     """
     Find largest mergeable subset of variants using MSA-based evaluation with exhaustive search.
 
@@ -1138,118 +1438,232 @@ def merge_group_with_msa(variants: List[ConsensusInfo], args) -> Tuple[List[Cons
     3. Exhaustively evaluate ALL subsets by total size (descending)
     4. Merge the best compatible subset found
     5. Remove merged variants and repeat with remaining
+    6. When overlap mode is enabled, iterate the entire process on merged results
+       until no more merges happen (handles prefix+suffix+full scenarios)
 
     This approach guarantees optimal results when N ≤ MAX_MSA_MERGE_VARIANTS.
     For N > MAX, processes top MAX per round (potentially suboptimal globally).
+
+    Iterative merging (overlap mode only):
+    - After first pass, merged results are fed back for another round
+    - Cumulative SNP/indel counts are tracked across rounds
+    - Continues until no merges occur in a round
 
     Args:
         variants: List of ConsensusInfo from HAC group
         args: Command-line arguments with merge parameters
 
     Returns:
-        (merged_variants, merge_traceability, potentially_suboptimal) where:
+        (merged_variants, merge_traceability, potentially_suboptimal, overlap_merges) where:
         - merged_variants is list of merged ConsensusInfo objects
         - traceability maps merged names to original cluster names
         - potentially_suboptimal is 1 if group had >MAX variants, 0 otherwise
+        - overlap_merges is list of OverlapMergeInfo for quality reporting
     """
     if len(variants) == 1:
-        return variants, {}, 0
+        return variants, {}, 0, []
 
     # Track if this group is potentially suboptimal (too many variants for global optimum)
     potentially_suboptimal = 1 if len(variants) > MAX_MSA_MERGE_VARIANTS else 0
 
-    # Sort variants by size (largest first)
-    remaining_variants = sorted(variants, key=lambda v: v.size, reverse=True)
-    merged_results = []
     all_traceability = {}
+    overlap_merges = []  # Track overlap merge events for quality reporting
 
-    while remaining_variants:
-        # Take up to MAX_MSA_MERGE_VARIANTS candidates
-        candidates = remaining_variants[:MAX_MSA_MERGE_VARIANTS]
+    # For iterative merging in overlap mode, we may need multiple rounds
+    current_variants = variants
+    iteration = 0
+    max_iterations = 10  # Safety limit to prevent infinite loops
 
-        # Apply size ratio filter if enabled (relative to largest in batch)
-        if args.merge_min_size_ratio > 0:
-            largest_size = candidates[0].size
-            filtered_candidates = [v for v in candidates
-                                  if (v.size / largest_size) >= args.merge_min_size_ratio]
-            if len(filtered_candidates) < len(candidates):
-                filtered_count = len(candidates) - len(filtered_candidates)
-                logging.debug(f"Filtered out {filtered_count} variants with size ratio < {args.merge_min_size_ratio} relative to largest (size={largest_size})")
-                candidates = filtered_candidates
+    while iteration < max_iterations:
+        iteration += 1
 
-        # Single candidate - just pass through
-        if len(candidates) == 1:
-            merged_results.append(candidates[0])
-            remaining_variants.remove(candidates[0])
-            continue
+        # Sort variants by size (largest first)
+        remaining_variants = sorted(current_variants, key=lambda v: v.size, reverse=True)
+        merged_results = []
+        merges_this_iteration = 0
 
-        logging.debug(f"Evaluating {len(candidates)} variants for merging (exhaustive subset search)")
+        while remaining_variants:
+            # Take up to MAX_MSA_MERGE_VARIANTS candidates
+            candidates = remaining_variants[:MAX_MSA_MERGE_VARIANTS]
 
-        # Run SPOA MSA on candidates
-        sequences = [v.sequence for v in candidates]
-        aligned_seqs = run_spoa_msa(sequences)
+            # Apply size ratio filter if enabled (relative to largest in batch)
+            if args.merge_min_size_ratio > 0:
+                largest_size = candidates[0].size
+                filtered_candidates = [v for v in candidates
+                                      if (v.size / largest_size) >= args.merge_min_size_ratio]
+                if len(filtered_candidates) < len(candidates):
+                    filtered_count = len(candidates) - len(filtered_candidates)
+                    logging.debug(f"Filtered out {filtered_count} variants with size ratio < {args.merge_min_size_ratio} relative to largest (size={largest_size})")
+                    candidates = filtered_candidates
 
-        logging.debug(f"Generated MSA with length {len(aligned_seqs[0].seq)}")
+            # Single candidate - just pass through
+            if len(candidates) == 1:
+                merged_results.append(candidates[0])
+                remaining_variants.remove(candidates[0])
+                continue
 
-        # Generate ALL subsets sorted by total size (exhaustive search)
-        all_subsets = generate_all_subsets_by_size(candidates)
+            if iteration > 1:
+                logging.debug(f"Iteration {iteration}: Evaluating {len(candidates)} variants for merging")
+            else:
+                logging.debug(f"Evaluating {len(candidates)} variants for merging (exhaustive subset search)")
 
-        logging.debug(f"Evaluating {len(all_subsets)} candidate subsets")
+            # Run SPOA MSA on candidates
+            # Use local alignment mode (0) for overlap merging to get clean terminal gaps
+            # Use global alignment mode (1) for standard same-length merging
+            sequences = [v.sequence for v in candidates]
+            spoa_mode = 0 if args.min_merge_overlap > 0 else 1
+            aligned_seqs = run_spoa_msa(sequences, alignment_mode=spoa_mode)
 
-        # Find first (largest) compatible subset
-        merged_this_round = False
-        for subset_indices in all_subsets:
-            subset_variants = [candidates[i] for i in subset_indices]
-            subset_aligned = [aligned_seqs[i] for i in subset_indices]
+            logging.debug(f"Generated MSA with length {len(aligned_seqs[0].seq)}")
 
-            # Analyze MSA for this subset
-            variant_stats = analyze_msa_columns(subset_aligned)
+            # Generate ALL subsets sorted by total size (exhaustive search)
+            all_subsets = generate_all_subsets_by_size(candidates)
 
-            # Check compatibility against merge limits
-            if is_compatible_subset(variant_stats, args):
-                # Only log "mergeable subset" message for actual merges (>1 variant)
-                if len(subset_indices) > 1:
-                    # Build detailed variant description
-                    parts = []
-                    if variant_stats['snp_count'] > 0:
-                        parts.append(f"{variant_stats['snp_count']} SNPs")
-                    if variant_stats['structural_indel_count'] > 0:
-                        parts.append(f"{variant_stats['structural_indel_count']} structural indels")
-                    if variant_stats['homopolymer_indel_count'] > 0:
-                        parts.append(f"{variant_stats['homopolymer_indel_count']} homopolymer indels")
+            logging.debug(f"Evaluating {len(all_subsets)} candidate subsets")
 
-                    variant_desc = ", ".join(parts) if parts else "identical sequences"
-                    logging.info(f"Found mergeable subset of {len(subset_indices)} variants: {variant_desc}")
+            # Find first (largest) compatible subset
+            merged_this_round = False
+            for subset_indices in all_subsets:
+                subset_variants = [candidates[i] for i in subset_indices]
+                subset_aligned = [aligned_seqs[i] for i in subset_indices]
 
-                # Create merged consensus
-                merged_consensus = create_consensus_from_msa(
-                    subset_aligned, subset_variants
-                )
+                # Analyze MSA for this subset
+                if args.min_merge_overlap > 0:
+                    # Use overlap-aware analysis for primer pool scenarios
+                    original_lengths = [len(v.sequence) for v in subset_variants]
+                    variant_stats = analyze_msa_columns_overlap_aware(
+                        subset_aligned, args.min_merge_overlap, original_lengths
+                    )
 
-                # Track merge provenance
-                traceability = {
-                    merged_consensus.sample_name: [v.sample_name for v in subset_variants]
-                }
-                all_traceability.update(traceability)
+                    # Check overlap requirement
+                    shorter_len = min(original_lengths)
+                    effective_threshold = min(args.min_merge_overlap, shorter_len)
+                    if variant_stats['overlap_bp'] < effective_threshold:
+                        # Insufficient overlap - skip this subset
+                        continue
+                else:
+                    # Use standard analysis
+                    variant_stats = analyze_msa_columns(subset_aligned)
 
-                # Add merged consensus to results
-                merged_results.append(merged_consensus)
+                # Calculate cumulative positions from input sequences (for iterative merging)
+                # Each sequence may carry positions from prior merges
+                prior_snps = sum(v.snp_count or 0 for v in subset_variants)
+                prior_indels = sum(v.merge_indel_count or 0 for v in subset_variants)
+                prior_positions = {'snp_count': prior_snps, 'indel_count': prior_indels}
 
-                # Remove merged variants from remaining pool
-                for v in subset_variants:
-                    if v in remaining_variants:
-                        remaining_variants.remove(v)
+                # Check compatibility against merge limits (including cumulative positions)
+                if is_compatible_subset(variant_stats, args, prior_positions):
+                    # Only log "mergeable subset" message for actual merges (>1 variant)
+                    if len(subset_indices) > 1:
+                        # Build detailed variant description
+                        parts = []
+                        if variant_stats['snp_count'] > 0:
+                            parts.append(f"{variant_stats['snp_count']} SNPs")
+                        if variant_stats['structural_indel_count'] > 0:
+                            parts.append(f"{variant_stats['structural_indel_count']} structural indels")
+                        if variant_stats['homopolymer_indel_count'] > 0:
+                            parts.append(f"{variant_stats['homopolymer_indel_count']} homopolymer indels")
 
-                merged_this_round = True
-                break
+                        variant_desc = ", ".join(parts) if parts else "identical sequences"
+                        iter_prefix = f"Iteration {iteration}: " if iteration > 1 else ""
+                        if args.min_merge_overlap > 0:
+                            # Include prefix/suffix extension info for overlap merges
+                            prefix_bp = variant_stats.get('prefix_bp', 0)
+                            suffix_bp = variant_stats.get('suffix_bp', 0)
+                            logging.info(f"{iter_prefix}Found mergeable subset of {len(subset_indices)} variants "
+                                       f"(overlap={variant_stats.get('overlap_bp', 'N/A')}bp, "
+                                       f"prefix={prefix_bp}bp, suffix={suffix_bp}bp): {variant_desc}")
 
-        # If no merge found, keep largest variant as-is and continue
-        if not merged_this_round:
-            logging.debug(f"No compatible merge found for largest variant (size={candidates[0].size})")
-            merged_results.append(candidates[0])
-            remaining_variants.remove(candidates[0])
+                            # DEBUG: Show span details for each sequence in the merge
+                            content_regions = variant_stats.get('content_regions', [])
+                            if content_regions:
+                                spans = [f"seq{i+1}=({s},{e})" for i, (s, e) in enumerate(content_regions)]
+                                logging.debug(f"Merge spans: {', '.join(spans)}")
+                        else:
+                            logging.info(f"{iter_prefix}Found mergeable subset of {len(subset_indices)} variants: {variant_desc}")
 
-    return merged_results, all_traceability, potentially_suboptimal
+                        # Calculate total positions for cumulative tracking
+                        # Total = prior positions from input sequences + new positions from this merge
+                        if args.disable_homopolymer_equivalence:
+                            this_merge_indels = variant_stats['structural_indel_count'] + variant_stats['homopolymer_indel_count']
+                        else:
+                            this_merge_indels = variant_stats['structural_indel_count']
+                        total_snps = prior_snps + variant_stats['snp_count']
+                        total_indels = prior_indels + this_merge_indels
+
+                    # Create merged consensus
+                    if args.min_merge_overlap > 0:
+                        # Use overlap-aware consensus generation
+                        merged_consensus = create_overlap_consensus_from_msa(
+                            subset_aligned, subset_variants
+                        )
+                    else:
+                        merged_consensus = create_consensus_from_msa(
+                            subset_aligned, subset_variants
+                        )
+
+                    # Update merged consensus with cumulative position counts for iterative tracking
+                    if len(subset_indices) > 1:
+                        merged_consensus = merged_consensus._replace(
+                            snp_count=total_snps if total_snps > 0 else None,
+                            merge_indel_count=total_indels if total_indels > 0 else None
+                        )
+
+                    # Track merge provenance
+                    traceability = {
+                        merged_consensus.sample_name: [v.sample_name for v in subset_variants]
+                    }
+                    all_traceability.update(traceability)
+
+                    # Track overlap merge for quality reporting
+                    if args.min_merge_overlap > 0 and len(subset_indices) > 1:
+                        # Extract specimen name (remove cluster suffix like -c1)
+                        specimen = merged_consensus.sample_name.rsplit('-c', 1)[0] if '-c' in merged_consensus.sample_name else merged_consensus.sample_name
+                        overlap_merges.append(OverlapMergeInfo(
+                            specimen=specimen,
+                            iteration=iteration,
+                            input_clusters=[v.sample_name for v in subset_variants],
+                            input_lengths=[len(v.sequence) for v in subset_variants],
+                            input_rics=[v.ric for v in subset_variants],
+                            overlap_bp=variant_stats.get('overlap_bp', 0),
+                            prefix_bp=variant_stats.get('prefix_bp', 0),
+                            suffix_bp=variant_stats.get('suffix_bp', 0),
+                            output_length=len(merged_consensus.sequence)
+                        ))
+
+                    # Add merged consensus to results
+                    merged_results.append(merged_consensus)
+
+                    # Remove merged variants from remaining pool
+                    for v in subset_variants:
+                        if v in remaining_variants:
+                            remaining_variants.remove(v)
+
+                    merged_this_round = True
+                    if len(subset_indices) > 1:
+                        merges_this_iteration += 1
+                    break
+
+            # If no merge found, keep largest variant as-is and continue
+            if not merged_this_round:
+                logging.debug(f"No compatible merge found for largest variant (size={candidates[0].size})")
+                merged_results.append(candidates[0])
+                remaining_variants.remove(candidates[0])
+
+        # Check if we should do another iteration (overlap mode only)
+        if args.min_merge_overlap > 0 and merges_this_iteration > 0 and len(merged_results) > 1:
+            # More merges might be possible with the new merged sequences
+            # Cumulative positions are tracked per-sequence via snp_count and merge_indel_count
+            logging.debug(f"Iteration {iteration} complete: {merges_this_iteration} merges, "
+                         f"{len(merged_results)} variants remaining, trying another round")
+            current_variants = merged_results
+        else:
+            # No more iterations needed
+            if iteration > 1:
+                logging.debug(f"Iterative merging complete after {iteration} iterations")
+            break
+
+    return merged_results, all_traceability, potentially_suboptimal, overlap_merges
 
 
 def bases_match_with_iupac(base1: str, base2: str) -> bool:
@@ -1413,6 +1827,54 @@ def calculate_adjusted_identity_distance(seq1: str, seq2: str) -> float:
     return 1.0 - score_result.identity
 
 
+def calculate_overlap_aware_distance(seq1: str, seq2: str, min_overlap_bp: int) -> float:
+    """
+    Calculate distance that accounts for partial overlaps between sequences.
+
+    When sequences have sufficient overlap with good identity, returns the
+    overlap-region distance. Otherwise falls back to global distance.
+
+    For containment cases where one sequence is shorter than min_overlap_bp,
+    uses the shorter sequence length as the effective threshold.
+
+    Args:
+        seq1, seq2: DNA sequences (may have different lengths)
+        min_overlap_bp: Minimum overlap required in base pairs
+
+    Returns:
+        Distance (0.0 to 1.0) based on overlap region if sufficient,
+        otherwise global distance from calculate_adjusted_identity_distance()
+    """
+    if not seq1 or not seq2:
+        return 1.0  # Maximum distance
+
+    if seq1 == seq2:
+        return 0.0
+
+    # Use align_and_score which handles bidirectional alignment internally
+    result = align_and_score(seq1, seq2, STANDARD_ADJUSTMENT_PARAMS)
+
+    # Calculate overlap in base pairs
+    # Coverage is fraction of each sequence used in alignment
+    len1, len2 = len(seq1), len(seq2)
+    shorter_len = min(len1, len2)
+
+    # Overlap is the minimum of the two coverages times the respective lengths
+    # For containment, the shorter sequence should be fully covered
+    overlap_bp = int(min(result.seq1_coverage * len1, result.seq2_coverage * len2))
+
+    # Effective threshold: for containment cases, allow merge if short sequence is fully covered
+    effective_threshold = min(min_overlap_bp, shorter_len)
+
+    if overlap_bp >= effective_threshold:
+        # Sufficient overlap - use overlap identity for distance
+        return 1.0 - result.identity
+    else:
+        # Insufficient overlap - fall back to global distance
+        # This will typically be high due to terminal gaps
+        return calculate_adjusted_identity_distance(seq1, seq2)
+
+
 # ============================================================================
 # Alignment Matrix Visualization Functions
 # ============================================================================
@@ -1540,37 +2002,72 @@ def analyze_cluster_quality(
     )
 
 
-def perform_hac_clustering(consensus_list: List[ConsensusInfo], 
-                          variant_group_identity: float) -> Dict[int, List[ConsensusInfo]]:
+def perform_hac_clustering(consensus_list: List[ConsensusInfo],
+                          variant_group_identity: float,
+                          min_overlap_bp: int = 0) -> Dict[int, List[ConsensusInfo]]:
     """
-    Perform Hierarchical Agglomerative Clustering using complete linkage.
+    Perform Hierarchical Agglomerative Clustering.
     Separates specimens from variants based on identity threshold.
     Returns groups of consensus sequences.
+
+    Linkage strategy:
+    - When min_overlap_bp > 0 (overlap mode): Uses SINGLE linkage, which groups
+      sequences if ANY pair has sufficient overlap. This allows prefix+suffix+full
+      scenarios where partials only overlap with the full sequence, not each other.
+    - When min_overlap_bp == 0 (standard mode): Uses COMPLETE linkage, which
+      requires ALL pairs to be within threshold. More conservative for same-length
+      sequences.
+
+    When min_overlap_bp > 0, also uses overlap-aware distance calculation that
+    allows sequences of different lengths to be grouped together if they
+    share sufficient overlap with good identity.
     """
     if len(consensus_list) <= 1:
         return {0: consensus_list}
 
-    logging.debug(f"Performing HAC clustering with {variant_group_identity} identity threshold")
+    # Determine linkage strategy based on overlap mode
+    use_single_linkage = min_overlap_bp > 0
+    linkage_type = "single" if use_single_linkage else "complete"
+
+    if min_overlap_bp > 0:
+        logging.debug(f"Performing HAC clustering with {variant_group_identity} identity threshold "
+                     f"({linkage_type} linkage, overlap-aware mode, min_overlap={min_overlap_bp}bp)")
+    else:
+        logging.debug(f"Performing HAC clustering with {variant_group_identity} identity threshold "
+                     f"({linkage_type} linkage)")
 
     n = len(consensus_list)
     distance_threshold = 1.0 - variant_group_identity
-    
+
     # Initialize each sequence as its own cluster
     clusters = [[i] for i in range(n)]
-    
+
     # Build initial distance matrix between individual sequences
     seq_distances = {}
     for i, j in itertools.combinations(range(n), 2):
-        dist = calculate_adjusted_identity_distance(
-            consensus_list[i].sequence,
-            consensus_list[j].sequence
-        )
+        if min_overlap_bp > 0:
+            # Use overlap-aware distance for primer pool scenarios
+            dist = calculate_overlap_aware_distance(
+                consensus_list[i].sequence,
+                consensus_list[j].sequence,
+                min_overlap_bp
+            )
+        else:
+            # Use standard global distance
+            dist = calculate_adjusted_identity_distance(
+                consensus_list[i].sequence,
+                consensus_list[j].sequence
+            )
         seq_distances[(i, j)] = dist
         seq_distances[(j, i)] = dist
     
     def cluster_distance(cluster1: List[int], cluster2: List[int]) -> float:
-        """Calculate complete linkage distance between two clusters."""
-        max_dist = 0.0
+        """Calculate linkage distance between two clusters.
+
+        Uses single linkage (min) for overlap mode, complete linkage (max) otherwise.
+        Single linkage allows transitive grouping through a bridge sequence.
+        """
+        distances = []
         for i in cluster1:
             for j in cluster2:
                 if i < j:
@@ -1579,8 +2076,12 @@ def perform_hac_clustering(consensus_list: List[ConsensusInfo],
                     dist = seq_distances[(j, i)]
                 else:
                     dist = 0.0
-                max_dist = max(max_dist, dist)
-        return max_dist
+                distances.append(dist)
+
+        if use_single_linkage:
+            return min(distances)  # Single linkage: closest pair
+        else:
+            return max(distances)  # Complete linkage: furthest pair
     
     # Perform hierarchical clustering
     while len(clusters) > 1:
@@ -1748,22 +2249,12 @@ def create_output_structure(groups: Dict[int, List[ConsensusInfo]],
         
         for variant_idx, variant in enumerate(selected_variants):
             # All variants get .v suffix (primary is .v1, additional are .v2, .v3, etc.)
-            new_name = f"{variant.sample_name.split('-c')[0]}-{group_idx}.v{variant_idx + 1}"
-            
-            # Create new ConsensusInfo with updated name
-            renamed_variant = ConsensusInfo(
-                sample_name=new_name,
-                cluster_id=variant.cluster_id,
-                sequence=variant.sequence,
-                ric=variant.ric,
-                size=variant.size,
-                file_path=variant.file_path,
-                snp_count=variant.snp_count,  # Preserve SNP count from original
-                primers=variant.primers,  # Preserve primers
-                raw_ric=variant.raw_ric,  # Preserve raw_ric
-                rid=variant.rid,  # Preserve identity metrics
-                rid_min=variant.rid_min,
-            )
+            # Use rsplit to split on the LAST '-c' (specimen names may contain '-c')
+            specimen_base = variant.sample_name.rsplit('-c', 1)[0]
+            new_name = f"{specimen_base}-{group_idx}.v{variant_idx + 1}"
+
+            # Use _replace to preserve all fields while updating sample_name
+            renamed_variant = variant._replace(sample_name=new_name)
 
             final_consensus.append(renamed_variant)
             group_naming.append((variant.sample_name, new_name))
@@ -2202,370 +2693,6 @@ def write_position_debug_file(
     logging.info(f"Position error debug file written to: {debug_path}")
 
 
-def write_quality_report(final_consensus: List[ConsensusInfo],
-                        all_raw_consensuses: List[Tuple[ConsensusInfo, str]],
-                        summary_folder: str,
-                        source_folder: str):
-    """
-    Write quality report with rid-based dual outlier detection.
-
-    Uses mean read identity (rid) for outlier detection. rid_min is not used
-    because single outlier reads don't significantly impact consensus quality;
-    positional analysis better captures systematic issues.
-
-    Structure:
-    1. Executive Summary - High-level overview with attention flags
-    2. Read Identity Analysis - Dual outlier detection (clustering threshold + statistical)
-    3. Positional Identity Analysis - Sequences with problematic positions
-    4. Variant Detection - Clusters with detected variants
-    5. Merged Sequence Analysis - Quality issues in merged components
-    6. Interpretation Guide - Actionable guidance with neutral tone
-
-    Args:
-        final_consensus: List of final consensus sequences
-        all_raw_consensuses: List of (raw_consensus, original_name) tuples
-        summary_folder: Output directory for report
-        source_folder: Source directory containing cluster_debug with MSA files
-    """
-    from datetime import datetime
-
-    quality_report_path = os.path.join(summary_folder, 'quality_report.txt')
-
-    # Build .raw lookup: map merged sequence names to their .raw components
-    raw_lookup = {}
-    for raw_cons, original_name in all_raw_consensuses:
-        base_match = re.match(r'(.+?)\.raw\d+$', raw_cons.sample_name)
-        if base_match:
-            base_name = base_match.group(1)
-            if base_name not in raw_lookup:
-                raw_lookup[base_name] = []
-            raw_lookup[base_name].append(raw_cons)
-
-    # Identify outliers using dual detection
-    outlier_results = identify_outliers(final_consensus, all_raw_consensuses, source_folder)
-
-    # Load min_variant_frequency and min_variant_count from metadata
-    # These parameters are used as thresholds for positional outlier detection
-    min_variant_frequency = None
-    min_variant_count = None
-
-    # Try to load from first available consensus sequence metadata
-    for cons in final_consensus:
-        # Extract specimen base name (metadata files are named by specimen, not cluster)
-        sample_name = cons.sample_name
-        specimen_base = re.sub(r'-\d+\.v\d+$', '', sample_name)
-
-        metadata = load_metadata_from_json(source_folder, specimen_base)
-        if metadata and 'parameters' in metadata:
-            params = metadata['parameters']
-            min_variant_frequency = params.get('min_variant_frequency', 0.2)
-            min_variant_count = params.get('min_variant_count', 5)
-            break
-
-    # Fallback to defaults if not found
-    if min_variant_frequency is None:
-        min_variant_frequency = 0.2
-        logging.warning("Could not load min_variant_frequency from metadata, using default: 0.2")
-    if min_variant_count is None:
-        min_variant_count = 5
-        logging.warning("Could not load min_variant_count from metadata, using default: 5")
-
-    # Analyze positional identity for all sequences
-    # For merged sequences, analyze their .raw components instead (which have MSA files)
-    pos_identity_results = {}
-    sequences_with_pos_outliers = []
-
-    # Collect all sequences to analyze
-    # Use dict to deduplicate by sample_name (ConsensusInfo is unhashable due to list fields)
-    sequences_to_analyze = {}
-    for cons in final_consensus:
-        sequences_to_analyze[cons.sample_name] = cons
-
-    # For merged sequences, analyze their .raw components (which have MSA files)
-    # For unmerged sequences, analyze them directly
-    logging.info("Analyzing positional identity for quality report...")
-    for cons in tqdm(sequences_to_analyze.values(), desc="Analyzing positional identity", unit="seq"):
-        is_merged = cons.snp_count is not None and cons.snp_count > 0
-
-        if is_merged:
-            # Analyze the raw components for this merged sequence
-            raw_components = raw_lookup.get(cons.sample_name, [])
-            worst_result = None
-            worst_outliers = 0
-
-            for raw_cons in raw_components:
-                result = analyze_positional_identity_outliers(
-                    raw_cons, source_folder, min_variant_frequency, min_variant_count
-                )
-                if result:
-                    result['component_name'] = raw_cons.sample_name
-                    result['component_ric'] = raw_cons.ric
-                    if result['num_outlier_positions'] > worst_outliers:
-                        worst_outliers = result['num_outlier_positions']
-                        worst_result = result
-
-            # Report the worst component for this merged sequence
-            if worst_result and worst_result['num_outlier_positions'] > 0:
-                sequences_with_pos_outliers.append((cons, worst_result))
-        else:
-            # Unmerged sequence - analyze directly
-            result = analyze_positional_identity_outliers(
-                cons, source_folder, min_variant_frequency, min_variant_count
-            )
-            if result and result['num_outlier_positions'] > 0:
-                sequences_with_pos_outliers.append((cons, result))
-
-    # Sort positional outliers by total nucleotide errors (desc)
-    sequences_with_pos_outliers.sort(key=lambda x: x[1].get('total_nucleotide_errors', 0), reverse=True)
-
-    # Write detailed position debug file
-    if sequences_with_pos_outliers:
-        write_position_debug_file(sequences_with_pos_outliers, summary_folder, min_variant_frequency)
-
-    # Identify merged sequences with quality issues in components
-    merged_with_issues = []
-    threshold_rid = outlier_results['global_stats']['stat_threshold_rid']
-
-    for cons in final_consensus:
-        is_merged = cons.snp_count is not None and cons.snp_count > 0
-        if is_merged:
-            raw_components = raw_lookup.get(cons.sample_name, [])
-            if not raw_components:
-                continue
-
-            # Collect all component info and calculate weighted average rid
-            components_info = []
-            worst_rid = 1.0
-            total_ric = 0
-            weighted_rid_sum = 0
-
-            for raw in raw_components:
-                rid = raw.rid if raw.rid is not None else 1.0
-                ric = raw.ric if raw.ric else 0
-                components_info.append((raw, rid, ric))
-                if rid < worst_rid:
-                    worst_rid = rid
-                if ric > 0:
-                    total_ric += ric
-                    weighted_rid_sum += rid * ric
-
-            # Calculate weighted average rid
-            weighted_avg_rid = weighted_rid_sum / total_ric if total_ric > 0 else 1.0
-
-            # Sort components by rid ascending
-            components_info.sort(key=lambda x: x[1])
-
-            # Flag if worst component has concerning quality
-            if worst_rid < threshold_rid:
-                merged_with_issues.append((cons, components_info, worst_rid, weighted_avg_rid))
-
-    # Sort merged issues by worst component quality
-    merged_with_issues.sort(key=lambda x: x[2])
-
-    # Write the report
-    with open(quality_report_path, 'w') as f:
-        # ====================================================================
-        # SECTION 1: HEADER
-        # ====================================================================
-        f.write("=" * 80 + "\n")
-        f.write("QUALITY REPORT - speconsense-summarize\n")
-        f.write("=" * 80 + "\n")
-        f.write(f"Generated: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n")
-        f.write(f"Source: {source_folder}\n")
-        f.write("=" * 80 + "\n\n")
-
-        # ====================================================================
-        # SECTION 2: EXECUTIVE SUMMARY
-        # ====================================================================
-        f.write("EXECUTIVE SUMMARY\n")
-        f.write("-" * 80 + "\n\n")
-
-        total_seqs = len(final_consensus)
-        total_merged = sum(1 for cons in final_consensus
-                          if cons.snp_count is not None and cons.snp_count > 0)
-
-        f.write(f"Total sequences: {total_seqs}\n")
-        f.write(f"Merged sequences: {total_merged} ({100*total_merged/total_seqs:.1f}%)\n\n")
-
-        # Global statistics
-        stats = outlier_results['global_stats']
-        f.write(f"Global Read Identity Statistics:\n")
-        f.write(f"  Mean rid: {stats['mean_rid']:.1%} ± {stats['std_rid']:.1%}\n\n")
-
-        # Sequences requiring attention
-        f.write("Sequences Requiring Attention:\n")
-
-        n_stat = len(outlier_results['statistical_outliers'])
-        n_pos = len(sequences_with_pos_outliers)
-        n_merged = len(merged_with_issues)
-
-        # Count unique sequences flagged (use sample_name for deduplication)
-        flagged_names = set()
-        for c, _ in outlier_results['statistical_outliers']:
-            flagged_names.add(c.sample_name)
-        for c, _ in sequences_with_pos_outliers:
-            flagged_names.add(c.sample_name)
-        for c, _, _, _ in merged_with_issues:
-            flagged_names.add(c.sample_name)
-        total_flagged = len(flagged_names)
-
-        # Count combined read identity issues (statistical outliers + merged with component issues)
-        n_rid_issues = n_stat + n_merged
-
-        f.write(f"  Total flagged: {total_flagged} ({100*total_flagged/total_seqs:.1f}%)\n")
-        f.write(f"    - Low read identity: {n_rid_issues} ({n_stat} sequences + {n_merged} merged)\n")
-        f.write(f"    - High-error positions: {n_pos}\n\n")
-
-        # ====================================================================
-        # SECTION 3: READ IDENTITY ANALYSIS
-        # ====================================================================
-        if n_rid_issues > 0:
-            f.write("=" * 80 + "\n")
-            f.write("READ IDENTITY ANALYSIS\n")
-            f.write("=" * 80 + "\n\n")
-
-            f.write("Sequences with mean read identity (rid) below mean - 2×std.\n")
-            f.write(f"Threshold: {stats['stat_threshold_rid']:.1%}\n\n")
-
-            f.write(f"{'Sequence':<50} {'RiC':<6} {'rid':<8}\n")
-            f.write("-" * 64 + "\n")
-
-            # Build combined list: non-merged outliers + merged with issues
-            # Each entry is: (display_rid_for_sorting, is_merged, data)
-            # For non-merged: data = (cons, rid)
-            # For merged: data = (cons, components_info, worst_rid, weighted_avg_rid)
-            combined_entries = []
-
-            # Add non-merged statistical outliers
-            for cons, rid in outlier_results['statistical_outliers']:
-                is_merged = cons.snp_count is not None and cons.snp_count > 0
-                if not is_merged:
-                    combined_entries.append((rid, False, (cons, rid)))
-
-            # Add merged sequences with issues
-            for entry in merged_with_issues:
-                cons, components_info, worst_rid, weighted_avg_rid = entry
-                combined_entries.append((worst_rid, True, entry))
-
-            # Sort by rid ascending (using worst component rid for merged)
-            combined_entries.sort(key=lambda x: x[0])
-
-            # Display entries
-            for _, is_merged, data in combined_entries:
-                if is_merged:
-                    cons, components_info, worst_rid, weighted_avg_rid = data
-                    # Parent row with [merged] tag and weighted average rid
-                    name = cons.sample_name
-                    name_with_tag = f"{name} [merged]"
-                    name_truncated = name_with_tag[:49] if len(name_with_tag) > 49 else name_with_tag
-                    rid_str = f"{weighted_avg_rid:.1%}"
-                    f.write(f"{name_truncated:<50} {cons.ric:<6} {rid_str:<8}\n")
-
-                    # Component rows (indented)
-                    for raw, comp_rid, comp_ric in components_info:
-                        # Extract cluster number from component name (e.g., "sample-c1" -> "c1")
-                        comp_name = raw.sample_name
-                        comp_display = f"  └─ {comp_name}"
-                        comp_truncated = comp_display[:49] if len(comp_display) > 49 else comp_display
-                        comp_rid_str = f"{comp_rid:.1%}"
-                        f.write(f"{comp_truncated:<50} {comp_ric:<6} {comp_rid_str:<8}\n")
-                else:
-                    cons, rid = data
-                    name_truncated = cons.sample_name[:49] if len(cons.sample_name) > 49 else cons.sample_name
-                    rid_str = f"{rid:.1%}"
-                    f.write(f"{name_truncated:<50} {cons.ric:<6} {rid_str:<8}\n")
-            f.write("\n")
-
-        # ====================================================================
-        # SECTION 4: POSITIONAL IDENTITY ANALYSIS
-        # ====================================================================
-        if n_pos > 0:
-            f.write("=" * 80 + "\n")
-            f.write("POSITIONAL IDENTITY ANALYSIS\n")
-            f.write("=" * 80 + "\n\n")
-
-            f.write("Sequences with high-error positions (error rate > threshold at specific positions):\n")
-            f.write(f"Threshold: {min_variant_frequency:.1%} (--min-variant-frequency from metadata)\n")
-            f.write(f"Min RiC: {2 * min_variant_count} (2 × --min-variant-count)\n")
-            f.write("Positions above threshold may indicate undetected/unphased variants.\n")
-            f.write("For merged sequences, shows worst component.\n\n")
-
-            # Sort by total nucleotide errors (descending)
-            sorted_pos_outliers = sorted(
-                sequences_with_pos_outliers,
-                key=lambda x: x[1].get('total_nucleotide_errors', 0),
-                reverse=True
-            )
-
-            # Calculate display names and find max length for dynamic column width
-            display_data = []
-            for cons, result in sorted_pos_outliers:
-                if 'component_name' in result:
-                    component_suffix = result['component_name'].split('.')[-1] if '.' in result['component_name'] else ''
-                    display_name = f"{cons.sample_name} ({component_suffix})"
-                    ric_val = result.get('component_ric', cons.ric)
-                else:
-                    display_name = cons.sample_name
-                    ric_val = cons.ric
-                display_data.append((display_name, ric_val, cons, result))
-
-            # Calculate column width based on longest name (minimum 40, cap at 70)
-            max_name_len = max(len(name) for name, _, _, _ in display_data) if display_data else 40
-            name_col_width = min(max(max_name_len + 2, 40), 70)
-
-            f.write(f"{'Sequence':<{name_col_width}} {'RiC':<6} {'Ambig':<6} {'#Pos':<6} {'MeanErr':<8} {'TotalErr':<10}\n")
-            f.write("-" * (name_col_width + 38) + "\n")
-
-            for display_name, ric_val, cons, result in display_data:
-                mean_err = result.get('mean_outlier_error_rate', 0.0)
-                total_err = result.get('total_nucleotide_errors', 0)
-                num_pos = result['num_outlier_positions']
-                # Count IUPAC ambiguity codes in the consensus sequence (non-ACGT characters)
-                ambig_count = sum(1 for c in cons.sequence if c.upper() not in 'ACGT')
-
-                f.write(f"{display_name:<{name_col_width}} {ric_val:<6} {ambig_count:<6} {num_pos:<6} "
-                       f"{mean_err:<8.1%} {total_err:<10}\n")
-
-            f.write("\n")
-
-        # ====================================================================
-        # SECTION 5: INTERPRETATION GUIDE
-        # ====================================================================
-        f.write("=" * 80 + "\n")
-        f.write("INTERPRETATION GUIDE\n")
-        f.write("=" * 80 + "\n\n")
-
-        f.write("Read Identity Analysis:\n")
-        f.write("-" * 40 + "\n")
-        f.write("  Threshold: mean - 2×std (statistical outliers)\n")
-        f.write("  RiC: Read-in-Cluster count\n")
-        f.write("  rid: Mean read identity to consensus\n")
-        f.write("  [merged]: Weighted average rid; components shown below\n\n")
-
-        f.write("Positional Identity Analysis:\n")
-        f.write("-" * 40 + "\n")
-        f.write("  Threshold: --min-variant-frequency from metadata\n")
-        f.write("  Min RiC: 2 × --min-variant-count\n")
-        f.write("  Ambig: Count of IUPAC ambiguity codes in consensus\n")
-        f.write("  #Pos: Count of positions exceeding error threshold\n")
-        f.write("  MeanErr: Average error rate at flagged positions\n")
-        f.write("  TotalErr: Sum of errors at flagged positions\n\n")
-
-
-    # Log summary
-    logging.info(f"Quality report written to: {quality_report_path}")
-    if n_rid_issues > 0:
-        logging.info(f"  {n_rid_issues} sequence(s) flagged for read identity ({n_stat} direct + {n_merged} merged)")
-    else:
-        logging.info("  All sequences show good read identity")
-
-    if n_pos > 0:
-        logging.info(f"  {n_pos} sequence(s) with high-error positions")
-    if n_merged > 0:
-        logging.info(f"  {n_merged} merged sequence(s) with component quality issues")
-
-
-
 def write_output_files(final_consensus: List[ConsensusInfo],
                       all_raw_consensuses: List[Tuple[ConsensusInfo, str]],
                       summary_folder: str,
@@ -2636,10 +2763,10 @@ def write_output_files(final_consensus: List[ConsensusInfo],
 
 
 def process_single_specimen(file_consensuses: List[ConsensusInfo],
-                           args) -> Tuple[List[ConsensusInfo], Dict[str, List[str]], Dict, int]:
+                           args) -> Tuple[List[ConsensusInfo], Dict[str, List[str]], Dict, int, List[OverlapMergeInfo]]:
     """
     Process a single specimen file: HAC cluster, MSA-based merge per group, and select final variants.
-    Returns final consensus list, merge traceability, naming info, and limited_count for this specimen.
+    Returns final consensus list, merge traceability, naming info, limited_count, and overlap merge info.
 
     Architecture (Phase 3):
     1. HAC clustering to separate variant groups (primary vs contaminants)
@@ -2647,13 +2774,15 @@ def process_single_specimen(file_consensuses: List[ConsensusInfo],
     3. Select representative variants per group
     """
     if not file_consensuses:
-        return [], {}, {}, 0
+        return [], {}, {}, 0, []
 
     file_name = os.path.basename(file_consensuses[0].file_path)
     logging.info(f"Processing specimen from file: {file_name}")
 
     # Phase 1: HAC clustering to separate variant groups (moved before merging!)
-    variant_groups = perform_hac_clustering(file_consensuses, args.group_identity)
+    variant_groups = perform_hac_clustering(
+        file_consensuses, args.group_identity, min_overlap_bp=args.min_merge_overlap
+    )
 
     # Filter to max groups if specified
     if args.select_max_groups > 0 and len(variant_groups) > args.select_max_groups:
@@ -2671,12 +2800,14 @@ def process_single_specimen(file_consensuses: List[ConsensusInfo],
     merged_groups = {}
     all_merge_traceability = {}
     total_limited_count = 0
+    all_overlap_merges = []
 
     for group_id, group_members in variant_groups.items():
-        merged, traceability, limited_count = merge_group_with_msa(group_members, args)
+        merged, traceability, limited_count, overlap_merges = merge_group_with_msa(group_members, args)
         merged_groups[group_id] = merged
         all_merge_traceability.update(traceability)
         total_limited_count += limited_count
+        all_overlap_merges.extend(overlap_merges)
 
     # Phase 3: Select representative variants for each group in this specimen
     final_consensus = []
@@ -2698,22 +2829,12 @@ def process_single_specimen(file_consensuses: List[ConsensusInfo],
 
         for variant_idx, variant in enumerate(selected_variants):
             # All variants get .v suffix (primary is .v1, additional are .v2, .v3, etc.)
-            new_name = f"{variant.sample_name.split('-c')[0]}-{group_idx + 1}.v{variant_idx + 1}"
+            # Use rsplit to split on the LAST '-c' (specimen names may contain '-c')
+            specimen_base = variant.sample_name.rsplit('-c', 1)[0]
+            new_name = f"{specimen_base}-{group_idx + 1}.v{variant_idx + 1}"
 
-            # Create new ConsensusInfo with updated name
-            renamed_variant = ConsensusInfo(
-                sample_name=new_name,
-                cluster_id=variant.cluster_id,
-                sequence=variant.sequence,
-                ric=variant.ric,
-                size=variant.size,
-                file_path=variant.file_path,
-                snp_count=variant.snp_count,  # Preserve SNP count from merging
-                primers=variant.primers,  # Preserve primers
-                raw_ric=variant.raw_ric,  # Preserve raw_ric
-                rid=variant.rid,  # Preserve identity metrics
-                rid_min=variant.rid_min,
-            )
+            # Use _replace to preserve all fields while updating sample_name
+            renamed_variant = variant._replace(sample_name=new_name)
 
             final_consensus.append(renamed_variant)
             group_naming.append((variant.sample_name, new_name))
@@ -2723,7 +2844,7 @@ def process_single_specimen(file_consensuses: List[ConsensusInfo],
     logging.info(f"Processed {file_name}: {len(final_consensus)} final variants across {len(merged_groups)} groups")
     logging.info("")  # Empty line for readability between specimens
 
-    return final_consensus, all_merge_traceability, naming_info, total_limited_count
+    return final_consensus, all_merge_traceability, naming_info, total_limited_count, all_overlap_merges
 
 
 def main():
@@ -2775,6 +2896,7 @@ def main():
     all_merge_traceability = {}
     all_naming_info = {}
     all_raw_consensuses = []  # Collect .raw files from all specimens
+    all_overlap_merges = []  # Collect overlap merge info for quality reporting
     total_limited_merges = 0
 
     sorted_file_paths = sorted(file_groups.keys())
@@ -2782,7 +2904,7 @@ def main():
         file_consensuses = file_groups[file_path]
 
         # Process specimen
-        final_consensus, merge_traceability, naming_info, limited_count = process_single_specimen(
+        final_consensus, merge_traceability, naming_info, limited_count, overlap_merges = process_single_specimen(
             file_consensuses, args
         )
 
@@ -2802,6 +2924,7 @@ def main():
         all_final_consensus.extend(final_consensus)
         all_merge_traceability.update(merge_traceability)
         all_raw_consensuses.extend(specimen_raw_consensuses)
+        all_overlap_merges.extend(overlap_merges)
         total_limited_merges += limited_count
 
         # Update naming info with unique keys per specimen
@@ -2819,12 +2942,15 @@ def main():
         fasta_fields
     )
 
-    # Write quality report
-    write_quality_report(
+    # Write quality report (deferred import to avoid circular dependency)
+    from speconsense import quality_report
+    quality_report.write_quality_report(
         all_final_consensus,
         all_raw_consensuses,
         args.summary_dir,
-        args.source
+        args.source,
+        all_overlap_merges,
+        args.min_merge_overlap
     )
 
     logging.info(f"Enhanced summarization completed successfully")
