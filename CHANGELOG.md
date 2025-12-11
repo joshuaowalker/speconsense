@@ -5,6 +5,32 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Added
+- **Overlap merge feature for primer pools** - Merge sequences of different lengths when they share sufficient overlap
+  - New `--min-merge-overlap` parameter (default: 200bp, 0 to disable)
+  - Enables primer pool workflows where reads have overlapping but different coverage
+  - Uses single-linkage HAC clustering in overlap mode for better grouping
+  - Supports iterative merging for 3+ overlapping sequences
+  - Containment case handled: allows merge when shorter sequence is fully contained
+- **`rawlen` FASTA field** - Shows original sequence lengths before overlap merging
+  - Format: `rawlen=630+361` (sorted descending by length)
+  - Accumulates through iterative merges: `rawlen=630+361+269`
+  - Added to default and full field presets
+- **Quality report overlap merge section** - New analysis section in quality_report.txt
+  - Groups merges by specimen with iteration details
+  - Shows overlap bp, prefix/suffix extensions
+  - Warns on edge cases (overlap near threshold, large length ratios)
+- **Improved overlap merge logging** - Enhanced log messages with extension details
+  - Format: `(overlap=360bp, prefix=100bp, suffix=169bp)`
+  - DEBUG level shows merge span positions
+
+### Fixed
+- **Specimen name truncation** - Fixed parsing of specimen names containing '-c'
+  - Example: `test-core-overlap-c1` now correctly extracts `test-core-overlap`
+  - Changed `split('-c')` to `rsplit('-c', 1)` throughout
+
 ## [0.6.0] - 2025-12-05
 
 ### Changed

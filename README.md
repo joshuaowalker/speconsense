@@ -247,6 +247,7 @@ Consensus sequence headers contain metadata fields separated by spaces:
 
 **Optional Fields:**
 - `rawric=N+N+...` - RiC values of .raw source variants (pre-merge, largest-first, only present in merged variants from speconsense-summarize)
+- `rawlen=N+N+...` - Original sequence lengths before overlap merging (largest-first, only present in overlap-merged variants)
 - `snp=N` - Number of SNP positions from IUPAC merging (only present in merged variants from speconsense-summarize)
 - `ambig=N` - Count of IUPAC ambiguity codes in consensus (Y, R, W, S, K, M, etc.)
 - `length=N` - Sequence length in bases (available via --fasta-fields option)
@@ -262,10 +263,13 @@ Consensus sequence headers contain metadata fields separated by spaces:
 >sample-c1 size=50 ric=45 rid=97.2 rid_min=94.1 primers=ITS1F,ITS4
 
 # Merged variant from speconsense-summarize (default fields):
->sample-1 size=250 ric=250 rawric=100+89+61 snp=2 ambig=2 primers=ITS1F,ITS4
+>sample-1.v1 size=250 ric=250 rawric=100+89+61 snp=2 ambig=2 primers=ITS1F,ITS4
+
+# Overlap-merged variant (different-length sequences merged):
+>sample-1.v1 size=471 ric=471 rawric=248+223 rawlen=630+361 primers=ITS1F,ITS4
 
 # With QC preset (--fasta-fields qc):
->sample-1 size=250 ric=250 length=589 rid=98.5 ambig=1
+>sample-1.v1 size=250 ric=250 length=589 rid=98.5 ambig=1
 ```
 
 **Notes:**
@@ -533,6 +537,7 @@ speconsense-summarize --fasta-fields minimal,qc
 - `ric` - Reads in consensus
 - `length` - Sequence length in bases
 - `rawric` - RiC values of .raw source variants (only when merged)
+- `rawlen` - Original sequence lengths before overlap merging (only when overlap-merged)
 - `snp` - Number of IUPAC positions from merging (only when >0)
 - `ambig` - Count of IUPAC ambiguity codes in consensus
 - `rid` - Mean read identity percentage (when available)
@@ -568,6 +573,12 @@ Speconsense-summarize automatically generates a `quality_report.txt` file to hel
 - Sequences containing IUPAC ambiguity codes (Y, R, W, S, K, M, etc.)
 - May result from merging or from unphased heterozygous positions
 - Count shown in `ambig` field
+
+**3. Overlap Merge Analysis:**
+- Lists specimens where overlap merging occurred (different-length sequences merged)
+- Shows merge iterations, overlap percentages, and prefix/suffix extensions
+- Flags edge cases (overlap near threshold, large length ratios >3:1)
+- Only appears when overlap merges with extensions occurred
 
 **Understanding Read Identity Metrics:**
 
@@ -782,14 +793,53 @@ speconsense-summarize --source /path/to/speconsense/output --summary-dir MyResul
 - `--source`: Directory containing speconsense output files (default: clusters)
 - `--summary-dir`: Output directory name (default: `__Summary__`)
 
+### Overlap Merging for Primer Pools
+
+When using multiple primers targeting the same locus ("primer pools"), reads may have overlapping but different coverage. The overlap merge feature (enabled by default) allows merging such sequences when they share sufficient overlap.
+
+**How it works:**
+1. During HAC clustering, uses single-linkage to group overlapping sequences
+2. Identifies sequences with sufficient overlap meeting identity threshold
+3. Creates consensus from union of coverage (overlap region uses majority voting)
+4. Supports iterative merging for 3+ overlapping sequences
+
+**Parameters:**
+- `--min-merge-overlap N`: Minimum overlap in bp (default: 200, 0 to disable)
+- `--group-identity`: Identity threshold for overlap region (default: 0.9)
+
+**Example:**
+```bash
+# Default behavior (overlap merging enabled)
+speconsense-summarize --source clusters
+
+# Disable overlap merging (original behavior)
+speconsense-summarize --source clusters --min-merge-overlap 0
+
+# More permissive overlap (allow smaller overlaps)
+speconsense-summarize --source clusters --min-merge-overlap 100
+```
+
+**Use cases:**
+- ITS2 sequence merging with full ITS sequence
+- Overlapping amplicons from primer pools
+- Partial sequences merging with complete references
+
+**Output indicators:**
+- Log messages show `(overlap=Xbp, prefix=Ybp, suffix=Zbp)` for overlap merges
+- FASTA headers include `rawlen=X+Y` showing original sequence lengths
+- Quality report includes "OVERLAP MERGE ANALYSIS" section
+
+**Containment handling:**
+When a shorter sequence is fully contained within a longer one (e.g., ITS2 within full ITS), the merge is allowed if `overlap >= min(threshold, shorter_length)`.
+
 ### Processing Workflow Summary
 
 The complete speconsense-summarize workflow operates in this order:
 
 1. **Load sequences** with RiC filtering (`--min-ric`)
-2. **HAC variant grouping** by sequence identity to separate dissimilar sequences (`--group-identity`)
+2. **HAC variant grouping** by sequence identity to separate dissimilar sequences (`--group-identity`); uses single-linkage when overlap merging is enabled
 3. **Group filtering** to limit output groups (`--select-max-groups`)
-4. **Homopolymer-aware MSA-based variant merging** within each group (`--merge-position-count`, `--merge-indel-length`, `--merge-snp`, `--merge-min-size-ratio`, `--disable-homopolymer-equivalence`)
+4. **Homopolymer-aware MSA-based variant merging** within each group, including **overlap merging** for different-length sequences (`--merge-position-count`, `--merge-indel-length`, `--min-merge-overlap`, `--merge-snp`, `--merge-min-size-ratio`, `--disable-homopolymer-equivalence`)
 5. **Variant selection** within each group (`--select-max-variants`, `--select-strategy`)
 6. **Output generation** with customizable header fields (`--fasta-fields`) and full traceability
 
@@ -797,6 +847,7 @@ The complete speconsense-summarize workflow operates in this order:
 - HAC grouping occurs BEFORE merging to prevent inappropriate merging of dissimilar sequences (e.g., contaminants with primary targets)
 - Merging is applied independently within each group using MSA-based consensus generation
 - Homopolymer-aware merging by default (AAA ≈ AAAA) to match pipeline-wide adjusted-identity semantics
+- Overlap merging enabled by default (`--min-merge-overlap 200`) for primer pool support
 
 ### Enhanced Logging and Traceability
 
@@ -927,6 +978,7 @@ usage: speconsense-summarize [-h] [--min-ric MIN_RIC] [--source SOURCE]
                              [--merge-indel-length MERGE_INDEL_LENGTH]
                              [--merge-position-count MERGE_POSITION_COUNT]
                              [--merge-min-size-ratio MERGE_MIN_SIZE_RATIO]
+                             [--min-merge-overlap MIN_MERGE_OVERLAP]
                              [--disable-homopolymer-equivalence]
                              [--group-identity GROUP_IDENTITY]
                              [--select-max-variants SELECT_MAX_VARIANTS]
@@ -945,9 +997,9 @@ options:
   --fasta-fields FASTA_FIELDS
                         FASTA header fields to output. Can be: (1) a preset name (default,
                         minimal, qc, full, id-only), (2) comma-separated field names (size,
-                        ric, length, rawric, snp, rid, rid_min, primers, group, variant),
-                        or (3) a combination of presets and fields (e.g., minimal,qc or
-                        minimal,rid). Duplicates removed, order preserved left to right.
+                        ric, length, rawric, rawlen, snp, ambig, rid, rid_min, primers, group,
+                        variant), or (3) a combination of presets and fields (e.g., minimal,qc
+                        or minimal,rid). Duplicates removed, order preserved left to right.
                         Default: default
   --merge-snp           Enable SNP-based merging (default: True)
   --merge-indel-length MERGE_INDEL_LENGTH
@@ -958,6 +1010,9 @@ options:
   --merge-min-size-ratio MERGE_MIN_SIZE_RATIO
                         Minimum size ratio (smaller/larger) for merging clusters
                         (default: 0.0 = disabled)
+  --min-merge-overlap MIN_MERGE_OVERLAP
+                        Minimum overlap in bp for merging sequences of different lengths
+                        (default: 200, 0 to disable)
   --disable-homopolymer-equivalence
                         Disable homopolymer equivalence in merging (treat AAA vs AAAA as
                         different)
