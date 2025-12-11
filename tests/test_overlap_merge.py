@@ -127,7 +127,7 @@ class TestCreateOverlapConsensusFromMsa:
 
     def test_containment_produces_full_length(self):
         """Merging contained sequence with full should produce full length."""
-        from speconsense.summarize import ConsensusInfo
+        from speconsense.types import ConsensusInfo
 
         aligned_seqs = run_spoa_msa([FULL_ITS, ITS2_ONLY])
 
@@ -177,7 +177,7 @@ class TestCreateOverlapConsensusFromMsa:
         ITS1_WITH_5_8S (470bp) + ITS2_WITH_5_8S (470bp) sharing 250bp 5.8S
         should produce a 690bp merged consensus (220 + 250 + 220).
         """
-        from speconsense.summarize import ConsensusInfo
+        from speconsense.types import ConsensusInfo
 
         # Use local alignment mode (0) as used in actual overlap merging workflow
         aligned_seqs = run_spoa_msa([ITS1_WITH_5_8S, ITS2_WITH_5_8S], alignment_mode=0)

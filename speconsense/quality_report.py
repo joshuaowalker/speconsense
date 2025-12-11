@@ -17,9 +17,16 @@ from typing import Dict, List, Tuple, TextIO
 
 from tqdm import tqdm
 
-# Import types from summarize module
-# Note: This creates a circular import that we handle by importing at runtime
-# These will be imported in write_quality_report() to avoid circular imports
+# Import shared types
+from speconsense.types import ConsensusInfo, OverlapMergeInfo
+
+# Import helper functions from summarize (safe because summarize uses deferred import for this module)
+from speconsense.summarize import (
+    identify_outliers,
+    analyze_positional_identity_outliers,
+    load_metadata_from_json,
+    write_position_debug_file,
+)
 
 
 def write_header_section(f: TextIO, source_folder: str):
@@ -62,7 +69,7 @@ def write_executive_summary_section(
 def write_read_identity_section(
     f: TextIO,
     outlier_results: Dict,
-    merged_with_issues: List,
+    merged_with_issues: List[Tuple[ConsensusInfo, List, float, float]],
     stats: Dict
 ):
     """Write the read identity analysis section."""
@@ -128,7 +135,7 @@ def write_read_identity_section(
 
 def write_positional_identity_section(
     f: TextIO,
-    sequences_with_pos_outliers: List,
+    sequences_with_pos_outliers: List[Tuple[ConsensusInfo, Dict]],
     min_variant_frequency: float,
     min_variant_count: int
 ):
@@ -187,7 +194,7 @@ def write_positional_identity_section(
 
 def write_overlap_merge_section(
     f: TextIO,
-    overlap_merges: List,
+    overlap_merges: List[OverlapMergeInfo],
     min_merge_overlap: int
 ):
     """Write the overlap merge analysis section."""
@@ -202,7 +209,7 @@ def write_overlap_merge_section(
     f.write("=" * 80 + "\n\n")
 
     # Group merges by specimen
-    specimen_merges = {}
+    specimen_merges: Dict[str, List[OverlapMergeInfo]] = {}
     for merge_info in true_overlap_merges:
         if merge_info.specimen not in specimen_merges:
             specimen_merges[merge_info.specimen] = []
@@ -297,17 +304,12 @@ def write_interpretation_guide_section(f: TextIO):
 
 
 def write_quality_report(
-    final_consensus: List,
-    all_raw_consensuses: List[Tuple],
+    final_consensus: List[ConsensusInfo],
+    all_raw_consensuses: List[Tuple[ConsensusInfo, str]],
     summary_folder: str,
     source_folder: str,
-    overlap_merges: List = None,
-    min_merge_overlap: int = 200,
-    # Helper functions passed in to avoid circular imports
-    identify_outliers_fn=None,
-    analyze_positional_identity_outliers_fn=None,
-    load_metadata_from_json_fn=None,
-    write_position_debug_file_fn=None
+    overlap_merges: List[OverlapMergeInfo] = None,
+    min_merge_overlap: int = 200
 ):
     """
     Write quality report with rid-based dual outlier detection.
@@ -330,10 +332,6 @@ def write_quality_report(
         source_folder: Source directory containing cluster_debug with MSA files
         overlap_merges: List of OverlapMergeInfo objects describing overlap merges
         min_merge_overlap: Threshold used for overlap merging (for edge case warnings)
-        identify_outliers_fn: Function to identify outliers
-        analyze_positional_identity_outliers_fn: Function to analyze positional identity
-        load_metadata_from_json_fn: Function to load metadata
-        write_position_debug_file_fn: Function to write position debug file
     """
     if overlap_merges is None:
         overlap_merges = []
@@ -341,7 +339,7 @@ def write_quality_report(
     quality_report_path = os.path.join(summary_folder, 'quality_report.txt')
 
     # Build .raw lookup: map merged sequence names to their .raw components
-    raw_lookup = {}
+    raw_lookup: Dict[str, List[ConsensusInfo]] = {}
     for raw_cons, original_name in all_raw_consensuses:
         base_match = re.match(r'(.+?)\.raw\d+$', raw_cons.sample_name)
         if base_match:
@@ -351,7 +349,7 @@ def write_quality_report(
             raw_lookup[base_name].append(raw_cons)
 
     # Identify outliers using dual detection
-    outlier_results = identify_outliers_fn(final_consensus, all_raw_consensuses, source_folder)
+    outlier_results = identify_outliers(final_consensus, all_raw_consensuses, source_folder)
 
     # Load min_variant_frequency and min_variant_count from metadata
     min_variant_frequency = None
@@ -361,7 +359,7 @@ def write_quality_report(
         sample_name = cons.sample_name
         specimen_base = re.sub(r'-\d+\.v\d+$', '', sample_name)
 
-        metadata = load_metadata_from_json_fn(source_folder, specimen_base)
+        metadata = load_metadata_from_json(source_folder, specimen_base)
         if metadata and 'parameters' in metadata:
             params = metadata['parameters']
             min_variant_frequency = params.get('min_variant_frequency', 0.2)
@@ -377,7 +375,7 @@ def write_quality_report(
         logging.warning("Could not load min_variant_count from metadata, using default: 5")
 
     # Analyze positional identity for all sequences
-    sequences_with_pos_outliers = []
+    sequences_with_pos_outliers: List[Tuple[ConsensusInfo, Dict]] = []
     sequences_to_analyze = {cons.sample_name: cons for cons in final_consensus}
 
     logging.info("Analyzing positional identity for quality report...")
@@ -390,7 +388,7 @@ def write_quality_report(
             worst_outliers = 0
 
             for raw_cons in raw_components:
-                result = analyze_positional_identity_outliers_fn(
+                result = analyze_positional_identity_outliers(
                     raw_cons, source_folder, min_variant_frequency, min_variant_count
                 )
                 if result:
@@ -403,7 +401,7 @@ def write_quality_report(
             if worst_result and worst_result['num_outlier_positions'] > 0:
                 sequences_with_pos_outliers.append((cons, worst_result))
         else:
-            result = analyze_positional_identity_outliers_fn(
+            result = analyze_positional_identity_outliers(
                 cons, source_folder, min_variant_frequency, min_variant_count
             )
             if result and result['num_outlier_positions'] > 0:
@@ -412,11 +410,11 @@ def write_quality_report(
     sequences_with_pos_outliers.sort(key=lambda x: x[1].get('total_nucleotide_errors', 0), reverse=True)
 
     # Write detailed position debug file
-    if sequences_with_pos_outliers and write_position_debug_file_fn:
-        write_position_debug_file_fn(sequences_with_pos_outliers, summary_folder, min_variant_frequency)
+    if sequences_with_pos_outliers:
+        write_position_debug_file(sequences_with_pos_outliers, summary_folder, min_variant_frequency)
 
     # Identify merged sequences with quality issues
-    merged_with_issues = []
+    merged_with_issues: List[Tuple[ConsensusInfo, List, float, float]] = []
     threshold_rid = outlier_results['global_stats']['stat_threshold_rid']
 
     for cons in final_consensus:
@@ -429,7 +427,7 @@ def write_quality_report(
             components_info = []
             worst_rid = 1.0
             total_ric = 0
-            weighted_rid_sum = 0
+            weighted_rid_sum = 0.0
 
             for raw in raw_components:
                 rid = raw.rid if raw.rid is not None else 1.0

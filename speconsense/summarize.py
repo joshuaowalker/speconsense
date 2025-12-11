@@ -30,8 +30,8 @@ from speconsense.msa import (
     IUPAC_CODES,
 )
 
-# Import quality report module
-from speconsense import quality_report
+# Import shared types
+from speconsense.types import ConsensusInfo, OverlapMergeInfo
 
 
 # IUPAC equivalencies for edlib alignment
@@ -61,23 +61,6 @@ STANDARD_ADJUSTMENT_PARAMS = AdjustmentParams(
 MAX_MSA_MERGE_VARIANTS = 10
 
 
-class ConsensusInfo(NamedTuple):
-    """Information about a consensus sequence from speconsense output."""
-    sample_name: str
-    cluster_id: str
-    sequence: str
-    ric: int
-    size: int
-    file_path: str
-    snp_count: Optional[int] = None  # Number of SNPs from IUPAC consensus generation
-    primers: Optional[List[str]] = None  # List of detected primer names
-    raw_ric: Optional[List[int]] = None  # RiC values of .raw source variants
-    raw_len: Optional[List[int]] = None  # Lengths of merged source sequences
-    rid: Optional[float] = None  # Mean read identity (internal consistency metric)
-    rid_min: Optional[float] = None  # Minimum read identity (worst-case read)
-    merge_indel_count: Optional[int] = None  # Number of indels consumed by merging (for cumulative tracking)
-
-
 class ClusterQualityData(NamedTuple):
     """Quality metrics for a cluster (no visualization matrix)."""
     consensus_seq: str
@@ -85,19 +68,6 @@ class ClusterQualityData(NamedTuple):
     position_error_counts: List[int]  # Per-position error counts in consensus space
     read_identities: List[float]  # Per-read identity scores (0-1)
     position_stats: Optional[List] = None  # Detailed PositionStats for debugging (optional)
-
-
-class OverlapMergeInfo(NamedTuple):
-    """Information about a single overlap merge event for quality reporting."""
-    specimen: str           # Specimen name
-    iteration: int          # Merge iteration (1 = first pass, 2+ = iterative)
-    input_clusters: List[str]   # Cluster IDs involved in merge
-    input_lengths: List[int]    # Original sequence lengths
-    input_rics: List[int]       # RiC values of input sequences
-    overlap_bp: int             # Overlap region size in bp
-    prefix_bp: int              # Extension before overlap
-    suffix_bp: int              # Extension after overlap
-    output_length: int          # Final merged sequence length
 
 
 # FASTA field customization support
@@ -2972,18 +2942,15 @@ def main():
         fasta_fields
     )
 
-    # Write quality report
+    # Write quality report (deferred import to avoid circular dependency)
+    from speconsense import quality_report
     quality_report.write_quality_report(
         all_final_consensus,
         all_raw_consensuses,
         args.summary_dir,
         args.source,
         all_overlap_merges,
-        args.min_merge_overlap,
-        identify_outliers_fn=identify_outliers,
-        analyze_positional_identity_outliers_fn=analyze_positional_identity_outliers,
-        load_metadata_from_json_fn=load_metadata_from_json,
-        write_position_debug_file_fn=write_position_debug_file
+        args.min_merge_overlap
     )
 
     logging.info(f"Enhanced summarization completed successfully")
