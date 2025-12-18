@@ -402,13 +402,19 @@ By default, Speconsense automatically detects and separates biological variants 
 
 4. **Haplotype filtering**: Small haplotypes that don't meet minimum thresholds are reassigned to the nearest qualifying haplotype, preventing read loss.
 
-5. **IUPAC ambiguity calling**: When only one haplotype qualifies (insufficient support for phasing), variant positions are encoded using IUPAC ambiguity codes (e.g., `Y` for C/T, `R` for A/G) rather than forcing a potentially incorrect consensus call.
+5. **IUPAC ambiguity calling**: When only one haplotype qualifies (insufficient support for phasing), variant positions are encoded using IUPAC ambiguity codes (e.g., `Y` for C/T, `R` for A/G) rather than forcing a potentially incorrect consensus call. Ambiguity calling uses separate (lower) thresholds than phasing, capturing more residual variation.
 
-**Key parameters:**
-- `--min-variant-frequency` - Minimum minor allele frequency to consider a position variant (default: 0.20 = 20%)
-- `--min-variant-count` - Minimum read count for minor allele (default: 5)
+**Key parameters for variant phasing:**
+- `--min-variant-frequency` - Minimum minor allele frequency to trigger cluster splitting (default: 0.20 = 20%)
+- `--min-variant-count` - Minimum read count for minor allele to trigger splitting (default: 5)
 - `--disable-position-phasing` - Disable variant phasing entirely
+
+**Key parameters for IUPAC ambiguity calling:**
+- `--min-ambiguity-frequency` - Minimum minor allele frequency for IUPAC codes (default: 0.10 = 10%)
+- `--min-ambiguity-count` - Minimum read count for minor allele for IUPAC codes (default: 3)
 - `--disable-ambiguity-calling` - Disable IUPAC codes for unphased variants
+
+The separate thresholds allow phasing to be conservative (avoiding over-fragmentation) while ambiguity calling captures more subtle variation in the consensus sequence.
 
 **Example:**
 ```bash
@@ -418,8 +424,14 @@ speconsense input.fastq
 # More permissive variant detection (lower frequency threshold)
 speconsense input.fastq --min-variant-frequency 0.15
 
-# Disable variant phasing
+# More aggressive IUPAC ambiguity calling
+speconsense input.fastq --min-ambiguity-frequency 0.05 --min-ambiguity-count 2
+
+# Disable variant phasing but keep ambiguity calling
 speconsense input.fastq --disable-position-phasing
+
+# Disable both phasing and ambiguity calling
+speconsense input.fastq --disable-position-phasing --disable-ambiguity-calling
 ```
 
 **When to use variant phasing (default):**
@@ -893,6 +905,8 @@ usage: speconsense [-h] [--augment-input AUGMENT_INPUT]
                    [--disable-position-phasing]
                    [--min-variant-frequency MIN_VARIANT_FREQUENCY]
                    [--min-variant-count MIN_VARIANT_COUNT]
+                   [--min-ambiguity-frequency MIN_AMBIGUITY_FREQUENCY]
+                   [--min-ambiguity-count MIN_AMBIGUITY_COUNT]
                    [--presample PRESAMPLE]
                    [--k-nearest-neighbors K_NEAREST_NEIGHBORS]
                    [--primers PRIMERS] [-O OUTPUT_DIR]
@@ -942,6 +956,12 @@ options:
   --min-variant-count MIN_VARIANT_COUNT
                         Minimum alternative allele read count to call variant
                         (default: 5)
+  --min-ambiguity-frequency MIN_AMBIGUITY_FREQUENCY
+                        Minimum alternative allele frequency for IUPAC
+                        ambiguity calling (default: 0.10 for 10%)
+  --min-ambiguity-count MIN_AMBIGUITY_COUNT
+                        Minimum alternative allele read count for IUPAC
+                        ambiguity calling (default: 3)
   --presample PRESAMPLE
                         Presample size for initial reads (default: 1000, 0 to
                         disable)

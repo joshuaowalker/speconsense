@@ -222,16 +222,19 @@ class TestAugmentInput:
     
     def test_empty_augment_file_warning(self, temp_dir, core_script_path):
         """Test warning for empty augment input file."""
-        # Create empty files
+        # Create main file with one sequence, empty augment file
         with open('test_main.fastq', 'w') as f:
-            f.write("")
+            f.write("@read1\n")
+            f.write("ACGTACGTACGT\n")
+            f.write("+\n")
+            f.write("IIIIIIIIIIII\n")
         with open('test_augment.fasta', 'w') as f:
             f.write("")
-        
+
         result = subprocess.run([
             sys.executable, core_script_path,
             'test_main.fastq', '--augment-input', 'test_augment.fasta',
-            '--min-size', '1', '--algorithm', 'greedy'
+            '--min-size', '0', '--algorithm', 'greedy'
         ], capture_output=True, text=True)
 
         # Should warn about empty augment file
