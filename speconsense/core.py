@@ -62,6 +62,8 @@ class SpecimenClusterer:
                  enable_secondpass_phasing: bool = True,
                  min_variant_frequency: float = 0.20,
                  min_variant_count: int = 5,
+                 min_ambiguity_frequency: float = 0.10,
+                 min_ambiguity_count: int = 3,
                  enable_iupac_calling: bool = True):
         self.min_identity = min_identity
         self.inflation = inflation
@@ -87,6 +89,8 @@ class SpecimenClusterer:
         self.enable_secondpass_phasing = enable_secondpass_phasing
         self.min_variant_frequency = min_variant_frequency
         self.min_variant_count = min_variant_count
+        self.min_ambiguity_frequency = min_ambiguity_frequency
+        self.min_ambiguity_count = min_ambiguity_count
         self.enable_iupac_calling = enable_iupac_calling
         self.sequences = {}  # id -> sequence string
         self.records = {}  # id -> SeqRecord object
@@ -126,6 +130,8 @@ class SpecimenClusterer:
                 "enable_secondpass_phasing": self.enable_secondpass_phasing,
                 "min_variant_frequency": self.min_variant_frequency,
                 "min_variant_count": self.min_variant_count,
+                "min_ambiguity_frequency": self.min_ambiguity_frequency,
+                "min_ambiguity_count": self.min_ambiguity_count,
                 "enable_iupac_calling": self.enable_iupac_calling,
                 "orient_mode": self.orient_mode,
             },
@@ -966,8 +972,8 @@ class SpecimenClusterer:
                             consensus=consensus,
                             alignments=result.alignments,
                             msa_to_consensus_pos=result.msa_to_consensus_pos,
-                            min_variant_frequency=self.min_variant_frequency,
-                            min_variant_count=self.min_variant_count
+                            min_variant_frequency=self.min_ambiguity_frequency,
+                            min_variant_count=self.min_ambiguity_count
                         )
                         if iupac_count > 0:
                             logging.debug(f"Cluster {final_idx}: Called {iupac_count} IUPAC ambiguity position(s)")
@@ -2054,6 +2060,10 @@ def main():
                         help="Minimum alternative allele frequency to call variant (default: 0.20 for 20%%)")
     parser.add_argument("--min-variant-count", type=int, default=5,
                         help="Minimum alternative allele read count to call variant (default: 5)")
+    parser.add_argument("--min-ambiguity-frequency", type=float, default=0.10,
+                        help="Minimum alternative allele frequency for IUPAC ambiguity calling (default: 0.10 for 10%%)")
+    parser.add_argument("--min-ambiguity-count", type=int, default=3,
+                        help="Minimum alternative allele read count for IUPAC ambiguity calling (default: 3)")
     parser.add_argument("--presample", type=int, default=1000,
                         help="Presample size for initial reads (default: 1000, 0 to disable)")
     parser.add_argument("--k-nearest-neighbors", type=int, default=5,
@@ -2101,6 +2111,8 @@ def main():
         enable_secondpass_phasing=not args.disable_position_phasing,
         min_variant_frequency=args.min_variant_frequency,
         min_variant_count=args.min_variant_count,
+        min_ambiguity_frequency=args.min_ambiguity_frequency,
+        min_ambiguity_count=args.min_ambiguity_count,
         enable_iupac_calling=not args.disable_ambiguity_calling
     )
 

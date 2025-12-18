@@ -5,7 +5,14 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [0.6.2] - Unreleased
+## [0.6.3] - 2025-12-18
+
+### Added
+- **Separate IUPAC ambiguity calling thresholds** - Independent parameters for ambiguity calling vs variant phasing
+  - New `--min-ambiguity-frequency` parameter (default: 0.10 = 10%, lower than phasing threshold)
+  - New `--min-ambiguity-count` parameter (default: 3, lower than phasing threshold)
+  - Allows conservative phasing while capturing more residual variation as IUPAC codes
+  - Parameters recorded in run metadata JSON
 
 ### Fixed
 - **Empty input file handling** - Fixed crash (ZeroDivisionError) when input file contains no sequences
