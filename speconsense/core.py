@@ -893,8 +893,11 @@ class SpecimenClusterer:
         total_sequences = len(self.sequences)
         sequences_covered = sum(len(c['read_ids']) for c in large_clusters)
 
-        logging.info(f"Final: {len(large_clusters)} clusters covering {sequences_covered} sequences "
-                    f"({sequences_covered / total_sequences:.1%} of total)")
+        if total_sequences > 0:
+            logging.info(f"Final: {len(large_clusters)} clusters covering {sequences_covered} sequences "
+                        f"({sequences_covered / total_sequences:.1%} of total)")
+        else:
+            logging.info(f"Final: {len(large_clusters)} clusters (no sequences to cluster)")
         
         return large_clusters
 
@@ -2124,6 +2127,10 @@ def main():
     format = "fasta" if args.input_file.endswith(".fasta") else "fastq"
     records = list(SeqIO.parse(args.input_file, format))
     logging.info(f"Loaded {len(records)} primary sequences")
+
+    if len(records) == 0:
+        logging.warning("No sequences found in input file. Nothing to cluster.")
+        sys.exit(0)
 
     # Load augmented sequences if specified
     augment_records = None
