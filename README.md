@@ -331,6 +331,26 @@ This reduces the computational complexity from O(n^2) to approximately O(n x k),
 - For summarize's HAC clustering, scalability is most effective when there are many consensus sequences to cluster
 - Scalability mode produces identical or near-identical results to brute-force mode
 
+## Early Filtering
+
+By default, speconsense applies size filtering early in the pipeline (after pre-phasing merge) to skip expensive variant phasing on small clusters that will ultimately be filtered out. This significantly improves performance for large datasets.
+
+### Options
+
+- Early filtering is **enabled by default**: min-size and min-cluster-ratio filtering is applied after pre-phasing merge. Small clusters skip variant phasing.
+- `--disable-early-filter`: Process all clusters through variant phasing (original behavior). Use this for eDNA workflows where rare species may produce small clusters.
+- `--collect-discards`: Write all discarded reads (outliers + early-filtered) to `cluster_debug/{sample}-discards.fastq` for inspection.
+
+### eDNA Workflow
+
+For environmental DNA (eDNA) analysis where rare species are important:
+
+```bash
+speconsense input.fastq --disable-early-filter --min-size 1 --enable-scalability
+```
+
+This preserves all clusters (even single-read) while still using scalability optimizations for the O(n^2) comparisons.
+
 ## Algorithm Details
 
 ### Clustering Methods

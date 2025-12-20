@@ -70,7 +70,9 @@ class SpecimenClusterer:
                  min_ambiguity_frequency: float = 0.10,
                  min_ambiguity_count: int = 3,
                  enable_iupac_calling: bool = True,
-                 enable_scalability: bool = False):
+                 enable_scalability: bool = False,
+                 early_filter: bool = True,
+                 collect_discards: bool = False):
         self.min_identity = min_identity
         self.inflation = inflation
         self.min_size = min_size
@@ -99,6 +101,9 @@ class SpecimenClusterer:
         self.min_ambiguity_count = min_ambiguity_count
         self.enable_iupac_calling = enable_iupac_calling
         self.enable_scalability = enable_scalability
+        self.early_filter = early_filter
+        self.collect_discards = collect_discards
+        self.discarded_read_ids: Set[str] = set()  # Track all discarded reads (outliers + filtered)
 
         # Initialize scalability configuration
         self.scalability_config = ScalabilityConfig(enabled=enable_scalability)
@@ -808,6 +813,57 @@ class SpecimenClusterer:
         # Extract back to sets for Phase 3
         return [d['read_ids'] for d in merged_dicts]
 
+    def _apply_early_filter(self, clusters: List[Set[str]]) -> Tuple[List[Set[str]], List[Set[str]]]:
+        """Apply early size filtering after pre-phasing merge.
+
+        Uses the same logic as _run_size_filtering() but operates before
+        variant phasing to avoid expensive processing of small clusters.
+
+        Args:
+            clusters: List of merged clusters from Phase 2
+
+        Returns:
+            Tuple of (clusters_to_process, filtered_clusters)
+        """
+        if not self.early_filter:
+            return clusters, []
+
+        # Get size of each cluster for filtering
+        cluster_sizes = [(c, len(c)) for c in clusters]
+
+        # Find largest cluster size for ratio filtering
+        if not cluster_sizes:
+            return [], []
+        largest_size = max(size for _, size in cluster_sizes)
+
+        keep_clusters = []
+        filtered_clusters = []
+
+        for cluster, size in cluster_sizes:
+            # Apply min_size filter
+            if size < self.min_size:
+                filtered_clusters.append(cluster)
+                continue
+
+            # Apply min_cluster_ratio filter
+            if self.min_cluster_ratio > 0 and size / largest_size < self.min_cluster_ratio:
+                filtered_clusters.append(cluster)
+                continue
+
+            keep_clusters.append(cluster)
+
+        if filtered_clusters:
+            # Collect discarded read IDs
+            discarded_count = 0
+            for cluster in filtered_clusters:
+                self.discarded_read_ids.update(cluster)
+                discarded_count += len(cluster)
+
+            logging.info(f"Early filter: {len(filtered_clusters)} clusters ({discarded_count} reads) "
+                        f"below threshold, {len(keep_clusters)} clusters proceeding to phasing")
+
+        return keep_clusters, filtered_clusters
+
     def _run_variant_phasing(self, merged_clusters: List[Set[str]]) -> List[Dict]:
         """Phase 3: Detect variants and phase reads into haplotypes.
         
@@ -868,8 +924,25 @@ class SpecimenClusterer:
                 )
 
                 if outlier_ids:
+                    # Special case: 2-read cluster with exactly 1 outlier
+                    # Split into 2 single-read clusters instead of arbitrary choice
+                    if len(cluster) == 2 and len(outlier_ids) == 1:
+                        logging.info(f"Initial cluster {initial_idx}: Split 2-read cluster due to 1 outlier")
+                        # Create 2 single-read subclusters
+                        for read_id in cluster:
+                            subcluster = {
+                                'read_ids': {read_id},
+                                'initial_cluster_num': initial_idx,
+                                'allele_combo': 'single-read-split'
+                            }
+                            all_subclusters.append(subcluster)
+                        continue  # Skip normal processing for this cluster
+
                     logging.info(f"Initial cluster {initial_idx}: Removing {len(outlier_ids)}/{len(cluster_ids)} outlier reads, "
                                f"regenerating consensus")
+
+                    # Track discarded outlier reads
+                    self.discarded_read_ids.update(outlier_ids)
 
                     # Update cluster_ids to exclude outliers
                     cluster_ids = keep_ids
@@ -1083,16 +1156,38 @@ class SpecimenClusterer:
 
         return clusters_with_ambiguities, total_ambiguity_positions
 
+    def _write_discarded_reads(self) -> None:
+        """Write discarded reads to a FASTQ file for inspection.
+
+        Discards include:
+        - Outlier reads removed during variant phasing
+        - Reads from clusters filtered out by early filtering
+
+        Output: cluster_debug/{sample_name}-discards.fastq
+        """
+        if not self.discarded_read_ids:
+            return
+
+        discards_file = os.path.join(self.debug_dir, f"{self.sample_name}-discards.fastq")
+        with open(discards_file, 'w') as f:
+            for seq_id in sorted(self.discarded_read_ids):
+                if seq_id in self.records:
+                    SeqIO.write(self.records[seq_id], f, "fastq")
+
+        logging.info(f"Wrote {len(self.discarded_read_ids)} discarded reads to {discards_file}")
+
     def cluster(self, algorithm: str = "graph") -> None:
         """Perform complete clustering process with variant phasing and write output files.
 
         Pipeline:
             1. Initial clustering (MCL or greedy)
             2. Pre-phasing merge (combine HP-equivalent initial clusters)
+            2b. Early filtering (optional, skip small clusters before expensive phasing)
             3. Variant detection + phasing (split clusters by haplotype)
             4. Post-phasing merge (combine HP-equivalent subclusters)
             5. Filtering (size and ratio thresholds)
             6. Output generation
+            7. Write discarded reads (optional)
 
         Args:
             algorithm: Clustering algorithm to use ('graph' for MCL or 'greedy')
@@ -1104,8 +1199,11 @@ class SpecimenClusterer:
             # Phase 2: Pre-phasing merge
             merged_clusters = self._run_prephasing_merge(initial_clusters)
 
+            # Phase 2b: Early filtering (optional)
+            clusters_to_phase, early_filtered = self._apply_early_filter(merged_clusters)
+
             # Phase 3: Variant detection + phasing
-            all_subclusters = self._run_variant_phasing(merged_clusters)
+            all_subclusters = self._run_variant_phasing(clusters_to_phase)
 
             # Phase 4: Post-phasing merge
             merged_subclusters = self._run_postphasing_merge(all_subclusters)
@@ -1118,6 +1216,10 @@ class SpecimenClusterer:
             clusters_with_ambiguities, total_ambiguity_positions = self._write_cluster_outputs(
                 filtered_clusters, consensus_output_file
             )
+
+            # Phase 7: Write discarded reads (optional)
+            if self.collect_discards and self.discarded_read_ids:
+                self._write_discarded_reads()
 
             # Write phasing statistics
             self.write_phasing_stats(
@@ -2148,6 +2250,10 @@ def main():
     parser.add_argument("--enable-scalability", action="store_true",
                         help="Enable scalable mode for large datasets (requires vsearch). "
                              "Uses approximate search for faster K-NN graph construction.")
+    parser.add_argument("--disable-early-filter", action="store_true",
+                        help="Disable early filtering; process all clusters through variant phasing (default: early filter enabled)")
+    parser.add_argument("--collect-discards", action="store_true",
+                        help="Write discarded reads (outliers and filtered clusters) to cluster_debug/{sample}-discards.fastq")
     parser.add_argument("--primers", help="FASTA file containing primer sequences (default: looks for primers.fasta in input file directory)")
     parser.add_argument("-O", "--output-dir", default="clusters",
                         help="Output directory for all files (default: clusters)")
@@ -2194,7 +2300,9 @@ def main():
         min_ambiguity_frequency=args.min_ambiguity_frequency,
         min_ambiguity_count=args.min_ambiguity_count,
         enable_iupac_calling=not args.disable_ambiguity_calling,
-        enable_scalability=args.enable_scalability
+        enable_scalability=args.enable_scalability,
+        early_filter=not args.disable_early_filter,
+        collect_discards=args.collect_discards
     )
 
     # Log configuration
