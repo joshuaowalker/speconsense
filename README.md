@@ -24,6 +24,7 @@ The key features of Speconsense include:
 - External dependencies:
   - [SPOA (SIMD POA)](https://github.com/rvaser/spoa) - Required (install via conda)
   - [MCL](https://micans.org/mcl/) - Optional but recommended for graph-based clustering (install via conda)
+  - [vsearch](https://github.com/torognes/vsearch) - Optional, required for scalability mode with large datasets (install via conda)
 
 ### Install from GitHub (Recommended)
 
@@ -69,6 +70,14 @@ conda install bioconda::spoa
 
 # Or install from GitHub releases or build from source
 # See https://github.com/rvaser/spoa for source installation instructions
+```
+
+**vsearch - Optional (for scalability mode):**
+```bash
+# Via conda (easiest)
+conda install bioconda::vsearch
+
+# Or download from https://github.com/torognes/vsearch/releases
 ```
 
 **Note:** If the mcl tool is not available, speconsense will automatically fall back to the greedy clustering algorithm.
@@ -278,6 +287,49 @@ Consensus sequence headers contain metadata fields separated by spaces:
 - Field name changes from earlier versions: `merged_ric` → `rawric`, `p50diff`/`p95diff` → `rid`/`rid_min`
 - Variant merging only occurs between sequences with identical primer sets
 - `snp` counts positions where IUPAC codes were introduced during merging; `ambig` counts total ambiguity codes in the final sequence
+
+## Scalability Features
+
+For large datasets (thousands of sequences), speconsense can use external tools to accelerate pairwise comparison operations.
+
+### Enabling Scalability Mode
+
+```bash
+# Enable scalability for speconsense (main clustering)
+speconsense input.fastq --enable-scalability
+
+# Enable scalability for speconsense-summarize (HAC clustering)
+speconsense-summarize --enable-scalability --source clusters/
+```
+
+### Requirements
+
+Scalability mode requires **vsearch** to be installed:
+
+```bash
+conda install bioconda::vsearch
+```
+
+### How It Works
+
+Scalability mode uses a two-stage approach to reduce the O(n^2) pairwise comparison cost:
+
+1. **Fast candidate finding**: vsearch quickly identifies approximate sequence matches using heuristic search
+2. **Exact scoring**: Only candidate pairs are scored using the full alignment algorithm
+
+This reduces the computational complexity from O(n^2) to approximately O(n x k), where k is the number of candidates per sequence.
+
+### When to Use
+
+- **Recommended**: Datasets with >2,000 sequences (speconsense will suggest enabling scalability)
+- **Required**: Datasets with >10,000 sequences where O(n^2) becomes impractical
+- **Optional**: Smaller datasets where brute-force is fast enough
+
+### Implementation Notes
+
+- The scalability layer is designed to be backend-agnostic; future versions may support alternative tools (BLAST, minimap2, etc.)
+- For summarize's HAC clustering, scalability is most effective when there are many consensus sequences to cluster
+- Scalability mode produces identical or near-identical results to brute-force mode
 
 ## Algorithm Details
 

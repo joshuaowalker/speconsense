@@ -40,6 +40,13 @@ from speconsense.msa import (
 # Import shared types
 from speconsense.types import ConsensusInfo, OverlapMergeInfo
 
+# Import scalability module
+from speconsense.scalability import (
+    VsearchCandidateFinder,
+    ScalablePairwiseOperation,
+    ScalabilityConfig,
+)
+
 
 # IUPAC equivalencies for edlib alignment
 # This allows edlib to treat IUPAC ambiguity codes as matching their constituent bases
@@ -388,6 +395,8 @@ def parse_arguments():
     parser.add_argument("--version", action="version",
                         version=f"speconsense-summarize {__version__}",
                         help="Show program's version number and exit")
+    parser.add_argument("--enable-scalability", action="store_true",
+                        help="Enable scalable mode for HAC clustering (requires vsearch)")
 
     args = parser.parse_args()
 
@@ -2061,7 +2070,9 @@ def analyze_cluster_quality(
 
 def perform_hac_clustering(consensus_list: List[ConsensusInfo],
                           variant_group_identity: float,
-                          min_overlap_bp: int = 0) -> Dict[int, List[ConsensusInfo]]:
+                          min_overlap_bp: int = 0,
+                          scalability_config: Optional[ScalabilityConfig] = None,
+                          output_dir: str = ".") -> Dict[int, List[ConsensusInfo]]:
     """
     Perform Hierarchical Agglomerative Clustering.
     Separates specimens from variants based on identity threshold.
@@ -2101,22 +2112,59 @@ def perform_hac_clustering(consensus_list: List[ConsensusInfo],
 
     # Build initial distance matrix between individual sequences
     seq_distances = {}
-    for i, j in itertools.combinations(range(n), 2):
-        if min_overlap_bp > 0:
-            # Use overlap-aware distance for primer pool scenarios
-            dist = calculate_overlap_aware_distance(
-                consensus_list[i].sequence,
-                consensus_list[j].sequence,
-                min_overlap_bp
+
+    # Use scalability if enabled and we have enough sequences
+    use_scalable = (
+        scalability_config is not None and
+        scalability_config.enabled and
+        n > 50 and
+        min_overlap_bp == 0  # Scalability only for standard mode currently
+    )
+
+    if use_scalable:
+        # Build sequence dict with index keys
+        sequences = {str(i): consensus_list[i].sequence for i in range(n)}
+
+        # Create scoring function that returns similarity (1 - distance)
+        def score_func(seq1: str, seq2: str) -> float:
+            return 1.0 - calculate_adjusted_identity_distance(seq1, seq2)
+
+        candidate_finder = VsearchCandidateFinder()
+        if candidate_finder.is_available:
+            operation = ScalablePairwiseOperation(
+                candidate_finder=candidate_finder,
+                scoring_function=score_func,
+                config=scalability_config
             )
+            distances = operation.compute_distance_matrix(sequences, output_dir)
+
+            # Convert to integer-keyed distances
+            for (id1, id2), dist in distances.items():
+                i, j = int(id1), int(id2)
+                seq_distances[(i, j)] = dist
+                seq_distances[(j, i)] = dist
         else:
-            # Use standard global distance
-            dist = calculate_adjusted_identity_distance(
-                consensus_list[i].sequence,
-                consensus_list[j].sequence
-            )
-        seq_distances[(i, j)] = dist
-        seq_distances[(j, i)] = dist
+            logging.warning("Scalability enabled but vsearch not available. Using brute-force.")
+            use_scalable = False
+
+    if not use_scalable:
+        # Standard brute-force calculation
+        for i, j in itertools.combinations(range(n), 2):
+            if min_overlap_bp > 0:
+                # Use overlap-aware distance for primer pool scenarios
+                dist = calculate_overlap_aware_distance(
+                    consensus_list[i].sequence,
+                    consensus_list[j].sequence,
+                    min_overlap_bp
+                )
+            else:
+                # Use standard global distance
+                dist = calculate_adjusted_identity_distance(
+                    consensus_list[i].sequence,
+                    consensus_list[j].sequence
+                )
+            seq_distances[(i, j)] = dist
+            seq_distances[(j, i)] = dist
     
     def cluster_distance(cluster1: List[int], cluster2: List[int]) -> float:
         """Calculate linkage distance between two clusters.
@@ -2837,8 +2885,13 @@ def process_single_specimen(file_consensuses: List[ConsensusInfo],
     logging.info(f"Processing specimen from file: {file_name}")
 
     # Phase 1: HAC clustering to separate variant groups (moved before merging!)
+    scalability_config = None
+    if getattr(args, 'enable_scalability', False):
+        scalability_config = ScalabilityConfig(enabled=True)
+
     variant_groups = perform_hac_clustering(
-        file_consensuses, args.group_identity, min_overlap_bp=args.min_merge_overlap
+        file_consensuses, args.group_identity, min_overlap_bp=args.min_merge_overlap,
+        scalability_config=scalability_config, output_dir=getattr(args, 'source', '.')
     )
 
     # Filter to max groups if specified

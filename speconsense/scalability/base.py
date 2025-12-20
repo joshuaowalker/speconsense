@@ -1,0 +1,306 @@
+"""Base classes and protocols for scalability features."""
+
+from abc import ABC, abstractmethod
+from typing import Callable, Dict, List, Tuple, Optional, Protocol, runtime_checkable
+import logging
+
+from tqdm import tqdm
+
+from .config import ScalabilityConfig
+
+
+@runtime_checkable
+class CandidateFinder(Protocol):
+    """Protocol for fast approximate candidate finding.
+
+    Implementations must be able to:
+    1. Build an index from a set of sequences
+    2. Find candidate matches for query sequences
+    3. Clean up resources when done
+    """
+
+    @property
+    def name(self) -> str:
+        """Human-readable name of this backend."""
+        ...
+
+    @property
+    def is_available(self) -> bool:
+        """Check if this backend is available (e.g., tool installed)."""
+        ...
+
+    def build_index(self,
+                    sequences: Dict[str, str],
+                    output_dir: str) -> None:
+        """Build search index from sequences.
+
+        Args:
+            sequences: Dict mapping sequence_id -> sequence_string
+            output_dir: Directory for any cache/index files
+        """
+        ...
+
+    def find_candidates(self,
+                        query_ids: List[str],
+                        sequences: Dict[str, str],
+                        min_identity: float,
+                        max_candidates: int) -> Dict[str, List[str]]:
+        """Find candidate matches for query sequences.
+
+        Args:
+            query_ids: List of sequence IDs to query
+            sequences: Dict mapping sequence_id -> sequence_string
+            min_identity: Minimum identity threshold (0.0-1.0)
+            max_candidates: Maximum candidates to return per query
+
+        Returns:
+            Dict mapping query_id -> list of candidate target_ids
+        """
+        ...
+
+    def cleanup(self) -> None:
+        """Clean up any temporary files or resources."""
+        ...
+
+
+class ScalablePairwiseOperation:
+    """Generic scalable pairwise operation using candidate pre-filtering.
+
+    This class encapsulates the two-stage pattern:
+    1. Fast candidate finding using CandidateFinder (e.g., vsearch)
+    2. Exact scoring using provided scoring function
+    """
+
+    def __init__(self,
+                 candidate_finder: Optional[CandidateFinder],
+                 scoring_function: Callable[[str, str], float],
+                 config: ScalabilityConfig):
+        """Initialize scalable pairwise operation.
+
+        Args:
+            candidate_finder: Backend for fast candidate finding (None = brute force only)
+            scoring_function: Function(seq1, seq2) -> similarity_score (0.0-1.0)
+            config: Scalability configuration
+        """
+        self.candidate_finder = candidate_finder
+        self.scoring_function = scoring_function
+        self.config = config
+
+    def compute_top_k_neighbors(self,
+                                 sequences: Dict[str, str],
+                                 k: int,
+                                 min_identity: float,
+                                 output_dir: str,
+                                 min_edges_per_node: int = 3) -> Dict[str, List[Tuple[str, float]]]:
+        """Compute top-k nearest neighbors for all sequences.
+
+        Args:
+            sequences: Dict mapping sequence_id -> sequence_string
+            k: Number of neighbors to find per sequence
+            min_identity: Minimum identity threshold for neighbors
+            output_dir: Directory for temporary files
+            min_edges_per_node: Minimum edges to ensure connectivity
+
+        Returns:
+            Dict mapping sequence_id -> list of (neighbor_id, similarity) tuples
+        """
+        n = len(sequences)
+
+        # Decide whether to use scalable or brute-force approach
+        use_scalable = (
+            self.config.enabled and
+            self.candidate_finder is not None and
+            self.candidate_finder.is_available
+        )
+
+        if use_scalable:
+            return self._compute_knn_scalable(sequences, k, min_identity, output_dir, min_edges_per_node)
+        else:
+            return self._compute_knn_brute_force(sequences, k, min_identity, min_edges_per_node)
+
+    def _compute_knn_scalable(self,
+                               sequences: Dict[str, str],
+                               k: int,
+                               min_identity: float,
+                               output_dir: str,
+                               min_edges_per_node: int) -> Dict[str, List[Tuple[str, float]]]:
+        """Two-stage scalable K-NN computation."""
+        logging.info(f"Using {self.candidate_finder.name}-based scalable K-NN computation")
+
+        # Build index
+        self.candidate_finder.build_index(sequences, output_dir)
+
+        # Find candidates with oversampling and relaxed threshold
+        candidate_count = k * self.config.oversampling_factor
+        relaxed_threshold = min_identity * self.config.relaxed_identity_factor
+
+        seq_ids = list(sequences.keys())
+        candidates = self.candidate_finder.find_candidates(
+            seq_ids, sequences, relaxed_threshold, candidate_count
+        )
+
+        # Refine with exact scoring
+        results: Dict[str, List[Tuple[str, float]]] = {}
+
+        with tqdm(total=len(seq_ids), desc="Refining K-NN with exact scoring") as pbar:
+            for seq_id in seq_ids:
+                seq_candidates = candidates.get(seq_id, [])
+
+                # Score all candidates
+                scored = []
+                for cand_id in seq_candidates:
+                    if cand_id != seq_id:
+                        score = self.scoring_function(sequences[seq_id], sequences[cand_id])
+                        scored.append((cand_id, score))
+
+                # Sort by score descending
+                scored.sort(key=lambda x: x[1], reverse=True)
+
+                # Take top k meeting threshold
+                top_k = [(cid, score) for cid, score in scored[:k] if score >= min_identity]
+
+                # Ensure minimum connectivity
+                if len(top_k) < min_edges_per_node and len(scored) >= min_edges_per_node:
+                    for cid, score in scored[len(top_k):]:
+                        if score >= min_identity * self.config.relaxed_identity_factor:
+                            top_k.append((cid, score))
+                            if len(top_k) >= min_edges_per_node:
+                                break
+
+                results[seq_id] = top_k
+                pbar.update(1)
+
+        return results
+
+    def _compute_knn_brute_force(self,
+                                  sequences: Dict[str, str],
+                                  k: int,
+                                  min_identity: float,
+                                  min_edges_per_node: int) -> Dict[str, List[Tuple[str, float]]]:
+        """Standard O(n^2) brute-force K-NN computation."""
+        logging.info("Using brute-force K-NN computation")
+
+        seq_ids = list(sequences.keys())
+        n = len(seq_ids)
+
+        # Compute all pairwise similarities
+        similarities: Dict[str, Dict[str, float]] = {sid: {} for sid in seq_ids}
+
+        total = (n * (n - 1)) // 2
+        with tqdm(total=total, desc="Computing pairwise similarities") as pbar:
+            for i, id1 in enumerate(seq_ids):
+                for id2 in seq_ids[i + 1:]:
+                    score = self.scoring_function(sequences[id1], sequences[id2])
+                    similarities[id1][id2] = score
+                    similarities[id2][id1] = score
+                    pbar.update(1)
+
+        # Extract top-k for each sequence
+        results: Dict[str, List[Tuple[str, float]]] = {}
+
+        for seq_id in seq_ids:
+            neighbors = sorted(
+                [(nid, score) for nid, score in similarities[seq_id].items()],
+                key=lambda x: x[1],
+                reverse=True
+            )
+
+            top_k = [(nid, score) for nid, score in neighbors[:k] if score >= min_identity]
+
+            # Ensure minimum connectivity
+            if len(top_k) < min_edges_per_node and len(neighbors) >= min_edges_per_node:
+                for nid, score in neighbors[k:]:
+                    if score >= min_identity * 0.9:
+                        top_k.append((nid, score))
+                        if len(top_k) >= min_edges_per_node:
+                            break
+
+            results[seq_id] = top_k
+
+        return results
+
+    def compute_distance_matrix(self,
+                                 sequences: Dict[str, str],
+                                 output_dir: str) -> Dict[Tuple[str, str], float]:
+        """Compute pairwise distance matrix (for HAC clustering).
+
+        Args:
+            sequences: Dict mapping sequence_id -> sequence_string
+            output_dir: Directory for temporary files
+
+        Returns:
+            Dict mapping (id1, id2) -> distance, symmetric
+        """
+        n = len(sequences)
+
+        # For small sets or when scalability disabled, use brute force
+        use_scalable = (
+            self.config.enabled and
+            self.candidate_finder is not None and
+            self.candidate_finder.is_available and
+            n > 50  # Only worthwhile for larger sets
+        )
+
+        if use_scalable:
+            return self._compute_distance_matrix_scalable(sequences, output_dir)
+        else:
+            return self._compute_distance_matrix_brute_force(sequences)
+
+    def _compute_distance_matrix_brute_force(self,
+                                              sequences: Dict[str, str]) -> Dict[Tuple[str, str], float]:
+        """Brute-force distance matrix computation."""
+        seq_ids = list(sequences.keys())
+        distances: Dict[Tuple[str, str], float] = {}
+
+        total = (len(seq_ids) * (len(seq_ids) - 1)) // 2
+        with tqdm(total=total, desc="Computing pairwise distances") as pbar:
+            for i, id1 in enumerate(seq_ids):
+                for id2 in seq_ids[i + 1:]:
+                    score = self.scoring_function(sequences[id1], sequences[id2])
+                    distance = 1.0 - score  # Convert similarity to distance
+                    distances[(id1, id2)] = distance
+                    distances[(id2, id1)] = distance
+                    pbar.update(1)
+
+        return distances
+
+    def _compute_distance_matrix_scalable(self,
+                                           sequences: Dict[str, str],
+                                           output_dir: str) -> Dict[Tuple[str, str], float]:
+        """Scalable distance matrix using candidates to reduce comparisons."""
+        logging.info(f"Using {self.candidate_finder.name}-based scalable distance matrix")
+
+        # Build index
+        self.candidate_finder.build_index(sequences, output_dir)
+
+        seq_ids = list(sequences.keys())
+        n = len(seq_ids)
+
+        # Find candidates with low threshold to capture most relevant pairs
+        all_candidates = self.candidate_finder.find_candidates(
+            seq_ids, sequences, 0.5, n  # Low threshold, all candidates
+        )
+
+        distances: Dict[Tuple[str, str], float] = {}
+        computed_pairs: set = set()
+
+        with tqdm(total=len(seq_ids), desc="Computing distances for candidates") as pbar:
+            for id1 in seq_ids:
+                for id2 in all_candidates.get(id1, []):
+                    pair = (min(id1, id2), max(id1, id2))
+                    if pair not in computed_pairs and id1 != id2:
+                        score = self.scoring_function(sequences[id1], sequences[id2])
+                        distance = 1.0 - score
+                        distances[(id1, id2)] = distance
+                        distances[(id2, id1)] = distance
+                        computed_pairs.add(pair)
+                pbar.update(1)
+
+        # Fill in missing pairs with maximum distance
+        for i, id1 in enumerate(seq_ids):
+            for id2 in seq_ids[i + 1:]:
+                if (id1, id2) not in distances:
+                    distances[(id1, id2)] = 1.0
+                    distances[(id2, id1)] = 1.0
+
+        return distances

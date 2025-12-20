@@ -44,6 +44,11 @@ from speconsense.msa import (
     filter_qualifying_haplotypes,
     calculate_within_cluster_error,
 )
+from speconsense.scalability import (
+    VsearchCandidateFinder,
+    ScalablePairwiseOperation,
+    ScalabilityConfig,
+)
 
 
 class SpecimenClusterer:
@@ -64,7 +69,8 @@ class SpecimenClusterer:
                  min_variant_count: int = 5,
                  min_ambiguity_frequency: float = 0.10,
                  min_ambiguity_count: int = 3,
-                 enable_iupac_calling: bool = True):
+                 enable_iupac_calling: bool = True,
+                 enable_scalability: bool = False):
         self.min_identity = min_identity
         self.inflation = inflation
         self.min_size = min_size
@@ -92,6 +98,17 @@ class SpecimenClusterer:
         self.min_ambiguity_frequency = min_ambiguity_frequency
         self.min_ambiguity_count = min_ambiguity_count
         self.enable_iupac_calling = enable_iupac_calling
+        self.enable_scalability = enable_scalability
+
+        # Initialize scalability configuration
+        self.scalability_config = ScalabilityConfig(enabled=enable_scalability)
+        self._candidate_finder = None
+        if enable_scalability:
+            self._candidate_finder = VsearchCandidateFinder()
+            if not self._candidate_finder.is_available:
+                logging.warning("Scalability enabled but vsearch not found. Falling back to brute-force.")
+                self._candidate_finder = None
+
         self.sequences = {}  # id -> sequence string
         self.records = {}  # id -> SeqRecord object
         self.id_map = {}  # short_id -> original_id
@@ -133,6 +150,7 @@ class SpecimenClusterer:
                 "min_ambiguity_frequency": self.min_ambiguity_frequency,
                 "min_ambiguity_count": self.min_ambiguity_count,
                 "enable_iupac_calling": self.enable_iupac_calling,
+                "enable_scalability": self.enable_scalability,
                 "orient_mode": self.orient_mode,
             },
             "input_file": self.input_file,
@@ -243,59 +261,41 @@ class SpecimenClusterer:
             self.sequences[record.id] = str(record.seq)
             self.records[record.id] = record
 
+        # Log recommendation for large datasets
+        if len(self.sequences) > self.scalability_config.recommendation_threshold and not self.enable_scalability:
+            logging.info(f"Large dataset detected ({len(self.sequences)} sequences). "
+                         "Consider using --enable-scalability for faster processing.")
+
+    def _get_scalable_operation(self) -> ScalablePairwiseOperation:
+        """Get configured scalable operation for K-NN computation."""
+        return ScalablePairwiseOperation(
+            candidate_finder=self._candidate_finder,
+            scoring_function=self.calculate_similarity,
+            config=self.scalability_config
+        )
+
     def write_mcl_input(self, output_file: str) -> None:
         """Write similarity matrix in MCL input format using k-nearest neighbors approach."""
         self._create_id_mapping()
 
-        # Calculate all pairwise similarities
-        similarities = {}
         n = len(self.sequences)
-        total_comparisons = (n * (n - 1)) // 2
-
-        # Sort sequence IDs for deterministic order
-        seq_ids = sorted(self.sequences.keys())
-
-        with tqdm(total=total_comparisons, desc="Calculating pairwise sequence similarities") as pbar:
-            for id1 in seq_ids:
-                similarities[id1] = {}
-                for id2 in seq_ids:
-                    if id1 >= id2:  # Only calculate upper triangle
-                        continue
-                    sim = self.calculate_similarity(self.sequences[id1], self.sequences[id2])
-                    similarities[id1][id2] = sim
-                    similarities.setdefault(id2, {})[id1] = sim  # Mirror for easy lookup
-                    pbar.update(1)
-
-        # Use k-nearest neighbors for each sequence to create sparse graph
         k = min(self.k_nearest_neighbors, n - 1)  # Connect to at most k neighbors
-        min_edges_per_node = 3  # Ensure at least some connections per node
 
+        # Use scalable operation to compute K-NN edges
+        operation = self._get_scalable_operation()
+        knn_edges = operation.compute_top_k_neighbors(
+            sequences=self.sequences,
+            k=k,
+            min_identity=self.min_identity,
+            output_dir=self.output_dir,
+            min_edges_per_node=3
+        )
+
+        # Write edges to MCL input file
         with open(output_file, 'w') as f:
-            for id1 in seq_ids:
+            for id1, neighbors in knn_edges.items():
                 short_id1 = self.rev_id_map[id1]
-
-                # Sort neighbors by similarity
-                neighbors = sorted(
-                    [(id2, sim) for id2, sim in similarities[id1].items()],
-                    key=lambda x: x[1], reverse=True
-                )
-
-                # Take top k neighbors with sufficient similarity
-                top_neighbors = [
-                    (id2, sim) for id2, sim in neighbors[:k]
-                    if sim >= self.min_identity
-                ]
-
-                # Ensure at least min_edges connections if possible
-                if len(top_neighbors) < min_edges_per_node and len(neighbors) >= min_edges_per_node:
-                    additional_needed = min_edges_per_node - len(top_neighbors)
-                    for id2, sim in neighbors[k:k + additional_needed]:
-                        if sim < self.min_identity * 0.9:  # Allow slightly lower threshold
-                            break
-                        top_neighbors.append((id2, sim))
-
-                # Write edges
-                for id2, sim in top_neighbors:
+                for id2, sim in neighbors:
                     short_id2 = self.rev_id_map[id2]
                     # Transform similarity to emphasize differences
                     transformed_sim = sim ** 2  # Square the similarity
@@ -2068,6 +2068,9 @@ def main():
                         help="Presample size for initial reads (default: 1000, 0 to disable)")
     parser.add_argument("--k-nearest-neighbors", type=int, default=5,
                         help="Number of nearest neighbors for graph construction (default: 5)")
+    parser.add_argument("--enable-scalability", action="store_true",
+                        help="Enable scalable mode for large datasets (requires vsearch). "
+                             "Uses approximate search for faster K-NN graph construction.")
     parser.add_argument("--primers", help="FASTA file containing primer sequences (default: looks for primers.fasta in input file directory)")
     parser.add_argument("-O", "--output-dir", default="clusters",
                         help="Output directory for all files (default: clusters)")
@@ -2113,7 +2116,8 @@ def main():
         min_variant_count=args.min_variant_count,
         min_ambiguity_frequency=args.min_ambiguity_frequency,
         min_ambiguity_count=args.min_ambiguity_count,
-        enable_iupac_calling=not args.disable_ambiguity_calling
+        enable_iupac_calling=not args.disable_ambiguity_calling,
+        enable_scalability=args.enable_scalability
     )
 
     # Log configuration
