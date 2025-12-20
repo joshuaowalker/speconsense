@@ -359,8 +359,27 @@ class SpecimenClusterer:
         consensuses = []
         cluster_to_consensus = {}  # Map from cluster index to its consensus
 
+        # First pass: prepare sampled sequences and handle single-read clusters
+        clusters_needing_spoa = []  # (cluster_index, sampled_seqs)
+
         for i, cluster_dict in enumerate(clusters):
             cluster_reads = cluster_dict['read_ids']
+
+            # Skip empty clusters
+            if not cluster_reads:
+                logging.warning(f"Cluster {i} is empty, skipping")
+                continue
+
+            # Single-read clusters don't need SPOA - use the read directly
+            if len(cluster_reads) == 1:
+                seq_id = next(iter(cluster_reads))
+                consensus = self.sequences[seq_id]
+                # Trim primers before comparison
+                if hasattr(self, 'primers'):
+                    consensus, _ = self.trim_primers(consensus)
+                consensuses.append(consensus)
+                cluster_to_consensus[i] = consensus
+                continue
 
             # Sample from larger clusters to speed up consensus generation
             if len(cluster_reads) > self.max_sample_size:
@@ -386,42 +405,100 @@ class SpecimenClusterer:
                               sorted(qualities, key=lambda x: (-x[0], x[1]))]
                 sampled_seqs = {seq_id: self.sequences[seq_id] for seq_id in sorted_ids}
 
-            result = self.run_spoa(sampled_seqs)
+            clusters_needing_spoa.append((i, sampled_seqs))
 
-            # Skip empty clusters (can occur when all sequences are filtered out)
-            if result is None:
-                logging.warning(f"Cluster {i} produced no consensus (empty cluster), skipping")
-                continue
+        # Run SPOA for multi-read clusters
+        if clusters_needing_spoa:
+            if self.enable_scalability and len(clusters_needing_spoa) > 10:
+                # Parallel SPOA execution
+                from concurrent.futures import ThreadPoolExecutor
+                import os
+                max_workers = min(os.cpu_count() or 1, 8)
 
-            consensus = result.consensus
+                def run_spoa_for_cluster(args):
+                    cluster_idx, sampled_seqs = args
+                    return cluster_idx, self.run_spoa(sampled_seqs)
 
-            # Trim primers before comparison to merge clusters that differ only in primer regions
-            # The trimmed consensus is used only for comparison and discarded after merging
-            if hasattr(self, 'primers'):
-                consensus, _ = self.trim_primers(consensus)  # Discard found_primers
+                with ThreadPoolExecutor(max_workers=max_workers) as executor:
+                    from tqdm import tqdm
+                    results = list(tqdm(
+                        executor.map(run_spoa_for_cluster, clusters_needing_spoa),
+                        total=len(clusters_needing_spoa),
+                        desc=f"{phase_name} consensus generation"
+                    ))
 
-            consensuses.append(consensus)
-            cluster_to_consensus[i] = consensus
+                for cluster_idx, result in results:
+                    if result is None:
+                        logging.warning(f"Cluster {cluster_idx} produced no consensus, skipping")
+                        continue
+                    consensus = result.consensus
+                    if hasattr(self, 'primers'):
+                        consensus, _ = self.trim_primers(consensus)
+                    consensuses.append(consensus)
+                    cluster_to_consensus[cluster_idx] = consensus
+            else:
+                # Sequential SPOA execution
+                for cluster_idx, sampled_seqs in clusters_needing_spoa:
+                    result = self.run_spoa(sampled_seqs)
+                    if result is None:
+                        logging.warning(f"Cluster {cluster_idx} produced no consensus, skipping")
+                        continue
+                    consensus = result.consensus
+                    if hasattr(self, 'primers'):
+                        consensus, _ = self.trim_primers(consensus)
+                    consensuses.append(consensus)
+                    cluster_to_consensus[cluster_idx] = consensus
 
         consensus_to_clusters = defaultdict(list)
-        
+
         if self.disable_homopolymer_equivalence:
             # Only merge exactly identical sequences
             for i, consensus in enumerate(consensuses):
                 consensus_to_clusters[consensus].append(i)
         else:
             # Group by homopolymer-equivalent sequences
-            for i, consensus in enumerate(consensuses):
-                # Find if this consensus is homopolymer-equivalent to any existing group
-                found_group = False
-                for existing_consensus in consensus_to_clusters.keys():
-                    if self.are_homopolymer_equivalent(consensus, existing_consensus):
-                        consensus_to_clusters[existing_consensus].append(i)
-                        found_group = True
-                        break
-                
-                if not found_group:
-                    consensus_to_clusters[consensus].append(i)
+            # Use scalable method when enabled and there are many clusters
+            use_scalable = (
+                self.enable_scalability and
+                self._candidate_finder is not None and
+                self._candidate_finder.is_available and
+                len(cluster_to_consensus) > 50
+            )
+
+            if use_scalable:
+                # Map cluster indices to string IDs for scalability module
+                str_to_index = {str(i): i for i in cluster_to_consensus.keys()}
+                consensus_seq_dict = {str(i): seq for i, seq in cluster_to_consensus.items()}
+
+                # Use scalable equivalence grouping
+                operation = self._get_scalable_operation()
+                equivalence_groups = operation.compute_equivalence_groups(
+                    sequences=consensus_seq_dict,
+                    equivalence_fn=self.are_homopolymer_equivalent,
+                    output_dir=self.output_dir,
+                    min_candidate_identity=0.95
+                )
+
+                # Convert groups back to indices and populate consensus_to_clusters
+                for group in equivalence_groups:
+                    if group:
+                        representative = group[0]
+                        repr_consensus = consensus_seq_dict[representative]
+                        for str_id in group:
+                            consensus_to_clusters[repr_consensus].append(str_to_index[str_id])
+            else:
+                # Original O(n²) approach for small sets
+                for i, consensus in enumerate(consensuses):
+                    # Find if this consensus is homopolymer-equivalent to any existing group
+                    found_group = False
+                    for existing_consensus in consensus_to_clusters.keys():
+                        if self.are_homopolymer_equivalent(consensus, existing_consensus):
+                            consensus_to_clusters[existing_consensus].append(i)
+                            found_group = True
+                            break
+
+                    if not found_group:
+                        consensus_to_clusters[consensus].append(i)
 
         merged = []
         merged_indices = set()

@@ -1,7 +1,7 @@
 """Base classes and protocols for scalability features."""
 
 from abc import ABC, abstractmethod
-from typing import Callable, Dict, List, Tuple, Optional, Protocol, runtime_checkable
+from typing import Callable, Dict, List, Set, Tuple, Optional, Protocol, runtime_checkable
 import logging
 
 from tqdm import tqdm
@@ -304,3 +304,138 @@ class ScalablePairwiseOperation:
                     distances[(id2, id1)] = 1.0
 
         return distances
+
+    def compute_equivalence_groups(self,
+                                    sequences: Dict[str, str],
+                                    equivalence_fn: Callable[[str, str], bool],
+                                    output_dir: str,
+                                    min_candidate_identity: float = 0.95) -> List[List[str]]:
+        """Compute groups of equivalent sequences using candidate pre-filtering.
+
+        This is useful for merging clusters whose consensus sequences are
+        identical or homopolymer-equivalent. Uses union-find for transitive grouping.
+
+        Args:
+            sequences: Dict mapping sequence_id -> sequence_string
+            equivalence_fn: Function(seq1, seq2) -> bool for exact equivalence check
+            output_dir: Directory for temporary files
+            min_candidate_identity: Min identity threshold for candidates (default 0.95)
+
+        Returns:
+            List of groups, where each group is a list of equivalent sequence IDs
+        """
+        n = len(sequences)
+
+        # For small sets or when scalability disabled, use brute force
+        use_scalable = (
+            self.config.enabled and
+            self.candidate_finder is not None and
+            self.candidate_finder.is_available and
+            n > 50  # Only worthwhile for larger sets
+        )
+
+        if use_scalable:
+            return self._compute_equivalence_groups_scalable(
+                sequences, equivalence_fn, output_dir, min_candidate_identity
+            )
+        else:
+            return self._compute_equivalence_groups_brute_force(sequences, equivalence_fn)
+
+    def _compute_equivalence_groups_brute_force(self,
+                                                 sequences: Dict[str, str],
+                                                 equivalence_fn: Callable[[str, str], bool]) -> List[List[str]]:
+        """Brute-force O(n²) equivalence group computation."""
+        seq_ids = list(sequences.keys())
+
+        # Union-find data structure
+        parent = {sid: sid for sid in seq_ids}
+
+        def find(x: str) -> str:
+            if parent[x] != x:
+                parent[x] = find(parent[x])
+            return parent[x]
+
+        def union(x: str, y: str) -> None:
+            px, py = find(x), find(y)
+            if px != py:
+                parent[px] = py
+
+        # Check all pairs
+        total = (len(seq_ids) * (len(seq_ids) - 1)) // 2
+        with tqdm(total=total, desc="Finding equivalent pairs") as pbar:
+            for i, id1 in enumerate(seq_ids):
+                for id2 in seq_ids[i + 1:]:
+                    if equivalence_fn(sequences[id1], sequences[id2]):
+                        union(id1, id2)
+                    pbar.update(1)
+
+        # Collect groups
+        groups: Dict[str, List[str]] = {}
+        for sid in seq_ids:
+            root = find(sid)
+            if root not in groups:
+                groups[root] = []
+            groups[root].append(sid)
+
+        return list(groups.values())
+
+    def _compute_equivalence_groups_scalable(self,
+                                              sequences: Dict[str, str],
+                                              equivalence_fn: Callable[[str, str], bool],
+                                              output_dir: str,
+                                              min_candidate_identity: float) -> List[List[str]]:
+        """Scalable equivalence group computation using candidate pre-filtering."""
+        logging.info(f"Using {self.candidate_finder.name}-based equivalence grouping")
+
+        # Build index
+        self.candidate_finder.build_index(sequences, output_dir)
+
+        seq_ids = list(sequences.keys())
+        n = len(seq_ids)
+
+        # Find candidates with high identity (likely equivalent sequences)
+        # Use a reasonable max_candidates to limit work while still finding all equivalents
+        max_candidates = min(n, 100)
+        all_candidates = self.candidate_finder.find_candidates(
+            seq_ids, sequences, min_candidate_identity, max_candidates
+        )
+
+        # Union-find data structure
+        parent = {sid: sid for sid in seq_ids}
+
+        def find(x: str) -> str:
+            if parent[x] != x:
+                parent[x] = find(parent[x])
+            return parent[x]
+
+        def union(x: str, y: str) -> None:
+            px, py = find(x), find(y)
+            if px != py:
+                parent[px] = py
+
+        # Check only candidate pairs
+        checked_pairs: set = set()
+        equivalent_count = 0
+
+        with tqdm(total=len(seq_ids), desc="Checking candidate equivalences") as pbar:
+            for id1 in seq_ids:
+                for id2 in all_candidates.get(id1, []):
+                    pair = (min(id1, id2), max(id1, id2))
+                    if pair not in checked_pairs and id1 != id2:
+                        if equivalence_fn(sequences[id1], sequences[id2]):
+                            union(id1, id2)
+                            equivalent_count += 1
+                        checked_pairs.add(pair)
+                pbar.update(1)
+
+        logging.debug(f"Found {equivalent_count} equivalent pairs from {len(checked_pairs)} candidates")
+
+        # Collect groups
+        groups: Dict[str, List[str]] = {}
+        for sid in seq_ids:
+            root = find(sid)
+            if root not in groups:
+                groups[root] = []
+            groups[root].append(sid)
+
+        return list(groups.values())
