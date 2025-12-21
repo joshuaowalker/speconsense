@@ -395,8 +395,10 @@ def parse_arguments():
     parser.add_argument("--version", action="version",
                         version=f"speconsense-summarize {__version__}",
                         help="Show program's version number and exit")
-    parser.add_argument("--enable-scalability", action="store_true",
-                        help="Enable scalable mode for HAC clustering (requires vsearch)")
+    parser.add_argument("--enable-scalability", nargs='?', const=0, default=None, type=int,
+                        metavar="THRESHOLD",
+                        help="Enable scalable mode for HAC clustering (requires vsearch). "
+                             "Optional: minimum sequence count to activate (default: 0 = always).")
 
     args = parser.parse_args()
 
@@ -2117,6 +2119,7 @@ def perform_hac_clustering(consensus_list: List[ConsensusInfo],
     use_scalable = (
         scalability_config is not None and
         scalability_config.enabled and
+        n >= scalability_config.activation_threshold and
         n > 50 and
         min_overlap_bp == 0  # Scalability only for standard mode currently
     )
@@ -2885,9 +2888,13 @@ def process_single_specimen(file_consensuses: List[ConsensusInfo],
     logging.info(f"Processing specimen from file: {file_name}")
 
     # Phase 1: HAC clustering to separate variant groups (moved before merging!)
+    scalability_threshold = getattr(args, 'enable_scalability', None)
     scalability_config = None
-    if getattr(args, 'enable_scalability', False):
-        scalability_config = ScalabilityConfig(enabled=True)
+    if scalability_threshold is not None:
+        scalability_config = ScalabilityConfig(
+            enabled=True,
+            activation_threshold=scalability_threshold
+        )
 
     variant_groups = perform_hac_clustering(
         file_consensuses, args.group_identity, min_overlap_bp=args.min_merge_overlap,

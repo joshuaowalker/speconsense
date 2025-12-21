@@ -110,7 +110,8 @@ class ScalablePairwiseOperation:
         use_scalable = (
             self.config.enabled and
             self.candidate_finder is not None and
-            self.candidate_finder.is_available
+            self.candidate_finder.is_available and
+            n >= self.config.activation_threshold
         )
 
         if use_scalable:
@@ -238,6 +239,7 @@ class ScalablePairwiseOperation:
             self.config.enabled and
             self.candidate_finder is not None and
             self.candidate_finder.is_available and
+            n >= self.config.activation_threshold and
             n > 50  # Only worthwhile for larger sets
         )
 
@@ -331,6 +333,7 @@ class ScalablePairwiseOperation:
             self.config.enabled and
             self.candidate_finder is not None and
             self.candidate_finder.is_available and
+            n >= self.config.activation_threshold and
             n > 50  # Only worthwhile for larger sets
         )
 

@@ -295,12 +295,20 @@ For large datasets (thousands of sequences), speconsense can use external tools 
 ### Enabling Scalability Mode
 
 ```bash
-# Enable scalability for speconsense (main clustering)
+# Enable scalability for all input sizes
 speconsense input.fastq --enable-scalability
 
-# Enable scalability for speconsense-summarize (HAC clustering)
+# Enable scalability only for datasets with 500+ sequences
+speconsense input.fastq --enable-scalability 500
+
+# Enable scalability for speconsense-summarize
 speconsense-summarize --enable-scalability --source clusters/
+
+# With threshold (only use vsearch for specimens with 100+ consensus sequences)
+speconsense-summarize --enable-scalability 100 --source clusters/
 ```
+
+The optional threshold parameter allows you to run a single command across multiple specimens of varying sizes. Smaller specimens will use brute-force (which has less overhead for small inputs), while larger specimens will use vsearch acceleration.
 
 ### Requirements
 

@@ -70,7 +70,7 @@ class SpecimenClusterer:
                  min_ambiguity_frequency: float = 0.10,
                  min_ambiguity_count: int = 3,
                  enable_iupac_calling: bool = True,
-                 enable_scalability: bool = False,
+                 enable_scalability: Optional[int] = None,
                  early_filter: bool = True,
                  collect_discards: bool = False):
         self.min_identity = min_identity
@@ -106,9 +106,13 @@ class SpecimenClusterer:
         self.discarded_read_ids: Set[str] = set()  # Track all discarded reads (outliers + filtered)
 
         # Initialize scalability configuration
-        self.scalability_config = ScalabilityConfig(enabled=enable_scalability)
+        # enable_scalability: None=disabled, 0=always, N=threshold
+        self.scalability_config = ScalabilityConfig(
+            enabled=enable_scalability is not None,
+            activation_threshold=enable_scalability if enable_scalability is not None else 0
+        )
         self._candidate_finder = None
-        if enable_scalability:
+        if enable_scalability is not None:
             self._candidate_finder = VsearchCandidateFinder()
             if not self._candidate_finder.is_available:
                 logging.warning("Scalability enabled but vsearch not found. Falling back to brute-force.")
@@ -267,7 +271,7 @@ class SpecimenClusterer:
             self.records[record.id] = record
 
         # Log recommendation for large datasets
-        if len(self.sequences) > self.scalability_config.recommendation_threshold and not self.enable_scalability:
+        if len(self.sequences) > self.scalability_config.recommendation_threshold and self.enable_scalability is None:
             logging.info(f"Large dataset detected ({len(self.sequences)} sequences). "
                          "Consider using --enable-scalability for faster processing.")
 
@@ -414,7 +418,7 @@ class SpecimenClusterer:
 
         # Run SPOA for multi-read clusters
         if clusters_needing_spoa:
-            if self.enable_scalability and len(clusters_needing_spoa) > 10:
+            if self.enable_scalability is not None and len(clusters_needing_spoa) > 10:
                 # Parallel SPOA execution
                 from concurrent.futures import ThreadPoolExecutor
                 import os
@@ -464,7 +468,7 @@ class SpecimenClusterer:
             # Group by homopolymer-equivalent sequences
             # Use scalable method when enabled and there are many clusters
             use_scalable = (
-                self.enable_scalability and
+                self.enable_scalability is not None and
                 self._candidate_finder is not None and
                 self._candidate_finder.is_available and
                 len(cluster_to_consensus) > 50
@@ -2247,9 +2251,10 @@ def main():
                         help="Presample size for initial reads (default: 1000, 0 to disable)")
     parser.add_argument("--k-nearest-neighbors", type=int, default=5,
                         help="Number of nearest neighbors for graph construction (default: 5)")
-    parser.add_argument("--enable-scalability", action="store_true",
+    parser.add_argument("--enable-scalability", nargs='?', const=0, default=None, type=int,
+                        metavar="THRESHOLD",
                         help="Enable scalable mode for large datasets (requires vsearch). "
-                             "Uses approximate search for faster K-NN graph construction.")
+                             "Optional: minimum sequence count to activate (default: 0 = always).")
     parser.add_argument("--disable-early-filter", action="store_true",
                         help="Disable early filtering; process all clusters through variant phasing (default: early filter enabled)")
     parser.add_argument("--collect-discards", action="store_true",
