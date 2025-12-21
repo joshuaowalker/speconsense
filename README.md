@@ -339,6 +339,24 @@ This reduces the computational complexity from O(n^2) to approximately O(n x k),
 - For summarize's HAC clustering, scalability is most effective when there are many consensus sequences to cluster
 - Scalability mode produces identical or near-identical results to brute-force mode
 
+### Concurrency Control
+
+By default, speconsense uses single-threaded execution (`--threads 1`), which is safe for running multiple instances via GNU parallel.
+
+For a single large job, increase parallelism with `--threads`:
+
+```bash
+# Many jobs via parallel - default is single-threaded (safe)
+ls *.fastq | parallel speconsense --enable-scalability {}
+
+# Single large job - enable internal parallelism
+speconsense large_dataset.fastq --enable-scalability --threads 8
+```
+
+The `--threads` option controls:
+- vsearch thread count for candidate finding
+- ThreadPoolExecutor workers for parallel SPOA consensus generation
+
 ## Early Filtering
 
 By default, speconsense applies size filtering early in the pipeline (after pre-phasing merge) to skip expensive variant phasing on small clusters that will ultimately be filtered out. This significantly improves performance for large datasets.

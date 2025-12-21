@@ -11,6 +11,7 @@ class ScalabilityConfig:
     Attributes:
         enabled: Whether scalability mode is active
         activation_threshold: Minimum sequence count to activate scalability (0 = always)
+        max_threads: Max threads for internal parallelism (default: 1 for backward compatibility)
         backend: Which backend to use (default: 'vsearch')
         oversampling_factor: Multiplier for candidate count in K-NN (default: 10)
         relaxed_identity_factor: Factor to relax identity threshold for candidates (default: 0.9)
@@ -19,6 +20,7 @@ class ScalabilityConfig:
     """
     enabled: bool = False
     activation_threshold: int = 0
+    max_threads: int = 1
     backend: str = 'vsearch'
     oversampling_factor: int = 10
     relaxed_identity_factor: float = 0.9
@@ -38,5 +40,6 @@ class ScalabilityConfig:
         return cls(
             enabled=threshold is not None,
             activation_threshold=threshold if threshold is not None else 0,
+            max_threads=getattr(args, 'threads', 1),
             backend=getattr(args, 'scalability_backend', 'vsearch'),
         )

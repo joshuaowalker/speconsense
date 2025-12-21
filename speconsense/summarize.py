@@ -399,6 +399,9 @@ def parse_arguments():
                         metavar="THRESHOLD",
                         help="Enable scalable mode for HAC clustering (requires vsearch). "
                              "Optional: minimum sequence count to activate (default: 0 = always).")
+    parser.add_argument("--threads", type=int, default=1, metavar="N",
+                        help="Max threads for internal parallelism. "
+                             "Default: 1. Use higher values for single large jobs.")
 
     args = parser.parse_args()
 
@@ -2132,7 +2135,7 @@ def perform_hac_clustering(consensus_list: List[ConsensusInfo],
         def score_func(seq1: str, seq2: str) -> float:
             return 1.0 - calculate_adjusted_identity_distance(seq1, seq2)
 
-        candidate_finder = VsearchCandidateFinder()
+        candidate_finder = VsearchCandidateFinder(num_threads=scalability_config.max_threads)
         if candidate_finder.is_available:
             operation = ScalablePairwiseOperation(
                 candidate_finder=candidate_finder,
@@ -2889,11 +2892,13 @@ def process_single_specimen(file_consensuses: List[ConsensusInfo],
 
     # Phase 1: HAC clustering to separate variant groups (moved before merging!)
     scalability_threshold = getattr(args, 'enable_scalability', None)
+    max_threads = getattr(args, 'threads', 1)
     scalability_config = None
     if scalability_threshold is not None:
         scalability_config = ScalabilityConfig(
             enabled=True,
-            activation_threshold=scalability_threshold
+            activation_threshold=scalability_threshold,
+            max_threads=max_threads
         )
 
     variant_groups = perform_hac_clustering(

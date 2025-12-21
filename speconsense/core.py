@@ -71,6 +71,7 @@ class SpecimenClusterer:
                  min_ambiguity_count: int = 3,
                  enable_iupac_calling: bool = True,
                  enable_scalability: Optional[int] = None,
+                 max_threads: int = 1,
                  early_filter: bool = True,
                  collect_discards: bool = False):
         self.min_identity = min_identity
@@ -101,6 +102,7 @@ class SpecimenClusterer:
         self.min_ambiguity_count = min_ambiguity_count
         self.enable_iupac_calling = enable_iupac_calling
         self.enable_scalability = enable_scalability
+        self.max_threads = max_threads
         self.early_filter = early_filter
         self.collect_discards = collect_discards
         self.discarded_read_ids: Set[str] = set()  # Track all discarded reads (outliers + filtered)
@@ -109,11 +111,12 @@ class SpecimenClusterer:
         # enable_scalability: None=disabled, 0=always, N=threshold
         self.scalability_config = ScalabilityConfig(
             enabled=enable_scalability is not None,
-            activation_threshold=enable_scalability if enable_scalability is not None else 0
+            activation_threshold=enable_scalability if enable_scalability is not None else 0,
+            max_threads=max_threads
         )
         self._candidate_finder = None
         if enable_scalability is not None:
-            self._candidate_finder = VsearchCandidateFinder()
+            self._candidate_finder = VsearchCandidateFinder(num_threads=max_threads)
             if not self._candidate_finder.is_available:
                 logging.warning("Scalability enabled but vsearch not found. Falling back to brute-force.")
                 self._candidate_finder = None
@@ -160,6 +163,7 @@ class SpecimenClusterer:
                 "min_ambiguity_count": self.min_ambiguity_count,
                 "enable_iupac_calling": self.enable_iupac_calling,
                 "enable_scalability": self.enable_scalability,
+                "max_threads": self.max_threads,
                 "orient_mode": self.orient_mode,
             },
             "input_file": self.input_file,
@@ -418,17 +422,15 @@ class SpecimenClusterer:
 
         # Run SPOA for multi-read clusters
         if clusters_needing_spoa:
-            if self.enable_scalability is not None and len(clusters_needing_spoa) > 10:
+            if self.max_threads > 1 and len(clusters_needing_spoa) > 10:
                 # Parallel SPOA execution
                 from concurrent.futures import ThreadPoolExecutor
-                import os
-                max_workers = min(os.cpu_count() or 1, 8)
 
                 def run_spoa_for_cluster(args):
                     cluster_idx, sampled_seqs = args
                     return cluster_idx, self.run_spoa(sampled_seqs)
 
-                with ThreadPoolExecutor(max_workers=max_workers) as executor:
+                with ThreadPoolExecutor(max_workers=self.max_threads) as executor:
                     from tqdm import tqdm
                     results = list(tqdm(
                         executor.map(run_spoa_for_cluster, clusters_needing_spoa),
@@ -2255,6 +2257,9 @@ def main():
                         metavar="THRESHOLD",
                         help="Enable scalable mode for large datasets (requires vsearch). "
                              "Optional: minimum sequence count to activate (default: 0 = always).")
+    parser.add_argument("--threads", type=int, default=1, metavar="N",
+                        help="Max threads for internal parallelism (vsearch, SPOA). "
+                             "Default: 1. Use higher values for single large jobs.")
     parser.add_argument("--disable-early-filter", action="store_true",
                         help="Disable early filtering; process all clusters through variant phasing (default: early filter enabled)")
     parser.add_argument("--collect-discards", action="store_true",
@@ -2306,6 +2311,7 @@ def main():
         min_ambiguity_count=args.min_ambiguity_count,
         enable_iupac_calling=not args.disable_ambiguity_calling,
         enable_scalability=args.enable_scalability,
+        max_threads=args.threads,
         early_filter=not args.disable_early_filter,
         collect_discards=args.collect_discards
     )

@@ -24,15 +24,15 @@ class VsearchCandidateFinder:
 
     def __init__(self,
                  batch_size: int = 1000,
-                 num_threads: Optional[int] = None):
+                 num_threads: int = 1):
         """Initialize VsearchCandidateFinder.
 
         Args:
             batch_size: Number of sequences to query per batch
-            num_threads: Number of threads for vsearch (default: min(cpu_count, 8))
+            num_threads: Number of threads for vsearch (default: 1 for backward compatibility)
         """
         self.batch_size = batch_size
-        self.num_threads = num_threads or min(os.cpu_count() or 1, 8)
+        self.num_threads = num_threads
         self._db_path: Optional[str] = None
         self._hash_to_ids: Dict[str, List[str]] = {}
         self._cache_dir: Optional[str] = None
@@ -57,14 +57,19 @@ class VsearchCandidateFinder:
 
     def build_index(self,
                     sequences: Dict[str, str],
-                    output_dir: str) -> None:
+                    output_dir: str,
+                    cache_id: Optional[str] = None) -> None:
         """Build vsearch database with SHA256-based deduplication.
 
         Args:
             sequences: Dict mapping sequence_id -> sequence_string
             output_dir: Directory for cache files
+            cache_id: Unique identifier for this cache (e.g., sample name).
+                      If not provided, uses process ID to avoid collisions.
         """
-        self._cache_dir = os.path.join(output_dir, ".vsearch_cache")
+        # Use cache_id or PID to ensure parallel instances don't collide
+        unique_id = cache_id if cache_id else str(os.getpid())
+        self._cache_dir = os.path.join(output_dir, f".vsearch_cache_{unique_id}")
         os.makedirs(self._cache_dir, exist_ok=True)
 
         self._db_path = os.path.join(self._cache_dir, "sequences.fasta")
@@ -121,6 +126,21 @@ class VsearchCandidateFinder:
                     all_results[query_id].extend(candidates)
 
                 pbar.update(len(batch_ids))
+
+        # Validate results - detect likely vsearch failures
+        total_candidates = sum(len(c) for c in all_results.values())
+        seqs_with_candidates = sum(1 for c in all_results.values() if c)
+
+        logging.debug(f"vsearch found {total_candidates} candidates for {len(query_ids)} sequences "
+                      f"({seqs_with_candidates} sequences with ≥1 candidate)")
+
+        # If zero candidates for a large dataset, vsearch likely failed
+        if len(query_ids) > 100 and total_candidates == 0:
+            raise RuntimeError(
+                f"vsearch returned zero candidates for {len(query_ids)} sequences. "
+                "This may indicate vsearch was killed due to resource contention. "
+                "Try running with --threads 1 when using GNU parallel."
+            )
 
         return dict(all_results)
 
