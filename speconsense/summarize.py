@@ -1260,9 +1260,9 @@ def create_consensus_from_msa(aligned_seqs: List, variants: List[ConsensusInfo])
                 # Single base - no ambiguity
                 consensus_seq.append(list(base_votes.keys())[0])
             else:
-                # Multiple bases - generate IUPAC code
+                # Multiple bases - generate IUPAC code (expanding any existing IUPAC codes)
                 represented_bases = set(base_votes.keys())
-                iupac_code = IUPAC_CODES.get(frozenset(represented_bases), 'N')
+                iupac_code = merge_bases_to_iupac(represented_bases)
                 consensus_seq.append(iupac_code)
                 snp_count += 1
         # else: majority wants gap, omit position
@@ -1370,7 +1370,7 @@ def create_overlap_consensus_from_msa(aligned_seqs: List, variants: List[Consens
                     consensus_seq.append(list(base_votes.keys())[0])
                 else:
                     represented_bases = set(base_votes.keys())
-                    iupac_code = IUPAC_CODES.get(frozenset(represented_bases), 'N')
+                    iupac_code = merge_bases_to_iupac(represented_bases)
                     consensus_seq.append(iupac_code)
                     snp_count += 1
             # else: majority wants gap in overlap, omit position
@@ -1390,7 +1390,7 @@ def create_overlap_consensus_from_msa(aligned_seqs: List, variants: List[Consens
                     consensus_seq.append(list(votes.keys())[0])
                 else:
                     represented_bases = set(votes.keys())
-                    iupac_code = IUPAC_CODES.get(frozenset(represented_bases), 'N')
+                    iupac_code = merge_bases_to_iupac(represented_bases)
                     consensus_seq.append(iupac_code)
                     snp_count += 1
 
@@ -1708,8 +1708,29 @@ def expand_iupac_code(base: str) -> set:
         'V': {'A', 'C', 'G'},
         'N': {'A', 'C', 'G', 'T'},
     }
-    
+
     return iupac_expansion.get(base.upper(), {'N'})
+
+
+def merge_bases_to_iupac(bases: set) -> str:
+    """
+    Merge a set of bases (which may include IUPAC codes) into a single IUPAC code.
+
+    Expands any existing IUPAC codes to their constituent nucleotides,
+    takes the union, and returns the appropriate IUPAC code.
+
+    Examples:
+        {'C', 'Y'} -> 'Y'  (Y=CT, so C+Y = CT = Y)
+        {'A', 'R'} -> 'R'  (R=AG, so A+R = AG = R)
+        {'C', 'R'} -> 'V'  (R=AG, so C+R = ACG = V)
+    """
+    # Expand all bases to their constituent nucleotides
+    all_nucleotides = set()
+    for base in bases:
+        all_nucleotides.update(expand_iupac_code(base))
+
+    # Look up the IUPAC code for the combined set
+    return IUPAC_CODES.get(frozenset(all_nucleotides), 'N')
 
 
 def create_variant_summary(primary_seq: str, variant_seq: str) -> str:

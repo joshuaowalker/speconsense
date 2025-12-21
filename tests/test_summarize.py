@@ -227,3 +227,42 @@ def test_merge_with_homopolymer_only_differences():
     finally:
         # Clean up temporary directory
         shutil.rmtree(temp_dir)
+
+
+def test_merge_bases_to_iupac_expands_existing_codes():
+    """Test that merge_bases_to_iupac correctly expands existing IUPAC codes.
+
+    This tests the fix for a bug where merging a base with an existing IUPAC
+    code would produce 'N' instead of the correct expanded code.
+    For example, C + Y should produce Y (since Y = C|T, and C is already in Y).
+    """
+    from speconsense.summarize import merge_bases_to_iupac
+
+    # Test cases: (input_bases, expected_output)
+    test_cases = [
+        # Bug fix cases: existing IUPAC codes should be expanded
+        ({'C', 'Y'}, 'Y'),   # C + Y(CT) = CT = Y
+        ({'T', 'Y'}, 'Y'),   # T + Y(CT) = CT = Y
+        ({'A', 'R'}, 'R'),   # A + R(AG) = AG = R
+        ({'G', 'R'}, 'R'),   # G + R(AG) = AG = R
+        ({'C', 'R'}, 'V'),   # C + R(AG) = ACG = V
+        ({'T', 'R'}, 'D'),   # T + R(AG) = AGT = D
+        ({'Y', 'R'}, 'N'),   # Y(CT) + R(AG) = ACGT = N
+
+        # Standard cases: no existing IUPAC codes
+        ({'A'}, 'A'),        # Single base stays the same
+        ({'C', 'T'}, 'Y'),   # C + T = CT = Y
+        ({'A', 'G'}, 'R'),   # A + G = AG = R
+        ({'A', 'C', 'G', 'T'}, 'N'),  # All four = N
+
+        # More complex IUPAC expansion cases
+        ({'M', 'K'}, 'N'),   # M(AC) + K(GT) = ACGT = N
+        ({'S', 'W'}, 'N'),   # S(GC) + W(AT) = ACGT = N
+        ({'B', 'A'}, 'N'),   # B(CGT) + A = ACGT = N
+        ({'V', 'T'}, 'N'),   # V(ACG) + T = ACGT = N
+    ]
+
+    for bases, expected in test_cases:
+        result = merge_bases_to_iupac(bases)
+        assert result == expected, \
+            f"merge_bases_to_iupac({bases}) returned '{result}', expected '{expected}'"
