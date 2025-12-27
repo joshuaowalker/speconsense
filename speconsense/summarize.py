@@ -11,7 +11,7 @@ import argparse
 import itertools
 import logging
 import datetime
-from typing import List, Dict, Tuple, Optional, NamedTuple
+from typing import List, Dict, Tuple, Optional, NamedTuple, Set
 from collections import defaultdict
 
 import edlib
@@ -2110,6 +2110,7 @@ def perform_hac_clustering(consensus_list: List[ConsensusInfo],
                      f"({linkage_type} linkage)")
 
     n = len(consensus_list)
+    logging.info(f"perform_hac_clustering: {n} sequences, threshold={variant_group_identity}")
     distance_threshold = 1.0 - variant_group_identity
 
     # Initialize each sequence as its own cluster
@@ -2123,17 +2124,22 @@ def perform_hac_clustering(consensus_list: List[ConsensusInfo],
         scalability_config is not None and
         scalability_config.enabled and
         n >= scalability_config.activation_threshold and
-        n > 50 and
-        min_overlap_bp == 0  # Scalability only for standard mode currently
+        n > 50
     )
+    logging.info(f"perform_hac_clustering: use_scalable={use_scalable}")
 
     if use_scalable:
         # Build sequence dict with index keys
         sequences = {str(i): consensus_list[i].sequence for i in range(n)}
 
         # Create scoring function that returns similarity (1 - distance)
-        def score_func(seq1: str, seq2: str) -> float:
-            return 1.0 - calculate_adjusted_identity_distance(seq1, seq2)
+        # Use overlap-aware distance when min_overlap_bp > 0
+        if min_overlap_bp > 0:
+            def score_func(seq1: str, seq2: str) -> float:
+                return 1.0 - calculate_overlap_aware_distance(seq1, seq2, min_overlap_bp)
+        else:
+            def score_func(seq1: str, seq2: str) -> float:
+                return 1.0 - calculate_adjusted_identity_distance(seq1, seq2)
 
         candidate_finder = VsearchCandidateFinder(num_threads=scalability_config.max_threads)
         if candidate_finder.is_available:
@@ -2142,7 +2148,7 @@ def perform_hac_clustering(consensus_list: List[ConsensusInfo],
                 scoring_function=score_func,
                 config=scalability_config
             )
-            distances = operation.compute_distance_matrix(sequences, output_dir)
+            distances = operation.compute_distance_matrix(sequences, output_dir, variant_group_identity)
 
             # Convert to integer-keyed distances
             for (id1, id2), dist in distances.items():
@@ -2171,58 +2177,153 @@ def perform_hac_clustering(consensus_list: List[ConsensusInfo],
                 )
             seq_distances[(i, j)] = dist
             seq_distances[(j, i)] = dist
-    
-    def cluster_distance(cluster1: List[int], cluster2: List[int]) -> float:
-        """Calculate linkage distance between two clusters.
 
-        Uses single linkage (min) for overlap mode, complete linkage (max) otherwise.
-        Single linkage allows transitive grouping through a bridge sequence.
-        """
-        distances = []
-        for i in cluster1:
-            for j in cluster2:
+    # Build sequence adjacency from computed distances (works for both paths)
+    # Only include edges where distance < 1.0 (excludes failed alignments and non-candidates)
+    seq_adjacency: Dict[int, Set[int]] = defaultdict(set)
+    for (i, j), dist in seq_distances.items():
+        if dist < 1.0 and i != j:
+            seq_adjacency[i].add(j)
+            seq_adjacency[j].add(i)
+
+    logging.info(f"Built adjacency: {len(seq_adjacency)} sequences with edges, "
+                 f"{sum(len(v) for v in seq_adjacency.values()) // 2} unique edges")
+
+    # Union-find helper functions
+    parent: Dict[int, int] = {i: i for i in range(n)}
+
+    def find(x: int) -> int:
+        if parent[x] != x:
+            parent[x] = find(parent[x])  # Path compression
+        return parent[x]
+
+    def union(x: int, y: int) -> None:
+        px, py = find(x), find(y)
+        if px != py:
+            parent[px] = py
+
+    if use_single_linkage:
+        # Single linkage = connected components on edges where dist < threshold
+        # This is O(n + E) instead of O(merges × E)
+        logging.info("Single linkage: computing connected components on threshold-filtered edges")
+
+        edge_count = 0
+        for (i, j), dist in seq_distances.items():
+            if i < j and dist < distance_threshold:
+                union(i, j)
+                edge_count += 1
+
+        logging.info(f"Processed {edge_count} edges below threshold {distance_threshold:.3f}")
+
+        # Collect groups
+        component_groups: Dict[int, List[int]] = defaultdict(list)
+        for i in range(n):
+            component_groups[find(i)].append(i)
+
+        clusters = list(component_groups.values())
+        logging.info(f"Single linkage produced {len(clusters)} clusters")
+
+    else:
+        # Complete linkage: partition by connected components first
+        # Clusters from different components can never merge (missing edge = dist 1.0)
+        logging.info("Complete linkage: partitioning into connected components")
+
+        for i in range(n):
+            for j in seq_adjacency[i]:
                 if i < j:
-                    dist = seq_distances[(i, j)]
-                elif i > j:
-                    dist = seq_distances[(j, i)]
-                else:
-                    dist = 0.0
-                distances.append(dist)
+                    union(i, j)
 
-        if use_single_linkage:
-            return min(distances)  # Single linkage: closest pair
-        else:
-            return max(distances)  # Complete linkage: furthest pair
-    
-    # Perform hierarchical clustering
-    while len(clusters) > 1:
-        # Find closest pair of clusters
-        min_distance = float('inf')
-        merge_pair = None
-        
-        for i, j in itertools.combinations(range(len(clusters)), 2):
-            dist = cluster_distance(clusters[i], clusters[j])
-            if dist < min_distance:
-                min_distance = dist
-                merge_pair = (i, j)
-        
-        # If minimum distance exceeds threshold, stop clustering
-        if min_distance >= distance_threshold:
-            break
-            
-        # Merge the closest clusters
-        i, j = merge_pair
-        merged_cluster = clusters[i] + clusters[j]
-        
-        # Remove old clusters (in reverse order to maintain indices)
-        new_clusters = []
-        for idx, cluster in enumerate(clusters):
-            if idx != i and idx != j:
-                new_clusters.append(cluster)
-        new_clusters.append(merged_cluster)
-        clusters = new_clusters
-        
-        logging.debug(f"Merged clusters with distance {min_distance:.3f}, now have {len(clusters)} clusters")
+        # Group sequences by component
+        components: Dict[int, List[int]] = defaultdict(list)
+        for i in range(n):
+            components[find(i)].append(i)
+
+        # Count singletons vs multi-sequence components
+        singletons = sum(1 for c in components.values() if len(c) == 1)
+        multi_seq = len(components) - singletons
+        logging.info(f"Found {len(components)} connected components "
+                     f"({singletons} singletons, {multi_seq} multi-sequence)")
+
+        # Run HAC within each component
+        clusters: List[List[int]] = []
+
+        for component_seqs in tqdm(components.values(), desc="HAC per component"):
+            if len(component_seqs) == 1:
+                clusters.append(component_seqs)
+                continue
+
+            # Build local adjacency for this component
+            local_adjacency: Dict[int, Set[int]] = defaultdict(set)
+            for i in component_seqs:
+                for j in seq_adjacency[i]:
+                    if j in component_seqs:
+                        local_adjacency[i].add(j)
+
+            # Initialize clusters for this component
+            seq_to_cluster: Dict[int, int] = {i: i for i in component_seqs}
+            cluster_map: Dict[int, List[int]] = {i: [i] for i in component_seqs}
+
+            def get_cluster_adjacency() -> Set[Tuple[int, int]]:
+                adjacent_pairs: Set[Tuple[int, int]] = set()
+                for seq_i in component_seqs:
+                    cluster_i = seq_to_cluster[seq_i]
+                    for seq_j in local_adjacency[seq_i]:
+                        cluster_j = seq_to_cluster[seq_j]
+                        if cluster_i != cluster_j:
+                            pair = (min(cluster_i, cluster_j), max(cluster_i, cluster_j))
+                            adjacent_pairs.add(pair)
+                return adjacent_pairs
+
+            def cluster_distance(cluster1: List[int], cluster2: List[int]) -> float:
+                # Complete linkage: max distance, early exit on missing edge
+                for i in cluster1:
+                    for j in cluster2:
+                        if i == j:
+                            continue
+                        elif j in local_adjacency[i]:
+                            key = (i, j) if (i, j) in seq_distances else (j, i)
+                            dist = seq_distances.get(key, 1.0)
+                            if dist >= distance_threshold:
+                                return 1.0
+                        else:
+                            return 1.0  # Missing edge = max distance
+                # All pairs have edges below threshold, compute actual max
+                max_dist = 0.0
+                for i in cluster1:
+                    for j in cluster2:
+                        if i != j:
+                            key = (i, j) if (i, j) in seq_distances else (j, i)
+                            max_dist = max(max_dist, seq_distances.get(key, 1.0))
+                return max_dist
+
+            # HAC within component
+            while len(cluster_map) > 1:
+                adjacent_pairs = get_cluster_adjacency()
+                if not adjacent_pairs:
+                    break
+
+                min_distance = float('inf')
+                merge_pair = None
+
+                for cluster_i, cluster_j in adjacent_pairs:
+                    if cluster_i not in cluster_map or cluster_j not in cluster_map:
+                        continue
+                    dist = cluster_distance(cluster_map[cluster_i], cluster_map[cluster_j])
+                    if dist < min_distance:
+                        min_distance = dist
+                        merge_pair = (cluster_i, cluster_j)
+
+                if min_distance >= distance_threshold or merge_pair is None:
+                    break
+
+                ci, cj = merge_pair
+                merged = cluster_map[ci] + cluster_map[cj]
+                for seq_idx in cluster_map[cj]:
+                    seq_to_cluster[seq_idx] = ci
+                cluster_map[ci] = merged
+                del cluster_map[cj]
+
+            clusters.extend(cluster_map.values())
     
     # Convert clusters to groups of ConsensusInfo
     groups = {}

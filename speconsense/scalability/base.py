@@ -222,17 +222,20 @@ class ScalablePairwiseOperation:
 
     def compute_distance_matrix(self,
                                  sequences: Dict[str, str],
-                                 output_dir: str) -> Dict[Tuple[str, str], float]:
+                                 output_dir: str,
+                                 min_identity: float = 0.9) -> Dict[Tuple[str, str], float]:
         """Compute pairwise distance matrix (for HAC clustering).
 
         Args:
             sequences: Dict mapping sequence_id -> sequence_string
             output_dir: Directory for temporary files
+            min_identity: Identity threshold for clustering (used to filter candidates)
 
         Returns:
             Dict mapping (id1, id2) -> distance, symmetric
         """
         n = len(sequences)
+        logging.info(f"compute_distance_matrix called with {n} sequences")
 
         # For small sets or when scalability disabled, use brute force
         use_scalable = (
@@ -243,8 +246,13 @@ class ScalablePairwiseOperation:
             n > 50  # Only worthwhile for larger sets
         )
 
+        logging.info(f"use_scalable={use_scalable} (enabled={self.config.enabled}, "
+                     f"finder={self.candidate_finder is not None}, "
+                     f"available={self.candidate_finder.is_available if self.candidate_finder else 'N/A'}, "
+                     f"threshold={self.config.activation_threshold})")
+
         if use_scalable:
-            return self._compute_distance_matrix_scalable(sequences, output_dir)
+            return self._compute_distance_matrix_scalable(sequences, output_dir, min_identity)
         else:
             return self._compute_distance_matrix_brute_force(sequences)
 
@@ -268,7 +276,8 @@ class ScalablePairwiseOperation:
 
     def _compute_distance_matrix_scalable(self,
                                            sequences: Dict[str, str],
-                                           output_dir: str) -> Dict[Tuple[str, str], float]:
+                                           output_dir: str,
+                                           min_identity: float) -> Dict[Tuple[str, str], float]:
         """Scalable distance matrix using candidates to reduce comparisons."""
         logging.info(f"Using {self.candidate_finder.name}-based scalable distance matrix")
 
@@ -278,9 +287,13 @@ class ScalablePairwiseOperation:
         seq_ids = list(sequences.keys())
         n = len(seq_ids)
 
-        # Find candidates with low threshold to capture most relevant pairs
+        # Use same safety factors as K-NN computation
+        relaxed_threshold = min_identity * self.config.relaxed_identity_factor
+        max_candidates = 500
+
+        logging.info(f"Finding candidates: identity>={relaxed_threshold:.2f}, max_candidates={max_candidates}")
         all_candidates = self.candidate_finder.find_candidates(
-            seq_ids, sequences, 0.5, n  # Low threshold, all candidates
+            seq_ids, sequences, relaxed_threshold, max_candidates
         )
 
         distances: Dict[Tuple[str, str], float] = {}
@@ -298,12 +311,8 @@ class ScalablePairwiseOperation:
                         computed_pairs.add(pair)
                 pbar.update(1)
 
-        # Fill in missing pairs with maximum distance
-        for i, id1 in enumerate(seq_ids):
-            for id2 in seq_ids[i + 1:]:
-                if (id1, id2) not in distances:
-                    distances[(id1, id2)] = 1.0
-                    distances[(id2, id1)] = 1.0
+        # Return sparse matrix - missing pairs are treated as distance 1.0 by consumers
+        logging.info(f"Computed {len(computed_pairs)} distance pairs (sparse matrix)")
 
         return distances
 
