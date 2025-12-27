@@ -1609,9 +1609,17 @@ def merge_group_with_msa(variants: List[ConsensusInfo], args) -> Tuple[List[Cons
                             merge_indel_count=total_indels if total_indels > 0 else None
                         )
 
-                    # Track merge provenance
+                    # Track merge provenance - expand any intermediate merges
+                    # so we always trace back to the original cluster names
+                    original_clusters = []
+                    for v in subset_variants:
+                        if v.sample_name in all_traceability:
+                            # This variant was itself merged, expand to its originals
+                            original_clusters.extend(all_traceability[v.sample_name])
+                        else:
+                            original_clusters.append(v.sample_name)
                     traceability = {
-                        merged_consensus.sample_name: [v.sample_name for v in subset_variants]
+                        merged_consensus.sample_name: original_clusters
                     }
                     all_traceability.update(traceability)
 

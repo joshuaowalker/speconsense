@@ -5,6 +5,15 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.6.5] - 2025-12-27
+
+### Fixed
+- **Merge traceability loss during iterative merging** - Fixed bug where FASTQ output files contained fewer reads than expected
+  - When iterative merging occurred in overlap mode, the merge traceability dictionary was being overwritten rather than expanded
+  - This caused loss of original cluster names when a merged result got merged again
+  - Result: incomplete FASTQ file concatenation (fewer reads than RiC value indicated)
+  - Fix: traceability now expands intermediate merges to preserve all original cluster names through the merge chain
+
 ## [0.6.4] - 2025-12-20
 
 ### Fixed
