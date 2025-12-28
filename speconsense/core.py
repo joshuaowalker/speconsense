@@ -323,6 +323,7 @@ class SpecimenClusterer:
             "-I", str(self.inflation),  # Inflation parameter
             "-scheme", "7",  # More advanced flow simulation
             "-pct", "50",  # Prune weakest 50% of connections during iterations
+            "-te", str(self.max_threads),  # Number of threads
             "-o", output_file  # Output file
         ]
 
