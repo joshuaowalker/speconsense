@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 
 import os
+import sys
 import re
 import glob
 import csv
@@ -21,6 +22,12 @@ import subprocess
 from tqdm import tqdm
 import numpy as np
 from io import StringIO
+
+try:
+    from speconsense import __version__
+except ImportError:
+    # Fallback for when running as a script directly (e.g., in tests)
+    __version__ = "dev"
 
 # Import homopolymer-aware alignment functions and IUPAC constants from msa module
 from speconsense.msa import (
@@ -378,11 +385,13 @@ def parse_arguments():
     parser.add_argument("--log-level", default="INFO",
                         choices=["DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL"],
                         help="Logging level")
+    parser.add_argument("--version", action="version",
+                        version=f"speconsense-summarize {__version__}",
+                        help="Show program's version number and exit")
 
     args = parser.parse_args()
 
     # Handle backward compatibility for deprecated parameters
-    import sys
     if args._snp_merge_limit_deprecated is not None:
         if '--snp-merge-limit' in sys.argv:
             logging.warning("--snp-merge-limit is deprecated, use --merge-position-count instead")
@@ -2885,18 +2894,35 @@ def main():
         fasta_fields = parse_fasta_fields(args.fasta_fields)
     except ValueError as e:
         logging.error(f"Invalid --fasta-fields specification: {e}")
-        import sys
         sys.exit(1)
 
     # Set up logging with temporary log file
-    import tempfile
     temp_log_file = tempfile.NamedTemporaryFile(mode='w', suffix='.log', delete=False)
     temp_log_file.close()
 
     setup_logging(args.log_level, temp_log_file.name)
 
+    logging.info(f"speconsense-summarize version {__version__}")
+    logging.info(f"Command: speconsense-summarize {' '.join(sys.argv[1:])}")
+    logging.info("")
     logging.info("Starting enhanced speconsense summarization")
-    logging.info(f"FASTA fields: {args.fasta_fields}")
+    logging.info(f"Parameters:")
+    logging.info(f"  --source: {args.source}")
+    logging.info(f"  --summary-dir: {args.summary_dir}")
+    logging.info(f"  --min-ric: {args.min_ric}")
+    logging.info(f"  --fasta-fields: {args.fasta_fields}")
+    logging.info(f"  --merge-snp: {args.merge_snp}")
+    logging.info(f"  --merge-indel-length: {args.merge_indel_length}")
+    logging.info(f"  --merge-position-count: {args.merge_position_count}")
+    logging.info(f"  --merge-min-size-ratio: {args.merge_min_size_ratio}")
+    logging.info(f"  --disable-homopolymer-equivalence: {args.disable_homopolymer_equivalence}")
+    logging.info(f"  --min-merge-overlap: {args.min_merge_overlap}")
+    logging.info(f"  --group-identity: {args.group_identity}")
+    logging.info(f"  --select-max-variants: {args.select_max_variants}")
+    logging.info(f"  --select-max-groups: {args.select_max_groups}")
+    logging.info(f"  --select-strategy: {args.select_strategy}")
+    logging.info(f"  --log-level: {args.log_level}")
+    logging.info("")
     logging.info("Processing each specimen file independently to organize variants within specimens")
     
     # Load all consensus sequences
