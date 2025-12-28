@@ -871,139 +871,176 @@ class SpecimenClusterer:
 
         return keep_clusters, filtered_clusters
 
+    def _process_single_cluster(self, initial_idx: int, cluster: Set[str]) -> Tuple[List[Dict], Set[str]]:
+        """Process a single cluster for outlier removal and phasing.
+
+        This method is designed to be thread-safe for parallel execution.
+        It does not mutate any shared state directly.
+
+        Args:
+            initial_idx: The 1-based index of this cluster
+            cluster: Set of read IDs in this cluster
+
+        Returns:
+            Tuple of (subclusters, discarded_read_ids) where:
+            - subclusters: List of subcluster dicts with read_ids, initial_cluster_num, allele_combo
+            - discarded_read_ids: Set of outlier read IDs that were removed
+        """
+        subclusters = []
+        discarded_ids = set()
+
+        # Sort all reads by quality for optimal SPOA ordering
+        qualities = []
+        for seq_id in cluster:
+            record = self.records[seq_id]
+            mean_quality = statistics.mean(record.letter_annotations["phred_quality"])
+            qualities.append((mean_quality, seq_id))
+        sorted_ids = [seq_id for _, seq_id in
+                      sorted(qualities, key=lambda x: (-x[0], x[1]))]
+        cluster_ids = cluster
+
+        # Generate consensus and MSA
+        cluster_seqs = {seq_id: self.sequences[seq_id] for seq_id in sorted_ids}
+        result = self.run_spoa(cluster_seqs)
+
+        if result is None:
+            logging.warning(f"Initial cluster {initial_idx}: Failed to generate consensus, skipping")
+            return subclusters, discarded_ids
+
+        consensus = result.consensus
+        msa = result.msa_string
+        alignments = result.alignments
+        msa_to_consensus_pos = result.msa_to_consensus_pos
+
+        # Calculate per-read identity from MSA
+        _, _ = self.calculate_read_identity(alignments, consensus)
+
+        # Optional: Remove outlier reads and regenerate consensus
+        if self.outlier_identity_threshold is not None:
+            keep_ids, outlier_ids = self.identify_outlier_reads(
+                alignments, consensus, cluster_ids, self.outlier_identity_threshold
+            )
+
+            if outlier_ids:
+                # Special case: 2-read cluster with exactly 1 outlier
+                if len(cluster) == 2 and len(outlier_ids) == 1:
+                    logging.info(f"Initial cluster {initial_idx}: Split 2-read cluster due to 1 outlier")
+                    for read_id in cluster:
+                        subcluster = {
+                            'read_ids': {read_id},
+                            'initial_cluster_num': initial_idx,
+                            'allele_combo': 'single-read-split'
+                        }
+                        subclusters.append(subcluster)
+                    return subclusters, discarded_ids
+
+                logging.info(f"Initial cluster {initial_idx}: Removing {len(outlier_ids)}/{len(cluster_ids)} outlier reads, "
+                           f"regenerating consensus")
+
+                # Track discarded outlier reads (returned, not mutated)
+                discarded_ids.update(outlier_ids)
+
+                # Update cluster_ids to exclude outliers
+                cluster_ids = keep_ids
+                cluster = cluster - outlier_ids
+
+                # Regenerate consensus with filtered reads
+                qualities_filtered = []
+                for seq_id in cluster_ids:
+                    record = self.records[seq_id]
+                    mean_quality = statistics.mean(record.letter_annotations["phred_quality"])
+                    qualities_filtered.append((mean_quality, seq_id))
+                sorted_ids_filtered = [seq_id for _, seq_id in
+                                      sorted(qualities_filtered, key=lambda x: (-x[0], x[1]))]
+
+                cluster_seqs = {seq_id: self.sequences[seq_id] for seq_id in sorted_ids_filtered}
+                result = self.run_spoa(cluster_seqs)
+
+                if result is not None:
+                    consensus = result.consensus
+                    msa = result.msa_string
+                    alignments = result.alignments
+                    msa_to_consensus_pos = result.msa_to_consensus_pos
+                    _, _ = self.calculate_read_identity(alignments, consensus)
+
+        # Detect variant positions (if second-pass phasing enabled)
+        variant_positions = []
+        if consensus and alignments and self.enable_secondpass_phasing:
+            variant_positions = self.detect_variant_positions(
+                alignments, consensus, msa_to_consensus_pos
+            )
+
+            if variant_positions:
+                logging.info(f"Initial cluster {initial_idx}: Detected {len(variant_positions)} variant positions")
+
+        # Phase reads into haplotypes
+        phased_haplotypes = self.phase_reads_by_variants(
+            msa, consensus, cluster, variant_positions, alignments
+        )
+
+        # Store each haplotype as a sub-cluster with provenance
+        for haplotype_idx, (allele_combo, haplotype_reads) in enumerate(phased_haplotypes):
+            subcluster = {
+                'read_ids': haplotype_reads,
+                'initial_cluster_num': initial_idx,
+                'allele_combo': allele_combo
+            }
+            subclusters.append(subcluster)
+
+        return subclusters, discarded_ids
+
     def _run_variant_phasing(self, merged_clusters: List[Set[str]]) -> List[Dict]:
         """Phase 3: Detect variants and phase reads into haplotypes.
-        
+
         For each merged cluster:
         1. Sample reads if needed
         2. Generate consensus and MSA
         3. Optionally remove outliers
         4. Detect variant positions
         5. Phase reads by their alleles at variant positions
-        
+
         Args:
             merged_clusters: List of merged clusters from Phase 2
-            
+
         Returns:
-            List of subclusters with provenance info (dicts with read_ids, 
+            List of subclusters with provenance info (dicts with read_ids,
             initial_cluster_num, allele_combo)
         """
         all_subclusters = []
+        all_discarded = set()
         logging.debug("Processing clusters for variant detection and phasing...")
 
-        for initial_idx, cluster in enumerate(merged_clusters, 1):
-            cluster_size = len(cluster)
+        indexed_clusters = list(enumerate(merged_clusters, 1))
 
-            # Sort all reads by quality for optimal SPOA ordering
-            # No sampling here - use all reads for accurate variant detection and phasing
-            # (sampling for output happens later in write_consensus_sequences)
-            qualities = []
-            for seq_id in cluster:
-                record = self.records[seq_id]
-                mean_quality = statistics.mean(record.letter_annotations["phred_quality"])
-                qualities.append((mean_quality, seq_id))
-            # Sort by quality (descending), then by read ID (ascending) for deterministic tie-breaking
-            sorted_ids = [seq_id for _, seq_id in
-                          sorted(qualities, key=lambda x: (-x[0], x[1]))]
-            cluster_ids = cluster  # All reads participate in MSA
+        if self.max_threads > 1 and len(merged_clusters) > 10:
+            # Parallel processing
+            from concurrent.futures import ThreadPoolExecutor
 
-            # Generate consensus and MSA
-            # Pass sequences to SPOA in quality-descending order
-            cluster_seqs = {seq_id: self.sequences[seq_id] for seq_id in sorted_ids}
-            result = self.run_spoa(cluster_seqs)
+            def process_cluster(args):
+                initial_idx, cluster = args
+                return self._process_single_cluster(initial_idx, cluster)
 
-            if result is None:
-                logging.warning(f"Initial cluster {initial_idx}: Failed to generate consensus, skipping")
-                continue
+            with ThreadPoolExecutor(max_workers=self.max_threads) as executor:
+                from tqdm import tqdm
+                results = list(tqdm(
+                    executor.map(process_cluster, indexed_clusters),
+                    total=len(indexed_clusters),
+                    desc="Processing clusters"
+                ))
 
-            consensus = result.consensus
-            msa = result.msa_string
-            alignments = result.alignments
-            msa_to_consensus_pos = result.msa_to_consensus_pos
+            # Collect results maintaining order
+            for subclusters, discarded_ids in results:
+                all_subclusters.extend(subclusters)
+                all_discarded.update(discarded_ids)
+        else:
+            # Sequential processing
+            for initial_idx, cluster in indexed_clusters:
+                subclusters, discarded_ids = self._process_single_cluster(initial_idx, cluster)
+                all_subclusters.extend(subclusters)
+                all_discarded.update(discarded_ids)
 
-            # Calculate per-read identity from MSA (unused but kept for potential debug output)
-            _, _ = self.calculate_read_identity(alignments, consensus)
-
-            # Optional: Remove outlier reads and regenerate consensus
-            if self.outlier_identity_threshold is not None:
-                keep_ids, outlier_ids = self.identify_outlier_reads(
-                    alignments, consensus, cluster_ids, self.outlier_identity_threshold
-                )
-
-                if outlier_ids:
-                    # Special case: 2-read cluster with exactly 1 outlier
-                    # Split into 2 single-read clusters instead of arbitrary choice
-                    if len(cluster) == 2 and len(outlier_ids) == 1:
-                        logging.info(f"Initial cluster {initial_idx}: Split 2-read cluster due to 1 outlier")
-                        # Create 2 single-read subclusters
-                        for read_id in cluster:
-                            subcluster = {
-                                'read_ids': {read_id},
-                                'initial_cluster_num': initial_idx,
-                                'allele_combo': 'single-read-split'
-                            }
-                            all_subclusters.append(subcluster)
-                        continue  # Skip normal processing for this cluster
-
-                    logging.info(f"Initial cluster {initial_idx}: Removing {len(outlier_ids)}/{len(cluster_ids)} outlier reads, "
-                               f"regenerating consensus")
-
-                    # Track discarded outlier reads
-                    self.discarded_read_ids.update(outlier_ids)
-
-                    # Update cluster_ids to exclude outliers
-                    cluster_ids = keep_ids
-
-                    # CRITICAL: Also remove outliers from the full cluster
-                    # This ensures outliers don't reappear in phased haplotypes
-                    cluster = cluster - outlier_ids
-
-                    # Regenerate consensus with filtered reads
-                    # Re-sort by quality after outlier removal
-                    qualities_filtered = []
-                    for seq_id in cluster_ids:
-                        record = self.records[seq_id]
-                        mean_quality = statistics.mean(record.letter_annotations["phred_quality"])
-                        qualities_filtered.append((mean_quality, seq_id))
-                    sorted_ids_filtered = [seq_id for _, seq_id in
-                                          sorted(qualities_filtered, key=lambda x: (-x[0], x[1]))]
-
-                    # Pass sequences to SPOA in quality-descending order
-                    cluster_seqs = {seq_id: self.sequences[seq_id] for seq_id in sorted_ids_filtered}
-                    result = self.run_spoa(cluster_seqs)
-
-                    # Recalculate identity metrics
-                    if result is not None:
-                        consensus = result.consensus
-                        msa = result.msa_string
-                        alignments = result.alignments
-                        msa_to_consensus_pos = result.msa_to_consensus_pos
-                        _, _ = self.calculate_read_identity(alignments, consensus)
-
-            # Detect variant positions (if second-pass phasing enabled)
-            variant_positions = []
-            if consensus and alignments and self.enable_secondpass_phasing:
-                variant_positions = self.detect_variant_positions(
-                    alignments, consensus, msa_to_consensus_pos
-                )
-
-                if variant_positions:
-                    logging.info(f"Initial cluster {initial_idx}: Detected {len(variant_positions)} variant positions")
-
-            # Phase reads into haplotypes
-            # Note: Uses the FULL cluster (not just sampled_ids) for phasing
-            phased_haplotypes = self.phase_reads_by_variants(
-                msa, consensus, cluster, variant_positions, alignments
-            )
-
-            # Store each haplotype as a sub-cluster with provenance
-            for haplotype_idx, (allele_combo, haplotype_reads) in enumerate(phased_haplotypes):
-                subcluster = {
-                    'read_ids': haplotype_reads,
-                    'initial_cluster_num': initial_idx,
-                    'allele_combo': allele_combo
-                }
-                all_subclusters.append(subcluster)
+        # Update shared state after all processing complete
+        self.discarded_read_ids.update(all_discarded)
 
         logging.info(f"After phasing, created {len(all_subclusters)} sub-clusters from {len(merged_clusters)} merged clusters")
         return all_subclusters
