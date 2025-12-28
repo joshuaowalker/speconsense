@@ -2143,18 +2143,21 @@ def perform_hac_clustering(consensus_list: List[ConsensusInfo],
 
         candidate_finder = VsearchCandidateFinder(num_threads=scalability_config.max_threads)
         if candidate_finder.is_available:
-            operation = ScalablePairwiseOperation(
-                candidate_finder=candidate_finder,
-                scoring_function=score_func,
-                config=scalability_config
-            )
-            distances = operation.compute_distance_matrix(sequences, output_dir, variant_group_identity)
+            try:
+                operation = ScalablePairwiseOperation(
+                    candidate_finder=candidate_finder,
+                    scoring_function=score_func,
+                    config=scalability_config
+                )
+                distances = operation.compute_distance_matrix(sequences, output_dir, variant_group_identity)
 
-            # Convert to integer-keyed distances
-            for (id1, id2), dist in distances.items():
-                i, j = int(id1), int(id2)
-                seq_distances[(i, j)] = dist
-                seq_distances[(j, i)] = dist
+                # Convert to integer-keyed distances
+                for (id1, id2), dist in distances.items():
+                    i, j = int(id1), int(id2)
+                    seq_distances[(i, j)] = dist
+                    seq_distances[(j, i)] = dist
+            finally:
+                candidate_finder.cleanup()
         else:
             logging.warning("Scalability enabled but vsearch not available. Using brute-force.")
             use_scalable = False
@@ -2252,11 +2255,14 @@ def perform_hac_clustering(consensus_list: List[ConsensusInfo],
                 clusters.append(component_seqs)
                 continue
 
+            # Convert to set for O(1) membership lookup
+            component_set = set(component_seqs)
+
             # Build local adjacency for this component
             local_adjacency: Dict[int, Set[int]] = defaultdict(set)
             for i in component_seqs:
                 for j in seq_adjacency[i]:
-                    if j in component_seqs:
+                    if j in component_set:
                         local_adjacency[i].add(j)
 
             # Initialize clusters for this component
@@ -2275,25 +2281,19 @@ def perform_hac_clustering(consensus_list: List[ConsensusInfo],
                 return adjacent_pairs
 
             def cluster_distance(cluster1: List[int], cluster2: List[int]) -> float:
-                # Complete linkage: max distance, early exit on missing edge
+                # Complete linkage: max distance, early exit on missing edge or threshold
+                max_dist = 0.0
                 for i in cluster1:
                     for j in cluster2:
                         if i == j:
                             continue
-                        elif j in local_adjacency[i]:
-                            key = (i, j) if (i, j) in seq_distances else (j, i)
-                            dist = seq_distances.get(key, 1.0)
-                            if dist >= distance_threshold:
-                                return 1.0
-                        else:
+                        if j not in local_adjacency[i]:
                             return 1.0  # Missing edge = max distance
-                # All pairs have edges below threshold, compute actual max
-                max_dist = 0.0
-                for i in cluster1:
-                    for j in cluster2:
-                        if i != j:
-                            key = (i, j) if (i, j) in seq_distances else (j, i)
-                            max_dist = max(max_dist, seq_distances.get(key, 1.0))
+                        key = (i, j) if (i, j) in seq_distances else (j, i)
+                        dist = seq_distances.get(key, 1.0)
+                        if dist >= distance_threshold:
+                            return 1.0  # Early exit
+                        max_dist = max(max_dist, dist)
                 return max_dist
 
             # HAC within component
