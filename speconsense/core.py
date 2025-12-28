@@ -126,6 +126,28 @@ class ClusterProcessingConfig:
         self.min_variant_count = min_variant_count
 
 
+class ConsensusGenerationConfig:
+    """Configuration for parallel final consensus generation.
+
+    Passed to worker processes to avoid needing to pickle the entire SpecimenClusterer.
+    """
+    __slots__ = ['max_sample_size', 'enable_iupac_calling', 'min_ambiguity_frequency',
+                 'min_ambiguity_count', 'disable_homopolymer_equivalence', 'primers']
+
+    def __init__(self, max_sample_size: int,
+                 enable_iupac_calling: bool,
+                 min_ambiguity_frequency: float,
+                 min_ambiguity_count: int,
+                 disable_homopolymer_equivalence: bool,
+                 primers: Optional[List[Tuple[str, str]]] = None):
+        self.max_sample_size = max_sample_size
+        self.enable_iupac_calling = enable_iupac_calling
+        self.min_ambiguity_frequency = min_ambiguity_frequency
+        self.min_ambiguity_count = min_ambiguity_count
+        self.disable_homopolymer_equivalence = disable_homopolymer_equivalence
+        self.primers = primers
+
+
 def _run_spoa_for_cluster_worker(sequences: Dict[str, str],
                                   disable_homopolymer_equivalence: bool) -> Optional[MSAResult]:
     """Run SPOA for a set of sequences. Used by cluster processing worker."""
@@ -553,6 +575,147 @@ def _process_cluster_worker(args) -> Tuple[List[Dict], Set[str]]:
         })
 
     return subclusters, discarded_ids
+
+
+def _trim_primers_standalone(sequence: str, primers: Optional[List[Tuple[str, str]]]) -> Tuple[str, List[str]]:
+    """Trim primers from start and end of sequence. Standalone version for workers."""
+    if not primers:
+        return sequence, []
+
+    found_primers = []
+    trimmed_seq = sequence
+
+    # Look for primer at 5' end
+    best_start_dist = float('inf')
+    best_start_primer = None
+    best_start_end = None
+
+    for primer_name, primer_seq in primers:
+        k = len(primer_seq) // 4  # Allow ~25% errors
+        search_region = sequence[:len(primer_seq) * 2]
+
+        result = edlib.align(primer_seq, search_region, task="path", mode="HW", k=k)
+
+        if result["editDistance"] != -1:
+            dist = result["editDistance"]
+            if dist < best_start_dist:
+                best_start_dist = dist
+                best_start_primer = primer_name
+                best_start_end = result["locations"][0][1] + 1
+
+    if best_start_primer:
+        found_primers.append(f"5'-{best_start_primer}")
+        trimmed_seq = trimmed_seq[best_start_end:]
+
+    # Look for primer at 3' end
+    best_end_dist = float('inf')
+    best_end_primer = None
+    best_end_start = None
+
+    for primer_name, primer_seq in primers:
+        k = len(primer_seq) // 4  # Allow ~25% errors
+        search_region = sequence[-len(primer_seq) * 2:]
+
+        result = edlib.align(primer_seq, search_region, task="path", mode="HW", k=k)
+
+        if result["editDistance"] != -1:
+            dist = result["editDistance"]
+            if dist < best_end_dist:
+                best_end_dist = dist
+                best_end_primer = primer_name
+                base_pos = len(trimmed_seq) - len(search_region)
+                best_end_start = base_pos + result["locations"][0][0]
+
+    if best_end_primer:
+        found_primers.append(f"3'-{best_end_primer}")
+        trimmed_seq = trimmed_seq[:best_end_start]
+
+    return trimmed_seq, found_primers
+
+
+def _generate_cluster_consensus_worker(args) -> Dict:
+    """Worker function for parallel final consensus generation.
+
+    Must be at module level for ProcessPoolExecutor pickling.
+
+    Args:
+        args: Tuple of (final_idx, cluster_read_ids, sequences, qualities, config)
+              - final_idx: 1-based cluster index
+              - cluster_read_ids: Set of read IDs in this cluster
+              - sequences: Dict mapping read_id -> sequence
+              - qualities: Dict mapping read_id -> mean quality score
+              - config: ConsensusGenerationConfig
+
+    Returns:
+        Dict with all computed results for this cluster
+    """
+    final_idx, cluster_read_ids, sequences, qualities, config = args
+
+    cluster = cluster_read_ids
+    actual_size = len(cluster)
+
+    # Sort all cluster reads by quality for consistent output ordering
+    sorted_cluster_ids = sorted(
+        cluster,
+        key=lambda x: (-qualities.get(x, 0), x)
+    )
+
+    # Sample sequences for final consensus generation if needed
+    if len(cluster) > config.max_sample_size:
+        sorted_sampled_ids = sorted_cluster_ids[:config.max_sample_size]
+        sampled_ids = set(sorted_sampled_ids)
+    else:
+        sorted_sampled_ids = sorted_cluster_ids
+        sampled_ids = cluster
+
+    # Generate final consensus and MSA
+    sampled_seqs = {seq_id: sequences[seq_id] for seq_id in sorted_sampled_ids}
+    result = _run_spoa_for_cluster_worker(sampled_seqs, config.disable_homopolymer_equivalence)
+
+    # Calculate final identity metrics
+    rid, rid_min = None, None
+    consensus = None
+    msa = None
+    iupac_count = 0
+    trimmed_consensus = None
+    found_primers = None
+
+    if result is not None:
+        consensus = result.consensus
+        msa = result.msa_string
+        alignments = result.alignments
+        rid, rid_min = _calculate_read_identity_standalone(alignments, consensus)
+
+        if consensus:
+            # Apply IUPAC ambiguity calling for unphased variant positions
+            if config.enable_iupac_calling:
+                consensus, iupac_count, iupac_details = call_iupac_ambiguities(
+                    consensus=consensus,
+                    alignments=result.alignments,
+                    msa_to_consensus_pos=result.msa_to_consensus_pos,
+                    min_variant_frequency=config.min_ambiguity_frequency,
+                    min_variant_count=config.min_ambiguity_count
+                )
+
+            # Perform primer trimming
+            if config.primers:
+                trimmed_consensus, found_primers = _trim_primers_standalone(consensus, config.primers)
+
+    return {
+        'final_idx': final_idx,
+        'cluster': cluster,
+        'actual_size': actual_size,
+        'consensus': consensus,
+        'trimmed_consensus': trimmed_consensus,
+        'found_primers': found_primers,
+        'rid': rid,
+        'rid_min': rid_min,
+        'msa': msa,
+        'sampled_ids': sampled_ids,
+        'sorted_cluster_ids': sorted_cluster_ids,
+        'sorted_sampled_ids': sorted_sampled_ids,
+        'iupac_count': iupac_count
+    }
 
 
 class SpecimenClusterer:
@@ -1505,98 +1668,97 @@ class SpecimenClusterer:
 
     def _write_cluster_outputs(self, clusters: List[Dict], output_file: str) -> Tuple[int, int]:
         """Phase 6: Generate final consensus and write output files.
-        
+
         Args:
             clusters: List of filtered clusters from Phase 5
             output_file: Path to the output FASTA file
-            
+
         Returns:
             Tuple of (clusters_with_ambiguities, total_ambiguity_positions)
         """
         total_ambiguity_positions = 0
         clusters_with_ambiguities = 0
 
+        # Create config for consensus generation workers
+        primers = getattr(self, 'primers', None)
+        config = ConsensusGenerationConfig(
+            max_sample_size=self.max_sample_size,
+            enable_iupac_calling=self.enable_iupac_calling,
+            min_ambiguity_frequency=self.min_ambiguity_frequency,
+            min_ambiguity_count=self.min_ambiguity_count,
+            disable_homopolymer_equivalence=self.disable_homopolymer_equivalence,
+            primers=primers
+        )
+
+        # Build work packages for each cluster
+        work_packages = []
+        for final_idx, cluster_dict in enumerate(clusters, 1):
+            cluster = cluster_dict['read_ids']
+            # Pre-compute quality means for each read
+            qualities = {}
+            for seq_id in cluster:
+                record = self.records[seq_id]
+                qualities[seq_id] = statistics.mean(record.letter_annotations["phred_quality"])
+            # Extract sequences for this cluster
+            sequences = {seq_id: self.sequences[seq_id] for seq_id in cluster}
+            work_packages.append((final_idx, cluster, sequences, qualities, config))
+
+        # Run consensus generation (parallel or sequential based on settings)
+        if self.max_threads > 1 and len(clusters) > 4:
+            # Parallel execution with ProcessPoolExecutor
+            from concurrent.futures import ProcessPoolExecutor
+
+            with ProcessPoolExecutor(max_workers=self.max_threads) as executor:
+                results = list(tqdm(
+                    executor.map(_generate_cluster_consensus_worker, work_packages),
+                    total=len(work_packages),
+                    desc="Final consensus generation"
+                ))
+        else:
+            # Sequential execution using same worker function
+            results = []
+            for work_package in work_packages:
+                result = _generate_cluster_consensus_worker(work_package)
+                results.append(result)
+
+        # Sort results by final_idx to ensure correct order
+        results.sort(key=lambda r: r['final_idx'])
+
+        # Write output files sequentially (I/O bound, must preserve order)
         with open(output_file, 'w') as consensus_fasta_handle:
-            for final_idx, cluster_dict in enumerate(clusters, 1):
-                cluster = cluster_dict['read_ids']
-                actual_size = len(cluster)
+            for result in results:
+                final_idx = result['final_idx']
+                cluster = result['cluster']
+                actual_size = result['actual_size']
 
-                # Sort all cluster reads by quality for consistent output ordering
-                qualities = []
-                for seq_id in cluster:
-                    record = self.records[seq_id]
-                    mean_quality = statistics.mean(record.letter_annotations["phred_quality"])
-                    qualities.append((mean_quality, seq_id))
-                # Sort by quality (descending), then by read ID (ascending) for deterministic tie-breaking
-                sorted_cluster_ids = [seq_id for _, seq_id in
-                                      sorted(qualities, key=lambda x: (-x[0], x[1]))]
-
-                # Sample sequences for final consensus generation if needed
+                # Log sampling info for large clusters
                 if len(cluster) > self.max_sample_size:
                     logging.info(f"Cluster {final_idx}: Sampling {self.max_sample_size} from {len(cluster)} reads for final consensus")
-                    sorted_sampled_ids = sorted_cluster_ids[:self.max_sample_size]
-                    sampled_ids = set(sorted_sampled_ids)  # Keep set for membership testing
-                else:
-                    # All reads used for consensus
-                    sorted_sampled_ids = sorted_cluster_ids
-                    sampled_ids = cluster
 
-                # Generate final consensus and MSA
-                # Pass sequences to SPOA in quality-descending order
-                sampled_seqs = {seq_id: self.sequences[seq_id] for seq_id in sorted_sampled_ids}
-                result = self.run_spoa(sampled_seqs)
-
-                # Calculate final identity metrics
-                rid, rid_min = None, None
-                consensus = None
-                msa = None
-
-                if result is not None:
-                    consensus = result.consensus
-                    msa = result.msa_string
-                    alignments = result.alignments
-                    rid, rid_min = self.calculate_read_identity(alignments, consensus)
-
-                # Note: No outlier removal or variant detection in output phase
-                # (already done in detection phase)
+                consensus = result['consensus']
+                iupac_count = result['iupac_count']
 
                 if consensus:
-                    # Apply IUPAC ambiguity calling for unphased variant positions
-                    iupac_count = 0
-                    if self.enable_iupac_calling and result is not None:
-                        consensus, iupac_count, iupac_details = call_iupac_ambiguities(
-                            consensus=consensus,
-                            alignments=result.alignments,
-                            msa_to_consensus_pos=result.msa_to_consensus_pos,
-                            min_variant_frequency=self.min_ambiguity_frequency,
-                            min_variant_count=self.min_ambiguity_count
-                        )
-                        if iupac_count > 0:
-                            logging.debug(f"Cluster {final_idx}: Called {iupac_count} IUPAC ambiguity position(s)")
-                            total_ambiguity_positions += iupac_count
-                            clusters_with_ambiguities += 1
-
-                    # Perform primer trimming (on potentially modified consensus)
-                    trimmed_consensus = None
-                    found_primers = None
-                    if hasattr(self, 'primers'):
-                        trimmed_consensus, found_primers = self.trim_primers(consensus)
+                    if iupac_count > 0:
+                        logging.debug(f"Cluster {final_idx}: Called {iupac_count} IUPAC ambiguity position(s)")
+                        total_ambiguity_positions += iupac_count
+                        clusters_with_ambiguities += 1
 
                     # Write output files
                     self.write_cluster_files(
                         cluster_num=final_idx,
                         cluster=cluster,
                         consensus=consensus,
-                        trimmed_consensus=trimmed_consensus,
-                        found_primers=found_primers,
-                        rid=rid,
-                        rid_min=rid_min,
+                        trimmed_consensus=result['trimmed_consensus'],
+                        found_primers=result['found_primers'],
+                        rid=result['rid'],
+                        rid_min=result['rid_min'],
                         actual_size=actual_size,
                         consensus_fasta_handle=consensus_fasta_handle,
-                        sampled_ids=sampled_ids,
-                        msa=msa,
-                        sorted_cluster_ids=sorted_cluster_ids,
-                        sorted_sampled_ids=sorted_sampled_ids,
+                        sampled_ids=result['sampled_ids'],
+                        msa=result['msa'],
+                        sorted_cluster_ids=result['sorted_cluster_ids'],
+                        sorted_sampled_ids=result['sorted_sampled_ids'],
                         iupac_count=iupac_count
                     )
 
@@ -1697,140 +1859,6 @@ class SpecimenClusterer:
             return 0.0
 
         return 1.0 - (result["editDistance"] / max(len(seq1), len(seq2)))
-
-    def run_spoa(self, read_sequences: Dict[str, str]) -> Optional[MSAResult]:
-        """Run SPOA to generate consensus sequence and MSA.
-
-        Args:
-            read_sequences: Dictionary mapping read IDs to sequence strings
-
-        Returns:
-            MSAResult containing consensus sequence, raw MSA string, and parsed records,
-            or None if SPOA fails or input is empty
-        """
-        if not read_sequences:
-            return None
-
-        try:
-            # Create temporary input file with actual read IDs
-            with tempfile.NamedTemporaryFile(mode='w', delete=False, suffix='.fasta') as f:
-                for read_id, seq in read_sequences.items():
-                    f.write(f">{read_id}\n{seq}\n")
-                temp_input = f.name
-
-            # Construct SPOA command with parameters
-            cmd = [
-                "spoa",
-                temp_input,
-                "-r", "2",  # Result mode 2: MSA + consensus (consensus is last)
-                "-l", "1",  # Global alignment mode
-                "-m", "5",  # Match score
-                "-n", "-4",  # Mismatch penalty
-                "-g", "-8",  # Gap opening penalty
-                "-e", "-6",  # Gap extension penalty
-            ]
-
-            result = subprocess.run(
-                cmd,
-                capture_output=True,
-                text=True,
-                check=True
-            )
-
-            # Clean up input file
-            os.unlink(temp_input)
-
-            # Parse SPOA output - capture both MSA and consensus
-            msa_output = result.stdout
-
-            # Parse MSA into ReadAlignment objects
-            # Homopolymer normalization is enabled unless explicitly disabled
-            enable_normalization = not self.disable_homopolymer_equivalence
-            alignments, consensus, msa_to_consensus_pos = extract_alignments_from_msa(
-                msa_output,
-                enable_homopolymer_normalization=enable_normalization
-            )
-
-            if not consensus:
-                raise RuntimeError("SPOA did not generate consensus sequence")
-
-            return MSAResult(
-                consensus=consensus,
-                msa_string=msa_output,
-                alignments=alignments,
-                msa_to_consensus_pos=msa_to_consensus_pos
-            )
-
-        except subprocess.CalledProcessError as e:
-            logging.error(f"SPOA failed with return code {e.returncode}")
-            logging.error(f"Command: {' '.join(cmd)}")
-            logging.error(f"Stderr: {e.stderr}")
-            return None
-
-        except RuntimeError:
-            # Re-raise RuntimeError (e.g., consensus generation failure) as hard error
-            raise
-
-        except (FileNotFoundError, OSError) as e:
-            # FileNotFoundError: SPOA not in PATH
-            # OSError: Other OS-level errors (e.g., permission denied)
-            logging.error(f"Error running SPOA: {str(e)}")
-            return None
-
-    def calculate_read_identity(self, alignments: List[ReadAlignment], consensus_seq: str) -> Tuple[Optional[float], Optional[float]]:
-        """Calculate read identity metrics from MSA alignments using homopolymer-normalized metrics.
-
-        Read identity measures how well individual reads agree with the consensus sequence.
-        This is an internal consistency metric - it does NOT measure accuracy against ground truth.
-        High values indicate homogeneous clustering and/or low read error rates.
-        Low values may indicate heterogeneous clusters, outliers, or poor consensus quality (esp. at low RiC).
-
-        Uses normalized_edit_distance which excludes homopolymer length differences when
-        homopolymer normalization is enabled (default behavior).
-
-        Args:
-            alignments: List of ReadAlignment objects from MSA
-            consensus_seq: Ungapped consensus sequence
-
-        Returns:
-            Tuple of (mean_rid, min_rid) where:
-            - mean_rid: Mean read identity across all reads (0.0-1.0)
-            - min_rid: Minimum read identity (worst-case read) (0.0-1.0)
-            Returns (None, None) if no valid alignments or consensus
-        """
-        if not alignments or not consensus_seq:
-            return None, None
-
-        try:
-            # Calculate read identity (1 - error_rate) for each read using normalized metrics
-            consensus_length = len(consensus_seq)
-            if consensus_length == 0:
-                return None, None
-
-            identities = []
-            for alignment in alignments:
-                # Use normalized edit distance (excludes homopolymer differences)
-                error_rate = alignment.normalized_edit_distance / consensus_length
-                identity = 1.0 - error_rate
-                identities.append(identity)
-
-            if not identities:
-                return None, None
-
-            # Calculate per-read statistics
-            mean_rid = np.mean(identities)
-            min_rid = np.min(identities)
-
-            logging.debug(f"Calculated identity metrics: rid={mean_rid:.3f}, rid_min={min_rid:.3f}")
-
-            return mean_rid, min_rid
-
-        except (ZeroDivisionError, ValueError, TypeError) as e:
-            # ZeroDivisionError: consensus_length is 0
-            # ValueError: np.mean/np.min on invalid data
-            # TypeError: unexpected None values in alignment data
-            logging.warning(f"Failed to calculate read identity from MSA: {e}")
-            return None, None
 
     def phase_reads_by_variants(
         self,
@@ -2061,67 +2089,9 @@ class SpecimenClusterer:
         return False
     
     def trim_primers(self, sequence: str) -> Tuple[str, List[str]]:
-        """
-        Trim primers from start and end of sequence.
-        Returns (trimmed_sequence, [found_primers])
-        """
-        if not hasattr(self, 'primers') or not self.primers:
-            return sequence, []
-
-        found_primers = []
-        trimmed_seq = sequence
-
-        # logging.debug(f"Starting primer trimming on sequence of length {len(sequence)}")
-
-        # Look for primer at 5' end
-        best_start_dist = float('inf')
-        best_start_primer = None
-        best_start_end = None
-
-        for primer_name, primer_seq in self.primers:
-            k = len(primer_seq) // 4  # Allow ~25% errors
-            search_region = sequence[:len(primer_seq) * 2]
-
-            result = edlib.align(primer_seq, search_region, task="path", mode="HW", k=k)
-            # logging.debug(f"Testing {primer_name} at 5' end (k={k})")
-
-            if result["editDistance"] != -1:
-                dist = result["editDistance"]
-                if dist < best_start_dist:
-                    best_start_dist = dist
-                    best_start_primer = primer_name
-                    best_start_end = result["locations"][0][1] + 1
-
-        if best_start_primer:
-            # logging.debug(f"Found {best_start_primer} at 5' end (k={best_start_dist})")
-            found_primers.append(f"5'-{best_start_primer}")
-            trimmed_seq = trimmed_seq[best_start_end:]
-
-        # Look for primer at 3' end
-        best_end_dist = float('inf')
-        best_end_primer = None
-        best_end_start = None
-
-        for primer_name, primer_seq in self.primers:
-            k = len(primer_seq) // 4  # Allow ~25% errors
-            search_region = sequence[-len(primer_seq) * 2:]
-
-            result = edlib.align(primer_seq, search_region, task="path", mode="HW", k=k)
-
-            if result["editDistance"] != -1:
-                dist = result["editDistance"]
-                if dist < best_end_dist:
-                    best_end_dist = dist
-                    best_end_primer = primer_name
-                    base_pos = len(trimmed_seq) - len(search_region)
-                    best_end_start = base_pos + result["locations"][0][0]
-
-        if best_end_primer:
-            # logging.debug(f"Found {best_end_primer} at 3' end (k={best_end_dist})")
-            found_primers.append(f"3'-{best_end_primer}")
-            trimmed_seq = trimmed_seq[:best_end_start]
-
-        return trimmed_seq, found_primers
+        """Trim primers from start and end of sequence. Wrapper around standalone function."""
+        primers = getattr(self, 'primers', None)
+        return _trim_primers_standalone(sequence, primers)
 
     def calculate_consensus_distance(self, seq1: str, seq2: str, require_merge_compatible: bool = False) -> int:
         """Calculate distance between two consensus sequences using adjusted identity.
