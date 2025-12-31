@@ -136,6 +136,24 @@ The codebase uses IUPAC nucleotide ambiguity codes throughout:
 - Fewer clusters, focuses on well-separated sequences
 - Good for detecting distinct targets vs. contaminants
 
+### MCL Graph Construction (Design Decision)
+
+The K-NN similarity graph for MCL uses an **asymmetric edge storage pattern** where `similarities[id1]` only contains entries for neighbors `id2 > id1` (lexicographically). This is a weakly-held design decision that produces good clustering results despite the MCL documentation recommending symmetric graphs.
+
+**Why asymmetric?** The pattern emerged from the original implementation and affects tie-breaking when multiple neighbors have identical similarity scores. Changing to symmetric storage would alter which neighbors are selected during K-NN construction, potentially changing clustering results.
+
+**Key implementation details** (in `scalability/base.py`):
+```python
+# Asymmetric pattern - matches main branch behavior
+similarities[id1][id2] = score
+similarities.setdefault(id2, {})[id1] = score  # Gets overwritten when id2 is processed
+```
+
+**If considering symmetric graphs in the future:**
+- Would require careful validation against existing test cases
+- May improve MCL convergence (per MCL documentation)
+- Would change clustering results - requires re-tuning or acceptance of different outputs
+
 ### Integration Context
 
 Designed to replace NGSpeciesID in the ONT fungal barcoding pipeline from protocols.io. Processes demultiplexed FASTQ files and generates consensus sequences suitable for taxonomic identification. Typically used downstream of specimux for demultiplexing.

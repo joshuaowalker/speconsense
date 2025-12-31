@@ -72,7 +72,7 @@ def _run_spoa_worker(args: Tuple[int, Dict[str, str], bool]) -> Tuple[int, Optio
 
     try:
         with tempfile.NamedTemporaryFile(mode='w', delete=False, suffix='.fasta') as f:
-            for read_id, seq in sampled_seqs.items():
+            for read_id, seq in sorted(sampled_seqs.items()):
                 f.write(f">{read_id}\n{seq}\n")
             temp_input = f.name
 
@@ -156,7 +156,7 @@ def _run_spoa_for_cluster_worker(sequences: Dict[str, str],
 
     try:
         with tempfile.NamedTemporaryFile(mode='w', delete=False, suffix='.fasta') as f:
-            for read_id, seq in sequences.items():
+            for read_id, seq in sorted(sequences.items()):
                 f.write(f">{read_id}\n{seq}\n")
             temp_input = f.name
 
@@ -973,7 +973,7 @@ class SpecimenClusterer:
 
         # Write edges to MCL input file
         with open(output_file, 'w') as f:
-            for id1, neighbors in knn_edges.items():
+            for id1, neighbors in sorted(knn_edges.items()):
                 short_id1 = self.rev_id_map[id1]
                 for id2, sim in neighbors:
                     short_id2 = self.rev_id_map[id2]
@@ -1131,10 +1131,16 @@ class SpecimenClusterer:
 
         consensus_to_clusters = defaultdict(list)
 
+        # IMPORTANT: Use cluster_to_consensus.items() instead of enumerate(consensuses)
+        # because the feature branch processes single-read and multi-read clusters separately,
+        # which changes the order in the consensuses list. The cluster_to_consensus dict
+        # maintains the correct mapping from cluster index to consensus.
+
         if self.disable_homopolymer_equivalence:
             # Only merge exactly identical sequences
-            for i, consensus in enumerate(consensuses):
-                consensus_to_clusters[consensus].append(i)
+            # Sort by cluster index to match main branch iteration order
+            for cluster_idx, consensus in sorted(cluster_to_consensus.items()):
+                consensus_to_clusters[consensus].append(cluster_idx)
         else:
             # Group by homopolymer-equivalent sequences
             # Use scalable method when enabled and there are many clusters
@@ -1168,17 +1174,21 @@ class SpecimenClusterer:
                             consensus_to_clusters[repr_consensus].append(str_to_index[str_id])
             else:
                 # Original O(n²) approach for small sets
-                for i, consensus in enumerate(consensuses):
+                # Sort by cluster index to match main branch iteration order
+                # (main branch iterates via enumerate(consensuses) where consensuses list
+                # order matches clusters order; our dict may have different insertion order
+                # due to single-read vs multi-read separation)
+                for cluster_idx, consensus in sorted(cluster_to_consensus.items()):
                     # Find if this consensus is homopolymer-equivalent to any existing group
                     found_group = False
                     for existing_consensus in consensus_to_clusters.keys():
                         if self.are_homopolymer_equivalent(consensus, existing_consensus):
-                            consensus_to_clusters[existing_consensus].append(i)
+                            consensus_to_clusters[existing_consensus].append(cluster_idx)
                             found_group = True
                             break
 
                     if not found_group:
-                        consensus_to_clusters[consensus].append(i)
+                        consensus_to_clusters[consensus].append(cluster_idx)
 
         merged = []
         merged_indices = set()

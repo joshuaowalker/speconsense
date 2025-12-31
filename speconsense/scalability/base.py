@@ -135,7 +135,7 @@ class ScalablePairwiseOperation:
         candidate_count = k * self.config.oversampling_factor
         relaxed_threshold = min_identity * self.config.relaxed_identity_factor
 
-        seq_ids = list(sequences.keys())
+        seq_ids = sorted(sequences.keys())
         candidates = self.candidate_finder.find_candidates(
             seq_ids, sequences, relaxed_threshold, candidate_count
         )
@@ -181,19 +181,27 @@ class ScalablePairwiseOperation:
         """Standard O(n^2) brute-force K-NN computation."""
         logging.info("Using brute-force K-NN computation")
 
-        seq_ids = list(sequences.keys())
+        seq_ids = sorted(sequences.keys())
         n = len(seq_ids)
 
         # Compute all pairwise similarities
-        similarities: Dict[str, Dict[str, float]] = {sid: {} for sid in seq_ids}
+        # IMPORTANT: This matches main branch's asymmetric dict structure exactly.
+        # Main branch creates similarities[id1] = {} inside the loop, which overwrites
+        # any entries added via setdefault(). The result is that similarities[id1]
+        # only contains entries for id2 > id1 (lexically). This affects tie-breaking
+        # when selecting top-k neighbors.
+        similarities: Dict[str, Dict[str, float]] = {}
 
         total = (n * (n - 1)) // 2
         with tqdm(total=total, desc="Computing pairwise similarities") as pbar:
-            for i, id1 in enumerate(seq_ids):
-                for id2 in seq_ids[i + 1:]:
+            for id1 in seq_ids:
+                similarities[id1] = {}
+                for id2 in seq_ids:
+                    if id1 >= id2:  # Only calculate upper triangle (id2 > id1)
+                        continue
                     score = self.scoring_function(sequences[id1], sequences[id2])
                     similarities[id1][id2] = score
-                    similarities[id2][id1] = score
+                    similarities.setdefault(id2, {})[id1] = score  # Mirror for lookup
                     pbar.update(1)
 
         # Extract top-k for each sequence
@@ -259,7 +267,7 @@ class ScalablePairwiseOperation:
     def _compute_distance_matrix_brute_force(self,
                                               sequences: Dict[str, str]) -> Dict[Tuple[str, str], float]:
         """Brute-force distance matrix computation."""
-        seq_ids = list(sequences.keys())
+        seq_ids = sorted(sequences.keys())
         distances: Dict[Tuple[str, str], float] = {}
 
         total = (len(seq_ids) * (len(seq_ids) - 1)) // 2
@@ -284,7 +292,7 @@ class ScalablePairwiseOperation:
         # Build index
         self.candidate_finder.build_index(sequences, output_dir)
 
-        seq_ids = list(sequences.keys())
+        seq_ids = sorted(sequences.keys())
         n = len(seq_ids)
 
         # Use same safety factors as K-NN computation
@@ -357,7 +365,7 @@ class ScalablePairwiseOperation:
                                                  sequences: Dict[str, str],
                                                  equivalence_fn: Callable[[str, str], bool]) -> List[List[str]]:
         """Brute-force O(n²) equivalence group computation."""
-        seq_ids = list(sequences.keys())
+        seq_ids = sorted(sequences.keys())
 
         # Union-find data structure
         parent = {sid: sid for sid in seq_ids}
@@ -402,7 +410,7 @@ class ScalablePairwiseOperation:
         # Build index
         self.candidate_finder.build_index(sequences, output_dir)
 
-        seq_ids = list(sequences.keys())
+        seq_ids = sorted(sequences.keys())
         n = len(seq_ids)
 
         # Find candidates with high identity (likely equivalent sequences)

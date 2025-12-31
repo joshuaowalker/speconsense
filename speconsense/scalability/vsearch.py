@@ -76,7 +76,7 @@ class VsearchCandidateFinder:
 
         # Deduplicate sequences using hash
         unique_seqs: Dict[str, tuple] = {}  # hash -> (list of ids, sequence)
-        for seq_id, seq in sequences.items():
+        for seq_id, seq in sorted(sequences.items()):
             seq_hash = hashlib.sha256(seq.encode()).hexdigest()[:16]
             if seq_hash not in unique_seqs:
                 unique_seqs[seq_hash] = ([], seq)
