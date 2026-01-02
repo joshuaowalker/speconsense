@@ -344,41 +344,41 @@ Based on benchmarking, the break-even point is approximately 1000 sequences:
 
 ### Concurrency Control
 
-By default, speconsense uses single-threaded execution (`--threads 1`), which is safe for running multiple instances via GNU parallel.
+The `--threads` option controls internal parallelism (vsearch, SPOA consensus generation). Use `0` for auto-detect.
 
-For a single large job, increase parallelism with `--threads`:
+**Default behavior differs between tools:**
+- `speconsense`: defaults to `--threads 1` (safe for GNU parallel workflows)
+- `speconsense-summarize`: defaults to `--threads 0` (auto-detect, since it runs once across all specimens)
 
 ```bash
-# Many jobs via parallel - default is single-threaded (safe)
+# Many speconsense jobs via parallel - single-threaded by default (safe)
 ls *.fastq | parallel speconsense {}
 
-# Single large job - enable internal parallelism
-speconsense large_dataset.fastq --threads 8
-```
+# Single large speconsense job - enable internal parallelism
+speconsense large_dataset.fastq --threads 0
 
-The `--threads` option controls:
-- vsearch thread count for candidate finding
-- ThreadPoolExecutor workers for parallel SPOA consensus generation
+# speconsense-summarize auto-detects threads by default
+speconsense-summarize --source clusters/
+```
 
 ## Early Filtering
 
-By default, speconsense applies size filtering early in the pipeline (after pre-phasing merge) to skip expensive variant phasing on small clusters that will ultimately be filtered out. This significantly improves performance for large datasets.
+Speconsense can optionally apply size filtering early in the pipeline (after pre-phasing merge) to skip expensive variant phasing on small clusters that will ultimately be filtered out. This can significantly improve performance for large datasets.
 
 ### Options
 
-- Early filtering is **enabled by default**: min-size and min-cluster-ratio filtering is applied after pre-phasing merge. Small clusters skip variant phasing.
-- `--disable-early-filter`: Process all clusters through variant phasing (original behavior). Use this for eDNA workflows where rare species may produce small clusters.
-- `--collect-discards`: Write all discarded reads (outliers + early-filtered) to `cluster_debug/{sample}-discards.fastq` for inspection.
+- `--enable-early-filter`: Apply min-size and min-cluster-ratio filtering after pre-phasing merge. Small clusters skip variant phasing, improving performance.
+- `--collect-discards`: Write all discarded reads (outliers + filtered clusters) to `cluster_debug/{sample}-discards.fastq` for inspection.
 
-### eDNA Workflow
+### Performance Optimization
 
-For environmental DNA (eDNA) analysis where rare species are important:
+For large datasets where performance is critical:
 
 ```bash
-speconsense input.fastq --disable-early-filter --min-size 1
+speconsense input.fastq --enable-early-filter
 ```
 
-This preserves all clusters (even single-read) while still using scalability optimizations for the O(n^2) comparisons.
+This skips variant phasing for clusters that will be filtered out anyway, while still using scalability optimizations for O(n²) comparisons.
 
 ## Algorithm Details
 

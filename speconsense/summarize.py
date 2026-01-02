@@ -398,9 +398,9 @@ def parse_arguments():
     parser.add_argument("--scale-threshold", type=int, default=1000,
                         help="Sequence count threshold for scalable mode in HAC clustering (requires vsearch). "
                              "Set to 0 to disable. Default: 1000")
-    parser.add_argument("--threads", type=int, default=1, metavar="N",
+    parser.add_argument("--threads", type=int, default=0, metavar="N",
                         help="Max threads for internal parallelism. "
-                             "Default: 1. Use higher values for single large jobs.")
+                             "0=auto-detect (default), N>0 for explicit count.")
 
     args = parser.parse_args()
 
@@ -2992,7 +2992,8 @@ def process_single_specimen(file_consensuses: List[ConsensusInfo],
 
     # Phase 1: HAC clustering to separate variant groups (moved before merging!)
     scale_threshold = getattr(args, 'scale_threshold', 1000)
-    max_threads = getattr(args, 'threads', 1)
+    threads_arg = getattr(args, 'threads', 0)
+    max_threads = threads_arg if threads_arg > 0 else os.cpu_count()
     scalability_config = None
     if scale_threshold > 0:
         scalability_config = ScalabilityConfig(

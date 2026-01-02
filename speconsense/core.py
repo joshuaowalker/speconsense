@@ -739,7 +739,7 @@ class SpecimenClusterer:
                  enable_iupac_calling: bool = True,
                  scale_threshold: int = 1000,
                  max_threads: int = 1,
-                 early_filter: bool = True,
+                 early_filter: bool = False,
                  collect_discards: bool = False):
         self.min_identity = min_identity
         self.inflation = inflation
@@ -2270,9 +2270,9 @@ def main():
                              "Set to 0 to disable. Default: 1000")
     parser.add_argument("--threads", type=int, default=1, metavar="N",
                         help="Max threads for internal parallelism (vsearch, SPOA). "
-                             "Default: 1. Use higher values for single large jobs.")
-    parser.add_argument("--disable-early-filter", action="store_true",
-                        help="Disable early filtering; process all clusters through variant phasing (default: early filter enabled)")
+                             "0=auto-detect, default=1 (safe for parallel workflows).")
+    parser.add_argument("--enable-early-filter", action="store_true",
+                        help="Enable early filtering to skip small clusters before variant phasing (improves performance for large datasets)")
     parser.add_argument("--collect-discards", action="store_true",
                         help="Write discarded reads (outliers and filtered clusters) to cluster_debug/{sample}-discards.fastq")
     parser.add_argument("--primers", help="FASTA file containing primer sequences (default: looks for primers.fasta in input file directory)")
@@ -2301,6 +2301,9 @@ def main():
         format=log_format
     )
 
+    # Resolve threads: 0 means auto-detect
+    threads = args.threads if args.threads > 0 else os.cpu_count()
+
     sample = os.path.splitext(os.path.basename(args.input_file))[0]
     clusterer = SpecimenClusterer(
         min_identity=args.min_identity,
@@ -2322,8 +2325,8 @@ def main():
         min_ambiguity_count=args.min_ambiguity_count,
         enable_iupac_calling=not args.disable_ambiguity_calling,
         scale_threshold=args.scale_threshold,
-        max_threads=args.threads,
-        early_filter=not args.disable_early_filter,
+        max_threads=threads,
+        early_filter=args.enable_early_filter,
         collect_discards=args.collect_discards
     )
 
