@@ -1914,6 +1914,17 @@ def calculate_overlap_aware_distance(seq1: str, seq2: str, min_overlap_bp: int) 
     Returns:
         Distance (0.0 to 1.0) based on overlap region if sufficient,
         otherwise global distance from calculate_adjusted_identity_distance()
+
+    TODO: Add primer pair constraint to prevent chimera grouping. Currently,
+    overlap-aware distance allows sequences with different lengths to be grouped
+    if they share a good prefix/suffix overlap. This is intended for primer pool
+    scenarios (e.g., ITS2 vs full ITS), but it also allows chimeric sequences
+    (normal amplicon + appended extra sequence) to group with normal sequences.
+
+    Proposed fix: Only allow overlap-aware distance when sequences have DIFFERENT
+    primer annotations. Same primers → same amplicon → should use global distance.
+    This requires passing primer info to this function or to perform_hac_clustering.
+    See: https://github.com/user/speconsense/issues/XXX (chimera grouping bug)
     """
     if not seq1 or not seq2:
         return 1.0  # Maximum distance
