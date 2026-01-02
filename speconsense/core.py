@@ -737,7 +737,7 @@ class SpecimenClusterer:
                  min_ambiguity_frequency: float = 0.10,
                  min_ambiguity_count: int = 3,
                  enable_iupac_calling: bool = True,
-                 enable_scalability: Optional[int] = None,
+                 scale_threshold: int = 1000,
                  max_threads: int = 1,
                  early_filter: bool = True,
                  collect_discards: bool = False):
@@ -768,25 +768,24 @@ class SpecimenClusterer:
         self.min_ambiguity_frequency = min_ambiguity_frequency
         self.min_ambiguity_count = min_ambiguity_count
         self.enable_iupac_calling = enable_iupac_calling
-        self.enable_scalability = enable_scalability
+        self.scale_threshold = scale_threshold
         self.max_threads = max_threads
         self.early_filter = early_filter
         self.collect_discards = collect_discards
         self.discarded_read_ids: Set[str] = set()  # Track all discarded reads (outliers + filtered)
 
         # Initialize scalability configuration
-        # enable_scalability: None=disabled, 0=always, N=threshold
+        # scale_threshold: 0=disabled, N>0=enabled for datasets >= N sequences
         self.scalability_config = ScalabilityConfig(
-            enabled=enable_scalability is not None,
-            activation_threshold=enable_scalability if enable_scalability is not None else 0,
+            enabled=scale_threshold > 0,
+            activation_threshold=scale_threshold,
             max_threads=max_threads
         )
         self._candidate_finder = None
-        if enable_scalability is not None:
-            self._candidate_finder = VsearchCandidateFinder(num_threads=max_threads)
-            if not self._candidate_finder.is_available:
-                logging.warning("Scalability enabled but vsearch not found. Falling back to brute-force.")
-                self._candidate_finder = None
+        if scale_threshold > 0:
+            finder = VsearchCandidateFinder(num_threads=max_threads)
+            if finder.is_available:
+                self._candidate_finder = finder
 
         self.sequences = {}  # id -> sequence string
         self.records = {}  # id -> SeqRecord object
@@ -829,7 +828,7 @@ class SpecimenClusterer:
                 "min_ambiguity_frequency": self.min_ambiguity_frequency,
                 "min_ambiguity_count": self.min_ambiguity_count,
                 "enable_iupac_calling": self.enable_iupac_calling,
-                "enable_scalability": self.enable_scalability,
+                "scale_threshold": self.scale_threshold,
                 "max_threads": self.max_threads,
                 "orient_mode": self.orient_mode,
             },
@@ -941,10 +940,13 @@ class SpecimenClusterer:
             self.sequences[record.id] = str(record.seq)
             self.records[record.id] = record
 
-        # Log recommendation for large datasets
-        if len(self.sequences) > self.scalability_config.recommendation_threshold and self.enable_scalability is None:
-            logging.info(f"Large dataset detected ({len(self.sequences)} sequences). "
-                         "Consider using --enable-scalability for faster processing.")
+        # Log scalability mode status for large datasets
+        if len(self.sequences) >= self.scale_threshold and self.scale_threshold > 0:
+            if self._candidate_finder is not None:
+                logging.info(f"Scalability mode active for {len(self.sequences)} sequences (threshold: {self.scale_threshold})")
+            else:
+                logging.warning(f"Dataset has {len(self.sequences)} sequences (>= threshold {self.scale_threshold}) "
+                               "but vsearch not found. Using brute-force.")
 
     def _get_scalable_operation(self) -> ScalablePairwiseOperation:
         """Get configured scalable operation for K-NN computation."""
@@ -1145,7 +1147,7 @@ class SpecimenClusterer:
             # Group by homopolymer-equivalent sequences
             # Use scalable method when enabled and there are many clusters
             use_scalable = (
-                self.enable_scalability is not None and
+                self.scale_threshold > 0 and
                 self._candidate_finder is not None and
                 self._candidate_finder.is_available and
                 len(cluster_to_consensus) > 50
@@ -2263,10 +2265,9 @@ def main():
                         help="Presample size for initial reads (default: 1000, 0 to disable)")
     parser.add_argument("--k-nearest-neighbors", type=int, default=5,
                         help="Number of nearest neighbors for graph construction (default: 5)")
-    parser.add_argument("--enable-scalability", nargs='?', const=0, default=None, type=int,
-                        metavar="THRESHOLD",
-                        help="Enable scalable mode for large datasets (requires vsearch). "
-                             "Optional: minimum sequence count to activate (default: 0 = always).")
+    parser.add_argument("--scale-threshold", type=int, default=1000,
+                        help="Sequence count threshold for scalable mode (requires vsearch). "
+                             "Set to 0 to disable. Default: 1000")
     parser.add_argument("--threads", type=int, default=1, metavar="N",
                         help="Max threads for internal parallelism (vsearch, SPOA). "
                              "Default: 1. Use higher values for single large jobs.")
@@ -2320,7 +2321,7 @@ def main():
         min_ambiguity_frequency=args.min_ambiguity_frequency,
         min_ambiguity_count=args.min_ambiguity_count,
         enable_iupac_calling=not args.disable_ambiguity_calling,
-        enable_scalability=args.enable_scalability,
+        scale_threshold=args.scale_threshold,
         max_threads=args.threads,
         early_filter=not args.disable_early_filter,
         collect_discards=args.collect_discards

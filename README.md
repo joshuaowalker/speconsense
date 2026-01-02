@@ -290,25 +290,25 @@ Consensus sequence headers contain metadata fields separated by spaces:
 
 ## Scalability Features
 
-For large datasets (thousands of sequences), speconsense can use external tools to accelerate pairwise comparison operations.
+For large datasets (thousands of sequences), speconsense uses external tools to accelerate pairwise comparison operations. **Scalability mode is enabled by default** for datasets with 1000+ sequences.
 
-### Enabling Scalability Mode
+### Configuration
 
 ```bash
-# Enable scalability for all input sizes
-speconsense input.fastq --enable-scalability
+# Default: scalability enabled for datasets with 1000+ sequences
+speconsense input.fastq
 
-# Enable scalability only for datasets with 500+ sequences
-speconsense input.fastq --enable-scalability 500
+# Custom threshold: enable scalability only for datasets with 500+ sequences
+speconsense input.fastq --scale-threshold 500
 
-# Enable scalability for speconsense-summarize
-speconsense-summarize --enable-scalability --source clusters/
+# Disable scalability entirely (use brute-force for all sizes)
+speconsense input.fastq --scale-threshold 0
 
-# With threshold (only use vsearch for specimens with 100+ consensus sequences)
-speconsense-summarize --enable-scalability 100 --source clusters/
+# Same options work for speconsense-summarize
+speconsense-summarize --scale-threshold 500 --source clusters/
 ```
 
-The optional threshold parameter allows you to run a single command across multiple specimens of varying sizes. Smaller specimens will use brute-force (which has less overhead for small inputs), while larger specimens will use vsearch acceleration.
+The threshold parameter allows you to run a single command across multiple specimens of varying sizes. Smaller specimens will use brute-force (which has less overhead for small inputs), while larger specimens will use vsearch acceleration.
 
 ### Requirements
 
@@ -317,6 +317,8 @@ Scalability mode requires **vsearch** to be installed:
 ```bash
 conda install bioconda::vsearch
 ```
+
+If vsearch is not available, speconsense will automatically fall back to brute-force computation.
 
 ### How It Works
 
@@ -327,11 +329,12 @@ Scalability mode uses a two-stage approach to reduce the O(n^2) pairwise compari
 
 This reduces the computational complexity from O(n^2) to approximately O(n x k), where k is the number of candidates per sequence.
 
-### When to Use
+### Performance
 
-- **Recommended**: Datasets with >2,000 sequences (speconsense will suggest enabling scalability)
-- **Required**: Datasets with >10,000 sequences where O(n^2) becomes impractical
-- **Optional**: Smaller datasets where brute-force is fast enough
+Based on benchmarking, the break-even point is approximately 1000 sequences:
+- Below 1000 sequences: brute-force is faster (less overhead)
+- Above 1000 sequences: vsearch acceleration provides significant speedup
+- At 10,000 sequences: ~10x faster than brute-force
 
 ### Implementation Notes
 
@@ -347,10 +350,10 @@ For a single large job, increase parallelism with `--threads`:
 
 ```bash
 # Many jobs via parallel - default is single-threaded (safe)
-ls *.fastq | parallel speconsense --enable-scalability {}
+ls *.fastq | parallel speconsense {}
 
 # Single large job - enable internal parallelism
-speconsense large_dataset.fastq --enable-scalability --threads 8
+speconsense large_dataset.fastq --threads 8
 ```
 
 The `--threads` option controls:
@@ -372,7 +375,7 @@ By default, speconsense applies size filtering early in the pipeline (after pre-
 For environmental DNA (eDNA) analysis where rare species are important:
 
 ```bash
-speconsense input.fastq --disable-early-filter --min-size 1 --enable-scalability
+speconsense input.fastq --disable-early-filter --min-size 1
 ```
 
 This preserves all clusters (even single-read) while still using scalability optimizations for the O(n^2) comparisons.

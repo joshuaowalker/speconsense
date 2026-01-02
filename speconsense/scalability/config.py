@@ -10,13 +10,12 @@ class ScalabilityConfig:
 
     Attributes:
         enabled: Whether scalability mode is active
-        activation_threshold: Minimum sequence count to activate scalability (0 = always)
+        activation_threshold: Minimum sequence count to activate scalability
         max_threads: Max threads for internal parallelism (default: 1 for backward compatibility)
         backend: Which backend to use (default: 'vsearch')
         oversampling_factor: Multiplier for candidate count in K-NN (default: 10)
         relaxed_identity_factor: Factor to relax identity threshold for candidates (default: 0.9)
         batch_size: Number of sequences per batch for vsearch queries (default: 1000)
-        recommendation_threshold: Sequence count above which to recommend scalability (default: 2000)
     """
     enabled: bool = False
     activation_threshold: int = 0
@@ -25,21 +24,19 @@ class ScalabilityConfig:
     oversampling_factor: int = 10
     relaxed_identity_factor: float = 0.9
     batch_size: int = 1000
-    recommendation_threshold: int = 2000
 
     @classmethod
     def from_args(cls, args) -> 'ScalabilityConfig':
         """Create config from command-line arguments.
 
-        The enable_scalability arg can be:
-        - None: disabled
-        - 0: enabled for all sizes
-        - N: enabled for sequences >= N
+        The scale_threshold arg controls scalability:
+        - 0: disabled
+        - N > 0: enabled for datasets >= N sequences (default: 1000)
         """
-        threshold = getattr(args, 'enable_scalability', None)
+        threshold = getattr(args, 'scale_threshold', 1000)
         return cls(
-            enabled=threshold is not None,
-            activation_threshold=threshold if threshold is not None else 0,
+            enabled=threshold > 0,
+            activation_threshold=threshold,
             max_threads=getattr(args, 'threads', 1),
             backend=getattr(args, 'scalability_backend', 'vsearch'),
         )
