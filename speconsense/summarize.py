@@ -1280,7 +1280,15 @@ def create_consensus_from_msa(aligned_seqs: List, variants: List[ConsensusInfo])
     consensus_sequence = ''.join(consensus_seq)
     total_size = sum(v.size for v in variants)
     total_ric = sum(v.ric for v in variants)
-    raw_ric_values = sorted([v.ric for v in variants], reverse=True) if len(variants) > 1 else None
+
+    # Collect RiC values, preserving any prior merge history
+    raw_ric_values = []
+    for v in variants:
+        if v.raw_ric:
+            raw_ric_values.extend(v.raw_ric)  # Flatten prior merge history
+        else:
+            raw_ric_values.append(v.ric)
+    raw_ric_values = sorted(raw_ric_values, reverse=True) if len(variants) > 1 else None
 
     # Collect lengths, preserving any prior merge history
     raw_len_values = []
@@ -1407,7 +1415,15 @@ def create_overlap_consensus_from_msa(aligned_seqs: List, variants: List[Consens
     consensus_sequence = ''.join(consensus_seq)
     total_size = sum(v.size for v in variants)
     total_ric = sum(v.ric for v in variants)
-    raw_ric_values = sorted([v.ric for v in variants], reverse=True) if len(variants) > 1 else None
+
+    # Collect RiC values, preserving any prior merge history
+    raw_ric_values = []
+    for v in variants:
+        if v.raw_ric:
+            raw_ric_values.extend(v.raw_ric)  # Flatten prior merge history
+        else:
+            raw_ric_values.append(v.ric)
+    raw_ric_values = sorted(raw_ric_values, reverse=True) if len(variants) > 1 else None
 
     # Collect lengths, preserving any prior merge history
     raw_len_values = []
@@ -1601,7 +1617,10 @@ def merge_group_with_msa(variants: List[ConsensusInfo], args) -> Tuple[List[Cons
                         total_indels = prior_indels + this_merge_indels
 
                     # Create merged consensus
-                    if args.min_merge_overlap > 0:
+                    if len(subset_indices) == 1:
+                        # Single variant - use directly, preserving raw_ric and other metadata
+                        merged_consensus = subset_variants[0]
+                    elif args.min_merge_overlap > 0:
                         # Use overlap-aware consensus generation
                         merged_consensus = create_overlap_consensus_from_msa(
                             subset_aligned, subset_variants

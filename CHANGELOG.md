@@ -5,6 +5,15 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.6.6] - 2026-01-01
+
+### Fixed
+- **`raw_ric` metadata loss during iterative merging** - Fixed two bugs causing `rawric` field and variant files to be missing
+  - Bug 1: When iteration 2+ found no new merges, single-variant pass-through incorrectly called `create_*_from_msa()` which reset `raw_ric` to None
+  - Bug 2: `raw_ric` was not flattening prior merge history (unlike `raw_len`), causing iterative merges to show summed values instead of original cluster RiCs
+  - Result: `rawric` field missing from FASTA headers, `.raw` variant files not created in `__Summary__/variants/`
+  - Fix: Skip `create_*_from_msa()` for single-variant subsets; flatten `raw_ric` like `raw_len` to preserve original values
+
 ## [0.6.5] - 2025-12-27
 
 ### Fixed

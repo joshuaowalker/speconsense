@@ -163,12 +163,13 @@ class TestOverlapMergeIntegration:
         ric = int(attrs.get("ric", 0))
         assert ric == 496, f"Expected RiC=496 (167+166+163), got {ric}"
 
-        # Verify iterative merge happened (rawric should show intermediate merge)
-        # After iteration 1: c1(167)+c3(163)=330, after iteration 2: 330+c2(166)=496
+        # Verify iterative merge preserved all original RiC values
+        # rawric should show all 3 original cluster RiCs: 167+166+163
         rawric = attrs["rawric"]
-        # rawric could be "330+166" or similar showing the iterative merge
         parts = rawric.split("+")
-        assert len(parts) == 2, f"Expected 2 parts in rawric showing iterative merge: {rawric}"
+        assert len(parts) == 3, f"Expected 3 parts in rawric preserving original RiCs: {rawric}"
+        ric_values = sorted([int(p) for p in parts], reverse=True)
+        assert ric_values == [167, 166, 163], f"Expected original RiCs [167, 166, 163], got {ric_values}"
 
     def test_overlap_disabled_no_merge(self, temp_output_dir):
         """
