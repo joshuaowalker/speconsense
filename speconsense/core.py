@@ -732,7 +732,7 @@ class SpecimenClusterer:
                  output_dir: str = "clusters",
                  outlier_identity_threshold: Optional[float] = None,
                  enable_secondpass_phasing: bool = True,
-                 min_variant_frequency: float = 0.20,
+                 min_variant_frequency: float = 0.10,
                  min_variant_count: int = 5,
                  min_ambiguity_frequency: float = 0.10,
                  min_ambiguity_count: int = 3,
@@ -2245,8 +2245,8 @@ def main():
                         help="MCL inflation parameter (default: 4.0)")
     parser.add_argument("--min-size", type=int, default=5,
                         help="Minimum cluster size (default: 5, 0 to disable)")
-    parser.add_argument("--min-cluster-ratio", type=float, default=0.2,
-                        help="Minimum size ratio between a cluster and the largest cluster (default: 0.2, 0 to disable)")
+    parser.add_argument("--min-cluster-ratio", type=float, default=0.01,
+                        help="Minimum size ratio between a cluster and the largest cluster (default: 0.01, 0 to disable)")
     parser.add_argument("--max-sample-size", type=int, default=500,
                         help="Maximum cluster size for consensus (default: 500)")
     parser.add_argument("--outlier-identity", type=float, default=None,
@@ -2259,8 +2259,8 @@ def main():
                         help="Disable position-based variant phasing (enabled by default). "
                              "MCL graph clustering already separates most variants; this "
                              "second pass analyzes MSA positions to phase remaining variants.")
-    parser.add_argument("--min-variant-frequency", type=float, default=0.20,
-                        help="Minimum alternative allele frequency to call variant (default: 0.20 for 20%%)")
+    parser.add_argument("--min-variant-frequency", type=float, default=0.10,
+                        help="Minimum alternative allele frequency to call variant (default: 0.10 for 10%%)")
     parser.add_argument("--min-variant-count", type=int, default=5,
                         help="Minimum alternative allele read count to call variant (default: 5)")
     parser.add_argument("--min-ambiguity-frequency", type=float, default=0.10,

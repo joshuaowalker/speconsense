@@ -468,7 +468,7 @@ def analyze_positional_variation(alignments: List[ReadAlignment], consensus_alig
 
 def is_variant_position_with_composition(
     position_stats: PositionStats,
-    min_variant_frequency: float = 0.20,
+    min_variant_frequency: float = 0.10,
     min_variant_count: int = 5
 ) -> Tuple[bool, List[str], str]:
     """
@@ -486,7 +486,7 @@ def is_variant_position_with_composition(
 
     Args:
         position_stats: Position statistics including base composition
-        min_variant_frequency: Minimum alternative allele frequency (default: 0.20 for 20%)
+        min_variant_frequency: Minimum alternative allele frequency (default: 0.10 for 10%)
         min_variant_count: Minimum alternative allele read count (default: 5 reads)
 
     Returns:
@@ -571,7 +571,7 @@ def call_iupac_ambiguities(
     consensus: str,
     alignments: List['ReadAlignment'],
     msa_to_consensus_pos: Dict[int, Optional[int]],
-    min_variant_frequency: float = 0.20,
+    min_variant_frequency: float = 0.10,
     min_variant_count: int = 5
 ) -> Tuple[str, int, List[Dict]]:
     """
@@ -589,7 +589,7 @@ def call_iupac_ambiguities(
         consensus: Ungapped consensus sequence from SPOA
         alignments: List of ReadAlignment objects from MSA
         msa_to_consensus_pos: Mapping from MSA position to consensus position
-        min_variant_frequency: Minimum alternative allele frequency (default: 0.20)
+        min_variant_frequency: Minimum alternative allele frequency (default: 0.10)
         min_variant_count: Minimum alternative allele read count (default: 5)
 
     Returns:

@@ -364,8 +364,8 @@ def parse_arguments():
                         help="Maximum length of individual indels allowed in merging (default: 0 = disabled)")
     parser.add_argument("--merge-position-count", type=int, default=2,
                         help="Maximum total SNP+indel positions allowed in merging (default: 2)")
-    parser.add_argument("--merge-min-size-ratio", type=float, default=0.0,
-                        help="Minimum size ratio (smaller/larger) for merging clusters (default: 0.0 = disabled)")
+    parser.add_argument("--merge-min-size-ratio", type=float, default=0.1,
+                        help="Minimum size ratio (smaller/larger) for merging clusters (default: 0.1, 0 to disable)")
     parser.add_argument("--disable-homopolymer-equivalence", action="store_true",
                         help="Disable homopolymer equivalence in merging (treat AAA vs AAAA as different)")
     parser.add_argument("--min-merge-overlap", type=int, default=200,

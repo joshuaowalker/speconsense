@@ -121,6 +121,20 @@ speconsense input.fastq --disable-position-phasing
 speconsense input.fastq -O my_results/
 ```
 
+### Two-Phase Processing Philosophy
+
+**speconsense** extracts distinct biological sequences from raw reads within a single specimen. It separates true biological variation (alleles, loci, contaminants) from sequencing noise by clustering reads and generating consensus sequences. Philosophy: *split rather than conflate* — better to produce separate clusters that can be merged downstream than to lose real biological distinctions.
+
+**speconsense-summarize** curates and consolidates consensus sequences for downstream analysis. It handles residual ambiguity that consensus generation cannot resolve — primarily minor SNP differences that may represent the same biological entity — groups related variants, selects representatives, and can analyze patterns across a run. Philosophy: *conservative simplification* — merge only what is clearly equivalent, preserve distinctions when uncertain.
+
+| Aspect | speconsense | speconsense-summarize |
+|--------|-------------|----------------------|
+| Input | Raw reads | Consensus sequences |
+| Scope | Single specimen | Single or multiple specimens |
+| Goal | Discovery/enumeration | Curation/simplification |
+| Error model | Read-level noise | Residual ambiguity |
+| Bias | Prefer over-splitting | Conservative merging |
+
 ### Post-processing with Speconsense-Summarize
 
 After running speconsense, use the summarize tool to process and refine outputs:
@@ -446,7 +460,7 @@ Speconsense provides two complementary filters to control which clusters are out
 - Applied **after merging** identical/homopolymer-equivalent clusters
 - Set to 0 to disable and output all clusters regardless of size
 
-**Relative size filtering (`--min-cluster-ratio`, default: 0.2):**
+**Relative size filtering (`--min-cluster-ratio`, default: 0.01):**
 - Filters clusters based on size relative to the largest cluster
 - Also applied **after merging** identical/homopolymer-equivalent clusters (post-merge sizes)
 - **Based on original cluster sizes**, not sampled sizes from `--max-sample-size`
@@ -495,7 +509,7 @@ By default, Speconsense automatically detects and separates biological variants 
 
 **How variant phasing works:**
 
-1. **Variant detection**: After initial clustering, Speconsense analyzes positional variation using multiple sequence alignment. Positions where the minor allele frequency exceeds the threshold (default 20%) and meets minimum read count requirements are identified as variant positions.
+1. **Variant detection**: After initial clustering, Speconsense analyzes positional variation using multiple sequence alignment. Positions where the minor allele frequency exceeds the threshold (default 10%) and meets minimum read count requirements are identified as variant positions.
 
 2. **Position selection**: When multiple variant positions are detected, Speconsense selects the single best position for splitting (minimizing within-cluster error), then recursively regenerates MSA for each subcluster to discover additional variant positions. This hierarchical approach prevents over-fragmentation while allowing deep phasing when supported by the data.
 
@@ -503,10 +517,10 @@ By default, Speconsense automatically detects and separates biological variants 
 
 4. **Haplotype filtering**: Small haplotypes that don't meet minimum thresholds are reassigned to the nearest qualifying haplotype, preventing read loss.
 
-5. **IUPAC ambiguity calling**: When only one haplotype qualifies (insufficient support for phasing), variant positions are encoded using IUPAC ambiguity codes (e.g., `Y` for C/T, `R` for A/G) rather than forcing a potentially incorrect consensus call. Ambiguity calling uses separate (lower) thresholds than phasing, capturing more residual variation.
+5. **IUPAC ambiguity calling**: When only one haplotype qualifies (insufficient support for phasing), variant positions are encoded using IUPAC ambiguity codes (e.g., `Y` for C/T, `R` for A/G) rather than forcing a potentially incorrect consensus call. Ambiguity calling uses a lower count threshold (3 reads vs 5 for splitting), capturing variation that doesn't have enough support to form a viable separate cluster.
 
 **Key parameters for variant phasing:**
-- `--min-variant-frequency` - Minimum minor allele frequency to trigger cluster splitting (default: 0.20 = 20%)
+- `--min-variant-frequency` - Minimum minor allele frequency to trigger cluster splitting (default: 0.10 = 10%)
 - `--min-variant-count` - Minimum read count for minor allele to trigger splitting (default: 5)
 - `--disable-position-phasing` - Disable variant phasing entirely
 
@@ -515,7 +529,7 @@ By default, Speconsense automatically detects and separates biological variants 
 - `--min-ambiguity-count` - Minimum read count for minor allele for IUPAC codes (default: 3)
 - `--disable-ambiguity-calling` - Disable IUPAC codes for unphased variants
 
-The separate thresholds allow phasing to be conservative (avoiding over-fragmentation) while ambiguity calling captures more subtle variation in the consensus sequence.
+The frequency thresholds are unified at 10%, but the count thresholds differ: splitting requires 5 reads (matching `--min-size`) to ensure viable clusters, while ambiguity calling uses 3 reads since it doesn't create new clusters.
 
 **Example:**
 ```bash
@@ -771,7 +785,7 @@ speconsense-summarize --snp-merge-limit 2  # Equivalent to --merge-position-coun
 - `--merge-position-count N`: Maximum total SNP + structural indel positions allowed (default: 2)
 - `--merge-indel-length N`: Maximum length of individual structural indels allowed (default: 0 = disabled)
 - `--merge-snp`: Enable/disable SNP merging (default: True)
-- `--merge-min-size-ratio R`: Minimum size ratio (smaller/larger) for merging clusters (default: 0.0 = disabled)
+- `--merge-min-size-ratio R`: Minimum size ratio (smaller/larger) for merging clusters (default: 0.1, 0 to disable)
 - `--disable-homopolymer-equivalence`: Treat homopolymer length differences as structural indels (default: disabled, meaning homopolymer equivalence is enabled)
 - `--snp-merge-limit N`: Legacy parameter, equivalent to `--merge-position-count` (deprecated)
 
@@ -1038,7 +1052,7 @@ options:
   --min-size MIN_SIZE   Minimum cluster size (default: 5, 0 to disable)
   --min-cluster-ratio MIN_CLUSTER_RATIO
                         Minimum size ratio between a cluster and the largest
-                        cluster (default: 0.2, 0 to disable)
+                        cluster (default: 0.01, 0 to disable)
   --max-sample-size MAX_SAMPLE_SIZE
                         Maximum cluster size for consensus (default: 500)
   --outlier-identity OUTLIER_IDENTITY
@@ -1053,7 +1067,7 @@ options:
                         phase remaining variants.
   --min-variant-frequency MIN_VARIANT_FREQUENCY
                         Minimum alternative allele frequency to call variant
-                        (default: 0.20 for 20%)
+                        (default: 0.10 for 10%)
   --min-variant-count MIN_VARIANT_COUNT
                         Minimum alternative allele read count to call variant
                         (default: 5)
@@ -1130,7 +1144,7 @@ options:
                         Maximum total SNP+indel positions allowed in merging (default: 2)
   --merge-min-size-ratio MERGE_MIN_SIZE_RATIO
                         Minimum size ratio (smaller/larger) for merging clusters
-                        (default: 0.0 = disabled)
+                        (default: 0.1, 0 to disable)
   --min-merge-overlap MIN_MERGE_OVERLAP
                         Minimum overlap in bp for merging sequences of different lengths
                         (default: 200, 0 to disable)
