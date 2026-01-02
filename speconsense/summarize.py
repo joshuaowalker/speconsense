@@ -350,6 +350,10 @@ def parse_arguments():
     parser = argparse.ArgumentParser(description="Process Speconsense output with advanced variant handling.")
     parser.add_argument("--min-ric", type=int, default=3,
                         help="Minimum Reads in Consensus (RiC) threshold (default: 3)")
+    parser.add_argument("--min-len", type=int, default=0,
+                        help="Minimum sequence length in bp (default: 0 = disabled)")
+    parser.add_argument("--max-len", type=int, default=0,
+                        help="Maximum sequence length in bp (default: 0 = disabled)")
     parser.add_argument("--source", type=str, default="clusters",
                         help="Source directory containing Speconsense output (default: clusters)")
     parser.add_argument("--summary-dir", type=str, default="__Summary__",
@@ -537,9 +541,26 @@ def parse_consensus_header(header: str) -> Tuple[Optional[str], Optional[int], O
     return sample_name, ric, size, primers, rid, rid_min
 
 
-def load_consensus_sequences(source_folder: str, min_ric: int) -> List[ConsensusInfo]:
-    """Load all consensus sequences from speconsense output files."""
+def load_consensus_sequences(
+    source_folder: str,
+    min_ric: int,
+    min_len: int = 0,
+    max_len: int = 0
+) -> List[ConsensusInfo]:
+    """Load all consensus sequences from speconsense output files.
+
+    Args:
+        source_folder: Directory containing speconsense output files
+        min_ric: Minimum Reads in Consensus threshold
+        min_len: Minimum sequence length (0 = disabled)
+        max_len: Maximum sequence length (0 = disabled)
+
+    Returns:
+        List of ConsensusInfo objects passing all filters
+    """
     consensus_list = []
+    filtered_by_ric = 0
+    filtered_by_len = 0
 
     # Find all consensus FASTA files matching the new naming pattern
     fasta_pattern = os.path.join(source_folder, "*-all.fasta")
@@ -553,27 +574,52 @@ def load_consensus_sequences(source_folder: str, min_ric: int) -> List[Consensus
                 sample_name, ric, size, primers, rid, rid_min = \
                     parse_consensus_header(f">{record.description}")
 
-                if sample_name and ric >= min_ric:
-                    # Extract cluster ID from sample name (e.g., "sample-c1" -> "c1")
-                    cluster_match = re.search(r'-c(\d+)$', sample_name)
-                    cluster_id = cluster_match.group(0) if cluster_match else sample_name
+                if not sample_name:
+                    continue
 
-                    consensus_info = ConsensusInfo(
-                        sample_name=sample_name,
-                        cluster_id=cluster_id,
-                        sequence=str(record.seq),
-                        ric=ric,
-                        size=size,
-                        file_path=fasta_file,
-                        snp_count=None,  # No SNP info from original speconsense output
-                        primers=primers,
-                        raw_ric=None,  # Not available in original speconsense output
-                        rid=rid,  # Mean read identity if available
-                        rid_min=rid_min,  # Minimum read identity if available
-                    )
-                    consensus_list.append(consensus_info)
+                # RiC filter
+                if ric < min_ric:
+                    filtered_by_ric += 1
+                    continue
 
-    logging.info(f"Loaded {len(consensus_list)} consensus sequences from {len(fasta_files)} files")
+                # Length filters (applied before merging to avoid chimeric contamination)
+                seq_len = len(record.seq)
+                if min_len > 0 and seq_len < min_len:
+                    logging.debug(f"Filtered {sample_name}: length {seq_len} < min_len {min_len}")
+                    filtered_by_len += 1
+                    continue
+                if max_len > 0 and seq_len > max_len:
+                    logging.debug(f"Filtered {sample_name}: length {seq_len} > max_len {max_len}")
+                    filtered_by_len += 1
+                    continue
+
+                # Extract cluster ID from sample name (e.g., "sample-c1" -> "c1")
+                cluster_match = re.search(r'-c(\d+)$', sample_name)
+                cluster_id = cluster_match.group(0) if cluster_match else sample_name
+
+                consensus_info = ConsensusInfo(
+                    sample_name=sample_name,
+                    cluster_id=cluster_id,
+                    sequence=str(record.seq),
+                    ric=ric,
+                    size=size,
+                    file_path=fasta_file,
+                    snp_count=None,  # No SNP info from original speconsense output
+                    primers=primers,
+                    raw_ric=None,  # Not available in original speconsense output
+                    rid=rid,  # Mean read identity if available
+                    rid_min=rid_min,  # Minimum read identity if available
+                )
+                consensus_list.append(consensus_info)
+
+    # Log loading summary
+    filter_parts = [f"Loaded {len(consensus_list)} consensus sequences from {len(fasta_files)} files"]
+    if filtered_by_ric > 0:
+        filter_parts.append(f"filtered {filtered_by_ric} by RiC")
+    if filtered_by_len > 0:
+        filter_parts.append(f"filtered {filtered_by_len} by length")
+    logging.info(", ".join(filter_parts))
+
     return consensus_list
 
 
@@ -3152,6 +3198,8 @@ def main():
     logging.info(f"  --source: {args.source}")
     logging.info(f"  --summary-dir: {args.summary_dir}")
     logging.info(f"  --min-ric: {args.min_ric}")
+    logging.info(f"  --min-len: {args.min_len}")
+    logging.info(f"  --max-len: {args.max_len}")
     logging.info(f"  --fasta-fields: {args.fasta_fields}")
     logging.info(f"  --merge-snp: {args.merge_snp}")
     logging.info(f"  --merge-indel-length: {args.merge_indel_length}")
@@ -3168,7 +3216,9 @@ def main():
     logging.info("Processing each specimen file independently to organize variants within specimens")
     
     # Load all consensus sequences
-    consensus_list = load_consensus_sequences(args.source, args.min_ric)
+    consensus_list = load_consensus_sequences(
+        args.source, args.min_ric, args.min_len, args.max_len
+    )
     if not consensus_list:
         logging.error("No consensus sequences found")
         return

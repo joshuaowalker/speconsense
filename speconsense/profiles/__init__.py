@@ -69,6 +69,8 @@ VALID_SPECONSENSE_KEYS = {
 
 VALID_SUMMARIZE_KEYS = {
     "min-ric",
+    "min-len",
+    "max-len",
     "merge-min-size-ratio",
     "merge-threshold",
     "merge-homopoly",
