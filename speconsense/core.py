@@ -1570,6 +1570,7 @@ class SpecimenClusterer:
         """
         all_subclusters = []
         all_discarded = set()
+        split_count = 0
         logging.debug("Processing clusters for variant detection and phasing...")
 
         indexed_clusters = list(enumerate(merged_clusters, 1))
@@ -1607,19 +1608,24 @@ class SpecimenClusterer:
 
             # Collect results maintaining order
             for subclusters, discarded_ids in results:
+                if len(subclusters) > 1:
+                    split_count += 1
                 all_subclusters.extend(subclusters)
                 all_discarded.update(discarded_ids)
         else:
             # Sequential processing using same worker function as parallel path
             for work_package in work_packages:
                 subclusters, discarded_ids = _process_cluster_worker(work_package)
+                if len(subclusters) > 1:
+                    split_count += 1
                 all_subclusters.extend(subclusters)
                 all_discarded.update(discarded_ids)
 
         # Update shared state after all processing complete
         self.discarded_read_ids.update(all_discarded)
 
-        logging.info(f"After phasing, created {len(all_subclusters)} sub-clusters from {len(merged_clusters)} merged clusters")
+        split_info = f" ({split_count} split)" if split_count > 0 else ""
+        logging.info(f"After phasing, created {len(all_subclusters)} sub-clusters from {len(merged_clusters)} merged clusters{split_info}")
         return all_subclusters
 
     def _run_postphasing_merge(self, subclusters: List[Dict]) -> List[Dict]:
