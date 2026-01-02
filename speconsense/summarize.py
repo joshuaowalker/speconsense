@@ -2120,7 +2120,7 @@ def perform_hac_clustering(consensus_list: List[ConsensusInfo],
                      f"({linkage_type} linkage)")
 
     n = len(consensus_list)
-    logging.info(f"perform_hac_clustering: {n} sequences, threshold={variant_group_identity}")
+    logging.debug(f"perform_hac_clustering: {n} sequences, threshold={variant_group_identity}")
     distance_threshold = 1.0 - variant_group_identity
 
     # Initialize each sequence as its own cluster
@@ -2136,7 +2136,7 @@ def perform_hac_clustering(consensus_list: List[ConsensusInfo],
         n >= scalability_config.activation_threshold and
         n > 50
     )
-    logging.info(f"perform_hac_clustering: use_scalable={use_scalable}")
+    logging.debug(f"perform_hac_clustering: use_scalable={use_scalable}")
 
     if use_scalable:
         # Build sequence dict with index keys
@@ -2199,8 +2199,8 @@ def perform_hac_clustering(consensus_list: List[ConsensusInfo],
             seq_adjacency[i].add(j)
             seq_adjacency[j].add(i)
 
-    logging.info(f"Built adjacency: {len(seq_adjacency)} sequences with edges, "
-                 f"{sum(len(v) for v in seq_adjacency.values()) // 2} unique edges")
+    logging.debug(f"Built adjacency: {len(seq_adjacency)} sequences with edges, "
+                  f"{sum(len(v) for v in seq_adjacency.values()) // 2} unique edges")
 
     # Union-find helper functions
     parent: Dict[int, int] = {i: i for i in range(n)}
@@ -2226,7 +2226,7 @@ def perform_hac_clustering(consensus_list: List[ConsensusInfo],
                 union(i, j)
                 edge_count += 1
 
-        logging.info(f"Processed {edge_count} edges below threshold {distance_threshold:.3f}")
+        logging.debug(f"Processed {edge_count} edges below threshold {distance_threshold:.3f}")
 
         # Collect groups
         component_groups: Dict[int, List[int]] = defaultdict(list)

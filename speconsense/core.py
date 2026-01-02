@@ -420,7 +420,7 @@ def _phase_reads_by_variants_standalone(
         if not read_sequences:
             return [(None, cluster_read_ids)]
 
-        logging.info(f"Recursive phasing with MSA regeneration: {len(variant_positions)} initial variants, {len(read_sequences)} reads")
+        logging.debug(f"Recursive phasing with MSA regeneration: {len(variant_positions)} initial variants, {len(read_sequences)} reads")
 
         leaves, deferred = _recursive_phase_cluster_standalone(
             set(read_sequences.keys()), read_sequences, [], 0, config
@@ -436,7 +436,7 @@ def _phase_reads_by_variants_standalone(
         if len(leaves) == 1:
             return [(None, cluster_read_ids)]
 
-        logging.info(f"Recursive phasing: {len(leaves)} leaf haplotypes, {len(deferred)} deferred reads")
+        logging.debug(f"Recursive phasing: {len(leaves)} leaf haplotypes, {len(deferred)} deferred reads")
 
         # Reassign deferred reads
         if deferred:
@@ -468,11 +468,11 @@ def _phase_reads_by_variants_standalone(
             if total_phased < 2:
                 return [(None, cluster_read_ids)]
 
-            logging.info(f"Phasing decision: SPLITTING cluster into {len(leaf_reads_updated)} haplotypes")
+            logging.debug(f"Phasing decision: SPLITTING cluster into {len(leaf_reads_updated)} haplotypes")
 
             return [('-'.join(path), reads) for path, reads in sorted(leaf_reads_updated.items(), key=lambda x: -len(x[1]))]
         else:
-            logging.info(f"Phasing decision: SPLITTING cluster into {len(leaves)} haplotypes")
+            logging.debug(f"Phasing decision: SPLITTING cluster into {len(leaves)} haplotypes")
             return [('-'.join(path), reads) for path, consensus, reads in sorted(leaves, key=lambda x: -len(x[2]))]
 
     except Exception as e:
@@ -524,7 +524,7 @@ def _process_cluster_worker(args) -> Tuple[List[Dict], Set[str]]:
 
         if outlier_ids:
             if len(cluster) == 2 and len(outlier_ids) == 1:
-                logging.info(f"Initial cluster {initial_idx}: Split 2-read cluster due to 1 outlier")
+                logging.debug(f"Initial cluster {initial_idx}: Split 2-read cluster due to 1 outlier")
                 for read_id in cluster:
                     subclusters.append({
                         'read_ids': {read_id},
@@ -533,8 +533,8 @@ def _process_cluster_worker(args) -> Tuple[List[Dict], Set[str]]:
                     })
                 return subclusters, discarded_ids
 
-            logging.info(f"Initial cluster {initial_idx}: Removing {len(outlier_ids)}/{len(cluster)} outlier reads, "
-                        f"regenerating consensus")
+            logging.debug(f"Initial cluster {initial_idx}: Removing {len(outlier_ids)}/{len(cluster)} outlier reads, "
+                         f"regenerating consensus")
 
             discarded_ids.update(outlier_ids)
             cluster = cluster - outlier_ids
@@ -560,7 +560,7 @@ def _process_cluster_worker(args) -> Tuple[List[Dict], Set[str]]:
         )
 
         if variant_positions:
-            logging.info(f"Initial cluster {initial_idx}: Detected {len(variant_positions)} variant positions")
+            logging.debug(f"Initial cluster {initial_idx}: Detected {len(variant_positions)} variant positions")
 
     # Phase reads
     phased_haplotypes = _phase_reads_by_variants_standalone(
@@ -1050,7 +1050,7 @@ class SpecimenClusterer:
 
             # Skip empty clusters
             if not cluster_reads:
-                logging.warning(f"Cluster {i} is empty, skipping")
+                logging.debug(f"Cluster {i} is empty, skipping")
                 continue
 
             # Single-read clusters don't need SPOA - use the read directly
@@ -1745,7 +1745,7 @@ class SpecimenClusterer:
 
                 # Log sampling info for large clusters
                 if len(cluster) > self.max_sample_size:
-                    logging.info(f"Cluster {final_idx}: Sampling {self.max_sample_size} from {len(cluster)} reads for final consensus")
+                    logging.debug(f"Cluster {final_idx}: Sampling {self.max_sample_size} from {len(cluster)} reads for final consensus")
 
                 consensus = result['consensus']
                 iupac_count = result['iupac_count']

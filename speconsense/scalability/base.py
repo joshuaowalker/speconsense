@@ -126,7 +126,7 @@ class ScalablePairwiseOperation:
                                output_dir: str,
                                min_edges_per_node: int) -> Dict[str, List[Tuple[str, float]]]:
         """Two-stage scalable K-NN computation."""
-        logging.info(f"Using {self.candidate_finder.name}-based scalable K-NN computation")
+        logging.debug(f"Using {self.candidate_finder.name}-based scalable K-NN computation")
 
         # Build index
         self.candidate_finder.build_index(sequences, output_dir)
@@ -179,7 +179,7 @@ class ScalablePairwiseOperation:
                                   min_identity: float,
                                   min_edges_per_node: int) -> Dict[str, List[Tuple[str, float]]]:
         """Standard O(n^2) brute-force K-NN computation."""
-        logging.info("Using brute-force K-NN computation")
+        logging.debug("Using brute-force K-NN computation")
 
         seq_ids = sorted(sequences.keys())
         n = len(seq_ids)
@@ -243,7 +243,7 @@ class ScalablePairwiseOperation:
             Dict mapping (id1, id2) -> distance, symmetric
         """
         n = len(sequences)
-        logging.info(f"compute_distance_matrix called with {n} sequences")
+        logging.debug(f"compute_distance_matrix called with {n} sequences")
 
         # For small sets or when scalability disabled, use brute force
         use_scalable = (
@@ -254,10 +254,10 @@ class ScalablePairwiseOperation:
             n > 50  # Only worthwhile for larger sets
         )
 
-        logging.info(f"use_scalable={use_scalable} (enabled={self.config.enabled}, "
-                     f"finder={self.candidate_finder is not None}, "
-                     f"available={self.candidate_finder.is_available if self.candidate_finder else 'N/A'}, "
-                     f"threshold={self.config.activation_threshold})")
+        logging.debug(f"use_scalable={use_scalable} (enabled={self.config.enabled}, "
+                      f"finder={self.candidate_finder is not None}, "
+                      f"available={self.candidate_finder.is_available if self.candidate_finder else 'N/A'}, "
+                      f"threshold={self.config.activation_threshold})")
 
         if use_scalable:
             return self._compute_distance_matrix_scalable(sequences, output_dir, min_identity)
@@ -287,7 +287,7 @@ class ScalablePairwiseOperation:
                                            output_dir: str,
                                            min_identity: float) -> Dict[Tuple[str, str], float]:
         """Scalable distance matrix using candidates to reduce comparisons."""
-        logging.info(f"Using {self.candidate_finder.name}-based scalable distance matrix")
+        logging.debug(f"Using {self.candidate_finder.name}-based scalable distance matrix")
 
         # Build index
         self.candidate_finder.build_index(sequences, output_dir)
@@ -299,7 +299,7 @@ class ScalablePairwiseOperation:
         relaxed_threshold = min_identity * self.config.relaxed_identity_factor
         max_candidates = 500
 
-        logging.info(f"Finding candidates: identity>={relaxed_threshold:.2f}, max_candidates={max_candidates}")
+        logging.debug(f"Finding candidates: identity>={relaxed_threshold:.2f}, max_candidates={max_candidates}")
         all_candidates = self.candidate_finder.find_candidates(
             seq_ids, sequences, relaxed_threshold, max_candidates
         )
@@ -320,7 +320,7 @@ class ScalablePairwiseOperation:
                 pbar.update(1)
 
         # Return sparse matrix - missing pairs are treated as distance 1.0 by consumers
-        logging.info(f"Computed {len(computed_pairs)} distance pairs (sparse matrix)")
+        logging.debug(f"Computed {len(computed_pairs)} distance pairs (sparse matrix)")
 
         return distances
 
@@ -405,7 +405,7 @@ class ScalablePairwiseOperation:
                                               output_dir: str,
                                               min_candidate_identity: float) -> List[List[str]]:
         """Scalable equivalence group computation using candidate pre-filtering."""
-        logging.info(f"Using {self.candidate_finder.name}-based equivalence grouping")
+        logging.debug(f"Using {self.candidate_finder.name}-based equivalence grouping")
 
         # Build index
         self.candidate_finder.build_index(sequences, output_dir)

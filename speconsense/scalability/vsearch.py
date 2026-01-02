@@ -92,8 +92,8 @@ class VsearchCandidateFinder:
             seq_hash: ids for seq_hash, (ids, _) in unique_seqs.items()
         }
 
-        logging.info(f"Built vsearch index: {len(unique_seqs)} unique sequences "
-                     f"(deduplicated from {len(sequences)} total)")
+        logging.debug(f"Built vsearch index: {len(unique_seqs)} unique sequences "
+                      f"(deduplicated from {len(sequences)} total)")
 
     def find_candidates(self,
                         query_ids: List[str],
