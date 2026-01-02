@@ -121,6 +121,26 @@ speconsense input.fastq --disable-position-phasing
 speconsense input.fastq -O my_results/
 ```
 
+### Using Profiles
+
+Profiles save parameter configurations for different workflows:
+
+```bash
+# List available profiles
+speconsense --list-profiles
+
+# Use a profile (CLI arguments override profile values)
+speconsense input.fastq -p herbarium
+speconsense input.fastq -p herbarium --min-size 10
+```
+
+**Bundled profiles:**
+- `herbarium` — High-recall for degraded DNA/type specimens
+- `specimens` — Balanced settings (matches defaults)
+- `strict` — High-precision for confident results
+
+On first use, an `example.yaml` template is created in `~/.config/speconsense/profiles/` — copy and edit it to create custom profiles.
+
 ### Two-Phase Processing Philosophy
 
 **speconsense** extracts distinct biological sequences from raw reads within a single specimen. It separates true biological variation (alleles, loci, contaminants) from sequencing noise by clustering reads and generating consensus sequences. Philosophy: *split rather than conflate* — better to produce separate clusters that can be merged downstream than to lose real biological distinctions.

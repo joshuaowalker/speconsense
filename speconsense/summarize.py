@@ -29,6 +29,12 @@ except ImportError:
     # Fallback for when running as a script directly (e.g., in tests)
     __version__ = "dev"
 
+from speconsense.profiles import (
+    Profile,
+    ProfileError,
+    print_profiles_list,
+)
+
 # Import homopolymer-aware alignment functions and IUPAC constants from msa module
 from speconsense.msa import (
     extract_alignments_from_msa,
@@ -401,8 +407,46 @@ def parse_arguments():
     parser.add_argument("--threads", type=int, default=0, metavar="N",
                         help="Max threads for internal parallelism. "
                              "0=auto-detect (default), N>0 for explicit count.")
+    parser.add_argument("-p", "--profile", metavar="NAME",
+                        help="Load parameter profile (use --list-profiles to see available)")
+    parser.add_argument("--list-profiles", action="store_true",
+                        help="List available profiles and exit")
+
+    # Handle --list-profiles early (before requiring other args)
+    if '--list-profiles' in sys.argv:
+        print_profiles_list('speconsense-summarize')
+        sys.exit(0)
+
+    # First pass: get profile name if specified
+    pre_args, _ = parser.parse_known_args()
+
+    # Track which arguments were explicitly provided on CLI
+    explicit_args = set()
+    for arg in sys.argv[1:]:
+        if arg.startswith('--') and '=' in arg:
+            explicit_args.add(arg.split('=')[0][2:].replace('-', '_'))
+        elif arg.startswith('--'):
+            explicit_args.add(arg[2:].replace('-', '_'))
+
+    # Load and apply profile if specified
+    loaded_profile = None
+    if pre_args.profile:
+        try:
+            loaded_profile = Profile.load(pre_args.profile)
+        except ProfileError as e:
+            print(f"Error: {e}", file=sys.stderr)
+            sys.exit(1)
+
+        # Apply profile values to parser defaults (explicit CLI args will override)
+        for key, value in loaded_profile.speconsense_summarize.items():
+            attr_name = key.replace('-', '_')
+            if attr_name not in explicit_args:
+                parser.set_defaults(**{attr_name: value})
 
     args = parser.parse_args()
+
+    # Store loaded profile for logging later
+    args._loaded_profile = loaded_profile
 
     # Handle backward compatibility for deprecated parameters
     if args._snp_merge_limit_deprecated is not None:
@@ -3099,6 +3143,8 @@ def main():
     setup_logging(args.log_level, temp_log_file.name)
 
     logging.info(f"speconsense-summarize version {__version__}")
+    if args._loaded_profile:
+        logging.info(f"Using profile '{args._loaded_profile.name}': {args._loaded_profile.description}")
     logging.info(f"Command: speconsense-summarize {' '.join(sys.argv[1:])}")
     logging.info("")
     logging.info("Starting enhanced speconsense summarization")

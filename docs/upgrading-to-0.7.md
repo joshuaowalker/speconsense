@@ -80,6 +80,40 @@ New `--enable-early-filter` option applies size filtering before variant phasing
 
 New `--collect-discards` option writes all discarded reads (outliers and filtered clusters) to `cluster_debug/{sample}-discards.fastq` for inspection.
 
+### Profile System (speconsense and speconsense-summarize)
+
+New profile system allows saving and reusing parameter configurations for different workflows.
+
+**Usage:**
+```bash
+# List available profiles
+speconsense --list-profiles
+speconsense-summarize --list-profiles
+
+# Use a profile
+speconsense input.fastq -p herbarium
+speconsense-summarize -p strict
+
+# CLI arguments override profile values
+speconsense input.fastq -p herbarium --min-size 10
+```
+
+**Bundled profiles:**
+- `herbarium` — High-recall settings for degraded DNA and type specimens
+- `specimens` — Balanced settings for fresh tissue (matches defaults)
+- `strict` — High-precision settings for confident results
+
+**Custom profiles:**
+On first use, an `example.yaml` template is created in `~/.config/speconsense/profiles/`. Copy and modify it to create your own profiles:
+
+```bash
+cd ~/.config/speconsense/profiles
+cp example.yaml my-workflow.yaml
+# Edit my-workflow.yaml with your settings
+```
+
+Profiles include version compatibility checking — profiles created for older versions will error with a helpful message when used with newer speconsense versions.
+
 ## Migration Checklist
 
 1. **Review your `--min-cluster-ratio` usage:**

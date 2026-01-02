@@ -1,0 +1,31 @@
+# Example Speconsense Profile
+#
+# Copy this file to create your own profiles:
+#   cp example.yaml my-workflow.yaml
+#
+# Then use it with:
+#   speconsense input.fastq -p my-workflow
+#   speconsense-summarize -p my-workflow
+#
+# Only include parameters you want to change from defaults.
+# CLI arguments always override profile values.
+
+speconsense-version: "0.7.*"
+description: "My custom workflow"
+
+# Parameters for speconsense (clustering and consensus)
+speconsense:
+  # min-cluster-ratio: 0.01    # Minimum cluster size ratio (default: 0.01)
+  # min-size: 5                # Minimum cluster size (default: 5)
+  # min-variant-frequency: 0.10  # Variant detection threshold (default: 0.10)
+  # min-identity: 0.9          # Clustering identity threshold (default: 0.9)
+  # algorithm: graph           # Clustering algorithm: graph or greedy
+  # max-sample-size: 500       # Max reads for consensus (default: 500)
+  # presample: 1000            # Initial read sampling (default: 1000)
+
+# Parameters for speconsense-summarize (post-processing)
+speconsense-summarize:
+  # min-ric: 3                 # Minimum Reads in Consensus (default: 3)
+  # merge-min-size-ratio: 0.1  # Merge size ratio threshold (default: 0.1)
+  # select-max-variants: -1    # Max variants per group (-1 = no limit)
+  # select-strategy: size      # Variant selection: size or diversity

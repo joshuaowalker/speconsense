@@ -26,6 +26,13 @@ except ImportError:
     # Fallback for when running as a script directly (e.g., in tests)
     __version__ = "dev"
 
+from speconsense.profiles import (
+    Profile,
+    ProfileError,
+    apply_profile_to_args,
+    print_profiles_list,
+)
+
 # Import MSA analysis functions and data structures from msa module
 from speconsense.msa import (
     # Data structures
@@ -2297,6 +2304,46 @@ def main():
     parser.add_argument("--version", action="version",
                         version=f"Speconsense {__version__}",
                         help="Show program's version number and exit")
+    parser.add_argument("-p", "--profile", metavar="NAME",
+                        help="Load parameter profile (use --list-profiles to see available)")
+    parser.add_argument("--list-profiles", action="store_true",
+                        help="List available profiles and exit")
+
+    # Handle --list-profiles early (before requiring input_file)
+    if '--list-profiles' in sys.argv:
+        print_profiles_list('speconsense')
+        sys.exit(0)
+
+    # First pass: get profile name if specified
+    # We need to detect which args were explicitly provided to not override them
+    pre_args, _ = parser.parse_known_args()
+
+    # Track which arguments were explicitly provided on CLI
+    explicit_args = set()
+    for arg in sys.argv[1:]:
+        if arg.startswith('--') and '=' in arg:
+            explicit_args.add(arg.split('=')[0][2:].replace('-', '_'))
+        elif arg.startswith('--'):
+            explicit_args.add(arg[2:].replace('-', '_'))
+        elif arg.startswith('-') and len(arg) == 2:
+            # Short option - would need to map to long name
+            # For now, we skip this since profile args use long names
+            pass
+
+    # Load and apply profile if specified
+    loaded_profile = None
+    if pre_args.profile:
+        try:
+            loaded_profile = Profile.load(pre_args.profile)
+        except ProfileError as e:
+            print(f"Error: {e}", file=sys.stderr)
+            sys.exit(1)
+
+        # Apply profile values to parser defaults (explicit CLI args will override)
+        for key, value in loaded_profile.speconsense.items():
+            attr_name = key.replace('-', '_')
+            if attr_name not in explicit_args:
+                parser.set_defaults(**{attr_name: value})
 
     args = parser.parse_args()
 
@@ -2306,6 +2353,10 @@ def main():
         level=getattr(logging, args.log_level),
         format=log_format
     )
+
+    # Log profile usage after logging is configured
+    if loaded_profile:
+        logging.info(f"Using profile '{loaded_profile.name}': {loaded_profile.description}")
 
     # Resolve threads: 0 means auto-detect
     threads = args.threads if args.threads > 0 else os.cpu_count()
