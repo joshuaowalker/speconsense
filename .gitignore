@@ -55,6 +55,9 @@ msalign.py
 
 # Development experiment logs (detailed experimental records)
 dev/
+
+# Local development scripts (not published)
+scripts/
 *_SUMMARY.md
 *_ANALYSIS.md
 *_RESULTS.md
