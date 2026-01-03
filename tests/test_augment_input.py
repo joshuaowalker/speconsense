@@ -69,10 +69,9 @@ class TestAugmentInput:
         return os.path.join(project_root, 'speconsense', 'core.py')
     
     @pytest.fixture
-    def summarize_script_path(self):
-        """Get path to speconsense summarize script."""
-        project_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-        return os.path.join(project_root, 'speconsense', 'summarize.py')
+    def summarize_module(self):
+        """Get module name for speconsense summarize."""
+        return 'speconsense.summarize'
     
     def create_test_files(self, test_data):
         """Create test files in current directory."""
@@ -146,10 +145,10 @@ class TestAugmentInput:
             debug_content = f.read()
             assert 'augmented_1' in debug_content, "Augmented sequence should be in cluster output"
     
-    def test_summarize_integration(self, temp_dir, core_script_path, summarize_script_path, test_data):
+    def test_summarize_integration(self, temp_dir, core_script_path, summarize_module, test_data):
         """Test that summarize step handles augmented sequences correctly."""
         self.create_test_files(test_data)
-        
+
         # Run speconsense
         result = subprocess.run([
             sys.executable, core_script_path,
@@ -161,17 +160,17 @@ class TestAugmentInput:
 
         # Run summarize
         result = subprocess.run([
-            sys.executable, summarize_script_path,
+            sys.executable, '-m', summarize_module,
             '--source', 'clusters', '--log-level', 'INFO'
         ], capture_output=True, text=True)
-        
+
         assert result.returncode == 0, f"Summarize should succeed: {result.stderr}"
         assert os.path.exists('__Summary__/FASTQ Files'), "Summary FASTQ Files directory should be created"
     
-    def test_augmented_sequence_in_summary_output(self, temp_dir, core_script_path, summarize_script_path, test_data):
+    def test_augmented_sequence_in_summary_output(self, temp_dir, core_script_path, summarize_module, test_data):
         """Test that augmented sequences appear in final summary output."""
         self.create_test_files(test_data)
-        
+
         # Run speconsense
         subprocess.run([
             sys.executable, core_script_path,
@@ -181,7 +180,7 @@ class TestAugmentInput:
 
         # Run summarize
         subprocess.run([
-            sys.executable, summarize_script_path,
+            sys.executable, '-m', summarize_module,
             '--source', 'clusters', '--log-level', 'INFO'
         ], capture_output=True, text=True)
 
@@ -193,10 +192,10 @@ class TestAugmentInput:
             summary_content = f.read()
             assert 'augmented_1' in summary_content, "Augmented sequence should be in summary output"
     
-    def test_final_consensus_counts(self, temp_dir, core_script_path, summarize_script_path, test_data):
+    def test_final_consensus_counts(self, temp_dir, core_script_path, summarize_module, test_data):
         """Test that final consensus headers show correct sequence counts."""
         self.create_test_files(test_data)
-        
+
         # Run speconsense
         subprocess.run([
             sys.executable, core_script_path,
@@ -206,7 +205,7 @@ class TestAugmentInput:
 
         # Run summarize
         subprocess.run([
-            sys.executable, summarize_script_path,
+            sys.executable, '-m', summarize_module,
             '--source', 'clusters', '--log-level', 'INFO'
         ], capture_output=True, text=True)
 
