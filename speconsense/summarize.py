@@ -2656,9 +2656,10 @@ def write_consensus_fastq(consensus: ConsensusInfo,
         return
     
     # Find FASTQ files for these clusters using lookup table
+    # Track cluster metadata alongside files: [(cluster_name, ric, [files]), ...]
     fastq_output_path = os.path.join(fastq_dir, f"{consensus.sample_name}-RiC{consensus.ric}.fastq")
-    input_files = []
-    
+    cluster_files = []
+
     for cluster_name in original_clusters:
         # Look for specimen name from cluster name (e.g., "sample-c1" -> "sample")
         if '-c' in cluster_name:
@@ -2678,52 +2679,66 @@ def write_consensus_fastq(consensus: ConsensusInfo,
             matching_files = [f for f in debug_files if cluster_ric_pattern in f]
 
             # Validate that matched files exist and log any issues
+            valid_files = []
             for mf in matching_files:
                 if not os.path.exists(mf):
                     logging.warning(f"Matched file does not exist: {mf}")
                 elif os.path.getsize(mf) == 0:
                     logging.warning(f"Matched file is empty: {mf}")
+                else:
+                    valid_files.append(mf)
 
-            input_files.extend(matching_files)
+            if valid_files:
+                cluster_files.append((cluster_name, original_ric.ric, valid_files))
 
-    if not input_files:
+    if not cluster_files:
         logging.warning(f"No FASTQ files found for {consensus.sample_name} from clusters: {original_clusters}")
         return
-    
-    # Concatenate files directly without parsing
+
+    # Concatenate files with cluster boundary delimiters
+    # Each cluster gets a synthetic FASTQ record as a delimiter before its reads
     files_processed = 0
     try:
-        with open(fastq_output_path, 'wb') as outf:
-            for input_file in input_files:
-                try:
-                    file_size = os.path.getsize(input_file)
-                    if file_size > 0:
-                        with open(input_file, 'rb') as inf:
+        with open(fastq_output_path, 'w') as outf:
+            for idx, (cluster_name, ric, files) in enumerate(cluster_files, 1):
+                # Count reads in this cluster's files
+                cluster_reads = 0
+                for f in files:
+                    with open(f, 'r') as rf:
+                        cluster_reads += sum(1 for _ in rf) // 4
+
+                # Write cluster boundary delimiter
+                outf.write(f"@CLUSTER_BOUNDARY_{idx}:{cluster_name}:RiC={ric}:reads={cluster_reads}\n")
+                outf.write("NNNNNNNNNN\n")
+                outf.write("+\n")
+                outf.write("!!!!!!!!!!\n")
+
+                # Write cluster reads
+                for input_file in files:
+                    try:
+                        with open(input_file, 'r') as inf:
                             shutil.copyfileobj(inf, outf)
                         files_processed += 1
-                    else:
-                        logging.debug(f"Skipping empty file: {input_file}")
-                except Exception as e:
-                    logging.debug(f"Could not concatenate {input_file}: {e}")
+                    except Exception as e:
+                        logging.debug(f"Could not concatenate {input_file}: {e}")
         
         # Check if the output file has content
         output_size = os.path.getsize(fastq_output_path)
+        total_files = sum(len(files) for _, _, files in cluster_files)
         if output_size > 0:
             # Count reads for logging by quickly counting lines and dividing by 4
             with open(fastq_output_path, 'r') as f:
                 line_count = sum(1 for line in f)
             read_count = line_count // 4
-            logging.debug(f"Concatenated {files_processed}/{len(input_files)} files ({output_size:,} bytes) with ~{read_count} reads to {fastq_output_path}")
+            logging.debug(f"Concatenated {files_processed}/{total_files} files from {len(cluster_files)} clusters ({output_size:,} bytes) with ~{read_count} reads to {fastq_output_path}")
         else:
             # Debug: check what files were supposed to be concatenated
             file_info = []
-            for input_file in input_files:
-                if os.path.exists(input_file):
-                    size = os.path.getsize(input_file)
+            for _, _, files in cluster_files:
+                for input_file in files:
+                    size = os.path.getsize(input_file) if os.path.exists(input_file) else 0
                     file_info.append(f"{os.path.basename(input_file)}:{size}B")
-                else:
-                    file_info.append(f"{os.path.basename(input_file)}:missing")
-            
+
             logging.warning(f"No data written for {consensus.sample_name} - input files: {', '.join(file_info)}")
             # Remove empty output file
             try:
