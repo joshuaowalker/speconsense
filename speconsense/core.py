@@ -2244,65 +2244,94 @@ def main():
     parser = argparse.ArgumentParser(
         description="MCL-based clustering of nanopore amplicon reads"
     )
-    parser.add_argument("input_file", help="Input FASTQ file")
-    parser.add_argument("--augment-input", help="Additional FASTQ/FASTA file with sequences recovered after primary demultiplexing (e.g., from specimine)")
-    parser.add_argument("--algorithm", type=str, default="graph", choices=["graph", "greedy"],
-                        help="Clustering algorithm to use (default: graph)")
-    parser.add_argument("--min-identity", type=float, default=0.9,
-                        help="Minimum sequence identity threshold for clustering (default: 0.9)")
-    parser.add_argument("--inflation", type=float, default=4.0,
-                        help="MCL inflation parameter (default: 4.0)")
-    parser.add_argument("--min-size", type=int, default=5,
-                        help="Minimum cluster size (default: 5, 0 to disable)")
-    parser.add_argument("--min-cluster-ratio", type=float, default=0.01,
-                        help="Minimum size ratio between a cluster and the largest cluster (default: 0.01, 0 to disable)")
-    parser.add_argument("--max-sample-size", type=int, default=500,
-                        help="Maximum cluster size for consensus (default: 500)")
-    parser.add_argument("--outlier-identity", type=float, default=None,
-                        help="Minimum read-to-consensus identity to keep a read (default: auto). "
-                             "Reads below this threshold are removed as outliers before final "
-                             "consensus generation. Auto-calculated as (1 + min_identity) / 2. "
-                             "This threshold is typically higher than --min-identity because "
-                             "the consensus is error-corrected through averaging.")
-    parser.add_argument("--disable-position-phasing", action="store_true",
-                        help="Disable position-based variant phasing (enabled by default). "
-                             "MCL graph clustering already separates most variants; this "
-                             "second pass analyzes MSA positions to phase remaining variants.")
-    parser.add_argument("--min-variant-frequency", type=float, default=0.10,
-                        help="Minimum alternative allele frequency to call variant (default: 0.10 for 10%%)")
-    parser.add_argument("--min-variant-count", type=int, default=5,
-                        help="Minimum alternative allele read count to call variant (default: 5)")
-    parser.add_argument("--min-ambiguity-frequency", type=float, default=0.10,
-                        help="Minimum alternative allele frequency for IUPAC ambiguity calling (default: 0.10 for 10%%)")
-    parser.add_argument("--min-ambiguity-count", type=int, default=3,
-                        help="Minimum alternative allele read count for IUPAC ambiguity calling (default: 3)")
-    parser.add_argument("--presample", type=int, default=1000,
-                        help="Presample size for initial reads (default: 1000, 0 to disable)")
-    parser.add_argument("--k-nearest-neighbors", type=int, default=5,
-                        help="Number of nearest neighbors for graph construction (default: 5)")
-    parser.add_argument("--scale-threshold", type=int, default=1001,
-                        help="Sequence count threshold for scalable mode (requires vsearch). "
-                             "Set to 0 to disable. Default: 1001")
-    parser.add_argument("--threads", type=int, default=1, metavar="N",
-                        help="Max threads for internal parallelism (vsearch, SPOA). "
-                             "0=auto-detect, default=1 (safe for parallel workflows).")
-    parser.add_argument("--enable-early-filter", action="store_true",
-                        help="Enable early filtering to skip small clusters before variant phasing (improves performance for large datasets)")
-    parser.add_argument("--collect-discards", action="store_true",
-                        help="Write discarded reads (outliers and filtered clusters) to cluster_debug/{sample}-discards.fastq")
-    parser.add_argument("--primers", help="FASTA file containing primer sequences (default: looks for primers.fasta in input file directory)")
-    parser.add_argument("-O", "--output-dir", default="clusters",
-                        help="Output directory for all files (default: clusters)")
-    parser.add_argument("--disable-homopolymer-equivalence", action="store_true",
-                        help="Disable homopolymer equivalence in cluster merging (only merge identical sequences)")
-    parser.add_argument("--disable-cluster-merging", action="store_true",
-                        help="Disable merging of clusters with identical consensus sequences")
-    parser.add_argument("--disable-ambiguity-calling", action="store_true",
-                        help="Disable IUPAC ambiguity code calling for unphased variant positions")
-    parser.add_argument("--orient-mode", choices=["skip", "keep-all", "filter-failed"], default="skip",
-                        help="Sequence orientation mode: skip (default, no orientation), keep-all (orient but keep failed), or filter-failed (orient and remove failed)")
-    parser.add_argument("--log-level", default="INFO",
-                        choices=["DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL"])
+
+    # Input/Output group
+    io_group = parser.add_argument_group("Input/Output")
+    io_group.add_argument("input_file", help="Input FASTQ file")
+    io_group.add_argument("-O", "--output-dir", default="clusters",
+                          help="Output directory for all files (default: clusters)")
+    io_group.add_argument("--primers", help="FASTA file containing primer sequences (default: looks for primers.fasta in input file directory)")
+    io_group.add_argument("--augment-input", help="Additional FASTQ/FASTA file with sequences recovered after primary demultiplexing (e.g., from specimine)")
+
+    # Clustering group
+    clustering_group = parser.add_argument_group("Clustering")
+    clustering_group.add_argument("--algorithm", type=str, default="graph", choices=["graph", "greedy"],
+                                  help="Clustering algorithm to use (default: graph)")
+    clustering_group.add_argument("--min-identity", type=float, default=0.9,
+                                  help="Minimum sequence identity threshold for clustering (default: 0.9)")
+    clustering_group.add_argument("--inflation", type=float, default=4.0,
+                                  help="MCL inflation parameter (default: 4.0)")
+    clustering_group.add_argument("--k-nearest-neighbors", type=int, default=5,
+                                  help="Number of nearest neighbors for graph construction (default: 5)")
+
+    # Filtering group
+    filtering_group = parser.add_argument_group("Filtering")
+    filtering_group.add_argument("--min-size", type=int, default=5,
+                                 help="Minimum cluster size (default: 5, 0 to disable)")
+    filtering_group.add_argument("--min-cluster-ratio", type=float, default=0.01,
+                                 help="Minimum size ratio between a cluster and the largest cluster (default: 0.01, 0 to disable)")
+    filtering_group.add_argument("--max-sample-size", type=int, default=500,
+                                 help="Maximum cluster size for consensus (default: 500)")
+    filtering_group.add_argument("--outlier-identity", type=float, default=None,
+                                 help="Minimum read-to-consensus identity to keep a read (default: auto). "
+                                      "Reads below this threshold are removed as outliers before final "
+                                      "consensus generation. Auto-calculated as (1 + min_identity) / 2. "
+                                      "This threshold is typically higher than --min-identity because "
+                                      "the consensus is error-corrected through averaging.")
+
+    # Variant Phasing group
+    phasing_group = parser.add_argument_group("Variant Phasing")
+    phasing_group.add_argument("--disable-position-phasing", action="store_true",
+                               help="Disable position-based variant phasing (enabled by default). "
+                                    "MCL graph clustering already separates most variants; this "
+                                    "second pass analyzes MSA positions to phase remaining variants.")
+    phasing_group.add_argument("--min-variant-frequency", type=float, default=0.10,
+                               help="Minimum alternative allele frequency to call variant (default: 0.10 for 10%%)")
+    phasing_group.add_argument("--min-variant-count", type=int, default=5,
+                               help="Minimum alternative allele read count to call variant (default: 5)")
+
+    # Ambiguity Calling group
+    ambiguity_group = parser.add_argument_group("Ambiguity Calling")
+    ambiguity_group.add_argument("--disable-ambiguity-calling", action="store_true",
+                                 help="Disable IUPAC ambiguity code calling for unphased variant positions")
+    ambiguity_group.add_argument("--min-ambiguity-frequency", type=float, default=0.10,
+                                 help="Minimum alternative allele frequency for IUPAC ambiguity calling (default: 0.10 for 10%%)")
+    ambiguity_group.add_argument("--min-ambiguity-count", type=int, default=3,
+                                 help="Minimum alternative allele read count for IUPAC ambiguity calling (default: 3)")
+
+    # Cluster Merging group
+    merging_group = parser.add_argument_group("Cluster Merging")
+    merging_group.add_argument("--disable-cluster-merging", action="store_true",
+                               help="Disable merging of clusters with identical consensus sequences")
+    merging_group.add_argument("--disable-homopolymer-equivalence", action="store_true",
+                               help="Disable homopolymer equivalence in cluster merging (only merge identical sequences)")
+
+    # Orientation group
+    orient_group = parser.add_argument_group("Orientation")
+    orient_group.add_argument("--orient-mode", choices=["skip", "keep-all", "filter-failed"], default="skip",
+                              help="Sequence orientation mode: skip (default, no orientation), keep-all (orient but keep failed), or filter-failed (orient and remove failed)")
+
+    # Performance group
+    perf_group = parser.add_argument_group("Performance")
+    perf_group.add_argument("--presample", type=int, default=1000,
+                            help="Presample size for initial reads (default: 1000, 0 to disable)")
+    perf_group.add_argument("--scale-threshold", type=int, default=1001,
+                            help="Sequence count threshold for scalable mode (requires vsearch). "
+                                 "Set to 0 to disable. Default: 1001")
+    perf_group.add_argument("--threads", type=int, default=1, metavar="N",
+                            help="Max threads for internal parallelism (vsearch, SPOA). "
+                                 "0=auto-detect, default=1 (safe for parallel workflows).")
+    perf_group.add_argument("--enable-early-filter", action="store_true",
+                            help="Enable early filtering to skip small clusters before variant phasing (improves performance for large datasets)")
+
+    # Debugging group
+    debug_group = parser.add_argument_group("Debugging")
+    debug_group.add_argument("--collect-discards", action="store_true",
+                             help="Write discarded reads (outliers and filtered clusters) to cluster_debug/{sample}-discards.fastq")
+    debug_group.add_argument("--log-level", default="INFO",
+                             choices=["DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL"])
+
+    # Version and profile options (default group)
     parser.add_argument("--version", action="version",
                         version=f"Speconsense {__version__}",
                         help="Show program's version number and exit")

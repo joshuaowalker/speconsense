@@ -374,69 +374,84 @@ def format_fasta_header(consensus: ConsensusInfo, fields: List[FastaField]) -> s
 
 def parse_arguments():
     parser = argparse.ArgumentParser(description="Process Speconsense output with advanced variant handling.")
-    parser.add_argument("--min-ric", type=int, default=3,
-                        help="Minimum Reads in Consensus (RiC) threshold (default: 3)")
-    parser.add_argument("--min-len", type=int, default=0,
-                        help="Minimum sequence length in bp (default: 0 = disabled)")
-    parser.add_argument("--max-len", type=int, default=0,
-                        help="Maximum sequence length in bp (default: 0 = disabled)")
-    parser.add_argument("--source", type=str, default="clusters",
-                        help="Source directory containing Speconsense output (default: clusters)")
-    parser.add_argument("--summary-dir", type=str, default="__Summary__",
-                        help="Output directory for summary files (default: __Summary__)")
-    parser.add_argument("--fasta-fields", type=str, default="default",
-                        help="FASTA header fields to output. Can be: "
-                             "(1) a preset name (default, minimal, qc, full, id-only), "
-                             "(2) comma-separated field names (size, ric, length, rawric, "
-                             "snp, rid, rid_min, primers, group, variant), or "
-                             "(3) a combination of presets and fields (e.g., minimal,qc or "
-                             "minimal,rid). Duplicates removed, order preserved "
-                             "left to right. Default: default")
 
-    # Merge phase parameters
-    parser.add_argument("--merge-snp", action="store_true", default=True,
-                        help="Enable SNP-based merging (default: True)")
-    parser.add_argument("--merge-indel-length", type=int, default=0,
-                        help="Maximum length of individual indels allowed in merging (default: 0 = disabled)")
-    parser.add_argument("--merge-position-count", type=int, default=2,
-                        help="Maximum total SNP+indel positions allowed in merging (default: 2)")
-    parser.add_argument("--merge-min-size-ratio", type=float, default=0.1,
-                        help="Minimum size ratio (smaller/larger) for merging clusters (default: 0.1, 0 to disable)")
-    parser.add_argument("--disable-homopolymer-equivalence", action="store_true",
-                        help="Disable homopolymer equivalence in merging (treat AAA vs AAAA as different)")
-    parser.add_argument("--min-merge-overlap", type=int, default=200,
-                        help="Minimum overlap in bp for merging sequences of different lengths (default: 200, 0 to disable)")
+    # Input/Output group
+    io_group = parser.add_argument_group("Input/Output")
+    io_group.add_argument("--source", type=str, default="clusters",
+                          help="Source directory containing Speconsense output (default: clusters)")
+    io_group.add_argument("--summary-dir", type=str, default="__Summary__",
+                          help="Output directory for summary files (default: __Summary__)")
+    io_group.add_argument("--fasta-fields", type=str, default="default",
+                          help="FASTA header fields to output. Can be: "
+                               "(1) a preset name (default, minimal, qc, full, id-only), "
+                               "(2) comma-separated field names (size, ric, length, rawric, "
+                               "snp, rid, rid_min, primers, group, variant), or "
+                               "(3) a combination of presets and fields (e.g., minimal,qc or "
+                               "minimal,rid). Duplicates removed, order preserved "
+                               "left to right. Default: default")
+
+    # Filtering group
+    filtering_group = parser.add_argument_group("Filtering")
+    filtering_group.add_argument("--min-ric", type=int, default=3,
+                                 help="Minimum Reads in Consensus (RiC) threshold (default: 3)")
+    filtering_group.add_argument("--min-len", type=int, default=0,
+                                 help="Minimum sequence length in bp (default: 0 = disabled)")
+    filtering_group.add_argument("--max-len", type=int, default=0,
+                                 help="Maximum sequence length in bp (default: 0 = disabled)")
+
+    # Grouping group
+    grouping_group = parser.add_argument_group("Grouping")
+    grouping_group.add_argument("--group-identity", "--variant-group-identity",
+                                dest="group_identity", type=float, default=0.9,
+                                help="Identity threshold for variant grouping using HAC (default: 0.9)")
+
+    # Merging group
+    merging_group = parser.add_argument_group("Merging")
+    merging_group.add_argument("--merge-snp", action="store_true", default=True,
+                               help="Enable SNP-based merging (default: True)")
+    merging_group.add_argument("--merge-indel-length", type=int, default=0,
+                               help="Maximum length of individual indels allowed in merging (default: 0 = disabled)")
+    merging_group.add_argument("--merge-position-count", type=int, default=2,
+                               help="Maximum total SNP+indel positions allowed in merging (default: 2)")
+    merging_group.add_argument("--merge-min-size-ratio", type=float, default=0.1,
+                               help="Minimum size ratio (smaller/larger) for merging clusters (default: 0.1, 0 to disable)")
+    merging_group.add_argument("--min-merge-overlap", type=int, default=200,
+                               help="Minimum overlap in bp for merging sequences of different lengths (default: 200, 0 to disable)")
+    merging_group.add_argument("--disable-homopolymer-equivalence", action="store_true",
+                               help="Disable homopolymer equivalence in merging (treat AAA vs AAAA as different)")
 
     # Backward compatibility: support old --snp-merge-limit parameter
     parser.add_argument("--snp-merge-limit", type=int, dest="_snp_merge_limit_deprecated",
                         help=argparse.SUPPRESS)  # Hidden but functional
 
-    # Group and selection phase parameters
-    parser.add_argument("--group-identity", "--variant-group-identity",
-                        dest="group_identity", type=float, default=0.9,
-                        help="Identity threshold for variant grouping using HAC (default: 0.9)")
-    parser.add_argument("--select-max-variants", "--max-variants",
-                        dest="select_max_variants", type=int, default=-1,
-                        help="Maximum total variants to output per group (default: -1 = no limit, 0 also means no limit)")
-    parser.add_argument("--select-max-groups", "--max-groups",
-                        dest="select_max_groups", type=int, default=-1,
-                        help="Maximum number of groups to output per specimen (default: -1 = all groups)")
-    parser.add_argument("--select-strategy", "--variant-selection",
-                        dest="select_strategy", choices=["size", "diversity"], default="size",
-                        help="Variant selection strategy: size or diversity (default: size)")
+    # Selection group
+    selection_group = parser.add_argument_group("Selection")
+    selection_group.add_argument("--select-max-groups", "--max-groups",
+                                 dest="select_max_groups", type=int, default=-1,
+                                 help="Maximum number of groups to output per specimen (default: -1 = all groups)")
+    selection_group.add_argument("--select-max-variants", "--max-variants",
+                                 dest="select_max_variants", type=int, default=-1,
+                                 help="Maximum total variants to output per group (default: -1 = no limit, 0 also means no limit)")
+    selection_group.add_argument("--select-strategy", "--variant-selection",
+                                 dest="select_strategy", choices=["size", "diversity"], default="size",
+                                 help="Variant selection strategy: size or diversity (default: size)")
 
+    # Performance group
+    perf_group = parser.add_argument_group("Performance")
+    perf_group.add_argument("--scale-threshold", type=int, default=1001,
+                            help="Sequence count threshold for scalable mode in HAC clustering (requires vsearch). "
+                                 "Set to 0 to disable. Default: 1001")
+    perf_group.add_argument("--threads", type=int, default=0, metavar="N",
+                            help="Max threads for internal parallelism. "
+                                 "0=auto-detect (default), N>0 for explicit count.")
+
+    # Version and profile options (default group)
     parser.add_argument("--log-level", default="INFO",
                         choices=["DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL"],
                         help="Logging level")
     parser.add_argument("--version", action="version",
                         version=f"speconsense-summarize {__version__}",
                         help="Show program's version number and exit")
-    parser.add_argument("--scale-threshold", type=int, default=1001,
-                        help="Sequence count threshold for scalable mode in HAC clustering (requires vsearch). "
-                             "Set to 0 to disable. Default: 1001")
-    parser.add_argument("--threads", type=int, default=0, metavar="N",
-                        help="Max threads for internal parallelism. "
-                             "0=auto-detect (default), N>0 for explicit count.")
     parser.add_argument("-p", "--profile", metavar="NAME",
                         help="Load parameter profile (use --list-profiles to see available)")
     parser.add_argument("--list-profiles", action="store_true",
