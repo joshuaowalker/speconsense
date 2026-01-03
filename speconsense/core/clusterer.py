@@ -1,6 +1,7 @@
 """Main SpecimenClusterer class for clustering and consensus generation."""
 
 from collections import defaultdict
+import json
 import logging
 import os
 import statistics
@@ -126,8 +127,6 @@ class SpecimenClusterer:
 
     def write_metadata(self) -> None:
         """Write run metadata to JSON file for use by post-processing tools."""
-        import json
-
         metadata = {
             "version": __version__,
             "timestamp": datetime.now().isoformat(),
@@ -162,89 +161,113 @@ class SpecimenClusterer:
         if hasattr(self, 'primers') and self.primers:
             metadata["primers_file"] = self.primers_file
             metadata["primers"] = {}
-            for primer_name, primer_seq in self.primers:
-                if not primer_name.endswith("_RC"):
-                    metadata["primers"][primer_name] = primer_seq
 
+            # Store primer sequences (avoid duplicates from RC versions)
+            seen_primers = set()
+            for primer_name, primer_seq in self.primers:
+                # Skip RC versions (they end with _RC)
+                if not primer_name.endswith('_RC') and primer_name not in seen_primers:
+                    metadata["primers"][primer_name] = primer_seq
+                    seen_primers.add(primer_name)
+
+        # Write metadata file
         metadata_file = os.path.join(self.debug_dir, f"{self.sample_name}-metadata.json")
         with open(metadata_file, 'w') as f:
             json.dump(metadata, f, indent=2)
-        logging.debug(f"Wrote metadata to {metadata_file}")
+
+        logging.debug(f"Wrote run metadata to {metadata_file}")
 
     def write_phasing_stats(self, initial_clusters_count: int, after_prephasing_merge_count: int,
-                            subclusters_count: int, merged_count: int, final_count: int,
-                            clusters_with_ambiguities: int = 0, total_ambiguity_positions: int = 0) -> None:
-        """Write phasing statistics to JSON file for analysis."""
-        import json
+                           subclusters_count: int, merged_count: int, final_count: int,
+                           clusters_with_ambiguities: int = 0,
+                           total_ambiguity_positions: int = 0) -> None:
+        """Write phasing statistics to JSON file after clustering completes.
 
-        stats = {
+        Args:
+            initial_clusters_count: Number of clusters from initial clustering
+            after_prephasing_merge_count: Number of clusters after pre-phasing merge
+            subclusters_count: Number of sub-clusters after phasing
+            merged_count: Number of clusters after post-phasing merge
+            final_count: Number of final clusters after filtering
+            clusters_with_ambiguities: Number of clusters with at least one ambiguity code
+            total_ambiguity_positions: Total number of ambiguity positions across all clusters
+        """
+        phasing_stats = {
+            "phasing_enabled": self.enable_secondpass_phasing,
             "initial_clusters": initial_clusters_count,
             "after_prephasing_merge": after_prephasing_merge_count,
-            "after_phasing_subclusters": subclusters_count,
+            "phased_subclusters": subclusters_count,
             "after_postphasing_merge": merged_count,
-            "final_clusters": final_count,
-            "prephasing_merge_delta": initial_clusters_count - after_prephasing_merge_count,
-            "phasing_split_delta": subclusters_count - after_prephasing_merge_count,
-            "postphasing_merge_delta": subclusters_count - merged_count,
-            "filter_delta": merged_count - final_count,
-            "discarded_outlier_count": len(self.discarded_read_ids),
+            "after_filtering": final_count,
+            "prephasing_clusters_merged": after_prephasing_merge_count < initial_clusters_count,
+            "clusters_split": subclusters_count > after_prephasing_merge_count,
+            "postphasing_clusters_merged": merged_count < subclusters_count,
+            "net_change": final_count - initial_clusters_count,
+            "ambiguity_calling_enabled": self.enable_iupac_calling,
+            "clusters_with_ambiguities": clusters_with_ambiguities,
+            "total_ambiguity_positions": total_ambiguity_positions
         }
 
-        # Add IUPAC ambiguity calling statistics if enabled
-        if self.enable_iupac_calling:
-            stats["ambiguity_calling"] = {
-                "clusters_with_ambiguities": clusters_with_ambiguities,
-                "total_ambiguity_positions": total_ambiguity_positions,
-            }
-
-        stats_file = os.path.join(self.output_dir, f"{self.sample_name}-phasing_stats.json")
+        # Write phasing stats to separate JSON file
+        stats_file = os.path.join(self.debug_dir, f"{self.sample_name}-phasing_stats.json")
         with open(stats_file, 'w') as f:
-            json.dump(stats, f, indent=2)
-        logging.debug(f"Wrote phasing stats to {stats_file}")
+            json.dump(phasing_stats, f, indent=2)
+
+        logging.debug(f"Wrote phasing statistics to {stats_file}")
 
     def add_sequences(self, records: List[SeqIO.SeqRecord],
                       augment_records: Optional[List[SeqIO.SeqRecord]] = None) -> None:
-        """Add sequences to the clusterer, with optional presampling.
+        """Add sequences to be clustered, with optional presampling."""
+        all_records = records.copy()  # Start with primary records
 
-        Args:
-            records: List of SeqRecord objects containing primary input sequences
-            augment_records: Optional list of augmented sequences that bypass presampling
-        """
-        import random
-
-        # Apply presampling if enabled and primary records exceed threshold
-        if self.presample_size > 0 and len(records) > self.presample_size:
-            logging.info(f"Presampling {self.presample_size} sequences from {len(records)} reads")
-            # Use deterministic seed based on sample name for reproducibility
-            rng = random.Random(hash(self.sample_name))
-            records = rng.sample(records, self.presample_size)
-
-        # Add primary sequences
-        for record in records:
-            seq_id = str(record.id)
-            self.sequences[seq_id] = str(record.seq)
-            self.records[seq_id] = record
-
+        # Track the source of each record for potential logging/debugging
         primary_count = len(records)
-
-        # Add augmented sequences (always included, bypass presampling)
         augment_count = 0
+
+        # Add augmented records if provided
         if augment_records:
-            for record in augment_records:
-                seq_id = str(record.id)
-                # Skip duplicates (shouldn't happen but handle gracefully)
-                if seq_id in self.sequences:
-                    logging.warning(f"Skipping duplicate sequence ID from augment input: {seq_id}")
-                    continue
-                self.sequences[seq_id] = str(record.seq)
-                self.records[seq_id] = record
-                augment_count += 1
+            augment_count = len(augment_records)
+            all_records.extend(augment_records)
 
-            if augment_count > 0:
-                logging.info(f"Added {augment_count} augmented sequences (bypassed presampling)")
+        if self.presample_size and len(all_records) > self.presample_size:
+            logging.info(f"Presampling {self.presample_size} sequences from {len(all_records)} total "
+                         f"({primary_count} primary, {augment_count} augmented)")
 
-        total = primary_count + augment_count
-        logging.debug(f"Total sequences for clustering: {total} ({primary_count} primary + {augment_count} augmented)")
+            # First, sort primary sequences by quality and take as many as possible
+            primary_sorted = sorted(
+                records,
+                key=lambda r: -statistics.mean(r.letter_annotations["phred_quality"])
+            )
+
+            # Determine how many primary sequences to include (all if possible)
+            primary_to_include = min(len(primary_sorted), self.presample_size)
+            presampled = primary_sorted[:primary_to_include]
+
+            # If we still have room, add augmented sequences sorted by quality
+            remaining_slots = self.presample_size - primary_to_include
+            if remaining_slots > 0 and augment_records:
+                augment_sorted = sorted(
+                    augment_records,
+                    key=lambda r: -statistics.mean(r.letter_annotations["phred_quality"])
+                )
+                presampled.extend(augment_sorted[:remaining_slots])
+
+            logging.info(f"Presampled {len(presampled)} sequences "
+                         f"({primary_to_include} primary, {len(presampled) - primary_to_include} augmented)")
+            all_records = presampled
+
+        # Add all selected records to internal storage
+        for record in all_records:
+            self.sequences[record.id] = str(record.seq)
+            self.records[record.id] = record
+
+        # Log scalability mode status for large datasets
+        if len(self.sequences) >= self.scale_threshold and self.scale_threshold > 0:
+            if self._candidate_finder is not None:
+                logging.info(f"Scalability mode active for {len(self.sequences)} sequences (threshold: {self.scale_threshold})")
+            else:
+                logging.warning(f"Dataset has {len(self.sequences)} sequences (>= threshold {self.scale_threshold}) "
+                               "but vsearch not found. Using brute-force.")
 
     def _get_scalable_operation(self) -> ScalablePairwiseOperation:
         """Get a ScalablePairwiseOperation for pairwise comparisons."""
