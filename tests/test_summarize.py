@@ -266,3 +266,51 @@ def test_merge_bases_to_iupac_expands_existing_codes():
         result = merge_bases_to_iupac(bases)
         assert result == expected, \
             f"merge_bases_to_iupac({bases}) returned '{result}', expected '{expected}'"
+
+
+class TestPrimersAreSame:
+    """Tests for primers_are_same() function used in overlap merge constraint."""
+
+    def test_same_primers_exact_match(self):
+        """Same primers should return True (use global distance)."""
+        from speconsense.summarize import primers_are_same
+        assert primers_are_same(['ITS1', 'ITS4'], ['ITS1', 'ITS4']) is True
+        assert primers_are_same(['fwd', 'rev'], ['fwd', 'rev']) is True
+
+    def test_same_primers_different_order(self):
+        """Same primers in different order should return True."""
+        from speconsense.summarize import primers_are_same
+        assert primers_are_same(['ITS4', 'ITS1'], ['ITS1', 'ITS4']) is True
+        assert primers_are_same(['rev', 'fwd'], ['fwd', 'rev']) is True
+
+    def test_different_primers(self):
+        """Different primers should return False (allow overlap merge)."""
+        from speconsense.summarize import primers_are_same
+        assert primers_are_same(['ITS1', 'ITS4'], ['ITS1', 'ITS2']) is False
+        assert primers_are_same(['fwd_a', 'rev_a'], ['fwd_b', 'rev_b']) is False
+
+    def test_none_primers_conservative(self):
+        """None primers should return True (conservative: unknown = same)."""
+        from speconsense.summarize import primers_are_same
+        assert primers_are_same(None, None) is True
+        assert primers_are_same(None, ['ITS1', 'ITS4']) is True
+        assert primers_are_same(['ITS1', 'ITS4'], None) is True
+
+    def test_empty_list_conservative(self):
+        """Empty list should return True (conservative: unknown = same)."""
+        from speconsense.summarize import primers_are_same
+        assert primers_are_same([], []) is True
+        assert primers_are_same([], ['ITS1', 'ITS4']) is True
+        assert primers_are_same(['ITS1', 'ITS4'], []) is True
+
+    def test_single_primer_overlap(self):
+        """Partial primer overlap should be treated as different."""
+        from speconsense.summarize import primers_are_same
+        # Different sets = different amplicons
+        assert primers_are_same(['ITS1'], ['ITS1', 'ITS4']) is False
+        assert primers_are_same(['ITS1', 'ITS4'], ['ITS4']) is False
+
+    def test_single_primer_same(self):
+        """Single primer that matches should return True."""
+        from speconsense.summarize import primers_are_same
+        assert primers_are_same(['ITS1'], ['ITS1']) is True

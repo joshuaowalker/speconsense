@@ -957,9 +957,11 @@ class SpecimenClusterer:
 
     def _get_scalable_operation(self) -> ScalablePairwiseOperation:
         """Get configured scalable operation for K-NN computation."""
+        # Wrap calculate_similarity to match expected signature (seq1, seq2, id1, id2)
+        # IDs are unused in core.py - only needed for primer-aware scoring in summarize.py
         return ScalablePairwiseOperation(
             candidate_finder=self._candidate_finder,
-            scoring_function=self.calculate_similarity,
+            scoring_function=lambda seq1, seq2, id1, id2: self.calculate_similarity(seq1, seq2),
             config=self.scalability_config
         )
 

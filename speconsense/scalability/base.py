@@ -73,13 +73,13 @@ class ScalablePairwiseOperation:
 
     def __init__(self,
                  candidate_finder: Optional[CandidateFinder],
-                 scoring_function: Callable[[str, str], float],
+                 scoring_function: Callable[[str, str, str, str], float],
                  config: ScalabilityConfig):
         """Initialize scalable pairwise operation.
 
         Args:
             candidate_finder: Backend for fast candidate finding (None = brute force only)
-            scoring_function: Function(seq1, seq2) -> similarity_score (0.0-1.0)
+            scoring_function: Function(seq1, seq2, id1, id2) -> similarity_score (0.0-1.0)
             config: Scalability configuration
         """
         self.candidate_finder = candidate_finder
@@ -151,7 +151,7 @@ class ScalablePairwiseOperation:
                 scored = []
                 for cand_id in seq_candidates:
                     if cand_id != seq_id:
-                        score = self.scoring_function(sequences[seq_id], sequences[cand_id])
+                        score = self.scoring_function(sequences[seq_id], sequences[cand_id], seq_id, cand_id)
                         scored.append((cand_id, score))
 
                 # Sort by score descending
@@ -199,7 +199,7 @@ class ScalablePairwiseOperation:
                 for id2 in seq_ids:
                     if id1 >= id2:  # Only calculate upper triangle (id2 > id1)
                         continue
-                    score = self.scoring_function(sequences[id1], sequences[id2])
+                    score = self.scoring_function(sequences[id1], sequences[id2], id1, id2)
                     similarities[id1][id2] = score
                     similarities.setdefault(id2, {})[id1] = score  # Mirror for lookup
                     pbar.update(1)
@@ -274,7 +274,7 @@ class ScalablePairwiseOperation:
         with tqdm(total=total, desc="Computing pairwise distances") as pbar:
             for i, id1 in enumerate(seq_ids):
                 for id2 in seq_ids[i + 1:]:
-                    score = self.scoring_function(sequences[id1], sequences[id2])
+                    score = self.scoring_function(sequences[id1], sequences[id2], id1, id2)
                     distance = 1.0 - score  # Convert similarity to distance
                     distances[(id1, id2)] = distance
                     distances[(id2, id1)] = distance
@@ -312,7 +312,7 @@ class ScalablePairwiseOperation:
                 for id2 in all_candidates.get(id1, []):
                     pair = (min(id1, id2), max(id1, id2))
                     if pair not in computed_pairs and id1 != id2:
-                        score = self.scoring_function(sequences[id1], sequences[id2])
+                        score = self.scoring_function(sequences[id1], sequences[id2], id1, id2)
                         distance = 1.0 - score
                         distances[(id1, id2)] = distance
                         distances[(id2, id1)] = distance

@@ -81,6 +81,32 @@ STANDARD_ADJUSTMENT_PARAMS = AdjustmentParams(
 MAX_MSA_MERGE_VARIANTS = 10
 
 
+def primers_are_same(p1: Optional[List[str]], p2: Optional[List[str]]) -> bool:
+    """Check if two primer annotations indicate the same amplicon.
+
+    Used to determine whether overlap-aware merging should be allowed.
+    When primers match, sequences should have the same amplicon length,
+    so length differences indicate chimeras rather than primer pool variation.
+
+    Returns True (use global distance, no overlap merging) when:
+    - Either is None or empty (conservative: unknown = assume same)
+    - Both have identical primer sets
+
+    Returns False (allow overlap merging) when primers differ.
+
+    Args:
+        p1: Primer annotation from first sequence (e.g., ['ITS1', 'ITS4'])
+        p2: Primer annotation from second sequence
+
+    Returns:
+        True if primers are same or unknown (use global distance)
+        False if primers differ (allow overlap-aware distance)
+    """
+    if not p1 or not p2:
+        return True  # Conservative: missing info → assume same
+    return set(p1) == set(p2)
+
+
 class ClusterQualityData(NamedTuple):
     """Quality metrics for a cluster (no visualization matrix)."""
     consensus_seq: str
@@ -1635,11 +1661,25 @@ def merge_group_with_msa(variants: List[ConsensusInfo], args) -> Tuple[List[Cons
             else:
                 logging.debug(f"Evaluating {len(candidates)} variants for merging (exhaustive subset search)")
 
+            # Determine if overlap mode should be used for this merge batch
+            # Same primers → use global mode (chimeras have same primers but different lengths)
+            # Different primers → use overlap mode (legitimate primer pool variation)
+            all_same_primers = all(
+                primers_are_same(candidates[0].primers, v.primers)
+                for v in candidates[1:]
+            ) if len(candidates) > 1 else True
+            use_overlap_mode = args.min_merge_overlap > 0 and not all_same_primers
+
+            if args.min_merge_overlap > 0 and all_same_primers and len(candidates) > 1:
+                # Log when primer constraint prevents overlap merging
+                primer_str = ','.join(candidates[0].primers) if candidates[0].primers else 'unknown'
+                logging.debug(f"Same primers [{primer_str}] detected - using global alignment instead of overlap")
+
             # Run SPOA MSA on candidates
             # Use local alignment mode (0) for overlap merging to get clean terminal gaps
             # Use global alignment mode (1) for standard same-length merging
             sequences = [v.sequence for v in candidates]
-            spoa_mode = 0 if args.min_merge_overlap > 0 else 1
+            spoa_mode = 0 if use_overlap_mode else 1
             aligned_seqs = run_spoa_msa(sequences, alignment_mode=spoa_mode)
 
             logging.debug(f"Generated MSA with length {len(aligned_seqs[0].seq)}")
@@ -1656,7 +1696,7 @@ def merge_group_with_msa(variants: List[ConsensusInfo], args) -> Tuple[List[Cons
                 subset_aligned = [aligned_seqs[i] for i in subset_indices]
 
                 # Analyze MSA for this subset
-                if args.min_merge_overlap > 0:
+                if use_overlap_mode:
                     # Use overlap-aware analysis for primer pool scenarios
                     original_lengths = [len(v.sequence) for v in subset_variants]
                     variant_stats = analyze_msa_columns_overlap_aware(
@@ -1694,7 +1734,7 @@ def merge_group_with_msa(variants: List[ConsensusInfo], args) -> Tuple[List[Cons
 
                         variant_desc = ", ".join(parts) if parts else "identical sequences"
                         iter_prefix = f"Iteration {iteration}: " if iteration > 1 else ""
-                        if args.min_merge_overlap > 0:
+                        if use_overlap_mode:
                             # Include prefix/suffix extension info for overlap merges
                             prefix_bp = variant_stats.get('prefix_bp', 0)
                             suffix_bp = variant_stats.get('suffix_bp', 0)
@@ -1723,7 +1763,7 @@ def merge_group_with_msa(variants: List[ConsensusInfo], args) -> Tuple[List[Cons
                     if len(subset_indices) == 1:
                         # Single variant - use directly, preserving raw_ric and other metadata
                         merged_consensus = subset_variants[0]
-                    elif args.min_merge_overlap > 0:
+                    elif use_overlap_mode:
                         # Use overlap-aware consensus generation
                         merged_consensus = create_overlap_consensus_from_msa(
                             subset_aligned, subset_variants
@@ -1755,7 +1795,7 @@ def merge_group_with_msa(variants: List[ConsensusInfo], args) -> Tuple[List[Cons
                     all_traceability.update(traceability)
 
                     # Track overlap merge for quality reporting
-                    if args.min_merge_overlap > 0 and len(subset_indices) > 1:
+                    if use_overlap_mode and len(subset_indices) > 1:
                         # Extract specimen name (remove cluster suffix like -c1)
                         specimen = merged_consensus.sample_name.rsplit('-c', 1)[0] if '-c' in merged_consensus.sample_name else merged_consensus.sample_name
                         overlap_merges.append(OverlapMergeInfo(
@@ -2005,16 +2045,9 @@ def calculate_overlap_aware_distance(seq1: str, seq2: str, min_overlap_bp: int) 
         Distance (0.0 to 1.0) based on overlap region if sufficient,
         otherwise global distance from calculate_adjusted_identity_distance()
 
-    TODO: Add primer pair constraint to prevent chimera grouping. Currently,
-    overlap-aware distance allows sequences with different lengths to be grouped
-    if they share a good prefix/suffix overlap. This is intended for primer pool
-    scenarios (e.g., ITS2 vs full ITS), but it also allows chimeric sequences
-    (normal amplicon + appended extra sequence) to group with normal sequences.
-
-    Proposed fix: Only allow overlap-aware distance when sequences have DIFFERENT
-    primer annotations. Same primers → same amplicon → should use global distance.
-    This requires passing primer info to this function or to perform_hac_clustering.
-    See: https://github.com/user/speconsense/issues/XXX (chimera grouping bug)
+    Note: This function calculates distance purely based on sequence content.
+    Primer-based filtering (to prevent chimera grouping) is applied at the
+    caller level in perform_hac_clustering() using primers_are_same().
     """
     if not seq1 or not seq2:
         return 1.0  # Maximum distance
@@ -2232,13 +2265,23 @@ def perform_hac_clustering(consensus_list: List[ConsensusInfo],
         # Build sequence dict with index keys
         sequences = {str(i): consensus_list[i].sequence for i in range(n)}
 
+        # Build primers lookup by ID for the scoring function
+        primers_lookup = {str(i): consensus_list[i].primers for i in range(n)}
+
         # Create scoring function that returns similarity (1 - distance)
         # Use overlap-aware distance when min_overlap_bp > 0
         if min_overlap_bp > 0:
-            def score_func(seq1: str, seq2: str) -> float:
-                return 1.0 - calculate_overlap_aware_distance(seq1, seq2, min_overlap_bp)
+            def score_func(seq1: str, seq2: str, id1: str, id2: str) -> float:
+                # Check if primers match - same primers require global distance
+                p1, p2 = primers_lookup.get(id1), primers_lookup.get(id2)
+                if primers_are_same(p1, p2):
+                    # Same primers → global distance (no overlap merging)
+                    return 1.0 - calculate_adjusted_identity_distance(seq1, seq2)
+                else:
+                    # Different primers → overlap-aware distance
+                    return 1.0 - calculate_overlap_aware_distance(seq1, seq2, min_overlap_bp)
         else:
-            def score_func(seq1: str, seq2: str) -> float:
+            def score_func(seq1: str, seq2: str, id1: str, id2: str) -> float:
                 return 1.0 - calculate_adjusted_identity_distance(seq1, seq2)
 
         candidate_finder = VsearchCandidateFinder(num_threads=scalability_config.max_threads)
@@ -2266,12 +2309,21 @@ def perform_hac_clustering(consensus_list: List[ConsensusInfo],
         # Standard brute-force calculation
         for i, j in itertools.combinations(range(n), 2):
             if min_overlap_bp > 0:
-                # Use overlap-aware distance for primer pool scenarios
-                dist = calculate_overlap_aware_distance(
-                    consensus_list[i].sequence,
-                    consensus_list[j].sequence,
-                    min_overlap_bp
-                )
+                # Check if primers match - same primers require global distance
+                p1, p2 = consensus_list[i].primers, consensus_list[j].primers
+                if primers_are_same(p1, p2):
+                    # Same primers → global distance (no overlap merging)
+                    dist = calculate_adjusted_identity_distance(
+                        consensus_list[i].sequence,
+                        consensus_list[j].sequence
+                    )
+                else:
+                    # Different primers → overlap-aware distance for primer pool scenarios
+                    dist = calculate_overlap_aware_distance(
+                        consensus_list[i].sequence,
+                        consensus_list[j].sequence,
+                        min_overlap_bp
+                    )
             else:
                 # Use standard global distance
                 dist = calculate_adjusted_identity_distance(
