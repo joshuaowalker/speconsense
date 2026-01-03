@@ -1,21 +1,16 @@
-#!/usr/bin/env python3
+"""Main SpecimenClusterer class for clustering and consensus generation."""
 
 from collections import defaultdict
-import argparse
-import json
 import logging
 import os
-import random
 import statistics
 import subprocess
-import sys
 import tempfile
-from typing import List, Set, Tuple, Optional, Dict, Any, NamedTuple
 from datetime import datetime
+from typing import Dict, List, Optional, Set, Tuple
 
 import edlib
-from adjusted_identity import score_alignment, AdjustmentParams
-import numpy as np
+from adjusted_identity import score_alignment, AdjustmentParams, ScoringFormat
 from Bio import SeqIO
 from Bio.Seq import reverse_complement
 from tqdm import tqdm
@@ -23,706 +18,24 @@ from tqdm import tqdm
 try:
     from speconsense import __version__
 except ImportError:
-    # Fallback for when running as a script directly (e.g., in tests)
     __version__ = "dev"
 
-from speconsense.profiles import (
-    Profile,
-    ProfileError,
-    apply_profile_to_args,
-    print_profiles_list,
-)
-
-# Import MSA analysis functions and data structures from msa module
-from speconsense.msa import (
-    # Data structures
-    ErrorPosition,
-    ReadAlignment,
-    PositionStats,
-    MSAResult,
-    IUPAC_CODES,
-    # Functions
-    parse_score_aligned_for_errors,
-    extract_alignments_from_msa,
-    analyze_positional_variation,
-    is_variant_position_with_composition,
-    call_iupac_ambiguities,
-    group_reads_by_single_position,
-    filter_qualifying_haplotypes,
-    calculate_within_cluster_error,
-)
+from speconsense.msa import ReadAlignment
 from speconsense.scalability import (
     VsearchCandidateFinder,
     ScalablePairwiseOperation,
     ScalabilityConfig,
 )
 
-
-# Module-level worker functions for ProcessPoolExecutor
-# These must be at module level to be picklable
-
-def _run_spoa_worker(args: Tuple[int, Dict[str, str], bool]) -> Tuple[int, Optional[MSAResult]]:
-    """Worker function for parallel SPOA execution.
-
-    Must be at module level for ProcessPoolExecutor pickling.
-
-    Args:
-        args: Tuple of (cluster_idx, sampled_seqs, disable_homopolymer_equivalence)
-
-    Returns:
-        Tuple of (cluster_idx, MSAResult or None)
-    """
-    cluster_idx, sampled_seqs, disable_homopolymer_equivalence = args
-
-    if not sampled_seqs:
-        return cluster_idx, None
-
-    try:
-        with tempfile.NamedTemporaryFile(mode='w', delete=False, suffix='.fasta') as f:
-            for read_id, seq in sorted(sampled_seqs.items()):
-                f.write(f">{read_id}\n{seq}\n")
-            temp_input = f.name
-
-        cmd = [
-            "spoa", temp_input,
-            "-r", "2", "-l", "1", "-m", "5", "-n", "-4", "-g", "-8", "-e", "-6",
-        ]
-        result = subprocess.run(cmd, capture_output=True, text=True, check=True)
-        os.unlink(temp_input)
-
-        enable_normalization = not disable_homopolymer_equivalence
-        alignments, consensus, msa_to_consensus_pos = extract_alignments_from_msa(
-            result.stdout, enable_homopolymer_normalization=enable_normalization
-        )
-
-        if not consensus:
-            return cluster_idx, None
-
-        return cluster_idx, MSAResult(
-            consensus=consensus,
-            msa_string=result.stdout,
-            alignments=alignments,
-            msa_to_consensus_pos=msa_to_consensus_pos
-        )
-    except subprocess.CalledProcessError as e:
-        logging.error(f"SPOA worker failed for cluster {cluster_idx}: return code {e.returncode}")
-        return cluster_idx, None
-    except Exception as e:
-        logging.error(f"SPOA worker failed for cluster {cluster_idx}: {e}")
-        return cluster_idx, None
-
-
-# Configuration for cluster processing workers
-class ClusterProcessingConfig:
-    """Configuration for parallel cluster processing.
-
-    Passed to worker processes to avoid needing to pickle the entire SpecimenClusterer.
-    """
-    __slots__ = ['outlier_identity_threshold', 'enable_secondpass_phasing',
-                 'disable_homopolymer_equivalence', 'min_variant_frequency', 'min_variant_count']
-
-    def __init__(self, outlier_identity_threshold: Optional[float],
-                 enable_secondpass_phasing: bool,
-                 disable_homopolymer_equivalence: bool,
-                 min_variant_frequency: float,
-                 min_variant_count: int):
-        self.outlier_identity_threshold = outlier_identity_threshold
-        self.enable_secondpass_phasing = enable_secondpass_phasing
-        self.disable_homopolymer_equivalence = disable_homopolymer_equivalence
-        self.min_variant_frequency = min_variant_frequency
-        self.min_variant_count = min_variant_count
-
-
-class ConsensusGenerationConfig:
-    """Configuration for parallel final consensus generation.
-
-    Passed to worker processes to avoid needing to pickle the entire SpecimenClusterer.
-    """
-    __slots__ = ['max_sample_size', 'enable_iupac_calling', 'min_ambiguity_frequency',
-                 'min_ambiguity_count', 'disable_homopolymer_equivalence', 'primers']
-
-    def __init__(self, max_sample_size: int,
-                 enable_iupac_calling: bool,
-                 min_ambiguity_frequency: float,
-                 min_ambiguity_count: int,
-                 disable_homopolymer_equivalence: bool,
-                 primers: Optional[List[Tuple[str, str]]] = None):
-        self.max_sample_size = max_sample_size
-        self.enable_iupac_calling = enable_iupac_calling
-        self.min_ambiguity_frequency = min_ambiguity_frequency
-        self.min_ambiguity_count = min_ambiguity_count
-        self.disable_homopolymer_equivalence = disable_homopolymer_equivalence
-        self.primers = primers
-
-
-def _run_spoa_for_cluster_worker(sequences: Dict[str, str],
-                                  disable_homopolymer_equivalence: bool) -> Optional[MSAResult]:
-    """Run SPOA for a set of sequences. Used by cluster processing worker."""
-    if not sequences:
-        return None
-
-    try:
-        with tempfile.NamedTemporaryFile(mode='w', delete=False, suffix='.fasta') as f:
-            for read_id, seq in sorted(sequences.items()):
-                f.write(f">{read_id}\n{seq}\n")
-            temp_input = f.name
-
-        cmd = [
-            "spoa", temp_input,
-            "-r", "2", "-l", "1", "-m", "5", "-n", "-4", "-g", "-8", "-e", "-6",
-        ]
-        result = subprocess.run(cmd, capture_output=True, text=True, check=True)
-        os.unlink(temp_input)
-
-        enable_normalization = not disable_homopolymer_equivalence
-        alignments, consensus, msa_to_consensus_pos = extract_alignments_from_msa(
-            result.stdout, enable_homopolymer_normalization=enable_normalization
-        )
-
-        if not consensus:
-            return None
-
-        return MSAResult(
-            consensus=consensus,
-            msa_string=result.stdout,
-            alignments=alignments,
-            msa_to_consensus_pos=msa_to_consensus_pos
-        )
-    except Exception:
-        return None
-
-
-def _identify_outlier_reads_standalone(alignments: List[ReadAlignment], consensus_seq: str,
-                                        sampled_ids: Set[str], threshold: float) -> Tuple[Set[str], Set[str]]:
-    """Identify outlier reads below identity threshold. Standalone version for workers."""
-    if not alignments or not consensus_seq:
-        return sampled_ids, set()
-
-    try:
-        keep_ids = set()
-        outlier_ids = set()
-        consensus_length = len(consensus_seq)
-        if consensus_length == 0:
-            return sampled_ids, set()
-
-        for alignment in alignments:
-            error_rate = alignment.normalized_edit_distance / consensus_length
-            identity = 1.0 - error_rate
-            if identity >= threshold:
-                keep_ids.add(alignment.read_id)
-            else:
-                outlier_ids.add(alignment.read_id)
-
-        return keep_ids, outlier_ids
-    except Exception:
-        return sampled_ids, set()
-
-
-def _calculate_read_identity_standalone(alignments: List[ReadAlignment],
-                                         consensus_seq: str) -> Tuple[Optional[float], Optional[float]]:
-    """Calculate read identity metrics. Standalone version for workers."""
-    if not alignments or not consensus_seq:
-        return None, None
-
-    try:
-        consensus_length = len(consensus_seq)
-        if consensus_length == 0:
-            return None, None
-
-        identities = []
-        for alignment in alignments:
-            error_rate = alignment.normalized_edit_distance / consensus_length
-            identity = 1.0 - error_rate
-            identities.append(identity)
-
-        if not identities:
-            return None, None
-
-        return np.mean(identities), np.min(identities)
-    except Exception:
-        return None, None
-
-
-def _detect_variant_positions_standalone(alignments: List[ReadAlignment], consensus_seq: str,
-                                          msa_to_consensus_pos: Dict[int, Optional[int]],
-                                          min_variant_frequency: float,
-                                          min_variant_count: int) -> List[Dict]:
-    """Detect variant positions in MSA. Standalone version for workers."""
-    if not alignments or not consensus_seq:
-        return []
-
-    try:
-        msa_length = len(alignments[0].aligned_sequence)
-        consensus_aligned = []
-        for msa_pos in range(msa_length):
-            cons_pos = msa_to_consensus_pos.get(msa_pos)
-            if cons_pos is not None:
-                consensus_aligned.append(consensus_seq[cons_pos])
-            else:
-                consensus_aligned.append('-')
-        consensus_aligned = ''.join(consensus_aligned)
-
-        position_stats = analyze_positional_variation(alignments, consensus_aligned, msa_to_consensus_pos)
-
-        variant_positions = []
-        for pos_stat in position_stats:
-            is_variant, variant_bases, reason = is_variant_position_with_composition(
-                pos_stat,
-                min_variant_frequency=min_variant_frequency,
-                min_variant_count=min_variant_count
-            )
-            if is_variant:
-                variant_positions.append({
-                    'msa_position': pos_stat.msa_position,
-                    'consensus_position': pos_stat.consensus_position,
-                    'coverage': pos_stat.coverage,
-                    'variant_bases': variant_bases,
-                    'base_composition': pos_stat.base_composition,
-                    'homopolymer_composition': pos_stat.homopolymer_composition,
-                    'error_rate': pos_stat.error_rate,
-                    'reason': reason
-                })
-
-        return variant_positions
-    except Exception:
-        return []
-
-
-def _recursive_phase_cluster_standalone(
-    read_ids: Set[str],
-    read_sequences: Dict[str, str],
-    path: List[str],
-    depth: int,
-    config: ClusterProcessingConfig
-) -> Tuple[List[Tuple[List[str], str, Set[str]]], Set[str]]:
-    """Recursively phase a cluster. Standalone version for workers."""
-    total_reads = len(read_ids)
-
-    # Base case: cluster too small
-    if total_reads < config.min_variant_count * 2:
-        leaf_seqs = {rid: read_sequences[rid] for rid in read_ids}
-        result = _run_spoa_for_cluster_worker(leaf_seqs, config.disable_homopolymer_equivalence)
-        consensus = result.consensus if result else ""
-        return [(path, consensus, read_ids)], set()
-
-    # Generate MSA
-    cluster_seqs = {rid: read_sequences[rid] for rid in read_ids}
-    result = _run_spoa_for_cluster_worker(cluster_seqs, config.disable_homopolymer_equivalence)
-
-    if result is None:
-        return [(path, "", read_ids)], set()
-
-    consensus = result.consensus
-    alignments = result.alignments
-    msa_to_consensus_pos = result.msa_to_consensus_pos
-
-    # Detect variants
-    variant_positions = _detect_variant_positions_standalone(
-        alignments, consensus, msa_to_consensus_pos,
-        config.min_variant_frequency, config.min_variant_count
-    )
-
-    if not variant_positions:
-        return [(path, consensus, read_ids)], set()
-
-    # Parse MSA for consensus_aligned
-    from io import StringIO
-    msa_handle = StringIO(result.msa_string)
-    records = list(SeqIO.parse(msa_handle, 'fasta'))
-
-    consensus_aligned = None
-    for record in records:
-        if 'Consensus' in record.description or 'Consensus' in record.id:
-            consensus_aligned = str(record.seq).upper()
-            break
-
-    if not consensus_aligned:
-        return [(path, consensus, read_ids)], set()
-
-    # Build read to alignment mapping
-    read_to_alignment = {a.read_id: a for a in alignments}
-
-    # Extract alleles at variant positions
-    variant_msa_positions = sorted([v['msa_position'] for v in variant_positions])
-    read_to_position_alleles = {}
-
-    for read_id in read_ids:
-        alignment = read_to_alignment.get(read_id)
-        if not alignment:
-            continue
-
-        aligned_seq = alignment.aligned_sequence
-        score_aligned = alignment.score_aligned
-
-        position_alleles = {}
-        for msa_pos in variant_msa_positions:
-            if msa_pos < len(aligned_seq):
-                allele = aligned_seq[msa_pos]
-                if score_aligned and msa_pos < len(score_aligned):
-                    if score_aligned[msa_pos] == '=':
-                        allele = consensus_aligned[msa_pos]
-                position_alleles[msa_pos] = allele
-            else:
-                position_alleles[msa_pos] = '-'
-
-        read_to_position_alleles[read_id] = position_alleles
-
-    # Find best split
-    best_pos = None
-    best_error = float('inf')
-    best_qualifying = None
-    best_non_qualifying = None
-    all_positions = set(variant_msa_positions)
-
-    for pos in variant_msa_positions:
-        allele_groups = group_reads_by_single_position(
-            read_to_position_alleles, pos, set(read_to_position_alleles.keys())
-        )
-        qualifying, non_qualifying = filter_qualifying_haplotypes(
-            allele_groups, total_reads, config.min_variant_count, config.min_variant_frequency
-        )
-        if len(qualifying) < 2:
-            continue
-
-        error = calculate_within_cluster_error(qualifying, read_to_position_alleles, {pos}, all_positions)
-        if error < best_error:
-            best_error = error
-            best_pos = pos
-            best_qualifying = qualifying
-            best_non_qualifying = non_qualifying
-
-    if best_pos is None:
-        return [(path, consensus, read_ids)], set()
-
-    # Collect deferred reads
-    all_deferred = set()
-    for allele, reads in best_non_qualifying.items():
-        all_deferred.update(reads)
-
-    # Recurse
-    all_leaves = []
-    for allele, sub_read_ids in sorted(best_qualifying.items()):
-        new_path = path + [allele]
-        sub_leaves, sub_deferred = _recursive_phase_cluster_standalone(
-            sub_read_ids, read_sequences, new_path, depth + 1, config
-        )
-        all_leaves.extend(sub_leaves)
-        all_deferred.update(sub_deferred)
-
-    return all_leaves, all_deferred
-
-
-def _phase_reads_by_variants_standalone(
-    cluster_read_ids: Set[str],
-    sequences: Dict[str, str],
-    variant_positions: List[Dict],
-    config: ClusterProcessingConfig
-) -> List[Tuple[str, Set[str]]]:
-    """Phase reads into haplotypes. Standalone version for workers."""
-    if not variant_positions:
-        return [(None, cluster_read_ids)]
-
-    try:
-        read_sequences = {rid: sequences[rid] for rid in cluster_read_ids if rid in sequences}
-        if not read_sequences:
-            return [(None, cluster_read_ids)]
-
-        logging.debug(f"Recursive phasing with MSA regeneration: {len(variant_positions)} initial variants, {len(read_sequences)} reads")
-
-        leaves, deferred = _recursive_phase_cluster_standalone(
-            set(read_sequences.keys()), read_sequences, [], 0, config
-        )
-
-        if len(leaves) <= 1 and not deferred:
-            if leaves:
-                path, consensus, reads = leaves[0]
-                if not path:
-                    return [(None, cluster_read_ids)]
-            return [(None, cluster_read_ids)]
-
-        if len(leaves) == 1:
-            return [(None, cluster_read_ids)]
-
-        logging.debug(f"Recursive phasing: {len(leaves)} leaf haplotypes, {len(deferred)} deferred reads")
-
-        # Reassign deferred reads
-        if deferred:
-            leaf_reads_updated = {tuple(path): set(reads) for path, consensus, reads in leaves}
-            leaf_consensuses = {tuple(path): consensus for path, consensus, reads in leaves}
-
-            for read_id in deferred:
-                if read_id not in read_sequences:
-                    continue
-
-                read_seq = read_sequences[read_id]
-                min_distance = float('inf')
-                nearest_path = None
-
-                for path_tuple, consensus in leaf_consensuses.items():
-                    if not consensus:
-                        continue
-                    result = edlib.align(read_seq, consensus)
-                    distance = result['editDistance']
-                    if distance < min_distance:
-                        min_distance = distance
-                        nearest_path = path_tuple
-
-                if nearest_path is not None:
-                    leaf_reads_updated[nearest_path].add(read_id)
-
-            # Log and decide on phasing
-            total_phased = sum(len(reads) for reads in leaf_reads_updated.values())
-            if total_phased < 2:
-                return [(None, cluster_read_ids)]
-
-            logging.debug(f"Phasing decision: SPLITTING cluster into {len(leaf_reads_updated)} haplotypes")
-
-            return [('-'.join(path), reads) for path, reads in sorted(leaf_reads_updated.items(), key=lambda x: -len(x[1]))]
-        else:
-            logging.debug(f"Phasing decision: SPLITTING cluster into {len(leaves)} haplotypes")
-            return [('-'.join(path), reads) for path, consensus, reads in sorted(leaves, key=lambda x: -len(x[2]))]
-
-    except Exception as e:
-        logging.warning(f"Failed to phase reads: {e}")
-        return [(None, cluster_read_ids)]
-
-
-def _process_cluster_worker(args) -> Tuple[List[Dict], Set[str]]:
-    """Worker function for parallel cluster processing.
-
-    Must be at module level for ProcessPoolExecutor pickling.
-
-    Args:
-        args: Tuple of (initial_idx, cluster_ids, sequences, qualities, config)
-
-    Returns:
-        Tuple of (subclusters, discarded_read_ids)
-    """
-    initial_idx, cluster_ids, sequences, qualities, config = args
-
-    subclusters = []
-    discarded_ids = set()
-
-    # Sort by quality
-    sorted_ids = sorted(cluster_ids, key=lambda x: (-qualities.get(x, 0), x))
-
-    # Generate consensus and MSA
-    cluster_seqs = {seq_id: sequences[seq_id] for seq_id in sorted_ids}
-    result = _run_spoa_for_cluster_worker(cluster_seqs, config.disable_homopolymer_equivalence)
-
-    if result is None:
-        logging.warning(f"Initial cluster {initial_idx}: Failed to generate consensus, skipping")
-        return subclusters, discarded_ids
-
-    consensus = result.consensus
-    msa = result.msa_string
-    alignments = result.alignments
-    msa_to_consensus_pos = result.msa_to_consensus_pos
-
-    _calculate_read_identity_standalone(alignments, consensus)
-
-    cluster = set(cluster_ids)
-
-    # Outlier removal
-    if config.outlier_identity_threshold is not None:
-        keep_ids, outlier_ids = _identify_outlier_reads_standalone(
-            alignments, consensus, cluster, config.outlier_identity_threshold
-        )
-
-        if outlier_ids:
-            if len(cluster) == 2 and len(outlier_ids) == 1:
-                logging.debug(f"Initial cluster {initial_idx}: Split 2-read cluster due to 1 outlier")
-                for read_id in cluster:
-                    subclusters.append({
-                        'read_ids': {read_id},
-                        'initial_cluster_num': initial_idx,
-                        'allele_combo': 'single-read-split'
-                    })
-                return subclusters, discarded_ids
-
-            logging.debug(f"Initial cluster {initial_idx}: Removing {len(outlier_ids)}/{len(cluster)} outlier reads, "
-                         f"regenerating consensus")
-
-            discarded_ids.update(outlier_ids)
-            cluster = cluster - outlier_ids
-
-            # Regenerate consensus
-            sorted_ids_filtered = sorted(cluster, key=lambda x: (-qualities.get(x, 0), x))
-            cluster_seqs = {seq_id: sequences[seq_id] for seq_id in sorted_ids_filtered}
-            result = _run_spoa_for_cluster_worker(cluster_seqs, config.disable_homopolymer_equivalence)
-
-            if result is not None:
-                consensus = result.consensus
-                msa = result.msa_string
-                alignments = result.alignments
-                msa_to_consensus_pos = result.msa_to_consensus_pos
-                _calculate_read_identity_standalone(alignments, consensus)
-
-    # Detect variants
-    variant_positions = []
-    if consensus and alignments and config.enable_secondpass_phasing:
-        variant_positions = _detect_variant_positions_standalone(
-            alignments, consensus, msa_to_consensus_pos,
-            config.min_variant_frequency, config.min_variant_count
-        )
-
-        if variant_positions:
-            logging.debug(f"Initial cluster {initial_idx}: Detected {len(variant_positions)} variant positions")
-
-    # Phase reads
-    phased_haplotypes = _phase_reads_by_variants_standalone(
-        cluster, sequences, variant_positions, config
-    )
-
-    for haplotype_idx, (allele_combo, haplotype_reads) in enumerate(phased_haplotypes):
-        subclusters.append({
-            'read_ids': haplotype_reads,
-            'initial_cluster_num': initial_idx,
-            'allele_combo': allele_combo
-        })
-
-    return subclusters, discarded_ids
-
-
-def _trim_primers_standalone(sequence: str, primers: Optional[List[Tuple[str, str]]]) -> Tuple[str, List[str]]:
-    """Trim primers from start and end of sequence. Standalone version for workers."""
-    if not primers:
-        return sequence, []
-
-    found_primers = []
-    trimmed_seq = sequence
-
-    # Look for primer at 5' end
-    best_start_dist = float('inf')
-    best_start_primer = None
-    best_start_end = None
-
-    for primer_name, primer_seq in primers:
-        k = len(primer_seq) // 4  # Allow ~25% errors
-        search_region = sequence[:len(primer_seq) * 2]
-
-        result = edlib.align(primer_seq, search_region, task="path", mode="HW", k=k)
-
-        if result["editDistance"] != -1:
-            dist = result["editDistance"]
-            if dist < best_start_dist:
-                best_start_dist = dist
-                best_start_primer = primer_name
-                best_start_end = result["locations"][0][1] + 1
-
-    if best_start_primer:
-        found_primers.append(f"5'-{best_start_primer}")
-        trimmed_seq = trimmed_seq[best_start_end:]
-
-    # Look for primer at 3' end
-    best_end_dist = float('inf')
-    best_end_primer = None
-    best_end_start = None
-
-    for primer_name, primer_seq in primers:
-        k = len(primer_seq) // 4  # Allow ~25% errors
-        search_region = sequence[-len(primer_seq) * 2:]
-
-        result = edlib.align(primer_seq, search_region, task="path", mode="HW", k=k)
-
-        if result["editDistance"] != -1:
-            dist = result["editDistance"]
-            if dist < best_end_dist:
-                best_end_dist = dist
-                best_end_primer = primer_name
-                base_pos = len(trimmed_seq) - len(search_region)
-                best_end_start = base_pos + result["locations"][0][0]
-
-    if best_end_primer:
-        found_primers.append(f"3'-{best_end_primer}")
-        trimmed_seq = trimmed_seq[:best_end_start]
-
-    return trimmed_seq, found_primers
-
-
-def _generate_cluster_consensus_worker(args) -> Dict:
-    """Worker function for parallel final consensus generation.
-
-    Must be at module level for ProcessPoolExecutor pickling.
-
-    Args:
-        args: Tuple of (final_idx, cluster_read_ids, sequences, qualities, config)
-              - final_idx: 1-based cluster index
-              - cluster_read_ids: Set of read IDs in this cluster
-              - sequences: Dict mapping read_id -> sequence
-              - qualities: Dict mapping read_id -> mean quality score
-              - config: ConsensusGenerationConfig
-
-    Returns:
-        Dict with all computed results for this cluster
-    """
-    final_idx, cluster_read_ids, sequences, qualities, config = args
-
-    cluster = cluster_read_ids
-    actual_size = len(cluster)
-
-    # Sort all cluster reads by quality for consistent output ordering
-    sorted_cluster_ids = sorted(
-        cluster,
-        key=lambda x: (-qualities.get(x, 0), x)
-    )
-
-    # Sample sequences for final consensus generation if needed
-    if len(cluster) > config.max_sample_size:
-        sorted_sampled_ids = sorted_cluster_ids[:config.max_sample_size]
-        sampled_ids = set(sorted_sampled_ids)
-    else:
-        sorted_sampled_ids = sorted_cluster_ids
-        sampled_ids = cluster
-
-    # Generate final consensus and MSA
-    sampled_seqs = {seq_id: sequences[seq_id] for seq_id in sorted_sampled_ids}
-    result = _run_spoa_for_cluster_worker(sampled_seqs, config.disable_homopolymer_equivalence)
-
-    # Calculate final identity metrics
-    rid, rid_min = None, None
-    consensus = None
-    msa = None
-    iupac_count = 0
-    trimmed_consensus = None
-    found_primers = None
-
-    if result is not None:
-        consensus = result.consensus
-        msa = result.msa_string
-        alignments = result.alignments
-        rid, rid_min = _calculate_read_identity_standalone(alignments, consensus)
-
-        if consensus:
-            # Apply IUPAC ambiguity calling for unphased variant positions
-            if config.enable_iupac_calling:
-                consensus, iupac_count, iupac_details = call_iupac_ambiguities(
-                    consensus=consensus,
-                    alignments=result.alignments,
-                    msa_to_consensus_pos=result.msa_to_consensus_pos,
-                    min_variant_frequency=config.min_ambiguity_frequency,
-                    min_variant_count=config.min_ambiguity_count
-                )
-
-            # Perform primer trimming
-            if config.primers:
-                trimmed_consensus, found_primers = _trim_primers_standalone(consensus, config.primers)
-
-    return {
-        'final_idx': final_idx,
-        'cluster': cluster,
-        'actual_size': actual_size,
-        'consensus': consensus,
-        'trimmed_consensus': trimmed_consensus,
-        'found_primers': found_primers,
-        'rid': rid,
-        'rid_min': rid_min,
-        'msa': msa,
-        'sampled_ids': sampled_ids,
-        'sorted_cluster_ids': sorted_cluster_ids,
-        'sorted_sampled_ids': sorted_sampled_ids,
-        'iupac_count': iupac_count
-    }
+from .workers import (
+    ClusterProcessingConfig,
+    ConsensusGenerationConfig,
+    _run_spoa_worker,
+    _process_cluster_worker,
+    _generate_cluster_consensus_worker,
+    _trim_primers_standalone,
+    _phase_reads_by_variants_standalone,
+)
 
 
 class SpecimenClusterer:
@@ -813,6 +126,8 @@ class SpecimenClusterer:
 
     def write_metadata(self) -> None:
         """Write run metadata to JSON file for use by post-processing tools."""
+        import json
+
         metadata = {
             "version": __version__,
             "timestamp": datetime.now().isoformat(),
@@ -847,116 +162,92 @@ class SpecimenClusterer:
         if hasattr(self, 'primers') and self.primers:
             metadata["primers_file"] = self.primers_file
             metadata["primers"] = {}
-
-            # Store primer sequences (avoid duplicates from RC versions)
-            seen_primers = set()
             for primer_name, primer_seq in self.primers:
-                # Skip RC versions (they end with _RC)
-                if not primer_name.endswith('_RC') and primer_name not in seen_primers:
+                if not primer_name.endswith("_RC"):
                     metadata["primers"][primer_name] = primer_seq
-                    seen_primers.add(primer_name)
 
-        # Write metadata file
         metadata_file = os.path.join(self.debug_dir, f"{self.sample_name}-metadata.json")
         with open(metadata_file, 'w') as f:
             json.dump(metadata, f, indent=2)
-
-        logging.debug(f"Wrote run metadata to {metadata_file}")
+        logging.debug(f"Wrote metadata to {metadata_file}")
 
     def write_phasing_stats(self, initial_clusters_count: int, after_prephasing_merge_count: int,
-                           subclusters_count: int, merged_count: int, final_count: int,
-                           clusters_with_ambiguities: int = 0,
-                           total_ambiguity_positions: int = 0) -> None:
-        """Write phasing statistics to JSON file after clustering completes.
+                            subclusters_count: int, merged_count: int, final_count: int,
+                            clusters_with_ambiguities: int = 0, total_ambiguity_positions: int = 0) -> None:
+        """Write phasing statistics to JSON file for analysis."""
+        import json
 
-        Args:
-            initial_clusters_count: Number of clusters from initial clustering
-            after_prephasing_merge_count: Number of clusters after pre-phasing merge
-            subclusters_count: Number of sub-clusters after phasing
-            merged_count: Number of clusters after post-phasing merge
-            final_count: Number of final clusters after filtering
-            clusters_with_ambiguities: Number of clusters with at least one ambiguity code
-            total_ambiguity_positions: Total number of ambiguity positions across all clusters
-        """
-        phasing_stats = {
-            "phasing_enabled": self.enable_secondpass_phasing,
+        stats = {
             "initial_clusters": initial_clusters_count,
             "after_prephasing_merge": after_prephasing_merge_count,
-            "phased_subclusters": subclusters_count,
+            "after_phasing_subclusters": subclusters_count,
             "after_postphasing_merge": merged_count,
-            "after_filtering": final_count,
-            "prephasing_clusters_merged": after_prephasing_merge_count < initial_clusters_count,
-            "clusters_split": subclusters_count > after_prephasing_merge_count,
-            "postphasing_clusters_merged": merged_count < subclusters_count,
-            "net_change": final_count - initial_clusters_count,
-            "ambiguity_calling_enabled": self.enable_iupac_calling,
-            "clusters_with_ambiguities": clusters_with_ambiguities,
-            "total_ambiguity_positions": total_ambiguity_positions
+            "final_clusters": final_count,
+            "prephasing_merge_delta": initial_clusters_count - after_prephasing_merge_count,
+            "phasing_split_delta": subclusters_count - after_prephasing_merge_count,
+            "postphasing_merge_delta": subclusters_count - merged_count,
+            "filter_delta": merged_count - final_count,
+            "discarded_outlier_count": len(self.discarded_read_ids),
         }
 
-        # Write phasing stats to separate JSON file
-        stats_file = os.path.join(self.debug_dir, f"{self.sample_name}-phasing_stats.json")
-        with open(stats_file, 'w') as f:
-            json.dump(phasing_stats, f, indent=2)
+        # Add IUPAC ambiguity calling statistics if enabled
+        if self.enable_iupac_calling:
+            stats["ambiguity_calling"] = {
+                "clusters_with_ambiguities": clusters_with_ambiguities,
+                "total_ambiguity_positions": total_ambiguity_positions,
+            }
 
-        logging.debug(f"Wrote phasing statistics to {stats_file}")
+        stats_file = os.path.join(self.output_dir, f"{self.sample_name}-phasing_stats.json")
+        with open(stats_file, 'w') as f:
+            json.dump(stats, f, indent=2)
+        logging.debug(f"Wrote phasing stats to {stats_file}")
 
     def add_sequences(self, records: List[SeqIO.SeqRecord],
                       augment_records: Optional[List[SeqIO.SeqRecord]] = None) -> None:
-        """Add sequences to be clustered, with optional presampling."""
-        all_records = records.copy()  # Start with primary records
+        """Add sequences to the clusterer, with optional presampling.
 
-        # Track the source of each record for potential logging/debugging
+        Args:
+            records: List of SeqRecord objects containing primary input sequences
+            augment_records: Optional list of augmented sequences that bypass presampling
+        """
+        import random
+
+        # Apply presampling if enabled and primary records exceed threshold
+        if self.presample_size > 0 and len(records) > self.presample_size:
+            logging.info(f"Presampling {self.presample_size} sequences from {len(records)} reads")
+            # Use deterministic seed based on sample name for reproducibility
+            rng = random.Random(hash(self.sample_name))
+            records = rng.sample(records, self.presample_size)
+
+        # Add primary sequences
+        for record in records:
+            seq_id = str(record.id)
+            self.sequences[seq_id] = str(record.seq)
+            self.records[seq_id] = record
+
         primary_count = len(records)
+
+        # Add augmented sequences (always included, bypass presampling)
         augment_count = 0
-
-        # Add augmented records if provided
         if augment_records:
-            augment_count = len(augment_records)
-            all_records.extend(augment_records)
+            for record in augment_records:
+                seq_id = str(record.id)
+                # Skip duplicates (shouldn't happen but handle gracefully)
+                if seq_id in self.sequences:
+                    logging.warning(f"Skipping duplicate sequence ID from augment input: {seq_id}")
+                    continue
+                self.sequences[seq_id] = str(record.seq)
+                self.records[seq_id] = record
+                augment_count += 1
 
-        if self.presample_size and len(all_records) > self.presample_size:
-            logging.info(f"Presampling {self.presample_size} sequences from {len(all_records)} total "
-                         f"({primary_count} primary, {augment_count} augmented)")
+            if augment_count > 0:
+                logging.info(f"Added {augment_count} augmented sequences (bypassed presampling)")
 
-            # First, sort primary sequences by quality and take as many as possible
-            primary_sorted = sorted(
-                records,
-                key=lambda r: -statistics.mean(r.letter_annotations["phred_quality"])
-            )
-
-            # Determine how many primary sequences to include (all if possible)
-            primary_to_include = min(len(primary_sorted), self.presample_size)
-            presampled = primary_sorted[:primary_to_include]
-
-            # If we still have room, add augmented sequences sorted by quality
-            remaining_slots = self.presample_size - primary_to_include
-            if remaining_slots > 0 and augment_records:
-                augment_sorted = sorted(
-                    augment_records,
-                    key=lambda r: -statistics.mean(r.letter_annotations["phred_quality"])
-                )
-                presampled.extend(augment_sorted[:remaining_slots])
-
-            logging.info(f"Presampled {len(presampled)} sequences "
-                         f"({primary_to_include} primary, {len(presampled) - primary_to_include} augmented)")
-            all_records = presampled
-
-        # Add all selected records to internal storage
-        for record in all_records:
-            self.sequences[record.id] = str(record.seq)
-            self.records[record.id] = record
-
-        # Log scalability mode status for large datasets
-        if len(self.sequences) >= self.scale_threshold and self.scale_threshold > 0:
-            if self._candidate_finder is not None:
-                logging.info(f"Scalability mode active for {len(self.sequences)} sequences (threshold: {self.scale_threshold})")
-            else:
-                logging.warning(f"Dataset has {len(self.sequences)} sequences (>= threshold {self.scale_threshold}) "
-                               "but vsearch not found. Using brute-force.")
+        total = primary_count + augment_count
+        logging.debug(f"Total sequences for clustering: {total} ({primary_count} primary + {augment_count} augmented)")
 
     def _get_scalable_operation(self) -> ScalablePairwiseOperation:
-        """Get configured scalable operation for K-NN computation."""
+        """Get a ScalablePairwiseOperation for pairwise comparisons."""
         # Wrap calculate_similarity to match expected signature (seq1, seq2, id1, id2)
         # IDs are unused in core.py - only needed for primer-aware scoring in summarize.py
         return ScalablePairwiseOperation(
@@ -1459,11 +750,11 @@ class SpecimenClusterer:
 
     def _run_initial_clustering(self, temp_dir: str, algorithm: str) -> List[Set[str]]:
         """Phase 1: Run initial clustering algorithm.
-        
+
         Args:
             temp_dir: Temporary directory for intermediate files
             algorithm: 'graph' for MCL or 'greedy' for greedy clustering
-            
+
         Returns:
             List of clusters (sets of read IDs), sorted by size (largest first)
         """
@@ -1487,19 +778,19 @@ class SpecimenClusterer:
 
     def _run_prephasing_merge(self, initial_clusters: List[Set[str]]) -> List[Set[str]]:
         """Phase 2: Merge initial clusters with HP-equivalent consensus.
-        
+
         Maximizes read depth for variant detection in the phasing phase.
-        
+
         Args:
             initial_clusters: List of initial clusters from Phase 1
-            
+
         Returns:
             List of merged clusters (sets of read IDs)
         """
         if self.disable_cluster_merging:
             logging.info("Cluster merging disabled, skipping pre-phasing merge")
             return initial_clusters
-        
+
         # Convert initial clusters to dict format for merge_similar_clusters
         initial_cluster_dicts = [
             {'read_ids': cluster, 'initial_cluster_num': i, 'allele_combo': None}
@@ -1639,25 +930,25 @@ class SpecimenClusterer:
 
     def _run_postphasing_merge(self, subclusters: List[Dict]) -> List[Dict]:
         """Phase 4: Merge subclusters with HP-equivalent consensus.
-        
+
         Args:
             subclusters: List of subclusters from Phase 3
-            
+
         Returns:
             List of merged subclusters
         """
         if self.disable_cluster_merging:
             logging.info("Cluster merging disabled, skipping post-phasing merge")
             return subclusters
-        
+
         return self.merge_similar_clusters(subclusters, phase_name="Post-phasing")
 
     def _run_size_filtering(self, subclusters: List[Dict]) -> List[Dict]:
         """Phase 5: Filter clusters by size and ratio thresholds.
-        
+
         Args:
             subclusters: List of subclusters from Phase 4
-            
+
         Returns:
             List of filtered clusters, sorted by size (largest first)
         """
@@ -1690,7 +981,7 @@ class SpecimenClusterer:
                         f"({sequences_covered / total_sequences:.1%} of total)")
         else:
             logging.info(f"Final: {len(large_clusters)} clusters (no sequences to cluster)")
-        
+
         return large_clusters
 
     def _write_cluster_outputs(self, clusters: List[Dict], output_file: str) -> Tuple[int, int]:
@@ -1929,17 +1220,17 @@ class SpecimenClusterer:
         self.reverse_primers = []
         self.forward_primers_rc = []  # RC of forward primers
         self.reverse_primers_rc = []  # RC of reverse primers
-        
+
         # For backward compatibility with trim_primers
         self.primers = []  # Will be populated with all primers for existing code
-        
+
         try:
             primer_count = {'forward': 0, 'reverse': 0, 'unknown': 0}
-            
+
             for record in SeqIO.parse(primer_file, "fasta"):
                 sequence = str(record.seq)
                 sequence_rc = str(reverse_complement(sequence))
-                
+
                 # Parse position from header
                 if "position=forward" in record.description:
                     self.forward_primers.append((record.id, sequence))
@@ -1957,7 +1248,7 @@ class SpecimenClusterer:
                     self.reverse_primers.append((record.id, sequence))
                     self.reverse_primers_rc.append((f"{record.id}_RC", sequence_rc))
                     primer_count['unknown'] += 1
-                
+
                 # Maintain backward compatibility
                 self.primers.append((record.id, sequence))
                 self.primers.append((f"{record.id}_RC", sequence_rc))
@@ -1974,12 +1265,12 @@ class SpecimenClusterer:
 
     def orient_sequences(self) -> set:
         """Normalize sequence orientations based on primer matches.
-        
+
         Scoring system:
         - +1 point if a forward primer is found at the expected position
         - +1 point if a reverse primer is found at the expected position
         - Maximum score: 2 (both primers found)
-        
+
         Decision logic:
         - If one orientation scores >0 and the other scores 0: use the non-zero orientation
         - If both score 0 or both score >0: keep original orientation (ambiguous/failed)
@@ -1987,26 +1278,26 @@ class SpecimenClusterer:
         if not hasattr(self, 'forward_primers') or not hasattr(self, 'reverse_primers'):
             logging.warning("No positioned primers loaded, skipping orientation")
             return set()
-            
+
         if len(self.forward_primers) == 0 and len(self.reverse_primers) == 0:
             logging.warning("No positioned primers available, skipping orientation")
             return set()
-        
+
         logging.info("Starting sequence orientation based on primer positions...")
-        
+
         oriented_count = 0
         already_correct = 0
         failed_count = 0
         failed_sequences = set()  # Track which sequences failed orientation
-        
+
         # Process each sequence
         for seq_id in tqdm(self.sequences, desc="Orienting sequences"):
             sequence = self.sequences[seq_id]
-            
+
             # Test both orientations (scores will be 0, 1, or 2)
             forward_score = self._score_orientation(sequence, "forward")
             reverse_score = self._score_orientation(sequence, "reverse")
-            
+
             # Decision logic
             if forward_score > 0 and reverse_score == 0:
                 # Clear forward orientation
@@ -2015,7 +1306,7 @@ class SpecimenClusterer:
             elif reverse_score > 0 and forward_score == 0:
                 # Clear reverse orientation - needs to be flipped
                 self.sequences[seq_id] = str(reverse_complement(sequence))
-                
+
                 # Also update the record if it exists
                 if seq_id in self.records:
                     record = self.records[seq_id]
@@ -2024,7 +1315,7 @@ class SpecimenClusterer:
                     if 'phred_quality' in record.letter_annotations:
                         record.letter_annotations['phred_quality'] = \
                             record.letter_annotations['phred_quality'][::-1]
-                
+
                 oriented_count += 1
                 logging.debug(f"Reoriented {seq_id}: forward_score={forward_score}, reverse_score={reverse_score}")
             else:
@@ -2035,29 +1326,29 @@ class SpecimenClusterer:
                     logging.debug(f"No primer matches for {seq_id}")
                 else:
                     logging.debug(f"Ambiguous orientation for {seq_id}: forward_score={forward_score}, reverse_score={reverse_score}")
-        
+
         logging.info(f"Orientation complete: {already_correct} kept as-is, "
                     f"{oriented_count} reverse-complemented, {failed_count} orientation failed")
-        
+
         # Return set of failed sequence IDs for potential filtering
         return failed_sequences
-    
+
     def _score_orientation(self, sequence: str, orientation: str) -> int:
         """Score how well primers match in the given orientation.
-        
+
         Simple binary scoring:
         - +1 if a forward primer is found at the expected position
         - +1 if a reverse primer is found at the expected position
-        
+
         Args:
             sequence: The sequence to test
             orientation: Either "forward" or "reverse"
-            
+
         Returns:
             Score from 0-2 (integer)
         """
         score = 0
-        
+
         if orientation == "forward":
             # Forward orientation:
             # - Check for forward primers at 5' end (as-is)
@@ -2074,37 +1365,37 @@ class SpecimenClusterer:
                 score += 1
             if self._has_primer_match(sequence, self.forward_primers_rc, "end"):
                 score += 1
-        
+
         return score
-    
+
     def _has_primer_match(self, sequence: str, primers: List[Tuple[str, str]], end: str) -> bool:
         """Check if any primer matches at the specified end of sequence.
-        
+
         Args:
             sequence: The sequence to search in
             primers: List of (name, sequence) tuples to search for
             end: Either "start" or "end"
-            
+
         Returns:
             True if any primer has a good match, False otherwise
         """
         if not primers or not sequence:
             return False
-        
+
         # Determine search region
         max_primer_len = max(len(p[1]) for p in primers) if primers else 50
         if end == "start":
             search_region = sequence[:min(max_primer_len * 2, len(sequence))]
         else:
             search_region = sequence[-min(max_primer_len * 2, len(sequence)):]
-        
+
         for primer_name, primer_seq in primers:
             # Allow up to 25% errors
             k = len(primer_seq) // 4
-            
+
             # Use edlib to find best match
             result = edlib.align(primer_seq, search_region, task="distance", mode="HW", k=k)
-            
+
             if result["editDistance"] != -1:
                 # Consider it a match if identity is >= 75%
                 identity = 1.0 - (result["editDistance"] / len(primer_seq))
@@ -2112,9 +1403,9 @@ class SpecimenClusterer:
                     logging.debug(f"Found {primer_name} at {end} with identity {identity:.2%} "
                                 f"(edit_dist={result['editDistance']}, len={len(primer_seq)})")
                     return True
-        
+
         return False
-    
+
     def trim_primers(self, sequence: str) -> Tuple[str, List[str]]:
         """Trim primers from start and end of sequence. Wrapper around standalone function."""
         primers = getattr(self, 'primers', None)
@@ -2122,18 +1413,18 @@ class SpecimenClusterer:
 
     def calculate_consensus_distance(self, seq1: str, seq2: str, require_merge_compatible: bool = False) -> int:
         """Calculate distance between two consensus sequences using adjusted identity.
-        
+
         Uses custom adjustment parameters that enable only homopolymer normalization:
         - Homopolymer differences (e.g., AAA vs AAAAA) are treated as identical
         - Regular substitutions count as mismatches
         - Non-homopolymer indels optionally prevent merging
-        
+
         Args:
             seq1: First consensus sequence
             seq2: Second consensus sequence
             require_merge_compatible: If True, return -1 when sequences have variations
                                      that cannot be represented in IUPAC consensus (indels)
-        
+
         Returns:
             Distance between sequences (substitutions only), or -1 if require_merge_compatible=True
             and sequences contain non-homopolymer indels
@@ -2146,13 +1437,13 @@ class SpecimenClusterer:
         if result["editDistance"] == -1:
             # Alignment failed, return maximum possible distance
             return max(len(seq1), len(seq2))
-            
+
         # Get nice alignment for adjusted identity scoring
         alignment = edlib.getNiceAlignment(result, seq1, seq2)
         if not alignment or not alignment.get('query_aligned') or not alignment.get('target_aligned'):
             # Fall back to edit distance if alignment extraction fails
             return result["editDistance"]
-            
+
         # Configure custom adjustment parameters for homopolymer normalization only
         # Use max_repeat_motif_length=1 to be consistent with variant detection
         # (extract_alignments_from_msa also uses length=1)
@@ -2163,9 +1454,8 @@ class SpecimenClusterer:
             end_skip_distance=0,            # Disable end trimming
             max_repeat_motif_length=1       # Single-base repeats only (consistent with variant detection)
         )
-        
+
         # Create custom scoring format to distinguish indels from substitutions
-        from adjusted_identity import ScoringFormat
         custom_format = ScoringFormat(
             match='|',
             substitution='X',     # Distinct code for substitutions
@@ -2174,15 +1464,15 @@ class SpecimenClusterer:
             homopolymer_extension='=',
             end_trimmed='.'
         )
-        
+
         # Calculate adjusted identity with custom format
         score_result = score_alignment(
-            alignment['query_aligned'], 
+            alignment['query_aligned'],
             alignment['target_aligned'],
             adjustment_params=custom_params,
             scoring_format=custom_format
         )
-        
+
         # Check for merge compatibility if requested
         # Both non-homopolymer indels ('I') and terminal overhangs ('.') prevent merging
         if require_merge_compatible:
@@ -2192,21 +1482,21 @@ class SpecimenClusterer:
             if '.' in score_result.score_aligned:
                 # logging.debug(f"Terminal overhang detected, sequences not merge-compatible")
                 return -1  # Signal that merging should not occur
-        
+
         # Count only substitutions (not homopolymer adjustments or indels)
         # Note: mismatches includes both substitutions and non-homopolymer indels
         # For accurate distance when indels are present, we use the mismatches count
         distance = score_result.mismatches
-        
+
         # Log details about the variations found
         substitutions = score_result.score_aligned.count('X')
         indels = score_result.score_aligned.count('I')
         homopolymers = score_result.score_aligned.count('=')
-        
+
         # logging.debug(f"Consensus distance: {distance} total mismatches "
         #              f"({substitutions} substitutions, {indels} indels, "
         #              f"{homopolymers} homopolymer adjustments)")
-        
+
         return distance
 
     def are_homopolymer_equivalent(self, seq1: str, seq2: str) -> bool:
@@ -2237,291 +1527,3 @@ class SpecimenClusterer:
                 cluster = {self.id_map[short_id] for short_id in short_ids}
                 clusters.append(cluster)
         return clusters
-
-
-
-def main():
-    parser = argparse.ArgumentParser(
-        description="MCL-based clustering of nanopore amplicon reads"
-    )
-
-    # Input/Output group
-    io_group = parser.add_argument_group("Input/Output")
-    io_group.add_argument("input_file", help="Input FASTQ file")
-    io_group.add_argument("-O", "--output-dir", default="clusters",
-                          help="Output directory for all files (default: clusters)")
-    io_group.add_argument("--primers", help="FASTA file containing primer sequences (default: looks for primers.fasta in input file directory)")
-    io_group.add_argument("--augment-input", help="Additional FASTQ/FASTA file with sequences recovered after primary demultiplexing (e.g., from specimine)")
-
-    # Clustering group
-    clustering_group = parser.add_argument_group("Clustering")
-    clustering_group.add_argument("--algorithm", type=str, default="graph", choices=["graph", "greedy"],
-                                  help="Clustering algorithm to use (default: graph)")
-    clustering_group.add_argument("--min-identity", type=float, default=0.9,
-                                  help="Minimum sequence identity threshold for clustering (default: 0.9)")
-    clustering_group.add_argument("--inflation", type=float, default=4.0,
-                                  help="MCL inflation parameter (default: 4.0)")
-    clustering_group.add_argument("--k-nearest-neighbors", type=int, default=5,
-                                  help="Number of nearest neighbors for graph construction (default: 5)")
-
-    # Filtering group
-    filtering_group = parser.add_argument_group("Filtering")
-    filtering_group.add_argument("--min-size", type=int, default=5,
-                                 help="Minimum cluster size (default: 5, 0 to disable)")
-    filtering_group.add_argument("--min-cluster-ratio", type=float, default=0.01,
-                                 help="Minimum size ratio between a cluster and the largest cluster (default: 0.01, 0 to disable)")
-    filtering_group.add_argument("--max-sample-size", type=int, default=500,
-                                 help="Maximum cluster size for consensus (default: 500)")
-    filtering_group.add_argument("--outlier-identity", type=float, default=None,
-                                 help="Minimum read-to-consensus identity to keep a read (default: auto). "
-                                      "Reads below this threshold are removed as outliers before final "
-                                      "consensus generation. Auto-calculated as (1 + min_identity) / 2. "
-                                      "This threshold is typically higher than --min-identity because "
-                                      "the consensus is error-corrected through averaging.")
-
-    # Variant Phasing group
-    phasing_group = parser.add_argument_group("Variant Phasing")
-    phasing_group.add_argument("--disable-position-phasing", action="store_true",
-                               help="Disable position-based variant phasing (enabled by default). "
-                                    "MCL graph clustering already separates most variants; this "
-                                    "second pass analyzes MSA positions to phase remaining variants.")
-    phasing_group.add_argument("--min-variant-frequency", type=float, default=0.10,
-                               help="Minimum alternative allele frequency to call variant (default: 0.10 for 10%%)")
-    phasing_group.add_argument("--min-variant-count", type=int, default=5,
-                               help="Minimum alternative allele read count to call variant (default: 5)")
-
-    # Ambiguity Calling group
-    ambiguity_group = parser.add_argument_group("Ambiguity Calling")
-    ambiguity_group.add_argument("--disable-ambiguity-calling", action="store_true",
-                                 help="Disable IUPAC ambiguity code calling for unphased variant positions")
-    ambiguity_group.add_argument("--min-ambiguity-frequency", type=float, default=0.10,
-                                 help="Minimum alternative allele frequency for IUPAC ambiguity calling (default: 0.10 for 10%%)")
-    ambiguity_group.add_argument("--min-ambiguity-count", type=int, default=3,
-                                 help="Minimum alternative allele read count for IUPAC ambiguity calling (default: 3)")
-
-    # Cluster Merging group
-    merging_group = parser.add_argument_group("Cluster Merging")
-    merging_group.add_argument("--disable-cluster-merging", action="store_true",
-                               help="Disable merging of clusters with identical consensus sequences")
-    merging_group.add_argument("--disable-homopolymer-equivalence", action="store_true",
-                               help="Disable homopolymer equivalence in cluster merging (only merge identical sequences)")
-
-    # Orientation group
-    orient_group = parser.add_argument_group("Orientation")
-    orient_group.add_argument("--orient-mode", choices=["skip", "keep-all", "filter-failed"], default="skip",
-                              help="Sequence orientation mode: skip (default, no orientation), keep-all (orient but keep failed), or filter-failed (orient and remove failed)")
-
-    # Performance group
-    perf_group = parser.add_argument_group("Performance")
-    perf_group.add_argument("--presample", type=int, default=1000,
-                            help="Presample size for initial reads (default: 1000, 0 to disable)")
-    perf_group.add_argument("--scale-threshold", type=int, default=1001,
-                            help="Sequence count threshold for scalable mode (requires vsearch). "
-                                 "Set to 0 to disable. Default: 1001")
-    perf_group.add_argument("--threads", type=int, default=1, metavar="N",
-                            help="Max threads for internal parallelism (vsearch, SPOA). "
-                                 "0=auto-detect, default=1 (safe for parallel workflows).")
-    perf_group.add_argument("--enable-early-filter", action="store_true",
-                            help="Enable early filtering to skip small clusters before variant phasing (improves performance for large datasets)")
-
-    # Debugging group
-    debug_group = parser.add_argument_group("Debugging")
-    debug_group.add_argument("--collect-discards", action="store_true",
-                             help="Write discarded reads (outliers and filtered clusters) to cluster_debug/{sample}-discards.fastq")
-    debug_group.add_argument("--log-level", default="INFO",
-                             choices=["DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL"])
-
-    # Version and profile options (default group)
-    parser.add_argument("--version", action="version",
-                        version=f"Speconsense {__version__}",
-                        help="Show program's version number and exit")
-    parser.add_argument("-p", "--profile", metavar="NAME",
-                        help="Load parameter profile (use --list-profiles to see available)")
-    parser.add_argument("--list-profiles", action="store_true",
-                        help="List available profiles and exit")
-
-    # Handle --list-profiles early (before requiring input_file)
-    if '--list-profiles' in sys.argv:
-        print_profiles_list('speconsense')
-        sys.exit(0)
-
-    # First pass: get profile name if specified
-    # We need to detect which args were explicitly provided to not override them
-    pre_args, _ = parser.parse_known_args()
-
-    # Track which arguments were explicitly provided on CLI
-    explicit_args = set()
-    for arg in sys.argv[1:]:
-        if arg.startswith('--') and '=' in arg:
-            explicit_args.add(arg.split('=')[0][2:].replace('-', '_'))
-        elif arg.startswith('--'):
-            explicit_args.add(arg[2:].replace('-', '_'))
-        elif arg.startswith('-') and len(arg) == 2:
-            # Short option - would need to map to long name
-            # For now, we skip this since profile args use long names
-            pass
-
-    # Load and apply profile if specified
-    loaded_profile = None
-    if pre_args.profile:
-        try:
-            loaded_profile = Profile.load(pre_args.profile)
-        except ProfileError as e:
-            print(f"Error: {e}", file=sys.stderr)
-            sys.exit(1)
-
-        # Apply profile values to parser defaults (explicit CLI args will override)
-        for key, value in loaded_profile.speconsense.items():
-            attr_name = key.replace('-', '_')
-            if attr_name not in explicit_args:
-                parser.set_defaults(**{attr_name: value})
-
-    args = parser.parse_args()
-
-    # Setup standard logging
-    log_format = '%(asctime)s - %(levelname)s - %(message)s'
-    logging.basicConfig(
-        level=getattr(logging, args.log_level),
-        format=log_format
-    )
-
-    # Log profile usage after logging is configured
-    if loaded_profile:
-        logging.info(f"Using profile '{loaded_profile.name}': {loaded_profile.description}")
-
-    # Resolve threads: 0 means auto-detect
-    threads = args.threads if args.threads > 0 else os.cpu_count()
-
-    sample = os.path.splitext(os.path.basename(args.input_file))[0]
-    clusterer = SpecimenClusterer(
-        min_identity=args.min_identity,
-        inflation=args.inflation,
-        min_size=args.min_size,
-        min_cluster_ratio=args.min_cluster_ratio,
-        max_sample_size=args.max_sample_size,
-        presample_size=args.presample,
-        k_nearest_neighbors=args.k_nearest_neighbors,
-        sample_name=sample,
-        disable_homopolymer_equivalence=args.disable_homopolymer_equivalence,
-        disable_cluster_merging=args.disable_cluster_merging,
-        output_dir=args.output_dir,
-        outlier_identity_threshold=args.outlier_identity,
-        enable_secondpass_phasing=not args.disable_position_phasing,
-        min_variant_frequency=args.min_variant_frequency,
-        min_variant_count=args.min_variant_count,
-        min_ambiguity_frequency=args.min_ambiguity_frequency,
-        min_ambiguity_count=args.min_ambiguity_count,
-        enable_iupac_calling=not args.disable_ambiguity_calling,
-        scale_threshold=args.scale_threshold,
-        max_threads=threads,
-        early_filter=args.enable_early_filter,
-        collect_discards=args.collect_discards
-    )
-
-    # Log configuration
-    if args.outlier_identity is not None:
-        logging.info(f"Outlier removal enabled: outlier_identity={args.outlier_identity*100:.1f}% (user-specified)")
-    else:
-        # Auto-calculated threshold
-        auto_threshold = (1.0 + args.min_identity) / 2.0
-        logging.info(f"Outlier removal enabled: outlier_identity={auto_threshold*100:.1f}% (auto-calculated from min_identity={args.min_identity*100:.1f}%)")
-
-    if not args.disable_position_phasing:
-        logging.info(f"Position-based variant phasing enabled: min_freq={args.min_variant_frequency:.0%}, "
-                    f"min_count={args.min_variant_count}")
-
-    # Set additional attributes for metadata
-    clusterer.input_file = os.path.abspath(args.input_file)
-    clusterer.augment_input = os.path.abspath(args.augment_input) if args.augment_input else None
-    clusterer.algorithm = args.algorithm
-    clusterer.orient_mode = args.orient_mode
-
-    # Read primary sequences
-    logging.info(f"Reading sequences from {args.input_file}")
-    format = "fasta" if args.input_file.endswith(".fasta") else "fastq"
-    records = list(SeqIO.parse(args.input_file, format))
-    logging.info(f"Loaded {len(records)} primary sequences")
-
-    if len(records) == 0:
-        logging.warning("No sequences found in input file. Nothing to cluster.")
-        sys.exit(0)
-
-    # Load augmented sequences if specified
-    augment_records = None
-    if args.augment_input:
-        # Check if augment input file exists
-        if not os.path.exists(args.augment_input):
-            logging.error(f"Augment input file not found: {args.augment_input}")
-            sys.exit(1)
-            
-        logging.info(f"Reading augmented sequences from {args.augment_input}")
-        
-        # Auto-detect format like main input
-        augment_format = "fasta" if args.augment_input.endswith(".fasta") else "fastq"
-        
-        try:
-            augment_records = list(SeqIO.parse(args.augment_input, augment_format))
-            logging.info(f"Loaded {len(augment_records)} augmented sequences")
-            
-            if len(augment_records) == 0:
-                logging.warning(f"No sequences found in augment input file: {args.augment_input}")
-            
-            # Add dummy quality scores to FASTA sequences so they can be written as FASTQ later
-            if augment_format == "fasta":
-                for record in augment_records:
-                    if not hasattr(record, 'letter_annotations') or 'phred_quality' not in record.letter_annotations:
-                        # Add dummy quality scores (quality 30 = '?' in FASTQ)
-                        record.letter_annotations = {'phred_quality': [30] * len(record.seq)}
-                logging.debug(f"Added quality scores to {len(augment_records)} FASTA sequences for downstream compatibility")
-                
-        except Exception as e:
-            logging.error(f"Failed to read augment input file '{args.augment_input}': {e}")
-            sys.exit(1)
-
-    # Add sequences to clusterer (both primary and augmented)
-    clusterer.add_sequences(records, augment_records)
-
-    if args.primers:
-        clusterer.primers_file = os.path.abspath(args.primers)
-        clusterer.load_primers(args.primers)
-    else:
-        # Look for primers.fasta in the same directory as the input file
-        input_dir = os.path.dirname(os.path.abspath(args.input_file))
-        auto_primer_path = os.path.join(input_dir, "primers.fasta")
-
-        if os.path.exists(auto_primer_path):
-            logging.debug(f"Found primers.fasta in input directory: {auto_primer_path}")
-            clusterer.primers_file = os.path.abspath(auto_primer_path)
-            clusterer.load_primers(auto_primer_path)
-        else:
-            logging.warning("No primer file specified and primers.fasta not found in input directory. Primer trimming will be disabled.")
-            clusterer.primers_file = None
-    
-    # Handle sequence orientation based on mode
-    if args.orient_mode != "skip":
-        if hasattr(clusterer, 'forward_primers') and hasattr(clusterer, 'reverse_primers'):
-            failed_sequences = clusterer.orient_sequences()
-
-            # Filter failed sequences if requested
-            if args.orient_mode == "filter-failed" and failed_sequences:
-                logging.info(f"Filtering out {len(failed_sequences)} sequences with failed orientation")
-
-                # Remove failed sequences from clusterer
-                for seq_id in failed_sequences:
-                    del clusterer.sequences[seq_id]
-                    del clusterer.records[seq_id]
-
-                remaining = len(clusterer.sequences)
-                logging.info(f"Continuing with {remaining} successfully oriented sequences")
-        else:
-            logging.warning(f"--orient-mode={args.orient_mode} specified but no primers with position information loaded")
-
-    # Write metadata file for use by post-processing tools
-    clusterer.write_metadata()
-
-    clusterer.cluster(algorithm=args.algorithm)
-    print()
-
-if __name__ == "__main__":
-    main()
-

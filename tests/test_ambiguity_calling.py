@@ -29,9 +29,9 @@ class TestAmbiguityCalling:
         shutil.rmtree(test_dir)
 
     @pytest.fixture
-    def core_script_path(self):
-        """Get path to core.py script."""
-        return os.path.join(os.path.dirname(__file__), '..', 'speconsense', 'core.py')
+    def core_module(self):
+        """Get module name for speconsense core."""
+        return 'speconsense.core'
 
     @pytest.fixture
     def test_fastq_path(self):
@@ -48,10 +48,10 @@ class TestAmbiguityCalling:
                 count += len(iupac_pattern.findall(line))
         return count
 
-    def test_default_ambiguity_thresholds(self, temp_dir, core_script_path, test_fastq_path):
+    def test_default_ambiguity_thresholds(self, temp_dir, core_module, test_fastq_path):
         """Test that default ambiguity thresholds (10%/3) are applied."""
         result = subprocess.run([
-            sys.executable, core_script_path,
+            sys.executable, '-m', core_module,
             test_fastq_path,
             '--min-size', '0',
             '--algorithm', 'greedy'
@@ -63,11 +63,11 @@ class TestAmbiguityCalling:
         output_file = os.path.join('clusters', 'ONT10.80-H10--iNat229710865-1.v2-RiC9-all.fasta')
         assert os.path.exists(output_file), f"Output file not found: {output_file}"
 
-    def test_strict_ambiguity_thresholds_fewer_codes(self, temp_dir, core_script_path, test_fastq_path):
+    def test_strict_ambiguity_thresholds_fewer_codes(self, temp_dir, core_module, test_fastq_path):
         """Test that stricter ambiguity thresholds result in fewer IUPAC codes."""
         # Run with default (lenient) thresholds
         result_lenient = subprocess.run([
-            sys.executable, core_script_path,
+            sys.executable, '-m', core_module,
             test_fastq_path,
             '--min-size', '0',
             '--algorithm', 'greedy',
@@ -86,7 +86,7 @@ class TestAmbiguityCalling:
 
         # Run with strict thresholds
         result_strict = subprocess.run([
-            sys.executable, core_script_path,
+            sys.executable, '-m', core_module,
             test_fastq_path,
             '--min-size', '0',
             '--algorithm', 'greedy',
@@ -103,11 +103,11 @@ class TestAmbiguityCalling:
         assert strict_iupac_count <= lenient_iupac_count, \
             f"Strict thresholds ({strict_iupac_count}) should not produce more IUPAC codes than lenient ({lenient_iupac_count})"
 
-    def test_ambiguity_independent_from_phasing(self, temp_dir, core_script_path, test_fastq_path):
+    def test_ambiguity_independent_from_phasing(self, temp_dir, core_module, test_fastq_path):
         """Test that ambiguity thresholds are independent from phasing thresholds."""
         # Run with high phasing thresholds but low ambiguity thresholds
         result = subprocess.run([
-            sys.executable, core_script_path,
+            sys.executable, '-m', core_module,
             test_fastq_path,
             '--min-size', '0',
             '--algorithm', 'greedy',
@@ -122,10 +122,10 @@ class TestAmbiguityCalling:
         output_file = os.path.join('clusters', 'ONT10.80-H10--iNat229710865-1.v2-RiC9-all.fasta')
         assert os.path.exists(output_file)
 
-    def test_disable_ambiguity_calling(self, temp_dir, core_script_path, test_fastq_path):
+    def test_disable_ambiguity_calling(self, temp_dir, core_module, test_fastq_path):
         """Test that --disable-ambiguity-calling produces no IUPAC codes."""
         result = subprocess.run([
-            sys.executable, core_script_path,
+            sys.executable, '-m', core_module,
             test_fastq_path,
             '--min-size', '0',
             '--algorithm', 'greedy',
@@ -141,12 +141,12 @@ class TestAmbiguityCalling:
         iupac_count = self.count_iupac_codes(content)
         assert iupac_count == 0, f"Disabled ambiguity calling should produce 0 IUPAC codes, got {iupac_count}"
 
-    def test_ambiguity_parameters_in_metadata(self, temp_dir, core_script_path, test_fastq_path):
+    def test_ambiguity_parameters_in_metadata(self, temp_dir, core_module, test_fastq_path):
         """Test that ambiguity parameters are recorded in metadata."""
         import json
 
         result = subprocess.run([
-            sys.executable, core_script_path,
+            sys.executable, '-m', core_module,
             test_fastq_path,
             '--min-size', '0',
             '--algorithm', 'greedy',
