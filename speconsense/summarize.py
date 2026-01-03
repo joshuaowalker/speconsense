@@ -2360,7 +2360,7 @@ def perform_hac_clustering(consensus_list: List[ConsensusInfo],
     if use_single_linkage:
         # Single linkage = connected components on edges where dist < threshold
         # This is O(n + E) instead of O(merges × E)
-        logging.info("Single linkage: computing connected components on threshold-filtered edges")
+        logging.debug("Single linkage: computing connected components on threshold-filtered edges")
 
         edge_count = 0
         for (i, j), dist in seq_distances.items():
@@ -2376,12 +2376,12 @@ def perform_hac_clustering(consensus_list: List[ConsensusInfo],
             component_groups[find(i)].append(i)
 
         clusters = list(component_groups.values())
-        logging.info(f"Single linkage produced {len(clusters)} clusters")
+        logging.info(f"Found {len(clusters)} sequence groups")
 
     else:
         # Complete linkage: partition by connected components first
         # Clusters from different components can never merge (missing edge = dist 1.0)
-        logging.info("Complete linkage: partitioning into connected components")
+        logging.debug("Complete linkage: partitioning into connected components")
 
         for i in range(n):
             for j in seq_adjacency[i]:
@@ -2396,8 +2396,8 @@ def perform_hac_clustering(consensus_list: List[ConsensusInfo],
         # Count singletons vs multi-sequence components
         singletons = sum(1 for c in components.values() if len(c) == 1)
         multi_seq = len(components) - singletons
-        logging.info(f"Found {len(components)} connected components "
-                     f"({singletons} singletons, {multi_seq} multi-sequence)")
+        logging.info(f"Found {len(components)} sequence groups "
+                     f"({singletons} single-sequence, {multi_seq} multi-sequence)")
 
         # Run HAC within each component
         clusters: List[List[int]] = []
@@ -3233,7 +3233,6 @@ def process_single_specimen(file_consensuses: List[ConsensusInfo],
         naming_info[group_idx + 1] = group_naming
 
     logging.info(f"Processed {file_name}: {len(final_consensus)} final variants across {len(merged_groups)} groups")
-    logging.info("")  # Empty line for readability between specimens
 
     return final_consensus, all_merge_traceability, naming_info, total_limited_count, all_overlap_merges
 
