@@ -31,9 +31,9 @@ class ScalabilityConfig:
 
         The scale_threshold arg controls scalability:
         - 0: disabled
-        - N > 0: enabled for datasets >= N sequences (default: 1000)
+        - N > 0: enabled for datasets >= N sequences (default: 1001)
         """
-        threshold = getattr(args, 'scale_threshold', 1000)
+        threshold = getattr(args, 'scale_threshold', 1001)
         return cls(
             enabled=threshold > 0,
             activation_threshold=threshold,

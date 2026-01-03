@@ -431,9 +431,9 @@ def parse_arguments():
     parser.add_argument("--version", action="version",
                         version=f"speconsense-summarize {__version__}",
                         help="Show program's version number and exit")
-    parser.add_argument("--scale-threshold", type=int, default=1000,
+    parser.add_argument("--scale-threshold", type=int, default=1001,
                         help="Sequence count threshold for scalable mode in HAC clustering (requires vsearch). "
-                             "Set to 0 to disable. Default: 1000")
+                             "Set to 0 to disable. Default: 1001")
     parser.add_argument("--threads", type=int, default=0, metavar="N",
                         help="Max threads for internal parallelism. "
                              "0=auto-detect (default), N>0 for explicit count.")
@@ -3159,7 +3159,7 @@ def process_single_specimen(file_consensuses: List[ConsensusInfo],
     logging.info(f"Processing specimen from file: {file_name}")
 
     # Phase 1: HAC clustering to separate variant groups (moved before merging!)
-    scale_threshold = getattr(args, 'scale_threshold', 1000)
+    scale_threshold = getattr(args, 'scale_threshold', 1001)
     threads_arg = getattr(args, 'threads', 0)
     max_threads = threads_arg if threads_arg > 0 else os.cpu_count()
     scalability_config = None

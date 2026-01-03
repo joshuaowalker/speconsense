@@ -744,7 +744,7 @@ class SpecimenClusterer:
                  min_ambiguity_frequency: float = 0.10,
                  min_ambiguity_count: int = 3,
                  enable_iupac_calling: bool = True,
-                 scale_threshold: int = 1000,
+                 scale_threshold: int = 1001,
                  max_threads: int = 1,
                  early_filter: bool = False,
                  collect_discards: bool = False):
@@ -2280,9 +2280,9 @@ def main():
                         help="Presample size for initial reads (default: 1000, 0 to disable)")
     parser.add_argument("--k-nearest-neighbors", type=int, default=5,
                         help="Number of nearest neighbors for graph construction (default: 5)")
-    parser.add_argument("--scale-threshold", type=int, default=1000,
+    parser.add_argument("--scale-threshold", type=int, default=1001,
                         help="Sequence count threshold for scalable mode (requires vsearch). "
-                             "Set to 0 to disable. Default: 1000")
+                             "Set to 0 to disable. Default: 1001")
     parser.add_argument("--threads", type=int, default=1, metavar="N",
                         help="Max threads for internal parallelism (vsearch, SPOA). "
                              "0=auto-detect, default=1 (safe for parallel workflows).")
