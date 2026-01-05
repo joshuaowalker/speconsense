@@ -5,6 +5,30 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.7.0] - 2026-01-05
+
+### Added
+- **Scalability mode** - Automatic vsearch-based acceleration for large datasets (1000+ sequences), reducing O(n²) pairwise comparisons to ~O(n log n)
+  - `--scale-threshold N` sets activation threshold (default: 1001, 0 to disable)
+  - `--threads N` controls internal parallelism (speconsense default: 1, summarize default: auto)
+  - Requires vsearch (`conda install bioconda::vsearch`), falls back to brute-force if missing
+- **Profile system** - YAML-based parameter presets for reproducible workflows
+  - Use with `-p herbarium`, `-p strict`, or `-p nostalgia`
+  - User profiles in `~/.config/speconsense/profiles/`
+  - Bundled profiles: `herbarium` (high-recall), `strict` (high-precision), `nostalgia` (simulate older pipelines)
+- **Length filtering** (summarize) - `--min-len` and `--max-len` filter sequences before processing
+- **Primer-constrained overlap merging** - Overlap-aware distance only applies when sequences have different primer pairs, preventing chimeras from incorrectly merging with shorter amplicons
+- **Performance options** - `--enable-early-filter` skips phasing on clusters that will be filtered; `--collect-discards` writes discarded reads for inspection
+- **Cluster boundary delimiters** - Merged FASTQ files include synthetic boundary records between clusters for easier inspection
+
+### Changed
+- **Default `--min-cluster-ratio`**: 0.20 → 0.01 (keep small clusters for downstream curation)
+- **Default `--min-variant-frequency`**: 0.20 → 0.10 (unified with ambiguity threshold)
+- **Default `--max-sample-size`**: 500 → 100 (sufficient for consensus quality)
+- **Default `--merge-min-size-ratio`** (summarize): 0.0 → 0.1 (prevent small clusters from adding IUPAC to large ones)
+- **Code architecture** - Refactored `core.py` into `core/` subpackage and `summarize.py` into `summarize/` subpackage
+- **CLI organization** - Options grouped into logical categories in `--help` output
+
 ## [0.6.6] - 2026-01-01
 
 ### Fixed

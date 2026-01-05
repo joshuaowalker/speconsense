@@ -108,8 +108,8 @@ speconsense input.fastq --min-size 10
 # Set minimum identity threshold for clustering (default: 0.9)
 speconsense input.fastq --min-identity 0.85
 
-# Control the maximum sample size for consensus generation
-speconsense input.fastq --max-sample-size 500
+# Control the maximum sample size for consensus generation (default: 100)
+speconsense input.fastq --max-sample-size 200
 
 # Specify output directory (default: clusters)
 speconsense input.fastq --output-dir results/
@@ -136,7 +136,7 @@ speconsense input.fastq -p herbarium --min-size 10
 
 **Bundled profiles:**
 - `herbarium` — High-recall for degraded DNA/type specimens
-- `specimens` — Balanced settings (matches defaults)
+- `nostalgia` — Simulate older bioinformatics pipelines
 - `strict` — High-precision for confident results
 
 On first use, an `example.yaml` template is created in `~/.config/speconsense/profiles/` — copy and edit it to create custom profiles.
@@ -781,6 +781,15 @@ speconsense-summarize --min-ric 5
 - Default is 3 - only sequences supported by at least 3 reads are processed
 - Higher values provide more stringent quality control but may exclude valid low-abundance variants
 
+**Length Filtering:**
+```bash
+speconsense-summarize --min-len 400 --max-len 800
+```
+- `--min-len`: Minimum sequence length in bp (default: 0 = disabled)
+- `--max-len`: Maximum sequence length in bp (default: 0 = disabled)
+- Applied during initial sequence loading, before HAC grouping
+- Useful for filtering incomplete amplicons or chimeric sequences
+
 **Variant Merging:**
 ```bash
 # Basic SNP-only merging (default)
@@ -949,6 +958,7 @@ When using multiple primers targeting the same locus ("primer pools"), reads may
 2. Identifies sequences with sufficient overlap meeting identity threshold
 3. Creates consensus from union of coverage (overlap region uses majority voting)
 4. Supports iterative merging for 3+ overlapping sequences
+5. **Primer-constrained**: Overlap-aware distance only applies when sequences have different primer pairs (legitimate primer pool scenarios). Same-primer sequences use global distance to prevent chimeras from incorrectly merging with shorter amplicons.
 
 **Parameters:**
 - `--min-merge-overlap N`: Minimum overlap in bp (default: 200, 0 to disable)
@@ -983,7 +993,7 @@ When a shorter sequence is fully contained within a longer one (e.g., ITS2 withi
 
 The complete speconsense-summarize workflow operates in this order:
 
-1. **Load sequences** with RiC filtering (`--min-ric`)
+1. **Load sequences** with RiC filtering (`--min-ric`) and length filtering (`--min-len`, `--max-len`)
 2. **HAC variant grouping** by sequence identity to separate dissimilar sequences (`--group-identity`); uses single-linkage when overlap merging is enabled
 3. **Group filtering** to limit output groups (`--select-max-groups`)
 4. **Homopolymer-aware MSA-based variant merging** within each group, including **overlap merging** for different-length sequences (`--merge-position-count`, `--merge-indel-length`, `--min-merge-overlap`, `--merge-snp`, `--merge-min-size-ratio`, `--disable-homopolymer-equivalence`)
@@ -1025,43 +1035,58 @@ Variant 2: (size=180, ric=180) - 3 substitutions, 1 single-nt indel - skipping
 - **File lineage**: maintains connection between final outputs and original speconsense clusters
 - **Read aggregation**: `FASTQ Files/` directory contains all reads that contributed to each final consensus
 - **Pre-merge preservation**: `variants/` directory contains `.raw` files that preserve individual pre-merge variants with their original sequences and reads
+- **Cluster boundaries in merged FASTQ**: When multiple clusters are merged, synthetic delimiter records mark boundaries between clusters for easy identification in sequence viewers (e.g., UGENE). Format: `@CLUSTER_BOUNDARY_{n}:{cluster}:RiC={ric}:reads={count}`
 
 This comprehensive logging allows users to understand exactly how the pipeline processed their data and make informed decisions about parameter tuning.
 
 ## Full Command Line Options
 
 ```
-usage: speconsense [-h] [--augment-input AUGMENT_INPUT]
+usage: speconsense [-h] [-O OUTPUT_DIR] [--primers PRIMERS]
+                   [--augment-input AUGMENT_INPUT]
                    [--algorithm {graph,greedy}] [--min-identity MIN_IDENTITY]
-                   [--inflation INFLATION] [--min-size MIN_SIZE]
+                   [--inflation INFLATION]
+                   [--k-nearest-neighbors K_NEAREST_NEIGHBORS]
+                   [--min-size MIN_SIZE]
                    [--min-cluster-ratio MIN_CLUSTER_RATIO]
                    [--max-sample-size MAX_SAMPLE_SIZE]
                    [--outlier-identity OUTLIER_IDENTITY]
                    [--disable-position-phasing]
                    [--min-variant-frequency MIN_VARIANT_FREQUENCY]
                    [--min-variant-count MIN_VARIANT_COUNT]
+                   [--disable-ambiguity-calling]
                    [--min-ambiguity-frequency MIN_AMBIGUITY_FREQUENCY]
                    [--min-ambiguity-count MIN_AMBIGUITY_COUNT]
-                   [--presample PRESAMPLE]
-                   [--k-nearest-neighbors K_NEAREST_NEIGHBORS]
-                   [--primers PRIMERS] [-O OUTPUT_DIR]
+                   [--disable-cluster-merging]
                    [--disable-homopolymer-equivalence]
-                   [--disable-cluster-merging] [--disable-ambiguity-calling]
                    [--orient-mode {skip,keep-all,filter-failed}]
+                   [--presample PRESAMPLE] [--scale-threshold SCALE_THRESHOLD]
+                   [--threads N] [--enable-early-filter] [--collect-discards]
                    [--log-level {DEBUG,INFO,WARNING,ERROR,CRITICAL}]
-                   [--version]
+                   [--version] [-p NAME] [--list-profiles]
                    input_file
 
 MCL-based clustering of nanopore amplicon reads
 
-positional arguments:
-  input_file            Input FASTQ file
-
 options:
   -h, --help            show this help message and exit
+  --version             Show program's version number and exit
+  -p NAME, --profile NAME
+                        Load parameter profile (use --list-profiles to see
+                        available)
+  --list-profiles       List available profiles and exit
+
+Input/Output:
+  input_file            Input FASTQ file
+  -O OUTPUT_DIR, --output-dir OUTPUT_DIR
+                        Output directory for all files (default: clusters)
+  --primers PRIMERS     FASTA file containing primer sequences (default: looks
+                        for primers.fasta in input file directory)
   --augment-input AUGMENT_INPUT
                         Additional FASTQ/FASTA file with sequences recovered
                         after primary demultiplexing (e.g., from specimine)
+
+Clustering:
   --algorithm {graph,greedy}
                         Clustering algorithm to use (default: graph)
   --min-identity MIN_IDENTITY
@@ -1069,20 +1094,30 @@ options:
                         (default: 0.9)
   --inflation INFLATION
                         MCL inflation parameter (default: 4.0)
+  --k-nearest-neighbors K_NEAREST_NEIGHBORS
+                        Number of nearest neighbors for graph construction
+                        (default: 5)
+
+Filtering:
   --min-size MIN_SIZE   Minimum cluster size (default: 5, 0 to disable)
   --min-cluster-ratio MIN_CLUSTER_RATIO
                         Minimum size ratio between a cluster and the largest
                         cluster (default: 0.01, 0 to disable)
   --max-sample-size MAX_SAMPLE_SIZE
-                        Maximum cluster size for consensus (default: 500)
+                        Maximum cluster size for consensus (default: 100)
   --outlier-identity OUTLIER_IDENTITY
                         Minimum read-to-consensus identity to keep a read
                         (default: auto). Reads below this threshold are
                         removed as outliers before final consensus generation.
-                        Auto-calculated as (1 + min_identity) / 2.
+                        Auto-calculated as (1 + min_identity) / 2. This
+                        threshold is typically higher than --min-identity
+                        because the consensus is error-corrected through
+                        averaging.
+
+Variant Phasing:
   --disable-position-phasing
                         Disable position-based variant phasing (enabled by
-                        default). MCL clustering already separates most
+                        default). MCL graph clustering already separates most
                         variants; this second pass analyzes MSA positions to
                         phase remaining variants.
   --min-variant-frequency MIN_VARIANT_FREQUENCY
@@ -1091,97 +1126,147 @@ options:
   --min-variant-count MIN_VARIANT_COUNT
                         Minimum alternative allele read count to call variant
                         (default: 5)
+
+Ambiguity Calling:
+  --disable-ambiguity-calling
+                        Disable IUPAC ambiguity code calling for unphased
+                        variant positions
   --min-ambiguity-frequency MIN_AMBIGUITY_FREQUENCY
                         Minimum alternative allele frequency for IUPAC
                         ambiguity calling (default: 0.10 for 10%)
   --min-ambiguity-count MIN_AMBIGUITY_COUNT
                         Minimum alternative allele read count for IUPAC
                         ambiguity calling (default: 3)
-  --presample PRESAMPLE
-                        Presample size for initial reads (default: 1000, 0 to
-                        disable)
-  --k-nearest-neighbors K_NEAREST_NEIGHBORS
-                        Number of nearest neighbors for graph construction
-                        (default: 5)
-  --primers PRIMERS     FASTA file containing primer sequences (default: looks
-                        for primers.fasta in input file directory)
-  -O OUTPUT_DIR, --output-dir OUTPUT_DIR
-                        Output directory for all files (default: clusters)
-  --disable-homopolymer-equivalence
-                        Disable homopolymer equivalence in cluster merging
-                        (only merge identical sequences)
+
+Cluster Merging:
   --disable-cluster-merging
                         Disable merging of clusters with identical consensus
                         sequences
-  --disable-ambiguity-calling
-                        Disable IUPAC ambiguity code calling for unphased
-                        variant positions
+  --disable-homopolymer-equivalence
+                        Disable homopolymer equivalence in cluster merging
+                        (only merge identical sequences)
+
+Orientation:
   --orient-mode {skip,keep-all,filter-failed}
                         Sequence orientation mode: skip (default, no
                         orientation), keep-all (orient but keep failed), or
                         filter-failed (orient and remove failed)
+
+Performance:
+  --presample PRESAMPLE
+                        Presample size for initial reads (default: 1000, 0 to
+                        disable)
+  --scale-threshold SCALE_THRESHOLD
+                        Sequence count threshold for scalable mode (requires
+                        vsearch). Set to 0 to disable. Default: 1001
+  --threads N           Max threads for internal parallelism (vsearch, SPOA).
+                        0=auto-detect, default=1 (safe for parallel
+                        workflows).
+  --enable-early-filter
+                        Enable early filtering to skip small clusters before
+                        variant phasing (improves performance for large
+                        datasets)
+
+Debugging:
+  --collect-discards    Write discarded reads (outliers and filtered clusters)
+                        to cluster_debug/{sample}-discards.fastq
   --log-level {DEBUG,INFO,WARNING,ERROR,CRITICAL}
-  --version             Show program's version number and exit
 ```
 
 ### speconsense-summarize Options
 
 ```
-usage: speconsense-summarize [-h] [--min-ric MIN_RIC] [--source SOURCE]
+usage: speconsense-summarize [-h] [--source SOURCE]
                              [--summary-dir SUMMARY_DIR]
-                             [--fasta-fields FASTA_FIELDS] [--merge-snp]
+                             [--fasta-fields FASTA_FIELDS] [--min-ric MIN_RIC]
+                             [--min-len MIN_LEN] [--max-len MAX_LEN]
+                             [--group-identity GROUP_IDENTITY] [--merge-snp]
                              [--merge-indel-length MERGE_INDEL_LENGTH]
                              [--merge-position-count MERGE_POSITION_COUNT]
                              [--merge-min-size-ratio MERGE_MIN_SIZE_RATIO]
                              [--min-merge-overlap MIN_MERGE_OVERLAP]
                              [--disable-homopolymer-equivalence]
-                             [--group-identity GROUP_IDENTITY]
-                             [--select-max-variants SELECT_MAX_VARIANTS]
                              [--select-max-groups SELECT_MAX_GROUPS]
+                             [--select-max-variants SELECT_MAX_VARIANTS]
                              [--select-strategy {size,diversity}]
+                             [--scale-threshold SCALE_THRESHOLD] [--threads N]
                              [--log-level {DEBUG,INFO,WARNING,ERROR,CRITICAL}]
+                             [--version] [-p NAME] [--list-profiles]
 
 Process Speconsense output with advanced variant handling.
 
 options:
   -h, --help            show this help message and exit
-  --min-ric MIN_RIC     Minimum Reads in Consensus (RiC) threshold (default: 3)
-  --source SOURCE       Source directory containing Speconsense output (default: clusters)
+  --log-level {DEBUG,INFO,WARNING,ERROR,CRITICAL}
+                        Logging level
+  --version             Show program's version number and exit
+  -p NAME, --profile NAME
+                        Load parameter profile (use --list-profiles to see
+                        available)
+  --list-profiles       List available profiles and exit
+
+Input/Output:
+  --source SOURCE       Source directory containing Speconsense output
+                        (default: clusters)
   --summary-dir SUMMARY_DIR
-                        Output directory for summary files (default: __Summary__)
+                        Output directory for summary files (default:
+                        __Summary__)
   --fasta-fields FASTA_FIELDS
-                        FASTA header fields to output. Can be: (1) a preset name (default,
-                        minimal, qc, full, id-only), (2) comma-separated field names (size,
-                        ric, length, rawric, rawlen, snp, ambig, rid, rid_min, primers, group,
-                        variant), or (3) a combination of presets and fields (e.g., minimal,qc
-                        or minimal,rid). Duplicates removed, order preserved left to right.
-                        Default: default
+                        FASTA header fields to output. Can be: (1) a preset
+                        name (default, minimal, qc, full, id-only), (2) comma-
+                        separated field names (size, ric, length, rawric, snp,
+                        rid, rid_min, primers, group, variant), or (3) a
+                        combination of presets and fields (e.g., minimal,qc or
+                        minimal,rid). Duplicates removed, order preserved left
+                        to right. Default: default
+
+Filtering:
+  --min-ric MIN_RIC     Minimum Reads in Consensus (RiC) threshold (default:
+                        3)
+  --min-len MIN_LEN     Minimum sequence length in bp (default: 0 = disabled)
+  --max-len MAX_LEN     Maximum sequence length in bp (default: 0 = disabled)
+
+Grouping:
+  --group-identity GROUP_IDENTITY, --variant-group-identity GROUP_IDENTITY
+                        Identity threshold for variant grouping using HAC
+                        (default: 0.9)
+
+Merging:
   --merge-snp           Enable SNP-based merging (default: True)
   --merge-indel-length MERGE_INDEL_LENGTH
                         Maximum length of individual indels allowed in merging
                         (default: 0 = disabled)
   --merge-position-count MERGE_POSITION_COUNT
-                        Maximum total SNP+indel positions allowed in merging (default: 2)
+                        Maximum total SNP+indel positions allowed in merging
+                        (default: 2)
   --merge-min-size-ratio MERGE_MIN_SIZE_RATIO
-                        Minimum size ratio (smaller/larger) for merging clusters
-                        (default: 0.1, 0 to disable)
+                        Minimum size ratio (smaller/larger) for merging
+                        clusters (default: 0.1, 0 to disable)
   --min-merge-overlap MIN_MERGE_OVERLAP
-                        Minimum overlap in bp for merging sequences of different lengths
-                        (default: 200, 0 to disable)
+                        Minimum overlap in bp for merging sequences of
+                        different lengths (default: 200, 0 to disable)
   --disable-homopolymer-equivalence
-                        Disable homopolymer equivalence in merging (treat AAA vs AAAA as
-                        different)
-  --group-identity GROUP_IDENTITY, --variant-group-identity GROUP_IDENTITY
-                        Identity threshold for variant grouping using HAC (default: 0.9)
-  --select-max-variants SELECT_MAX_VARIANTS, --max-variants SELECT_MAX_VARIANTS
-                        Maximum total variants to output per group (default: -1 = no limit)
+                        Disable homopolymer equivalence in merging (treat AAA
+                        vs AAAA as different)
+
+Selection:
   --select-max-groups SELECT_MAX_GROUPS, --max-groups SELECT_MAX_GROUPS
-                        Maximum number of groups to output per specimen (default: -1 = all
-                        groups)
+                        Maximum number of groups to output per specimen
+                        (default: -1 = all groups)
+  --select-max-variants SELECT_MAX_VARIANTS, --max-variants SELECT_MAX_VARIANTS
+                        Maximum total variants to output per group (default:
+                        -1 = no limit, 0 also means no limit)
   --select-strategy {size,diversity}, --variant-selection {size,diversity}
-                        Variant selection strategy: size or diversity (default: size)
-  --log-level {DEBUG,INFO,WARNING,ERROR,CRITICAL}
-                        Logging level
+                        Variant selection strategy: size or diversity
+                        (default: size)
+
+Performance:
+  --scale-threshold SCALE_THRESHOLD
+                        Sequence count threshold for scalable mode in HAC
+                        clustering (requires vsearch). Set to 0 to disable.
+                        Default: 1001
+  --threads N           Max threads for internal parallelism. 0=auto-detect
+                        (default), N>0 for explicit count.
 ```
 
 ## Specialized Workflows
