@@ -1,0 +1,24 @@
+# Speconsense Profile to simulate results of older bioinformatics pipelines.
+# Included for comparison only - not recommended for production usage
+
+speconsense-version: "0.7.*"
+description: "Simulate older bioinformatics"
+
+# Parameters for speconsense (clustering and consensus)
+speconsense:
+  algorithm: greedy
+  min-identity: 0.85
+  outlier-identity: 0.85
+  disable-position-phasing: True
+  disable-ambiguity-calling: True
+  min-cluster-ratio: 0.2
+  min-size: 5 
+  max-sample-size: 500       
+  presample: 500
+
+# Parameters for speconsense-summarize (post-processing)
+speconsense-summarize:
+  min-ric: 5
+  merge-snp: False
+  merge-position-count: 0
+  min-merge-overlap: 0

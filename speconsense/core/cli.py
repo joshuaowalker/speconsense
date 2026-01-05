@@ -51,8 +51,8 @@ def main():
                                  help="Minimum cluster size (default: 5, 0 to disable)")
     filtering_group.add_argument("--min-cluster-ratio", type=float, default=0.01,
                                  help="Minimum size ratio between a cluster and the largest cluster (default: 0.01, 0 to disable)")
-    filtering_group.add_argument("--max-sample-size", type=int, default=500,
-                                 help="Maximum cluster size for consensus (default: 500)")
+    filtering_group.add_argument("--max-sample-size", type=int, default=100,
+                                 help="Maximum cluster size for consensus (default: 100)")
     filtering_group.add_argument("--outlier-identity", type=float, default=None,
                                  help="Minimum read-to-consensus identity to keep a read (default: auto). "
                                       "Reads below this threshold are removed as outliers before final "

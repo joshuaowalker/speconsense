@@ -51,16 +51,32 @@ PROFILES_DIR = XDG_CONFIG_HOME / "speconsense" / "profiles"
 
 # Valid keys for each tool (for strict validation)
 VALID_SPECONSENSE_KEYS = {
-    "min-cluster-ratio",
+    # Clustering algorithm
+    "algorithm",
+    "min-identity",
+    "inflation",
+    "k-nearest-neighbors",
+    # Cluster filtering
     "min-size",
-    "min-variant-frequency",
-    "min-variant-count",
-    "min-ambiguity-frequency",
-    "min-ambiguity-count",
+    "min-cluster-ratio",
+    "outlier-identity",
+    # Sampling
     "max-sample-size",
     "presample",
-    "min-identity",
-    "algorithm",
+    # Variant calling
+    "min-variant-frequency",
+    "min-variant-count",
+    "disable-position-phasing",
+    # Ambiguity calling
+    "min-ambiguity-frequency",
+    "min-ambiguity-count",
+    "disable-ambiguity-calling",
+    # Merging
+    "disable-cluster-merging",
+    "disable-homopolymer-equivalence",
+    # Orientation
+    "orient-mode",
+    # Processing
     "scale-threshold",
     "threads",
     "enable-early-filter",
@@ -68,15 +84,25 @@ VALID_SPECONSENSE_KEYS = {
 }
 
 VALID_SUMMARIZE_KEYS = {
+    # Filtering
     "min-ric",
     "min-len",
     "max-len",
-    "merge-min-size-ratio",
-    "merge-threshold",
-    "merge-homopoly",
+    # Grouping
+    "group-identity",
     "hac-threshold",
+    # Merging
+    "merge-snp",
+    "merge-indel-length",
+    "merge-position-count",
+    "merge-min-size-ratio",
+    "min-merge-overlap",
+    "disable-homopolymer-equivalence",
+    # Selection
+    "select-max-groups",
     "select-max-variants",
     "select-strategy",
+    # Processing
     "scale-threshold",
     "threads",
 }

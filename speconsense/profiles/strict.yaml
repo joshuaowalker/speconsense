@@ -13,11 +13,17 @@ speconsense-version: "0.7.*"
 description: "High-precision settings for confident results"
 
 speconsense:
-  min-cluster-ratio: 0.05       # Filter more aggressively (5% minimum)
-  min-size: 10                  # Require strong cluster support
-  min-variant-frequency: 0.15   # Less sensitive to variants (15%)
+  min-identity: 0.95           # High initial clustering identity
+  outlier-identity: 0.98       # Discard reads with high mismatch
+  min-cluster-ratio: 0.05      # Filter more aggressively (5% minimum)
+  min-size: 10                 # Require strong cluster support
+  min-variant-frequency: 0.25  # Less sensitive to variants (25%)
+  disable-ambiguity-calling: true  # Don't call ambiguities
+  presample: 0                 # Use all reads
+  max-sample-size: 100         # 100 reads sufficient for high quality consensus
 
 speconsense-summarize:
-  min-ric: 5                    # Higher consensus threshold
-  merge-min-size-ratio: 0.2     # Conservative merging (20%)
-  select-max-variants: 3        # Limit variants per group
+  min-ric: 5                   # Higher consensus threshold
+  merge-snp: false             # Preserve all variants
+  merge-position-count: 0      # No merges
+  min-merge-overlap: 0         # Don't merge sequences of different lengths

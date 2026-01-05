@@ -44,7 +44,7 @@ class SpecimenClusterer:
                  inflation: float = 4.0,
                  min_size: int = 5,
                  min_cluster_ratio: float = 0.2,
-                 max_sample_size: int = 500,
+                 max_sample_size: int = 100,
                  presample_size: int = 1000,
                  k_nearest_neighbors: int = 20,
                  sample_name: str = "sample",

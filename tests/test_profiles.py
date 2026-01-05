@@ -57,9 +57,9 @@ class TestBundledProfiles:
     def test_list_bundled_profiles(self):
         profiles = list_bundled_profiles()
         assert "herbarium" in profiles
-        assert "specimens" in profiles
         assert "strict" in profiles
         assert "example" in profiles
+        assert "nostalgia" in profiles
 
     def test_get_bundled_profile_path(self):
         path = get_bundled_profile_path("herbarium")
@@ -261,8 +261,8 @@ class TestListProfiles:
     def test_list_includes_bundled(self):
         profiles = list_profiles()
         assert "herbarium" in profiles
-        assert "specimens" in profiles
         assert "strict" in profiles
+        assert "nostalgia" in profiles
 
     def test_list_includes_user_profiles(self):
         with tempfile.TemporaryDirectory() as tmpdir:
