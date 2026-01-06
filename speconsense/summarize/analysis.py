@@ -29,8 +29,10 @@ from .iupac import IUPAC_EQUIV
 
 # Maximum number of variants to evaluate for MSA-based merging
 # Beyond this limit, subset evaluation becomes computationally impractical
-# (2^N subsets to evaluate - 2^10 = 1024 is manageable, 2^20 = 1M+ is not)
-MAX_MSA_MERGE_VARIANTS = 10
+# (2^N subsets to evaluate - 2^8 = 256 is fast, 2^10 = 1024 is slower)
+# Reduced from 10 to 8 for better performance with minimal quality impact
+# since most merges involve only 2-3 variants in practice
+MAX_MSA_MERGE_VARIANTS = 8
 
 
 class ClusterQualityData(NamedTuple):
