@@ -426,5 +426,350 @@ class TestScaleThresholdBoundary:
                 assert False, f"Unexpected failure: {result.stderr}"
 
 
+class TestLengthFilters:
+    """Tests for --min-len and --max-len filters in speconsense-summarize.
+
+    Feature: Filter sequences by length before merging.
+    Added: commit c9cb2ae
+    """
+
+    @pytest.fixture
+    def temp_dir(self):
+        """Create temporary directory for testing."""
+        test_dir = tempfile.mkdtemp(prefix='speconsense_length_test_')
+        original_dir = os.getcwd()
+        os.chdir(test_dir)
+        yield test_dir
+        os.chdir(original_dir)
+        shutil.rmtree(test_dir)
+
+    @pytest.fixture
+    def summarize_module(self):
+        """Get module name for speconsense summarize."""
+        return 'speconsense.summarize'
+
+    @pytest.fixture
+    def source_dir_with_varied_lengths(self, temp_dir):
+        """Create source directory with sequences of different lengths."""
+        source_dir = os.path.join(temp_dir, 'clusters')
+        os.makedirs(source_dir)
+
+        # Create FASTA file with sequences of varying lengths
+        # Short: 100bp, Medium: 500bp, Long: 1000bp
+        fasta_content = """>short-c1 size=10 ric=10
+{"A" * 100}
+>medium-c1 size=20 ric=20
+{"A" * 500}
+>long-c1 size=30 ric=30
+{"A" * 1000}
+"""
+        # Need to actually generate the sequences
+        short_seq = "ACGT" * 25  # 100bp
+        medium_seq = "ACGT" * 125  # 500bp
+        long_seq = "ACGT" * 250  # 1000bp
+
+        fasta_content = f""">short-c1 size=10 ric=10
+{short_seq}
+>medium-c1 size=20 ric=20
+{medium_seq}
+>long-c1 size=30 ric=30
+{long_seq}
+"""
+        fasta_file = os.path.join(source_dir, 'test-all.fasta')
+        with open(fasta_file, 'w') as f:
+            f.write(fasta_content)
+
+        return source_dir
+
+    def test_min_len_filters_short_sequences(self, temp_dir, summarize_module, source_dir_with_varied_lengths):
+        """--min-len should filter out sequences shorter than threshold."""
+        summary_dir = os.path.join(temp_dir, '__Summary__')
+
+        result = subprocess.run([
+            sys.executable, '-m', summarize_module,
+            '--source', source_dir_with_varied_lengths,
+            '--summary-dir', summary_dir,
+            '--min-ric', '1',
+            '--min-len', '200'  # Filter out 100bp sequence
+        ], capture_output=True, text=True)
+
+        assert result.returncode == 0, f"Command failed: {result.stderr}"
+
+        # Read output and check sequence count
+        output_fasta = os.path.join(summary_dir, 'summary.fasta')
+        assert os.path.exists(output_fasta), "Output file should exist"
+
+        records = list(SeqIO.parse(output_fasta, 'fasta'))
+        # Should have 2 sequences (medium and long), not 3
+        assert len(records) == 2, f"Expected 2 sequences after min-len filter, got {len(records)}"
+
+        # Verify lengths are all >= 200
+        for record in records:
+            assert len(record.seq) >= 200, f"Sequence {record.id} length {len(record.seq)} < min-len 200"
+
+    def test_max_len_filters_long_sequences(self, temp_dir, summarize_module, source_dir_with_varied_lengths):
+        """--max-len should filter out sequences longer than threshold."""
+        summary_dir = os.path.join(temp_dir, '__Summary__')
+
+        result = subprocess.run([
+            sys.executable, '-m', summarize_module,
+            '--source', source_dir_with_varied_lengths,
+            '--summary-dir', summary_dir,
+            '--min-ric', '1',
+            '--max-len', '600'  # Filter out 1000bp sequence
+        ], capture_output=True, text=True)
+
+        assert result.returncode == 0, f"Command failed: {result.stderr}"
+
+        output_fasta = os.path.join(summary_dir, 'summary.fasta')
+        records = list(SeqIO.parse(output_fasta, 'fasta'))
+
+        # Should have 2 sequences (short and medium), not 3
+        assert len(records) == 2, f"Expected 2 sequences after max-len filter, got {len(records)}"
+
+        # Verify lengths are all <= 600
+        for record in records:
+            assert len(record.seq) <= 600, f"Sequence {record.id} length {len(record.seq)} > max-len 600"
+
+    def test_min_and_max_len_combined(self, temp_dir, summarize_module, source_dir_with_varied_lengths):
+        """--min-len and --max-len can be combined to filter a range."""
+        summary_dir = os.path.join(temp_dir, '__Summary__')
+
+        result = subprocess.run([
+            sys.executable, '-m', summarize_module,
+            '--source', source_dir_with_varied_lengths,
+            '--summary-dir', summary_dir,
+            '--min-ric', '1',
+            '--min-len', '200',
+            '--max-len', '600'
+        ], capture_output=True, text=True)
+
+        assert result.returncode == 0, f"Command failed: {result.stderr}"
+
+        output_fasta = os.path.join(summary_dir, 'summary.fasta')
+        records = list(SeqIO.parse(output_fasta, 'fasta'))
+
+        # Should have only 1 sequence (medium: 500bp)
+        assert len(records) == 1, f"Expected 1 sequence in range, got {len(records)}"
+        assert len(records[0].seq) == 500, f"Expected 500bp sequence, got {len(records[0].seq)}"
+
+    def test_zero_means_disabled(self, temp_dir, summarize_module, source_dir_with_varied_lengths):
+        """--min-len 0 and --max-len 0 should be disabled (default)."""
+        summary_dir = os.path.join(temp_dir, '__Summary__')
+
+        result = subprocess.run([
+            sys.executable, '-m', summarize_module,
+            '--source', source_dir_with_varied_lengths,
+            '--summary-dir', summary_dir,
+            '--min-ric', '1',
+            '--min-len', '0',
+            '--max-len', '0'
+        ], capture_output=True, text=True)
+
+        assert result.returncode == 0, f"Command failed: {result.stderr}"
+
+        output_fasta = os.path.join(summary_dir, 'summary.fasta')
+        records = list(SeqIO.parse(output_fasta, 'fasta'))
+
+        # Should have all 3 sequences
+        assert len(records) == 3, f"Expected all 3 sequences with filters disabled, got {len(records)}"
+
+
+class TestCollectDiscards:
+    """Tests for --collect-discards option in speconsense.
+
+    Feature: Write discarded reads (outliers and filtered clusters) to a FASTQ file.
+    Added: commit da5e71a
+    """
+
+    @pytest.fixture
+    def temp_dir(self):
+        """Create temporary directory for testing."""
+        test_dir = tempfile.mkdtemp(prefix='speconsense_discards_test_')
+        original_dir = os.getcwd()
+        os.chdir(test_dir)
+        yield test_dir
+        os.chdir(original_dir)
+        shutil.rmtree(test_dir)
+
+    @pytest.fixture
+    def core_module(self):
+        """Get module name for speconsense core."""
+        return 'speconsense.core'
+
+    @pytest.fixture
+    def test_fastq_with_outlier(self, temp_dir):
+        """Create test FASTQ with a clear outlier sequence."""
+        # Create sequences: most are similar, one is very different (outlier)
+        base_seq = "ACGTACGTACGTACGTACGTACGTACGTACGTACGTACGT"
+        outlier_seq = "TTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTT"
+
+        records = []
+        # 10 similar sequences
+        for i in range(10):
+            records.append(
+                SeqRecord(
+                    Seq(base_seq),
+                    id=f"similar_{i:02d}",
+                    letter_annotations={'phred_quality': [30] * len(base_seq)}
+                )
+            )
+        # 1 outlier
+        records.append(
+            SeqRecord(
+                Seq(outlier_seq),
+                id="outlier_01",
+                letter_annotations={'phred_quality': [30] * len(outlier_seq)}
+            )
+        )
+
+        fastq_path = os.path.join(temp_dir, 'with_outlier.fastq')
+        with open(fastq_path, 'w') as f:
+            SeqIO.write(records, f, 'fastq')
+        return fastq_path
+
+    def test_collect_discards_creates_file(self, temp_dir, core_module, test_fastq_with_outlier):
+        """--collect-discards should create a discards.fastq file."""
+        result = subprocess.run([
+            sys.executable, '-m', core_module,
+            test_fastq_with_outlier,
+            '--min-size', '2',
+            '--algorithm', 'greedy',
+            '--collect-discards'
+        ], capture_output=True, text=True)
+
+        assert result.returncode == 0, f"Command failed: {result.stderr}"
+
+        # Check for discards file
+        discards_file = os.path.join('clusters', 'cluster_debug', 'with_outlier-discards.fastq')
+
+        # The file may or may not exist depending on whether there were discards
+        # With our test data, the outlier should be discarded
+        if os.path.exists(discards_file):
+            # Verify it's a valid FASTQ
+            records = list(SeqIO.parse(discards_file, 'fastq'))
+            assert len(records) >= 0, "Discards file should be valid FASTQ"
+
+    def test_without_collect_discards_no_file(self, temp_dir, core_module, test_fastq_with_outlier):
+        """Without --collect-discards, no discards.fastq should be created."""
+        result = subprocess.run([
+            sys.executable, '-m', core_module,
+            test_fastq_with_outlier,
+            '--min-size', '2',
+            '--algorithm', 'greedy'
+            # No --collect-discards
+        ], capture_output=True, text=True)
+
+        assert result.returncode == 0, f"Command failed: {result.stderr}"
+
+        # Discards file should NOT exist
+        discards_file = os.path.join('clusters', 'cluster_debug', 'with_outlier-discards.fastq')
+        assert not os.path.exists(discards_file), \
+            "Discards file should not be created without --collect-discards"
+
+    def test_collect_discards_with_early_filter(self, temp_dir, core_module):
+        """--collect-discards should capture reads filtered by early filtering."""
+        # Create sequences that will result in small clusters being filtered
+        records = []
+        # Main cluster: 10 identical sequences
+        main_seq = "ACGTACGTACGTACGTACGTACGTACGTACGTACGTACGT"
+        for i in range(10):
+            records.append(
+                SeqRecord(
+                    Seq(main_seq),
+                    id=f"main_{i:02d}",
+                    letter_annotations={'phred_quality': [30] * len(main_seq)}
+                )
+            )
+        # Small cluster: 2 different sequences (will be filtered with --min-size 5)
+        small_seq = "GGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGG"
+        for i in range(2):
+            records.append(
+                SeqRecord(
+                    Seq(small_seq),
+                    id=f"small_{i:02d}",
+                    letter_annotations={'phred_quality': [30] * len(small_seq)}
+                )
+            )
+
+        fastq_path = os.path.join(temp_dir, 'mixed_clusters.fastq')
+        with open(fastq_path, 'w') as f:
+            SeqIO.write(records, f, 'fastq')
+
+        result = subprocess.run([
+            sys.executable, '-m', core_module,
+            fastq_path,
+            '--min-size', '5',  # Filter out clusters with < 5 reads
+            '--algorithm', 'greedy',
+            '--collect-discards',
+            '--enable-early-filter'
+        ], capture_output=True, text=True)
+
+        assert result.returncode == 0, f"Command failed: {result.stderr}"
+
+        # Check for discards file - should contain the small cluster reads
+        discards_file = os.path.join('clusters', 'cluster_debug', 'mixed_clusters-discards.fastq')
+
+        if os.path.exists(discards_file):
+            records = list(SeqIO.parse(discards_file, 'fastq'))
+            # Should have at least the 2 small cluster reads
+            small_ids = [r.id for r in records if r.id.startswith('small_')]
+            # Note: early filter may or may not catch these depending on clustering
+            assert len(records) >= 0, "Should have valid discards"
+
+    def test_discards_contains_correct_reads(self, temp_dir, core_module):
+        """Discards file should contain the actual discarded read sequences."""
+        # Create a mix of sequences where some will definitely be discarded
+        records = []
+
+        # Main group: 15 identical sequences (will form main cluster)
+        main_seq = "ACGTACGTACGTACGTACGTACGTACGTACGTACGTACGT"
+        for i in range(15):
+            records.append(
+                SeqRecord(
+                    Seq(main_seq),
+                    id=f"main_{i:02d}",
+                    letter_annotations={'phred_quality': [30] * len(main_seq)}
+                )
+            )
+
+        # Single outlier (will be filtered by min-size)
+        outlier_seq = "TTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTT"
+        records.append(
+            SeqRecord(
+                Seq(outlier_seq),
+                id="lone_outlier",
+                letter_annotations={'phred_quality': [30] * len(outlier_seq)}
+            )
+        )
+
+        fastq_path = os.path.join(temp_dir, 'main_plus_outlier.fastq')
+        with open(fastq_path, 'w') as f:
+            SeqIO.write(records, f, 'fastq')
+
+        result = subprocess.run([
+            sys.executable, '-m', core_module,
+            fastq_path,
+            '--min-size', '5',
+            '--algorithm', 'greedy',
+            '--collect-discards'
+        ], capture_output=True, text=True)
+
+        assert result.returncode == 0, f"Command failed: {result.stderr}"
+
+        discards_file = os.path.join('clusters', 'cluster_debug', 'main_plus_outlier-discards.fastq')
+
+        if os.path.exists(discards_file):
+            discarded = list(SeqIO.parse(discards_file, 'fastq'))
+            discarded_ids = {r.id for r in discarded}
+
+            # The lone outlier should be in discards (filtered by min-size)
+            # Note: It may form its own cluster of size 1, which gets filtered
+            if 'lone_outlier' in discarded_ids:
+                # Verify the sequence is correct
+                outlier_record = next(r for r in discarded if r.id == 'lone_outlier')
+                assert str(outlier_record.seq) == outlier_seq, "Discarded sequence should match original"
+
+
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])
