@@ -19,6 +19,4 @@ speconsense:
 # Parameters for speconsense-summarize (post-processing)
 speconsense-summarize:
   min-ric: 5
-  merge-snp: False
-  merge-position-count: 0
-  min-merge-overlap: 0
+  disable-merging: true        # Skip merging entirely

@@ -24,6 +24,4 @@ speconsense:
 
 speconsense-summarize:
   min-ric: 5                   # Higher consensus threshold
-  merge-snp: false             # Preserve all variants
-  merge-position-count: 0      # No merges
-  min-merge-overlap: 0         # Don't merge sequences of different lengths
+  disable-merging: true        # Skip merging entirely - preserve all variants

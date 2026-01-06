@@ -92,6 +92,8 @@ VALID_SUMMARIZE_KEYS = {
     "group-identity",
     "hac-threshold",
     # Merging
+    "disable-merging",
+    "merge-effort",
     "merge-snp",
     "merge-indel-length",
     "merge-position-count",

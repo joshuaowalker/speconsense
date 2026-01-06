@@ -79,6 +79,8 @@ speconsense-summarize:
   # hac-threshold: 0.05           # HAC distance threshold (1 - identity)
 
   # --- MSA-based Merging ---
+  # disable-merging: false        # Set true to skip all merging (fastest)
+  # merge-effort: balanced        # Effort level: fast, balanced, thorough, or 6-14
   # merge-snp: true               # Enable SNP-based merging
   # merge-indel-length: 3         # Max indel length to merge (0 = disabled)
   # merge-position-count: 1       # Max variant positions to merge

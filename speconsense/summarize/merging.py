@@ -16,7 +16,8 @@ from .analysis import (
     run_spoa_msa,
     analyze_msa_columns,
     analyze_msa_columns_overlap_aware,
-    MAX_MSA_MERGE_VARIANTS,
+    MAX_MSA_MERGE_VARIANTS,  # Kept for backward compatibility
+    compute_merge_batch_size,
 )
 
 
@@ -371,8 +372,12 @@ def merge_group_with_msa(variants: List[ConsensusInfo], args) -> Tuple[List[Cons
     if len(variants) == 1:
         return variants, {}, 0, []
 
+    # Compute batch size based on effort and group size
+    effort = getattr(args, 'merge_effort_value', 10)  # Default to balanced
+    batch_size = compute_merge_batch_size(len(variants), effort)
+
     # Track if this group is potentially suboptimal (too many variants for global optimum)
-    potentially_suboptimal = 1 if len(variants) > MAX_MSA_MERGE_VARIANTS else 0
+    potentially_suboptimal = 1 if len(variants) > batch_size else 0
 
     all_traceability = {}
     overlap_merges = []  # Track overlap merge events for quality reporting
@@ -391,8 +396,8 @@ def merge_group_with_msa(variants: List[ConsensusInfo], args) -> Tuple[List[Cons
         merges_this_iteration = 0
 
         while remaining_variants:
-            # Take up to MAX_MSA_MERGE_VARIANTS candidates
-            candidates = remaining_variants[:MAX_MSA_MERGE_VARIANTS]
+            # Take up to batch_size candidates (dynamically computed based on effort and group size)
+            candidates = remaining_variants[:batch_size]
 
             # Apply size ratio filter if enabled (relative to largest in batch)
             if args.merge_min_size_ratio > 0:
@@ -411,9 +416,11 @@ def merge_group_with_msa(variants: List[ConsensusInfo], args) -> Tuple[List[Cons
                 continue
 
             if iteration > 1:
-                logging.debug(f"Iteration {iteration}: Evaluating {len(candidates)} variants for merging")
+                logging.debug(f"Iteration {iteration}: Evaluating {len(candidates)} variants "
+                              f"(batch_size={batch_size}) for merging")
             else:
-                logging.debug(f"Evaluating {len(candidates)} variants for merging (exhaustive subset search)")
+                logging.debug(f"Evaluating {len(candidates)} variants (batch_size={batch_size}, "
+                              f"effort={effort}) for merging (exhaustive subset search)")
 
             # Determine if overlap mode should be used for this merge batch
             # Same primers -> use global mode (chimeras have same primers but different lengths)

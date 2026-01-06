@@ -36,7 +36,44 @@ from .io import (
 )
 from .clustering import perform_hac_clustering, select_variants
 from .merging import merge_group_with_msa
-from .analysis import MAX_MSA_MERGE_VARIANTS
+from .analysis import MAX_MSA_MERGE_VARIANTS, MIN_MERGE_BATCH, MAX_MERGE_BATCH
+
+
+# Merge effort configuration
+MERGE_EFFORT_PRESETS = {
+    'fast': 8,
+    'balanced': 10,
+    'thorough': 12,
+}
+
+
+def parse_merge_effort(spec: str) -> int:
+    """Parse merge effort specification into numeric value.
+
+    Args:
+        spec: Preset name (fast, balanced, thorough) or numeric 6-14
+
+    Returns:
+        Effort level as integer
+
+    Raises:
+        ValueError: If spec is invalid
+    """
+    spec = spec.strip().lower()
+    if spec in MERGE_EFFORT_PRESETS:
+        return MERGE_EFFORT_PRESETS[spec]
+    try:
+        value = int(spec)
+        if 6 <= value <= 14:
+            return value
+        raise ValueError(f"Numeric merge-effort must be 6-14, got {value}")
+    except ValueError as e:
+        if "invalid literal" in str(e):
+            raise ValueError(
+                f"Unknown merge-effort: '{spec}'. "
+                f"Use preset (fast, balanced, thorough) or numeric 6-14"
+            )
+        raise
 
 
 def parse_arguments():
@@ -74,6 +111,8 @@ def parse_arguments():
 
     # Merging group
     merging_group = parser.add_argument_group("Merging")
+    merging_group.add_argument("--disable-merging", action="store_true",
+                               help="Disable all variant merging (skip MSA-based merge evaluation entirely)")
     merging_group.add_argument("--merge-snp", action=argparse.BooleanOptionalAction, default=True,
                                help="Enable SNP-based merging (default: True, use --no-merge-snp to disable)")
     merging_group.add_argument("--merge-indel-length", type=int, default=0,
@@ -86,6 +125,10 @@ def parse_arguments():
                                help="Minimum overlap in bp for merging sequences of different lengths (default: 200, 0 to disable)")
     merging_group.add_argument("--disable-homopolymer-equivalence", action="store_true",
                                help="Disable homopolymer equivalence in merging (treat AAA vs AAAA as different)")
+    merging_group.add_argument("--merge-effort", type=str, default="balanced", metavar="LEVEL",
+                               help="Merging effort level: fast (8), balanced (10), thorough (12), "
+                                    "or numeric 6-14. Higher values allow larger batch sizes for "
+                                    "exhaustive subset search. Default: balanced")
 
     # Backward compatibility: support old --snp-merge-limit parameter
     parser.add_argument("--snp-merge-limit", type=int, dest="_snp_merge_limit_deprecated",
@@ -261,12 +304,18 @@ def process_single_specimen(file_consensuses: List[ConsensusInfo],
     total_limited_count = 0
     all_overlap_merges = []
 
-    for group_id, group_members in variant_groups.items():
-        merged, traceability, limited_count, overlap_merges = merge_group_with_msa(group_members, args)
-        merged_groups[group_id] = merged
-        all_merge_traceability.update(traceability)
-        total_limited_count += limited_count
-        all_overlap_merges.extend(overlap_merges)
+    if args.disable_merging:
+        # Skip merging entirely - pass variants through unchanged
+        logging.info("Merging disabled - skipping MSA-based merge evaluation")
+        for group_id, group_members in variant_groups.items():
+            merged_groups[group_id] = group_members
+    else:
+        for group_id, group_members in variant_groups.items():
+            merged, traceability, limited_count, overlap_merges = merge_group_with_msa(group_members, args)
+            merged_groups[group_id] = merged
+            all_merge_traceability.update(traceability)
+            total_limited_count += limited_count
+            all_overlap_merges.extend(overlap_merges)
 
     # Phase 3: Select representative variants for each group in this specimen
     final_consensus = []
@@ -316,6 +365,13 @@ def main():
         logging.error(f"Invalid --fasta-fields specification: {e}")
         sys.exit(1)
 
+    # Parse merge effort specification
+    try:
+        args.merge_effort_value = parse_merge_effort(args.merge_effort)
+    except ValueError as e:
+        logging.error(f"Invalid --merge-effort: {e}")
+        sys.exit(1)
+
     # Set up logging with temporary log file
     temp_log_file = tempfile.NamedTemporaryFile(mode='w', suffix='.log', delete=False)
     temp_log_file.close()
@@ -341,6 +397,7 @@ def main():
     logging.info(f"  --merge-min-size-ratio: {args.merge_min_size_ratio}")
     logging.info(f"  --disable-homopolymer-equivalence: {args.disable_homopolymer_equivalence}")
     logging.info(f"  --min-merge-overlap: {args.min_merge_overlap}")
+    logging.info(f"  --merge-effort: {args.merge_effort} ({args.merge_effort_value})")
     logging.info(f"  --group-identity: {args.group_identity}")
     logging.info(f"  --select-max-variants: {args.select_max_variants}")
     logging.info(f"  --select-max-groups: {args.select_max_groups}")

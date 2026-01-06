@@ -27,12 +27,38 @@ from speconsense.msa import (
 from .iupac import IUPAC_EQUIV
 
 
-# Maximum number of variants to evaluate for MSA-based merging
-# Beyond this limit, subset evaluation becomes computationally impractical
-# (2^N subsets to evaluate - 2^8 = 256 is fast, 2^10 = 1024 is slower)
-# Reduced from 10 to 8 for better performance with minimal quality impact
-# since most merges involve only 2-3 variants in practice
+# Maximum number of variants to evaluate for MSA-based merging (legacy constant)
+# Batch size is now dynamically computed based on --merge-effort and group size.
+# This constant is kept for backward compatibility and as the default MAX_MERGE_BATCH.
 MAX_MSA_MERGE_VARIANTS = 8
+
+# Merge effort batch size limits
+MIN_MERGE_BATCH = 4
+MAX_MERGE_BATCH = 8
+
+
+def compute_merge_batch_size(group_size: int, effort: int) -> int:
+    """Compute batch size for a group based on effort level.
+
+    Uses formula: B = E + 1 - log2(V), clamped to [MIN_MERGE_BATCH, MAX_MERGE_BATCH]
+    This keeps expected evaluations near 2^E per group.
+
+    Args:
+        group_size: Number of variants in the HAC group
+        effort: Merge effort level (6-14, default 10)
+
+    Returns:
+        Batch size between MIN_MERGE_BATCH and MAX_MERGE_BATCH
+    """
+    import math
+
+    if group_size <= 1:
+        return 1
+
+    log_v = int(math.log2(group_size))
+    batch = effort + 1 - log_v
+
+    return max(MIN_MERGE_BATCH, min(MAX_MERGE_BATCH, batch))
 
 
 class ClusterQualityData(NamedTuple):
