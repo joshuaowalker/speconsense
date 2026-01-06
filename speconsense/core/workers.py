@@ -481,6 +481,8 @@ def _process_cluster_worker(args) -> Tuple[List[Dict], Set[str]]:
 
     if result is None:
         logging.warning(f"Initial cluster {initial_idx}: Failed to generate consensus, skipping")
+        # Track these reads as discarded since we couldn't generate consensus
+        discarded_ids.update(cluster_ids)
         return subclusters, discarded_ids
 
     consensus = result.consensus

@@ -977,21 +977,32 @@ class SpecimenClusterer:
         """
         # Filter by absolute size
         large_clusters = [c for c in subclusters if len(c['read_ids']) >= self.min_size]
+        small_clusters = [c for c in subclusters if len(c['read_ids']) < self.min_size]
 
-        if len(large_clusters) < len(subclusters):
-            filtered_count = len(subclusters) - len(large_clusters)
+        if small_clusters:
+            filtered_count = len(small_clusters)
             logging.info(f"Filtered {filtered_count} clusters below minimum size ({self.min_size})")
+            # Track discarded reads from size-filtered clusters
+            for cluster in small_clusters:
+                self.discarded_read_ids.update(cluster['read_ids'])
 
         # Filter by relative size ratio
         if large_clusters and self.min_cluster_ratio > 0:
             largest_size = max(len(c['read_ids']) for c in large_clusters)
             before_ratio_filter = len(large_clusters)
-            large_clusters = [c for c in large_clusters
-                             if len(c['read_ids']) / largest_size >= self.min_cluster_ratio]
+            passing_ratio = [c for c in large_clusters
+                            if len(c['read_ids']) / largest_size >= self.min_cluster_ratio]
+            failing_ratio = [c for c in large_clusters
+                            if len(c['read_ids']) / largest_size < self.min_cluster_ratio]
 
-            if len(large_clusters) < before_ratio_filter:
-                filtered_count = before_ratio_filter - len(large_clusters)
+            if failing_ratio:
+                filtered_count = len(failing_ratio)
                 logging.info(f"Filtered {filtered_count} clusters below minimum ratio ({self.min_cluster_ratio})")
+                # Track discarded reads from ratio-filtered clusters
+                for cluster in failing_ratio:
+                    self.discarded_read_ids.update(cluster['read_ids'])
+
+            large_clusters = passing_ratio
 
         # Sort by size and renumber as c1, c2, c3...
         large_clusters.sort(key=lambda c: len(c['read_ids']), reverse=True)
@@ -1110,7 +1121,9 @@ class SpecimenClusterer:
 
         Discards include:
         - Outlier reads removed during variant phasing
-        - Reads from clusters filtered out by early filtering
+        - Reads from clusters filtered out by early filtering (Phase 2b)
+        - Reads from clusters filtered out by size/ratio thresholds (Phase 5)
+        - Reads filtered during orientation (when --orient-mode filter-failed)
 
         Output: cluster_debug/{sample_name}-discards.fastq
         """

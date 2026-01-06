@@ -771,5 +771,341 @@ class TestCollectDiscards:
                 assert str(outlier_record.seq) == outlier_seq, "Discarded sequence should match original"
 
 
+class TestDiscardTrackingCompleteness:
+    """Tests for complete discard tracking across all filtering steps.
+
+    These tests verify that --collect-discards captures ALL filtered reads,
+    not just some. The invariant is: (final output reads) + (discarded reads) = (input reads).
+
+    Gaps identified:
+    - Phase 5 size filtering: reads silently lost (clusterer.py:969-1008)
+    - Orientation filtering: reads deleted without tracking (cli.py:287-293)
+    - SPOA failures: reads lost when consensus fails (workers.py:482-484)
+    """
+
+    @pytest.fixture
+    def temp_dir(self):
+        """Create temporary directory for testing."""
+        test_dir = tempfile.mkdtemp(prefix='speconsense_discard_complete_test_')
+        original_dir = os.getcwd()
+        os.chdir(test_dir)
+        yield test_dir
+        os.chdir(original_dir)
+        shutil.rmtree(test_dir)
+
+    @pytest.fixture
+    def core_module(self):
+        """Get module name for speconsense core."""
+        return 'speconsense.core'
+
+    def count_reads_in_cluster_files(self, clusters_dir: str) -> set:
+        """Count unique read IDs in cluster debug files (reads that made it to output)."""
+        read_ids = set()
+        debug_dir = os.path.join(clusters_dir, 'cluster_debug')
+
+        if not os.path.exists(debug_dir):
+            return read_ids
+
+        for filename in os.listdir(debug_dir):
+            if filename.endswith('-reads.fastq') or filename.endswith('-reads.fasta'):
+                filepath = os.path.join(debug_dir, filename)
+                for record in SeqIO.parse(filepath, 'fastq' if filename.endswith('.fastq') else 'fasta'):
+                    read_ids.add(record.id)
+
+        return read_ids
+
+    def count_discarded_reads(self, clusters_dir: str, sample_name: str) -> set:
+        """Get read IDs from discards file."""
+        discards_file = os.path.join(clusters_dir, 'cluster_debug', f'{sample_name}-discards.fastq')
+
+        if not os.path.exists(discards_file):
+            return set()
+
+        return {record.id for record in SeqIO.parse(discards_file, 'fastq')}
+
+    def test_read_accounting_with_size_filtering(self, temp_dir, core_module):
+        """Verify all reads accounted for when clusters are filtered by size.
+
+        This test creates a scenario where some clusters will be filtered by
+        --min-size. The filtered reads should appear in the discards file.
+
+        Expected behavior: input_reads == output_reads + discarded_reads
+        Current behavior (BUG): Phase 5 filtered reads are lost
+        """
+        # Create input: 15 reads for main cluster, 2 reads for small cluster
+        main_seq = "ACGTACGTACGTACGTACGTACGTACGTACGTACGTACGT"
+        small_seq = "TTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTT"
+
+        records = []
+        # Main cluster: 15 identical reads
+        for i in range(15):
+            records.append(
+                SeqRecord(
+                    Seq(main_seq),
+                    id=f"main_{i:02d}",
+                    letter_annotations={'phred_quality': [30] * len(main_seq)}
+                )
+            )
+        # Small cluster: 2 identical reads (will be filtered by --min-size 5)
+        for i in range(2):
+            records.append(
+                SeqRecord(
+                    Seq(small_seq),
+                    id=f"small_{i:02d}",
+                    letter_annotations={'phred_quality': [30] * len(small_seq)}
+                )
+            )
+
+        input_count = len(records)
+        input_ids = {r.id for r in records}
+
+        fastq_path = os.path.join(temp_dir, 'size_filter_test.fastq')
+        with open(fastq_path, 'w') as f:
+            SeqIO.write(records, f, 'fastq')
+
+        result = subprocess.run([
+            sys.executable, '-m', core_module,
+            fastq_path,
+            '--min-size', '5',  # Filter clusters < 5 reads
+            '--algorithm', 'greedy',
+            '--collect-discards'
+        ], capture_output=True, text=True)
+
+        assert result.returncode == 0, f"Command failed: {result.stderr}"
+
+        # Count reads in final output (cluster debug read files)
+        output_ids = self.count_reads_in_cluster_files('clusters')
+
+        # Count discarded reads
+        discarded_ids = self.count_discarded_reads('clusters', 'size_filter_test')
+
+        # Verify accounting: all input reads should be either in output or discards
+        accounted_ids = output_ids | discarded_ids
+        missing_ids = input_ids - accounted_ids
+        extra_ids = accounted_ids - input_ids
+
+        assert len(missing_ids) == 0, \
+            f"Missing reads not in output or discards: {missing_ids}"
+        assert len(extra_ids) == 0, \
+            f"Extra reads appeared from nowhere: {extra_ids}"
+        assert len(accounted_ids) == input_count, \
+            f"Read accounting mismatch: input={input_count}, output={len(output_ids)}, discards={len(discarded_ids)}"
+
+        # Specifically verify the small cluster reads are in discards
+        small_ids = {f"small_{i:02d}" for i in range(2)}
+        assert small_ids.issubset(discarded_ids), \
+            f"Small cluster reads should be in discards: expected {small_ids}, got discards={discarded_ids}"
+
+    def test_read_accounting_with_ratio_filtering(self, temp_dir, core_module):
+        """Verify reads filtered by --min-cluster-ratio appear in discards.
+
+        Creates a large cluster (100 reads) and small cluster (5 reads).
+        With --min-cluster-ratio 0.1, the small cluster (5% of large) should be filtered.
+        """
+        main_seq = "ACGTACGTACGTACGTACGTACGTACGTACGTACGTACGT"
+        small_seq = "GGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGG"
+
+        records = []
+        # Large cluster: 100 reads
+        for i in range(100):
+            records.append(
+                SeqRecord(
+                    Seq(main_seq),
+                    id=f"large_{i:03d}",
+                    letter_annotations={'phred_quality': [30] * len(main_seq)}
+                )
+            )
+        # Small cluster: 5 reads (5% of large, below 10% ratio threshold)
+        for i in range(5):
+            records.append(
+                SeqRecord(
+                    Seq(small_seq),
+                    id=f"ratio_filtered_{i:02d}",
+                    letter_annotations={'phred_quality': [30] * len(small_seq)}
+                )
+            )
+
+        input_count = len(records)
+        input_ids = {r.id for r in records}
+
+        fastq_path = os.path.join(temp_dir, 'ratio_filter_test.fastq')
+        with open(fastq_path, 'w') as f:
+            SeqIO.write(records, f, 'fastq')
+
+        result = subprocess.run([
+            sys.executable, '-m', core_module,
+            fastq_path,
+            '--min-size', '3',
+            '--min-cluster-ratio', '0.10',  # Clusters < 10% of largest are filtered
+            '--algorithm', 'greedy',
+            '--collect-discards'
+        ], capture_output=True, text=True)
+
+        assert result.returncode == 0, f"Command failed: {result.stderr}"
+
+        output_ids = self.count_reads_in_cluster_files('clusters')
+        discarded_ids = self.count_discarded_reads('clusters', 'ratio_filter_test')
+
+        accounted_ids = output_ids | discarded_ids
+        missing_ids = input_ids - accounted_ids
+
+        assert len(missing_ids) == 0, \
+            f"Missing reads not in output or discards: {missing_ids}"
+
+        # The ratio-filtered reads should be in discards
+        ratio_filtered_ids = {f"ratio_filtered_{i:02d}" for i in range(5)}
+        assert ratio_filtered_ids.issubset(discarded_ids), \
+            f"Ratio-filtered reads should be in discards: expected {ratio_filtered_ids}, got discards={discarded_ids}"
+
+    def test_read_accounting_with_orientation_filtering(self, temp_dir, core_module):
+        """Verify reads filtered by orientation appear in discards.
+
+        Creates reads where some cannot be oriented (no primer match).
+        With --orient-mode filter-failed, unoriented reads should be discarded.
+        """
+        # Forward primer at start
+        forward_primer = "ACGTACGTACGT"
+        # Reverse primer at end (reverse complement would be at end)
+        reverse_primer = "TGCATGCATGCA"
+
+        good_seq = forward_primer + "NNNNNNNNNNNNNNNNNNNNNNNN" + reverse_primer
+        # Bad sequence: no primers, cannot be oriented
+        bad_seq = "GGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGG"
+
+        records = []
+        # Good reads: have primers, can be oriented
+        for i in range(10):
+            records.append(
+                SeqRecord(
+                    Seq(good_seq),
+                    id=f"orientable_{i:02d}",
+                    letter_annotations={'phred_quality': [30] * len(good_seq)}
+                )
+            )
+        # Bad reads: no primers, will fail orientation
+        for i in range(3):
+            records.append(
+                SeqRecord(
+                    Seq(bad_seq),
+                    id=f"unorientable_{i:02d}",
+                    letter_annotations={'phred_quality': [30] * len(bad_seq)}
+                )
+            )
+
+        input_count = len(records)
+        input_ids = {r.id for r in records}
+
+        fastq_path = os.path.join(temp_dir, 'orient_filter_test.fastq')
+        with open(fastq_path, 'w') as f:
+            SeqIO.write(records, f, 'fastq')
+
+        # Create primers file with position hints
+        primers_content = f""">forward_primer position=forward
+{forward_primer}
+>reverse_primer position=reverse
+{reverse_primer}
+"""
+        primers_path = os.path.join(temp_dir, 'primers.fasta')
+        with open(primers_path, 'w') as f:
+            f.write(primers_content)
+
+        result = subprocess.run([
+            sys.executable, '-m', core_module,
+            fastq_path,
+            '--primers', primers_path,
+            '--orient-mode', 'filter-failed',  # Filter reads that can't be oriented
+            '--min-size', '0',
+            '--algorithm', 'greedy',
+            '--collect-discards'
+        ], capture_output=True, text=True)
+
+        assert result.returncode == 0, f"Command failed: {result.stderr}"
+
+        output_ids = self.count_reads_in_cluster_files('clusters')
+        discarded_ids = self.count_discarded_reads('clusters', 'orient_filter_test')
+
+        accounted_ids = output_ids | discarded_ids
+        missing_ids = input_ids - accounted_ids
+
+        assert len(missing_ids) == 0, \
+            f"Missing reads not in output or discards: {missing_ids}"
+
+        # The unorientable reads should be in discards
+        unorientable_ids = {f"unorientable_{i:02d}" for i in range(3)}
+        assert unorientable_ids.issubset(discarded_ids), \
+            f"Unorientable reads should be in discards: expected {unorientable_ids}, got discards={discarded_ids}"
+
+    def test_total_read_accounting_complex_scenario(self, temp_dir, core_module):
+        """Comprehensive test: all input reads must be in either output or discards.
+
+        This test creates a complex scenario with multiple filtering opportunities
+        and verifies complete read accounting.
+        """
+        # Three distinct sequence types
+        main_seq = "ACGTACGTACGTACGTACGTACGTACGTACGTACGTACGT"
+        variant_seq = "ACGTACGTACGTACGTACGTACGTACGTACGTACGTTTTT"  # Similar to main
+        outlier_seq = "CCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCC"
+
+        records = []
+        # Main cluster: 20 reads
+        for i in range(20):
+            records.append(
+                SeqRecord(
+                    Seq(main_seq),
+                    id=f"main_{i:02d}",
+                    letter_annotations={'phred_quality': [30] * len(main_seq)}
+                )
+            )
+        # Variant cluster: 8 reads (may merge or stay separate)
+        for i in range(8):
+            records.append(
+                SeqRecord(
+                    Seq(variant_seq),
+                    id=f"variant_{i:02d}",
+                    letter_annotations={'phred_quality': [30] * len(variant_seq)}
+                )
+            )
+        # Outlier cluster: 2 reads (will be filtered by --min-size 5)
+        for i in range(2):
+            records.append(
+                SeqRecord(
+                    Seq(outlier_seq),
+                    id=f"outlier_{i:02d}",
+                    letter_annotations={'phred_quality': [30] * len(outlier_seq)}
+                )
+            )
+
+        input_count = len(records)
+        input_ids = {r.id for r in records}
+
+        fastq_path = os.path.join(temp_dir, 'complex_test.fastq')
+        with open(fastq_path, 'w') as f:
+            SeqIO.write(records, f, 'fastq')
+
+        result = subprocess.run([
+            sys.executable, '-m', core_module,
+            fastq_path,
+            '--min-size', '5',
+            '--algorithm', 'greedy',
+            '--collect-discards'
+        ], capture_output=True, text=True)
+
+        assert result.returncode == 0, f"Command failed: {result.stderr}"
+
+        output_ids = self.count_reads_in_cluster_files('clusters')
+        discarded_ids = self.count_discarded_reads('clusters', 'complex_test')
+
+        # THE KEY INVARIANT: every input read is either in output or discards
+        accounted_ids = output_ids | discarded_ids
+
+        assert accounted_ids == input_ids, \
+            f"Read accounting failed:\n" \
+            f"  Input: {len(input_ids)} reads\n" \
+            f"  Output: {len(output_ids)} reads\n" \
+            f"  Discards: {len(discarded_ids)} reads\n" \
+            f"  Missing: {input_ids - accounted_ids}\n" \
+            f"  Extra: {accounted_ids - input_ids}"
+
+
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])

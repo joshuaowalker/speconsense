@@ -287,10 +287,11 @@ def main():
             if args.orient_mode == "filter-failed" and failed_sequences:
                 logging.info(f"Filtering out {len(failed_sequences)} sequences with failed orientation")
 
-                # Remove failed sequences from clusterer
+                # Track as discarded and remove from clustering (but keep records for discards file)
+                clusterer.discarded_read_ids.update(failed_sequences)
                 for seq_id in failed_sequences:
                     del clusterer.sequences[seq_id]
-                    del clusterer.records[seq_id]
+                    # Keep records so they can be written to discards file
 
                 remaining = len(clusterer.sequences)
                 logging.info(f"Continuing with {remaining} successfully oriented sequences")
