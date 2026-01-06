@@ -74,8 +74,8 @@ def parse_arguments():
 
     # Merging group
     merging_group = parser.add_argument_group("Merging")
-    merging_group.add_argument("--merge-snp", action="store_true", default=True,
-                               help="Enable SNP-based merging (default: True)")
+    merging_group.add_argument("--merge-snp", action=argparse.BooleanOptionalAction, default=True,
+                               help="Enable SNP-based merging (default: True, use --no-merge-snp to disable)")
     merging_group.add_argument("--merge-indel-length", type=int, default=0,
                                help="Maximum length of individual indels allowed in merging (default: 0 = disabled)")
     merging_group.add_argument("--merge-position-count", type=int, default=2,
