@@ -801,6 +801,14 @@ speconsense-summarize --merge-position-count 3 --merge-indel-length 3
 # Disable SNP merging (only merge identical sequences)
 speconsense-summarize --merge-snp false
 
+# Disable all merging (fastest, skip MSA evaluation entirely)
+speconsense-summarize --disable-merging
+
+# Control merge evaluation effort (performance vs thoroughness)
+speconsense-summarize --merge-effort fast      # Faster, may miss some merges in large groups
+speconsense-summarize --merge-effort balanced  # Default
+speconsense-summarize --merge-effort thorough  # More exhaustive for large variant groups
+
 # Legacy parameter (still supported)
 speconsense-summarize --snp-merge-limit 2  # Equivalent to --merge-position-count 2
 ```
@@ -811,6 +819,8 @@ speconsense-summarize --snp-merge-limit 2  # Equivalent to --merge-position-coun
 - Only merges variants with **identical primer sets** to maintain biological validity
 
 **Merge Parameters:**
+- `--disable-merging`: Skip MSA-based merge evaluation entirely (fastest option when merging is not needed)
+- `--merge-effort LEVEL`: Control merge evaluation thoroughness. Presets: `fast` (8), `balanced` (10, default), `thorough` (12), or numeric 6-14. Higher values use larger batch sizes for exhaustive subset search, improving merge quality for large variant groups at the cost of runtime
 - `--merge-position-count N`: Maximum total SNP + structural indel positions allowed (default: 2)
 - `--merge-indel-length N`: Maximum length of individual structural indels allowed (default: 0 = disabled)
 - `--merge-snp`: Enable/disable SNP merging (default: True)
@@ -996,7 +1006,7 @@ The complete speconsense-summarize workflow operates in this order:
 1. **Load sequences** with RiC filtering (`--min-ric`) and length filtering (`--min-len`, `--max-len`)
 2. **HAC variant grouping** by sequence identity to separate dissimilar sequences (`--group-identity`); uses single-linkage when overlap merging is enabled
 3. **Group filtering** to limit output groups (`--select-max-groups`)
-4. **Homopolymer-aware MSA-based variant merging** within each group, including **overlap merging** for different-length sequences (`--merge-position-count`, `--merge-indel-length`, `--min-merge-overlap`, `--merge-snp`, `--merge-min-size-ratio`, `--disable-homopolymer-equivalence`)
+4. **Homopolymer-aware MSA-based variant merging** within each group, including **overlap merging** for different-length sequences (`--disable-merging`, `--merge-effort`, `--merge-position-count`, `--merge-indel-length`, `--min-merge-overlap`, `--merge-snp`, `--merge-min-size-ratio`, `--disable-homopolymer-equivalence`)
 5. **Variant selection** within each group (`--select-max-variants`, `--select-strategy`)
 6. **Output generation** with customizable header fields (`--fasta-fields`) and full traceability
 
@@ -1232,6 +1242,12 @@ Grouping:
                         (default: 0.9)
 
 Merging:
+  --disable-merging     Disable all variant merging (skip MSA-based merge
+                        evaluation entirely)
+  --merge-effort LEVEL  Merging effort level: fast (8), balanced (10),
+                        thorough (12), or numeric 6-14. Higher values allow
+                        larger batch sizes for exhaustive subset search.
+                        Default: balanced
   --merge-snp           Enable SNP-based merging (default: True)
   --merge-indel-length MERGE_INDEL_LENGTH
                         Maximum length of individual indels allowed in merging

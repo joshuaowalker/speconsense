@@ -90,7 +90,6 @@ VALID_SUMMARIZE_KEYS = {
     "max-len",
     # Grouping
     "group-identity",
-    "hac-threshold",
     # Merging
     "disable-merging",
     "merge-effort",

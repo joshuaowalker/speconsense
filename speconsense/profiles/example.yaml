@@ -76,7 +76,6 @@ speconsense-summarize:
 
   # --- Variant Grouping (HAC clustering) ---
   # group-identity: 0.95          # Identity threshold for grouping variants
-  # hac-threshold: 0.05           # HAC distance threshold (1 - identity)
 
   # --- MSA-based Merging ---
   # disable-merging: false        # Set true to skip all merging (fastest)
