@@ -13,21 +13,32 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - `--threads N` controls internal parallelism (speconsense default: 1, summarize default: auto)
   - Requires vsearch (`conda install bioconda::vsearch`), falls back to brute-force if missing
 - **Profile system** - YAML-based parameter presets for reproducible workflows
-  - Use with `-p herbarium`, `-p strict`, or `-p nostalgia`
+  - Use with `-p herbarium`, `-p strict`, `-p nostalgia`, or `-p largedata`
   - User profiles in `~/.config/speconsense/profiles/`
-  - Bundled profiles: `herbarium` (high-recall), `strict` (high-precision), `nostalgia` (simulate older pipelines)
+  - Bundled profiles: `herbarium` (high-recall), `strict` (high-precision), `nostalgia` (simulate older pipelines), `largedata` (large input files)
+- **Merge control options** (summarize):
+  - `--disable-merging` skips MSA-based merge evaluation entirely (fastest when merging not needed)
+  - `--merge-effort` controls merge thoroughness: `fast`, `balanced` (default), `thorough`, or numeric 6-14
 - **Length filtering** (summarize) - `--min-len` and `--max-len` filter sequences before processing
 - **Primer-constrained overlap merging** - Overlap-aware distance only applies when sequences have different primer pairs, preventing chimeras from incorrectly merging with shorter amplicons
+- **Hybrid linkage for HAC clustering** - Uses single-linkage when overlap merging is enabled (for transitive overlap relationships), complete linkage otherwise
 - **Performance options** - `--enable-early-filter` skips phasing on clusters that will be filtered; `--collect-discards` writes discarded reads for inspection
 - **Cluster boundary delimiters** - Merged FASTQ files include synthetic boundary records between clusters for easier inspection
+- **Profile parameters reference** - New `docs/profile-parameters.md` with complete parameter tables for all profiles
 
 ### Changed
 - **Default `--min-cluster-ratio`**: 0.20 → 0.01 (keep small clusters for downstream curation)
 - **Default `--min-variant-frequency`**: 0.20 → 0.10 (unified with ambiguity threshold)
 - **Default `--max-sample-size`**: 500 → 100 (sufficient for consensus quality)
 - **Default `--merge-min-size-ratio`** (summarize): 0.0 → 0.1 (prevent small clusters from adding IUPAC to large ones)
+- **Reduced MAX_MSA_MERGE_VARIANTS** from 10 to 8 for better performance in large variant groups
 - **Code architecture** - Refactored `core.py` into `core/` subpackage and `summarize.py` into `summarize/` subpackage
 - **CLI organization** - Options grouped into logical categories in `--help` output
+
+### Fixed
+- **`--merge-snp` option** - Now correctly supports `--no-merge-snp` to disable SNP merging from command line
+- **`--collect-discards` option** - Fixed incomplete discard tracking that missed some filtered reads
+- **README documentation** - Fixed incorrect defaults and examples (variant-frequency, merge-min-size-ratio, missing tools/profiles)
 
 ## [0.6.6] - 2026-01-01
 
