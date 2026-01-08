@@ -260,5 +260,289 @@ class TestDisabledMode:
         assert standard_dist is not None
 
 
+class TestHybridLinkage:
+    """Tests for hybrid linkage in HAC clustering.
+
+    When overlap mode is enabled (min_overlap_bp > 0), HAC uses:
+    - Complete linkage within each primer set (prevents chaining)
+    - Single linkage across primer sets (allows ITS1+full+ITS2 merging)
+    """
+
+    def test_same_primers_use_complete_linkage(self):
+        """Same-primer sequences should not chain through intermediates.
+
+        Creates a chain A-B-C where A~B, B~C, but A!~C.
+        With complete linkage, they should NOT all be in one group.
+        """
+        from speconsense.types import ConsensusInfo
+        from speconsense.summarize.clustering import perform_hac_clustering
+
+        # Create sequences that form a chain: A~B~C but A!~C
+        # Each differs from B by ~4% (20 mutations), so A-C differs by ~8%
+        # At 95% identity threshold (5% distance):
+        # - A-B: ~3.4% < 5% (should merge)
+        # - B-C: ~4.0% < 5% (should merge)
+        # - A-C: ~7.4% > 5% (should NOT merge)
+        base_seq = generate_dna_sequence("chain_base", 500)
+        num_mutations = 20
+
+        # B is base sequence
+        seq_b = base_seq
+
+        # A differs from B at positions 0, 25, 50, ...
+        seq_a_list = list(base_seq)
+        for i in range(num_mutations):
+            pos = i * 25  # Spread across sequence
+            seq_a_list[pos] = {'A': 'T', 'T': 'A', 'G': 'C', 'C': 'G'}[seq_a_list[pos]]
+        seq_a = ''.join(seq_a_list)
+
+        # C differs from B at positions 12, 37, 62, ... (different from A)
+        seq_c_list = list(base_seq)
+        for i in range(num_mutations):
+            pos = i * 25 + 12  # Different positions than A
+            seq_c_list[pos] = {'A': 'T', 'T': 'A', 'G': 'C', 'C': 'G'}[seq_c_list[pos]]
+        seq_c = ''.join(seq_c_list)
+
+        # All have same primers
+        same_primers = ['ITS1F', 'ITS4']
+
+        variants = [
+            ConsensusInfo(
+                sample_name="seq_a",
+                cluster_id="c1",
+                sequence=seq_a,
+                ric=100,
+                size=100,
+                file_path="/test",
+                snp_count=None,
+                primers=same_primers,
+                raw_ric=None,
+                rid=None,
+                rid_min=None,
+            ),
+            ConsensusInfo(
+                sample_name="seq_b",
+                cluster_id="c2",
+                sequence=seq_b,
+                ric=100,
+                size=100,
+                file_path="/test",
+                snp_count=None,
+                primers=same_primers,
+                raw_ric=None,
+                rid=None,
+                rid_min=None,
+            ),
+            ConsensusInfo(
+                sample_name="seq_c",
+                cluster_id="c3",
+                sequence=seq_c,
+                ric=100,
+                size=100,
+                file_path="/test",
+                snp_count=None,
+                primers=same_primers,
+                raw_ric=None,
+                rid=None,
+                rid_min=None,
+            ),
+        ]
+
+        # Run with overlap mode enabled (triggers hybrid linkage)
+        # Use 0.95 identity threshold (5% distance)
+        groups = perform_hac_clustering(
+            variants,
+            variant_group_identity=0.95,
+            min_overlap_bp=200
+        )
+
+        # With complete linkage for same primers, A and C should NOT be in same group
+        # (since A-C distance is >5%)
+        # But A-B and B-C could be grouped if distance <5%
+        # The key is that we DON'T get all 3 in one group through chaining
+
+        all_in_one_group = any(len(group) == 3 for group in groups.values())
+        assert not all_in_one_group, \
+            "Same-primer sequences should use complete linkage and not chain A-B-C into one group"
+
+    def test_different_primers_use_single_linkage(self):
+        """Different-primer sequences can connect via overlap.
+
+        Simulates ITS1 + full ITS + ITS2 scenario where:
+        - ITS1 overlaps with full ITS (in 5' region)
+        - ITS2 overlaps with full ITS (in 3' region)
+        - ITS1 does NOT overlap with ITS2
+
+        With single linkage across primers, all three should merge.
+        """
+        from speconsense.types import ConsensusInfo
+        from speconsense.summarize.clustering import perform_hac_clustering
+
+        # Use the pre-defined test sequences
+        variants = [
+            ConsensusInfo(
+                sample_name="its1_partial",
+                cluster_id="c1",
+                sequence=ITS1_WITH_5_8S,
+                ric=100,
+                size=100,
+                file_path="/test",
+                snp_count=None,
+                primers=['ITS1F', 'ITS2'],  # ITS1-only primers
+                raw_ric=None,
+                rid=None,
+                rid_min=None,
+            ),
+            ConsensusInfo(
+                sample_name="full_its",
+                cluster_id="c2",
+                sequence=FULL_ITS,
+                ric=200,
+                size=200,
+                file_path="/test",
+                snp_count=None,
+                primers=['ITS1F', 'ITS4'],  # Full ITS primers
+                raw_ric=None,
+                rid=None,
+                rid_min=None,
+            ),
+            ConsensusInfo(
+                sample_name="its2_partial",
+                cluster_id="c3",
+                sequence=ITS2_WITH_5_8S,
+                ric=100,
+                size=100,
+                file_path="/test",
+                snp_count=None,
+                primers=['ITS3', 'ITS4'],  # ITS2-only primers
+                raw_ric=None,
+                rid=None,
+                rid_min=None,
+            ),
+        ]
+
+        # Run with overlap mode (triggers hybrid linkage)
+        groups = perform_hac_clustering(
+            variants,
+            variant_group_identity=0.95,
+            min_overlap_bp=200  # 5.8S region is 250bp
+        )
+
+        # With single linkage across primers, all 3 should be in one group
+        # because ITS1 overlaps full_its, and ITS2 overlaps full_its
+        all_in_one_group = any(len(group) == 3 for group in groups.values())
+        assert all_in_one_group, \
+            "Different-primer sequences should use single linkage and merge via overlaps"
+
+    def test_non_overlapping_different_primers_stay_separate(self):
+        """Non-overlapping different-primer sequences stay separate.
+
+        Even with single linkage across primers, sequences without overlap
+        should not merge (distance = 1.0).
+        """
+        from speconsense.types import ConsensusInfo
+        from speconsense.summarize.clustering import perform_hac_clustering
+
+        # Create two completely different sequences with different primers
+        seq1 = generate_dna_sequence("genus_a_species", 500)
+        seq2 = generate_dna_sequence("genus_b_species", 500)
+
+        variants = [
+            ConsensusInfo(
+                sample_name="species_a",
+                cluster_id="c1",
+                sequence=seq1,
+                ric=100,
+                size=100,
+                file_path="/test",
+                snp_count=None,
+                primers=['ITS1F', 'ITS2'],
+                raw_ric=None,
+                rid=None,
+                rid_min=None,
+            ),
+            ConsensusInfo(
+                sample_name="species_b",
+                cluster_id="c2",
+                sequence=seq2,
+                ric=100,
+                size=100,
+                file_path="/test",
+                snp_count=None,
+                primers=['ITS3', 'ITS4'],
+                raw_ric=None,
+                rid=None,
+                rid_min=None,
+            ),
+        ]
+
+        groups = perform_hac_clustering(
+            variants,
+            variant_group_identity=0.95,
+            min_overlap_bp=200
+        )
+
+        # With no overlap, even single linkage should keep them separate
+        assert len(groups) == 2, \
+            "Non-overlapping sequences should remain in separate groups"
+
+    def test_none_primers_grouped_as_separate_set(self):
+        """Sequences with None primers are treated as their own primer set.
+
+        This uses complete linkage within the None set.
+        """
+        from speconsense.types import ConsensusInfo
+        from speconsense.summarize.clustering import perform_hac_clustering
+
+        # Two similar sequences with no primer info
+        base_seq = generate_dna_sequence("no_primer_base", 500)
+        similar_seq_list = list(base_seq)
+        for i in range(10):  # ~2% difference
+            pos = i * 50
+            similar_seq_list[pos] = {'A': 'T', 'T': 'A', 'G': 'C', 'C': 'G'}[similar_seq_list[pos]]
+        similar_seq = ''.join(similar_seq_list)
+
+        variants = [
+            ConsensusInfo(
+                sample_name="seq_a",
+                cluster_id="c1",
+                sequence=base_seq,
+                ric=100,
+                size=100,
+                file_path="/test",
+                snp_count=None,
+                primers=None,  # No primer info
+                raw_ric=None,
+                rid=None,
+                rid_min=None,
+            ),
+            ConsensusInfo(
+                sample_name="seq_b",
+                cluster_id="c2",
+                sequence=similar_seq,
+                ric=100,
+                size=100,
+                file_path="/test",
+                snp_count=None,
+                primers=None,  # No primer info
+                raw_ric=None,
+                rid=None,
+                rid_min=None,
+            ),
+        ]
+
+        groups = perform_hac_clustering(
+            variants,
+            variant_group_identity=0.95,
+            min_overlap_bp=200
+        )
+
+        # Both have None primers, so treated as same primer set
+        # With 98% identity, should merge at 95% threshold
+        all_in_one_group = any(len(group) == 2 for group in groups.values())
+        assert all_in_one_group, \
+            "Similar sequences with None primers should merge via complete linkage"
+
+
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])

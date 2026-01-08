@@ -16,3 +16,4 @@ speconsense:
 # =============================================================================
 speconsense-summarize:
   merge-effort: fast
+  group-identity: 0.95            # Avoid spurious groupings with many sequences
