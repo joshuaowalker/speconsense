@@ -46,6 +46,7 @@ pip install git+https://github.com/joshuaowalker/speconsense.git
 After installation, the tools will be available as command-line programs:
 - `speconsense` - Main clustering and consensus tool
 - `speconsense-summarize` - Post-processing and summary tool
+- `speconsense-synth` - Synthetic read generator for testing
 
 To deactivate the virtual environment when done:
 ```bash
@@ -136,6 +137,7 @@ speconsense input.fastq -p herbarium --min-size 10
 
 **Bundled profiles:**
 - `herbarium` — High-recall for degraded DNA/type specimens
+- `largedata` — Experimental settings for large input files
 - `nostalgia` — Simulate older bioinformatics pipelines
 - `strict` — High-precision for confident results
 
@@ -557,7 +559,7 @@ The frequency thresholds are unified at 10%, but the count thresholds differ: sp
 speconsense input.fastq
 
 # More permissive variant detection (lower frequency threshold)
-speconsense input.fastq --min-variant-frequency 0.15
+speconsense input.fastq --min-variant-frequency 0.05
 
 # More aggressive IUPAC ambiguity calling
 speconsense input.fastq --min-ambiguity-frequency 0.05 --min-ambiguity-count 2
@@ -936,7 +938,7 @@ speconsense-summarize --merge-min-size-ratio 0.1
 - Prevents merging clusters with very different sizes (e.g., well-supported variant + poorly-supported variant)
 - Ratio calculated as `smaller_size / larger_size` - must be ≥ threshold to merge
 - Example: `--merge-min-size-ratio 0.1` means smaller cluster must be ≥10% size of larger
-- Default is 0.0 (disabled) - all size combinations allowed
+- Default is 0.1 - smaller cluster must be ≥10% size of larger to merge
 - **Use cases:**
   - Prevent poorly-supported variants (low read count) from introducing ambiguities into well-supported sequences
   - Avoid merging weakly-supported bioinformatic artifacts into high-confidence sequences
@@ -1248,7 +1250,9 @@ Merging:
                         thorough (12), or numeric 6-14. Higher values allow
                         larger batch sizes for exhaustive subset search.
                         Default: balanced
-  --merge-snp           Enable SNP-based merging (default: True)
+  --merge-snp, --no-merge-snp
+                        Enable SNP-based merging (default: True, use --no-
+                        merge-snp to disable)
   --merge-indel-length MERGE_INDEL_LENGTH
                         Maximum length of individual indels allowed in merging
                         (default: 0 = disabled)
