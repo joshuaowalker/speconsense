@@ -13,17 +13,26 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: Set up Python ${{ matrix.python-version }}
-        uses: actions/setup-python@v5
+      - name: Set up micromamba
+        uses: mamba-org/setup-micromamba@v2
         with:
-          python-version: ${{ matrix.python-version }}
+          environment-name: test
+          create-args: >-
+            python=${{ matrix.python-version }}
+            spoa
+          condarc: |
+            channels:
+              - conda-forge
+              - bioconda
 
       - name: Install dependencies
+        shell: bash -el {0}
         run: |
           python -m pip install --upgrade pip
           pip install -e ".[dev]"
 
       - name: Run tests
+        shell: bash -el {0}
         run: pytest --cov=speconsense --cov-report=term-missing
 
   build:
