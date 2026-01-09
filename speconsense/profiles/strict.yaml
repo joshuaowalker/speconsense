@@ -1,0 +1,27 @@
+# High-precision settings for confident results
+#
+# Use this profile when:
+# - Precision is more important than recall
+# - You need high-confidence sequences for publication
+# - Working with well-characterized reference databases
+# - False positives would be more problematic than false negatives
+#
+# The settings prioritize quality over completeness, filtering out
+# low-support variants and limiting output to well-supported sequences.
+
+speconsense-version: "0.7.*"
+description: "High-precision settings for confident results"
+
+speconsense:
+  min-identity: 0.95           # High initial clustering identity
+  outlier-identity: 0.98       # Discard reads with high mismatch
+  min-cluster-ratio: 0.05      # Filter more aggressively (5% minimum)
+  min-size: 10                 # Require strong cluster support
+  min-variant-frequency: 0.25  # Less sensitive to variants (25%)
+  disable-ambiguity-calling: true  # Don't call ambiguities
+  presample: 0                 # Use all reads
+  max-sample-size: 100         # 100 reads sufficient for high quality consensus
+
+speconsense-summarize:
+  min-ric: 5                   # Higher consensus threshold
+  disable-merging: true        # Skip merging entirely - preserve all variants

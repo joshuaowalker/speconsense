@@ -49,21 +49,23 @@ pytest -m "not slow"
 
 ### Main Components
 
-**speconsense/core.py** - Core clustering and consensus generation:
-- `SpecimenClusterer` class: Main orchestrator for the clustering pipeline
+**speconsense/core/** - Core clustering and consensus generation subpackage:
+- `clusterer.py`: `SpecimenClusterer` class - main orchestrator for the clustering pipeline
+- `workers.py`: Worker functions for parallel processing (SPOA, cluster processing)
+- `cli.py`: Command-line interface and argument parsing
 - Two clustering algorithms: graph-based MCL (default) and greedy clustering
 - Consensus generation via external SPOA tool
 - Cluster merging based on consensus sequence similarity
 - Stability assessment through subsampling
 
-**speconsense/summarize.py** - Post-processing utility:
-- Parses Speconsense FASTA output files
-- SNP-based variant merging using IUPAC ambiguity codes
-- Hierarchical Agglomerative Clustering (HAC) for variant grouping
-- Variant selection strategies (size-based or diversity-based)
-- Generates summary reports and filtered datasets
-
-**speconsense/cli.py** - Command-line interface entry point for main tool
+**speconsense/summarize/** - Post-processing utility subpackage:
+- `cli.py`: Command-line interface and main entry point
+- `iupac.py`: IUPAC ambiguity code utilities and distance calculations
+- `fields.py`: FASTA header field classes and formatting
+- `analysis.py`: MSA analysis and quality assessment
+- `merging.py`: MSA-based variant merging with IUPAC consensus
+- `clustering.py`: HAC clustering and variant selection
+- `io.py`: File I/O operations (loading sequences, writing outputs)
 
 **speconsense/synth.py** - Synthetic read generator for testing consensus algorithms
 
@@ -136,6 +138,24 @@ The codebase uses IUPAC nucleotide ambiguity codes throughout:
 - Fewer clusters, focuses on well-separated sequences
 - Good for detecting distinct targets vs. contaminants
 
+### MCL Graph Construction (Design Decision)
+
+The K-NN similarity graph for MCL uses an **asymmetric edge storage pattern** where `similarities[id1]` only contains entries for neighbors `id2 > id1` (lexicographically). This is a weakly-held design decision that produces good clustering results despite the MCL documentation recommending symmetric graphs.
+
+**Why asymmetric?** The pattern emerged from the original implementation and affects tie-breaking when multiple neighbors have identical similarity scores. Changing to symmetric storage would alter which neighbors are selected during K-NN construction, potentially changing clustering results.
+
+**Key implementation details** (in `scalability/base.py`):
+```python
+# Asymmetric pattern - matches main branch behavior
+similarities[id1][id2] = score
+similarities.setdefault(id2, {})[id1] = score  # Gets overwritten when id2 is processed
+```
+
+**If considering symmetric graphs in the future:**
+- Would require careful validation against existing test cases
+- May improve MCL convergence (per MCL documentation)
+- Would change clustering results - requires re-tuning or acceptance of different outputs
+
 ### Integration Context
 
 Designed to replace NGSpeciesID in the ONT fungal barcoding pipeline from protocols.io. Processes demultiplexed FASTQ files and generates consensus sequences suitable for taxonomic identification. Typically used downstream of specimux for demultiplexing.
@@ -148,3 +168,11 @@ All parameters controlled via command-line arguments. No configuration files. Ke
 - Sample size limits (`--max-sample-size`, `--presample`)
 - Cluster size filtering (`--min-size`, `--min-cluster-ratio`)
 - Primer handling (`--primers`, `--orient-mode`)
+
+### Local Development Scripts
+
+The `scripts/` directory (git-ignored) contains local development utilities:
+- `verify_refactor.py`: AST-based verification of refactoring equivalence against current code
+- `verify_refactor_at_commit.py`: Same verification against specific git commits
+
+These scripts compare original monolithic files against refactored subpackages to detect transcription errors. Useful for future refactoring work.

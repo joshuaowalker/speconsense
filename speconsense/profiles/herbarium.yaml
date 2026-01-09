@@ -1,0 +1,25 @@
+# High-recall settings for herbarium specimens with degraded DNA
+#
+# Use this profile when working with:
+# - Herbarium specimens where DNA may be degraded
+# - Type specimens that cannot be resampled
+# - Samples where contamination may dominate the target
+# - Any situation where false negatives are more costly than false positives
+#
+# The settings prioritize keeping all potential biological signal for
+# manual review, at the cost of more output variants.
+
+speconsense-version: "0.7.*"
+description: "High-recall settings for herbarium specimens with degraded DNA"
+
+speconsense:
+  min-identity: 0.85            # Lower threshold for degraded DNA
+  # outlier-identity: auto      # Auto-calculated as 0.925 from min-identity
+  min-cluster-ratio: 0          # Keep all clusters
+  min-size: 3                   # Lower minimum for degraded samples
+  min-variant-frequency: 0.05   # More sensitive variant detection (5%)
+  presample: 0                  # Use all reads
+  max-sample-size: 100          # 100 reads for high-quality consensus
+
+speconsense-summarize:
+  min-ric: 3                    # Accept lower-support consensus

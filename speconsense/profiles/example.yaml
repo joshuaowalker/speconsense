@@ -1,0 +1,97 @@
+# Example Speconsense Profile
+#
+# Copy this file to create your own profiles:
+#   cp example.yaml my-workflow.yaml
+#
+# Then use it with:
+#   speconsense input.fastq -p my-workflow
+#   speconsense-summarize -p my-workflow
+#
+# HOW TO USE THIS FILE:
+#   - Lines starting with # are comments (ignored)
+#   - To enable an option, remove the # at the start of the line
+#   - Only include parameters you want to change from defaults
+#   - CLI arguments always override profile values
+#
+# Example: To set min-size to 10, change:
+#   # min-size: 5
+# to:
+#   min-size: 10
+
+speconsense-version: "0.7.*"
+description: "My custom workflow"
+
+# =============================================================================
+# Parameters for speconsense (clustering and consensus)
+# =============================================================================
+speconsense:
+
+  # --- Clustering Algorithm ---
+  # algorithm: graph              # Clustering algorithm: graph (MCL) or greedy
+  # min-identity: 0.9             # Similarity threshold for clustering (0.0-1.0)
+  # inflation: 2.0                # MCL inflation parameter (higher = more clusters)
+  # k-nearest-neighbors: 10       # K-NN graph construction parameter
+
+  # --- Cluster Filtering ---
+  # min-size: 5                   # Minimum reads per cluster (0 to disable)
+  # min-cluster-ratio: 0.01       # Minimum cluster size as ratio of total reads
+  # outlier-identity: 0.85        # Identity threshold for outlier detection
+
+  # --- Read Sampling ---
+  # presample: 1000               # Initial random sampling of input reads
+  # max-sample-size: 100          # Max reads used for consensus generation
+
+  # --- Variant Calling (position-based phasing) ---
+  # min-variant-frequency: 0.10   # Min frequency to call a variant (0.0-1.0)
+  # min-variant-count: 3          # Min read count to call a variant
+  # disable-position-phasing: false  # Set true to disable variant detection
+
+  # --- Ambiguity Calling (IUPAC codes) ---
+  # min-ambiguity-frequency: 0.25 # Min frequency for IUPAC ambiguity codes
+  # min-ambiguity-count: 3        # Min read count for ambiguity codes
+  # disable-ambiguity-calling: false  # Set true to disable IUPAC codes
+
+  # --- Cluster Merging ---
+  # disable-cluster-merging: false     # Set true to skip merging similar clusters
+  # disable-homopolymer-equivalence: false  # Set true for strict homopolymer comparison
+
+  # --- Primer Orientation ---
+  # orient-mode: filter-failed    # skip, keep-all, or filter-failed
+
+  # --- Processing ---
+  # threads: 0                    # Max threads (0 = auto-detect)
+  # scale-threshold: 500          # Read count threshold for scaled processing
+  # enable-early-filter: false    # Enable early filtering optimization
+  # collect-discards: false       # Write discarded reads to separate file
+
+# =============================================================================
+# Parameters for speconsense-summarize (post-processing)
+# =============================================================================
+speconsense-summarize:
+
+  # --- Input Filtering ---
+  # min-ric: 3                    # Minimum Reads in Consensus threshold
+  # min-len: 0                    # Minimum sequence length (0 = disabled)
+  # max-len: 0                    # Maximum sequence length (0 = disabled)
+
+  # --- Variant Grouping (HAC clustering) ---
+  # group-identity: 0.95          # Identity threshold for grouping variants
+
+  # --- MSA-based Merging ---
+  # disable-merging: false        # Set true to skip all merging (fastest)
+  # merge-effort: balanced        # Effort level: fast, balanced, thorough, or 6-14
+  # merge-snp: true               # Enable SNP-based merging
+  # merge-indel-length: 3         # Max indel length to merge (0 = disabled)
+  # merge-position-count: 1       # Max variant positions to merge
+  # merge-min-size-ratio: 0.1     # Min size ratio for merge candidate
+  # min-merge-overlap: 0.9        # Min alignment overlap for merging
+  # disable-homopolymer-equivalence: false  # Set true for strict comparison
+
+  # --- Variant Selection ---
+  # select-max-groups: -1         # Max groups to output (-1 = no limit)
+  # select-max-variants: -1       # Max variants per group (-1 = no limit)
+  # select-strategy: size         # Selection strategy: size or diversity
+
+  # --- Processing ---
+  # threads: 0                    # Max threads (0 = auto-detect)
+  # scale-threshold: 500          # Read count threshold for scaled processing

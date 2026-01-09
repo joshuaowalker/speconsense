@@ -582,7 +582,7 @@ Given the limited empirical validation to date, **default parameters in Speconse
 **Key defaults and their rationale:**
 - `--min-size 5` (speconsense): Filters small clusters at the empirically-observed artifact threshold (≤4 reads)
 - `--min-ric 3` (speconsense-summarize): Matches the minimum N for reliable consensus shown in testing
-- `--min-cluster-ratio 0.2` (speconsense): Filters clusters smaller than 20% of the largest cluster to remove minor contaminants
+- `--min-cluster-ratio 0.01` (speconsense): Filters clusters smaller than 1% of the largest cluster; serves as runaway protection while allowing minor variants through for downstream curation
 - MCL as default algorithm: More computationally expensive but safer for contamination detection than greedy
 
 **Rationale:**

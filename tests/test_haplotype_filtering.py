@@ -21,8 +21,8 @@ def create_msa_with_haplotypes():
     Total: 100 reads
     Variant positions: 10 (A/G), 20 (G/T/C)
 
-    With default thresholds (min_variant_frequency=0.20, min_variant_count=5):
-    - Qualifying haplotypes: A-G, A-T, G-G (all >= 20% and >= 5 reads)
+    With default thresholds (min_variant_frequency=0.10, min_variant_count=5):
+    - Qualifying haplotypes: A-G, A-T, G-G (all >= 10% and >= 5 reads)
     - Non-qualifying: G-T (3 reads), A-C (2 reads)
     - G-T should merge to G-G (distance=1)
     - A-C should merge to A-G (distance=1)

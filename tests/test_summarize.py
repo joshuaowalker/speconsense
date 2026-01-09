@@ -266,3 +266,174 @@ def test_merge_bases_to_iupac_expands_existing_codes():
         result = merge_bases_to_iupac(bases)
         assert result == expected, \
             f"merge_bases_to_iupac({bases}) returned '{result}', expected '{expected}'"
+
+
+class TestPrimersAreSame:
+    """Tests for primers_are_same() function used in overlap merge constraint."""
+
+    def test_same_primers_exact_match(self):
+        """Same primers should return True (use global distance)."""
+        from speconsense.summarize import primers_are_same
+        assert primers_are_same(['ITS1', 'ITS4'], ['ITS1', 'ITS4']) is True
+        assert primers_are_same(['fwd', 'rev'], ['fwd', 'rev']) is True
+
+    def test_same_primers_different_order(self):
+        """Same primers in different order should return True."""
+        from speconsense.summarize import primers_are_same
+        assert primers_are_same(['ITS4', 'ITS1'], ['ITS1', 'ITS4']) is True
+        assert primers_are_same(['rev', 'fwd'], ['fwd', 'rev']) is True
+
+    def test_different_primers(self):
+        """Different primers should return False (allow overlap merge)."""
+        from speconsense.summarize import primers_are_same
+        assert primers_are_same(['ITS1', 'ITS4'], ['ITS1', 'ITS2']) is False
+        assert primers_are_same(['fwd_a', 'rev_a'], ['fwd_b', 'rev_b']) is False
+
+    def test_none_primers_conservative(self):
+        """None primers should return True (conservative: unknown = same)."""
+        from speconsense.summarize import primers_are_same
+        assert primers_are_same(None, None) is True
+        assert primers_are_same(None, ['ITS1', 'ITS4']) is True
+        assert primers_are_same(['ITS1', 'ITS4'], None) is True
+
+    def test_empty_list_conservative(self):
+        """Empty list should return True (conservative: unknown = same)."""
+        from speconsense.summarize import primers_are_same
+        assert primers_are_same([], []) is True
+        assert primers_are_same([], ['ITS1', 'ITS4']) is True
+        assert primers_are_same(['ITS1', 'ITS4'], []) is True
+
+    def test_single_primer_overlap(self):
+        """Partial primer overlap should be treated as different."""
+        from speconsense.summarize import primers_are_same
+        # Different sets = different amplicons
+        assert primers_are_same(['ITS1'], ['ITS1', 'ITS4']) is False
+        assert primers_are_same(['ITS1', 'ITS4'], ['ITS4']) is False
+
+    def test_single_primer_same(self):
+        """Single primer that matches should return True."""
+        from speconsense.summarize import primers_are_same
+        assert primers_are_same(['ITS1'], ['ITS1']) is True
+
+
+class TestMergeEffort:
+    """Tests for --merge-effort parameter parsing and batch size computation."""
+
+    def test_parse_presets(self):
+        """Test preset name parsing."""
+        from speconsense.summarize.cli import parse_merge_effort
+        assert parse_merge_effort("fast") == 8
+        assert parse_merge_effort("balanced") == 10
+        assert parse_merge_effort("thorough") == 12
+
+    def test_parse_presets_case_insensitive(self):
+        """Test that presets are case-insensitive."""
+        from speconsense.summarize.cli import parse_merge_effort
+        assert parse_merge_effort("BALANCED") == 10
+        assert parse_merge_effort("Fast") == 8
+        assert parse_merge_effort("THOROUGH") == 12
+
+    def test_parse_presets_whitespace(self):
+        """Test that whitespace is stripped."""
+        from speconsense.summarize.cli import parse_merge_effort
+        assert parse_merge_effort("  balanced  ") == 10
+        assert parse_merge_effort("\tfast\n") == 8
+
+    def test_parse_numeric(self):
+        """Test numeric value parsing."""
+        from speconsense.summarize.cli import parse_merge_effort
+        assert parse_merge_effort("6") == 6
+        assert parse_merge_effort("10") == 10
+        assert parse_merge_effort("14") == 14
+
+    def test_parse_numeric_at_bounds(self):
+        """Test numeric values at the valid boundaries."""
+        from speconsense.summarize.cli import parse_merge_effort
+        assert parse_merge_effort("6") == 6   # Minimum
+        assert parse_merge_effort("14") == 14  # Maximum
+
+    def test_parse_invalid_preset(self):
+        """Test that invalid preset names raise ValueError."""
+        import pytest
+        from speconsense.summarize.cli import parse_merge_effort
+        with pytest.raises(ValueError, match="Unknown merge-effort"):
+            parse_merge_effort("invalid")
+        with pytest.raises(ValueError, match="Unknown merge-effort"):
+            parse_merge_effort("medium")
+
+    def test_parse_numeric_below_minimum(self):
+        """Test that values below minimum raise ValueError."""
+        import pytest
+        from speconsense.summarize.cli import parse_merge_effort
+        with pytest.raises(ValueError, match="must be 6-14"):
+            parse_merge_effort("5")
+        with pytest.raises(ValueError, match="must be 6-14"):
+            parse_merge_effort("0")
+
+    def test_parse_numeric_above_maximum(self):
+        """Test that values above maximum raise ValueError."""
+        import pytest
+        from speconsense.summarize.cli import parse_merge_effort
+        with pytest.raises(ValueError, match="must be 6-14"):
+            parse_merge_effort("15")
+        with pytest.raises(ValueError, match="must be 6-14"):
+            parse_merge_effort("20")
+
+    def test_batch_size_balanced_small_groups(self):
+        """Test batch size computation for balanced effort with small groups."""
+        from speconsense.summarize.analysis import compute_merge_batch_size
+        # E=10 (balanced): groups <= 8 should get batch=8
+        assert compute_merge_batch_size(4, 10) == 8
+        assert compute_merge_batch_size(8, 10) == 8
+
+    def test_batch_size_balanced_medium_groups(self):
+        """Test batch size computation for balanced effort with medium groups."""
+        from speconsense.summarize.analysis import compute_merge_batch_size
+        # E=10: batch decreases as group size increases
+        assert compute_merge_batch_size(16, 10) == 7
+        assert compute_merge_batch_size(32, 10) == 6
+        assert compute_merge_batch_size(64, 10) == 5
+
+    def test_batch_size_balanced_large_groups(self):
+        """Test batch size computation for balanced effort with large groups."""
+        from speconsense.summarize.analysis import compute_merge_batch_size
+        # E=10: large groups hit MIN_BATCH=4
+        assert compute_merge_batch_size(128, 10) == 4
+        assert compute_merge_batch_size(256, 10) == 4
+        assert compute_merge_batch_size(512, 10) == 4
+
+    def test_batch_size_fast(self):
+        """Test batch size computation for fast effort (E=8)."""
+        from speconsense.summarize.analysis import compute_merge_batch_size
+        assert compute_merge_batch_size(8, 8) == 6
+        assert compute_merge_batch_size(16, 8) == 5
+        assert compute_merge_batch_size(32, 8) == 4
+
+    def test_batch_size_thorough(self):
+        """Test batch size computation for thorough effort (E=12)."""
+        from speconsense.summarize.analysis import compute_merge_batch_size
+        assert compute_merge_batch_size(32, 12) == 8
+        assert compute_merge_batch_size(64, 12) == 7
+        assert compute_merge_batch_size(128, 12) == 6
+
+    def test_batch_size_edge_cases(self):
+        """Test batch size computation edge cases."""
+        from speconsense.summarize.analysis import compute_merge_batch_size
+        # Single variant returns 1
+        assert compute_merge_batch_size(1, 10) == 1
+        # Two variants with high effort -> clamped to MAX_BATCH=8
+        assert compute_merge_batch_size(2, 10) == 8
+
+    def test_batch_size_clamped_to_max(self):
+        """Test that batch size is clamped to MAX_MERGE_BATCH=8."""
+        from speconsense.summarize.analysis import compute_merge_batch_size, MAX_MERGE_BATCH
+        # Very small group with high effort should still be clamped to 8
+        assert compute_merge_batch_size(2, 14) == MAX_MERGE_BATCH
+        assert compute_merge_batch_size(4, 14) == MAX_MERGE_BATCH
+
+    def test_batch_size_clamped_to_min(self):
+        """Test that batch size is clamped to MIN_MERGE_BATCH=4."""
+        from speconsense.summarize.analysis import compute_merge_batch_size, MIN_MERGE_BATCH
+        # Very large group should be clamped to 4
+        assert compute_merge_batch_size(1000, 10) == MIN_MERGE_BATCH
+        assert compute_merge_batch_size(10000, 6) == MIN_MERGE_BATCH

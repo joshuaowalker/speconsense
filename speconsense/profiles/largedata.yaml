@@ -1,0 +1,19 @@
+# Speconsense profile for a single large input file
+
+speconsense-version: "0.7.*"
+description: "Large Input (experimental)"
+
+# =============================================================================
+# Parameters for speconsense (clustering and consensus)
+# =============================================================================
+speconsense:
+  min-cluster-ratio: 0            # Do not filter by relative size
+  presample: 0                    # Process all reads
+  threads: 0                      # Max threads (0 = auto-detect)
+
+# =============================================================================
+# Parameters for speconsense-summarize (post-processing)
+# =============================================================================
+speconsense-summarize:
+  merge-effort: fast
+  group-identity: 0.95            # Avoid spurious groupings with many sequences

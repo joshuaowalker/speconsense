@@ -62,17 +62,14 @@ class TestAugmentInput:
         shutil.rmtree(test_dir)
     
     @pytest.fixture
-    def core_script_path(self):
-        """Get path to speconsense core script."""
-        # Get the project root directory (assuming we're in tests/)
-        project_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-        return os.path.join(project_root, 'speconsense', 'core.py')
+    def core_module(self):
+        """Get module name for speconsense core."""
+        return 'speconsense.core'
     
     @pytest.fixture
-    def summarize_script_path(self):
-        """Get path to speconsense summarize script."""
-        project_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-        return os.path.join(project_root, 'speconsense', 'summarize.py')
+    def summarize_module(self):
+        """Get module name for speconsense summarize."""
+        return 'speconsense.summarize'
     
     def create_test_files(self, test_data):
         """Create test files in current directory."""
@@ -82,12 +79,12 @@ class TestAugmentInput:
         with open('test_augment.fasta', 'w') as f:
             SeqIO.write(test_data['augment_records'], f, 'fasta')
     
-    def test_error_handling_nonexistent_file(self, temp_dir, core_script_path, test_data):
+    def test_error_handling_nonexistent_file(self, temp_dir, core_module, test_data):
         """Test error handling for nonexistent augment input file."""
         self.create_test_files(test_data)
-        
+
         result = subprocess.run([
-            sys.executable, core_script_path,
+            sys.executable, '-m', core_module,
             'test_main.fastq', '--augment-input', 'nonexistent.fastq',
             '--min-size', '2', '--algorithm', 'greedy'
         ], capture_output=True, text=True)
@@ -95,12 +92,12 @@ class TestAugmentInput:
         assert result.returncode == 1, "Should fail with exit code 1 for nonexistent file"
         assert "not found" in result.stderr, "Should show file not found error"
     
-    def test_augmented_sequences_loaded(self, temp_dir, core_script_path, test_data):
+    def test_augmented_sequences_loaded(self, temp_dir, core_module, test_data):
         """Test that augmented sequences are properly loaded."""
         self.create_test_files(test_data)
-        
+
         result = subprocess.run([
-            sys.executable, core_script_path,
+            sys.executable, '-m', core_module,
             'test_main.fastq', '--augment-input', 'test_augment.fasta',
             '--min-size', '2', '--algorithm', 'greedy',
             '--log-level', 'INFO'
@@ -110,12 +107,12 @@ class TestAugmentInput:
         assert "Loaded 1 augmented sequences" in result.stderr, "Should load augmented sequences"
         assert "Loaded 4 primary sequences" in result.stderr, "Should load primary sequences"
     
-    def test_output_files_created(self, temp_dir, core_script_path, test_data):
+    def test_output_files_created(self, temp_dir, core_module, test_data):
         """Test that output files are created correctly."""
         self.create_test_files(test_data)
-        
+
         result = subprocess.run([
-            sys.executable, core_script_path,
+            sys.executable, '-m', core_module,
             'test_main.fastq', '--augment-input', 'test_augment.fasta',
             '--min-size', '2', '--algorithm', 'greedy'
         ], capture_output=True, text=True)
@@ -124,12 +121,12 @@ class TestAugmentInput:
         assert os.path.exists('clusters/test_main-all.fasta'), "Main output file should be created"
         assert os.path.exists('clusters/cluster_debug'), "Debug directory should be created"
     
-    def test_augmented_sequence_in_cluster_output(self, temp_dir, core_script_path, test_data):
+    def test_augmented_sequence_in_cluster_output(self, temp_dir, core_module, test_data):
         """Test that augmented sequences appear in cluster debug files."""
         self.create_test_files(test_data)
-        
+
         result = subprocess.run([
-            sys.executable, core_script_path,
+            sys.executable, '-m', core_module,
             'test_main.fastq', '--augment-input', 'test_augment.fasta',
             '--min-size', '2', '--algorithm', 'greedy'
         ], capture_output=True, text=True)
@@ -146,13 +143,13 @@ class TestAugmentInput:
             debug_content = f.read()
             assert 'augmented_1' in debug_content, "Augmented sequence should be in cluster output"
     
-    def test_summarize_integration(self, temp_dir, core_script_path, summarize_script_path, test_data):
+    def test_summarize_integration(self, temp_dir, core_module, summarize_module, test_data):
         """Test that summarize step handles augmented sequences correctly."""
         self.create_test_files(test_data)
-        
+
         # Run speconsense
         result = subprocess.run([
-            sys.executable, core_script_path,
+            sys.executable, '-m', core_module,
             'test_main.fastq', '--augment-input', 'test_augment.fasta',
             '--min-size', '2', '--algorithm', 'greedy'
         ], capture_output=True, text=True)
@@ -161,27 +158,27 @@ class TestAugmentInput:
 
         # Run summarize
         result = subprocess.run([
-            sys.executable, summarize_script_path,
+            sys.executable, '-m', summarize_module,
             '--source', 'clusters', '--log-level', 'INFO'
         ], capture_output=True, text=True)
-        
+
         assert result.returncode == 0, f"Summarize should succeed: {result.stderr}"
         assert os.path.exists('__Summary__/FASTQ Files'), "Summary FASTQ Files directory should be created"
     
-    def test_augmented_sequence_in_summary_output(self, temp_dir, core_script_path, summarize_script_path, test_data):
+    def test_augmented_sequence_in_summary_output(self, temp_dir, core_module, summarize_module, test_data):
         """Test that augmented sequences appear in final summary output."""
         self.create_test_files(test_data)
-        
+
         # Run speconsense
         subprocess.run([
-            sys.executable, core_script_path,
+            sys.executable, '-m', core_module,
             'test_main.fastq', '--augment-input', 'test_augment.fasta',
             '--min-size', '2', '--algorithm', 'greedy'
         ], capture_output=True, text=True)
 
         # Run summarize
         subprocess.run([
-            sys.executable, summarize_script_path,
+            sys.executable, '-m', summarize_module,
             '--source', 'clusters', '--log-level', 'INFO'
         ], capture_output=True, text=True)
 
@@ -193,20 +190,20 @@ class TestAugmentInput:
             summary_content = f.read()
             assert 'augmented_1' in summary_content, "Augmented sequence should be in summary output"
     
-    def test_final_consensus_counts(self, temp_dir, core_script_path, summarize_script_path, test_data):
+    def test_final_consensus_counts(self, temp_dir, core_module, summarize_module, test_data):
         """Test that final consensus headers show correct sequence counts."""
         self.create_test_files(test_data)
-        
+
         # Run speconsense
         subprocess.run([
-            sys.executable, core_script_path,
+            sys.executable, '-m', core_module,
             'test_main.fastq', '--augment-input', 'test_augment.fasta',
             '--min-size', '2', '--algorithm', 'greedy'
         ], capture_output=True, text=True)
 
         # Run summarize
         subprocess.run([
-            sys.executable, summarize_script_path,
+            sys.executable, '-m', summarize_module,
             '--source', 'clusters', '--log-level', 'INFO'
         ], capture_output=True, text=True)
 
@@ -220,7 +217,7 @@ class TestAugmentInput:
             # Should show size=4 (3 similar primary + 1 augmented) or size=5 (all sequences)
             assert ('size=4' in header or 'size=5' in header), f"Unexpected sequence count in header: {header}"
     
-    def test_empty_augment_file_warning(self, temp_dir, core_script_path):
+    def test_empty_augment_file_warning(self, temp_dir, core_module):
         """Test warning for empty augment input file."""
         # Create main file with one sequence, empty augment file
         with open('test_main.fastq', 'w') as f:
@@ -232,7 +229,7 @@ class TestAugmentInput:
             f.write("")
 
         result = subprocess.run([
-            sys.executable, core_script_path,
+            sys.executable, '-m', core_module,
             'test_main.fastq', '--augment-input', 'test_augment.fasta',
             '--min-size', '0', '--algorithm', 'greedy'
         ], capture_output=True, text=True)
