@@ -11,6 +11,25 @@ import tempfile
 from typing import List, Tuple, Dict
 from collections import defaultdict
 
+# Python 3.8 compatibility: BooleanOptionalAction was added in Python 3.9
+if not hasattr(argparse, 'BooleanOptionalAction'):
+    class BooleanOptionalAction(argparse.Action):
+        def __init__(self, option_strings, dest, default=None, required=False, help=None):
+            _option_strings = []
+            for option_string in option_strings:
+                _option_strings.append(option_string)
+                if option_string.startswith('--'):
+                    _option_strings.append('--no-' + option_string[2:])
+            super().__init__(option_strings=_option_strings, dest=dest, nargs=0,
+                           default=default, required=required, help=help)
+
+        def __call__(self, parser, namespace, values, option_string=None):
+            if option_string.startswith('--no-'):
+                setattr(namespace, self.dest, False)
+            else:
+                setattr(namespace, self.dest, True)
+    argparse.BooleanOptionalAction = BooleanOptionalAction
+
 from tqdm import tqdm
 
 try:
