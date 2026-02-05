@@ -86,7 +86,8 @@ pytest -m "not slow"
 2. HAC variant grouping by sequence identity (separates dissimilar sequences)
 3. Homopolymer-aware MSA-based merging within each group (creates IUPAC consensus sequences)
 4. Variant selection within each group (size-based or diversity-based)
-5. Output generation with full traceability
+5. Optional full consensus generation per group (`--enable-full-consensus`) — IUPAC consensus from all pre-merge variants, gaps never win
+6. Output generation with full traceability
 
 Note: HAC grouping occurs BEFORE merging (since 0.4.0) to prevent inappropriate merging of dissimilar sequences (e.g., contaminants with primary targets). Homopolymer-aware merging (since 0.5.0) distinguishes structural indels from homopolymer length differences.
 
@@ -114,6 +115,7 @@ Note: HAC grouping occurs BEFORE merging (since 0.4.0) to prevent inappropriate 
 - Dual namespace system:
   - Original clustering: `-c1`, `-c2`, `-c3` format
   - Summarization: `-1.v1`, `-1.v2`, `-2.v1` format for groups and variants
+  - Full consensus: `-1.full` format (one per group, when `--enable-full-consensus` is used)
 
 ### IUPAC Ambiguity Code Handling
 

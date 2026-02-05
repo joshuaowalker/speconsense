@@ -7,6 +7,7 @@ This document provides a complete reference of all configurable parameters acros
 | Profile | Purpose |
 |---------|---------|
 | **default** | Balanced settings suitable for most fungal amplicon workflows |
+| **compressed** | Compress variants into minimal IUPAC consensus sequences (aggressive merging with indels, 20% thresholds) |
 | **herbarium** | High-recall for degraded DNA/type specimens where false negatives are costly |
 | **largedata** | Experimental settings optimized for large input files |
 | **nostalgia** | Simulate older bioinformatics pipelines (for comparison only) |
@@ -18,28 +19,28 @@ This document provides a complete reference of all configurable parameters acros
 
 Parameters for the main clustering and consensus tool.
 
-| Parameter | Description | Default | herbarium | largedata | nostalgia | strict |
-|-----------|-------------|---------|-----------|-----------|-----------|--------|
-| `algorithm` | Clustering algorithm: `graph` (MCL) or `greedy` | graph | — | — | greedy | — |
-| `min-identity` | Minimum sequence identity threshold for clustering | 0.9 | 0.85 | — | 0.85 | 0.95 |
-| `inflation` | MCL inflation parameter (higher = more clusters) | 4.0 | — | — | — | — |
-| `k-nearest-neighbors` | Number of nearest neighbors for graph construction | 5 | — | — | — | — |
-| `min-size` | Minimum cluster size to output (0 = disabled) | 5 | 3 | — | 5 | 10 |
-| `min-cluster-ratio` | Minimum size relative to largest cluster (0 = disabled) | 0.01 | 0 | 0 | 0.2 | 0.05 |
-| `max-sample-size` | Maximum reads sampled for consensus generation | 100 | 100 | — | 500 | 100 |
-| `outlier-identity` | Min read-to-consensus identity (`auto` = (1+min-identity)/2) | auto | auto | — | 0.85 | 0.98 |
-| `presample` | Presample size for initial reads (0 = use all) | 1000 | 0 | 0 | 500 | 0 |
-| `disable-position-phasing` | Disable variant phasing within clusters | false | — | — | true | — |
-| `min-variant-frequency` | Min minor allele frequency for variant phasing | 0.10 | 0.05 | — | — | 0.25 |
-| `min-variant-count` | Min read count for minor allele to trigger phasing | 5 | — | — | — | — |
-| `disable-ambiguity-calling` | Disable IUPAC codes for unphased variants | false | — | — | true | true |
-| `min-ambiguity-frequency` | Min minor allele frequency for IUPAC calling | 0.10 | — | — | — | — |
-| `min-ambiguity-count` | Min read count for IUPAC ambiguity calling | 3 | — | — | — | — |
-| `disable-cluster-merging` | Disable merging identical consensus sequences | false | — | — | — | — |
-| `disable-homopolymer-equivalence` | Require exact match for cluster merging | false | — | — | — | — |
-| `orient-mode` | Sequence orientation: `skip`, `keep-all`, `filter-failed` | skip | — | — | — | — |
-| `scale-threshold` | Sequence count to enable vsearch acceleration (0 = disabled) | 1001 | — | — | — | — |
-| `threads` | Max threads for internal parallelism (0 = auto) | 1 | — | 0 | — | — |
+| Parameter | Description | Default | compressed | herbarium | largedata | nostalgia | strict |
+|-----------|-------------|---------|------------|-----------|-----------|-----------|--------|
+| `algorithm` | Clustering algorithm: `graph` (MCL) or `greedy` | graph | — | — | — | greedy | — |
+| `min-identity` | Minimum sequence identity threshold for clustering | 0.9 | — | 0.85 | — | 0.85 | 0.95 |
+| `inflation` | MCL inflation parameter (higher = more clusters) | 4.0 | — | — | — | — | — |
+| `k-nearest-neighbors` | Number of nearest neighbors for graph construction | 5 | — | — | — | — | — |
+| `min-size` | Minimum cluster size to output (0 = disabled) | 5 | — | 3 | — | 5 | 10 |
+| `min-cluster-ratio` | Minimum size relative to largest cluster (0 = disabled) | 0.01 | — | 0 | 0 | 0.2 | 0.05 |
+| `max-sample-size` | Maximum reads sampled for consensus generation | 100 | — | 100 | — | 500 | 100 |
+| `outlier-identity` | Min read-to-consensus identity (`auto` = (1+min-identity)/2) | auto | — | auto | — | 0.85 | 0.98 |
+| `presample` | Presample size for initial reads (0 = use all) | 1000 | — | 0 | 0 | 500 | 0 |
+| `disable-position-phasing` | Disable variant phasing within clusters | false | — | — | — | true | — |
+| `min-variant-frequency` | Min minor allele frequency for variant phasing | 0.10 | 0.20 | 0.05 | — | — | 0.25 |
+| `min-variant-count` | Min read count for minor allele to trigger phasing | 5 | — | — | — | — | — |
+| `disable-ambiguity-calling` | Disable IUPAC codes for unphased variants | false | — | — | — | true | true |
+| `min-ambiguity-frequency` | Min minor allele frequency for IUPAC calling | 0.10 | 0.20 | — | — | — | — |
+| `min-ambiguity-count` | Min read count for IUPAC ambiguity calling | 3 | — | — | — | — | — |
+| `disable-cluster-merging` | Disable merging identical consensus sequences | false | — | — | — | — | — |
+| `disable-homopolymer-equivalence` | Require exact match for cluster merging | false | — | — | — | — | — |
+| `orient-mode` | Sequence orientation: `skip`, `keep-all`, `filter-failed` | skip | — | — | — | — | — |
+| `scale-threshold` | Sequence count to enable vsearch acceleration (0 = disabled) | 1001 | — | — | — | — | — |
+| `threads` | Max threads for internal parallelism (0 = auto) | 1 | — | — | 0 | — | — |
 
 **Notes:**
 - "—" indicates the parameter uses the default value
@@ -51,26 +52,27 @@ Parameters for the main clustering and consensus tool.
 
 Parameters for the post-processing and summarization tool.
 
-| Parameter | Description | Default | herbarium | largedata | nostalgia | strict |
-|-----------|-------------|---------|-----------|-----------|-----------|--------|
-| `min-ric` | Minimum Reads in Consensus threshold | 3 | 3 | — | 5 | 5 |
-| `min-len` | Minimum sequence length in bp (0 = disabled) | 0 | — | — | — | — |
-| `max-len` | Maximum sequence length in bp (0 = disabled) | 0 | — | — | — | — |
-| `group-identity` | Identity threshold for HAC variant grouping | 0.9 | — | 0.95 | — | — |
-| `disable-merging` | Skip MSA-based merge evaluation entirely | false | — | — | true | true |
-| `merge-effort` | Merge thoroughness: `fast`, `balanced`, `thorough`, or 6-14 | balanced | — | fast | — | — |
-| `merge-snp` | Enable SNP-based variant merging | true | — | — | — | — |
-| `merge-indel-length` | Max individual indel length for merging (0 = disabled) | 0 | — | — | — | — |
-| `merge-position-count` | Max total SNP+indel positions for merging | 2 | — | — | — | — |
-| `merge-min-size-ratio` | Min size ratio (smaller/larger) for merging (0 = disabled) | 0.1 | — | — | — | — |
-| `min-merge-overlap` | Min overlap in bp for different-length sequence merging | 200 | — | — | — | — |
-| `disable-homopolymer-equivalence` | Treat homopolymer length differences as structural | false | — | — | — | — |
-| `select-max-groups` | Max groups to output per specimen (-1 = all) | -1 | — | — | — | — |
-| `select-max-variants` | Max variants per group (-1 = no limit) | -1 | — | — | — | — |
-| `select-strategy` | Variant selection: `size` or `diversity` | size | — | — | — | — |
-| `fasta-fields` | Header fields: preset or comma-separated list | default | — | — | — | — |
-| `scale-threshold` | Sequence count to enable vsearch acceleration (0 = disabled) | 1001 | — | — | — | — |
-| `threads` | Max threads for internal parallelism (0 = auto) | 0 | — | — | — | — |
+| Parameter | Description | Default | compressed | herbarium | largedata | nostalgia | strict |
+|-----------|-------------|---------|------------|-----------|-----------|-----------|--------|
+| `min-ric` | Minimum Reads in Consensus threshold | 3 | — | 3 | — | 5 | 5 |
+| `min-len` | Minimum sequence length in bp (0 = disabled) | 0 | — | — | — | — | — |
+| `max-len` | Maximum sequence length in bp (0 = disabled) | 0 | — | — | — | — | — |
+| `group-identity` | Identity threshold for HAC variant grouping | 0.9 | — | — | 0.95 | — | — |
+| `disable-merging` | Skip MSA-based merge evaluation entirely | false | — | — | — | true | true |
+| `merge-effort` | Merge thoroughness: `fast`, `balanced`, `thorough`, or 6-14 | balanced | — | — | fast | — | — |
+| `merge-snp` | Enable SNP-based variant merging | true | — | — | — | — | — |
+| `merge-indel-length` | Max individual indel length for merging (0 = disabled) | 0 | 5 | — | — | — | — |
+| `merge-position-count` | Max total SNP+indel positions for merging | 2 | 10 | — | — | — | — |
+| `merge-min-size-ratio` | Min size ratio (smaller/larger) for merging (0 = disabled) | 0.1 | 0.2 | — | — | — | — |
+| `min-merge-overlap` | Min overlap in bp for different-length sequence merging | 200 | 0 | — | — | — | — |
+| `disable-homopolymer-equivalence` | Treat homopolymer length differences as structural | false | — | — | — | — | — |
+| `select-max-groups` | Max groups to output per specimen (-1 = all) | -1 | — | — | — | — | — |
+| `select-max-variants` | Max variants per group (-1 = no limit) | -1 | — | — | — | — | — |
+| `select-strategy` | Variant selection: `size` or `diversity` | size | — | — | — | — | — |
+| `enable-full-consensus` | Generate full IUPAC consensus per variant group | false | true | — | — | — | — |
+| `fasta-fields` | Header fields: preset or comma-separated list | default | — | — | — | — | — |
+| `scale-threshold` | Sequence count to enable vsearch acceleration (0 = disabled) | 1001 | — | — | — | — | — |
+| `threads` | Max threads for internal parallelism (0 = auto) | 0 | — | — | — | — | — |
 
 **Notes:**
 - "—" indicates the parameter uses the default value
@@ -83,6 +85,7 @@ Parameters for the post-processing and summarization tool.
 | Scenario | Recommended Profile |
 |----------|---------------------|
 | Standard fungal amplicon workflow | **default** |
+| Fewer sequences to review, variation captured as IUPAC codes | **compressed** |
 | Herbarium/type specimens with degraded DNA | **herbarium** |
 | Processing a single large FASTQ file | **largedata** |
 | Comparing results to older pipeline outputs | **nostalgia** |
@@ -119,4 +122,4 @@ Profiles specify a `speconsense-version` field (e.g., `"0.7.*"`) indicating comp
 
 ---
 
-*Document generated for speconsense 0.7.0*
+*Document generated for speconsense 0.7.x (updated for compressed profile and full consensus)*
