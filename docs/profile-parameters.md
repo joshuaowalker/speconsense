@@ -123,4 +123,4 @@ Profiles specify a `speconsense-version` field (e.g., `"0.7.*"`) indicating comp
 
 ---
 
-*Document generated for speconsense 0.7.3*
+*Document generated for speconsense 0.7.4*
