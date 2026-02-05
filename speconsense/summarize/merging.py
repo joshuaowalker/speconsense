@@ -337,6 +337,87 @@ def create_overlap_consensus_from_msa(aligned_seqs: List, variants: List[Consens
     )
 
 
+def create_full_consensus_from_msa(aligned_seqs: List, variants: List[ConsensusInfo]) -> ConsensusInfo:
+    """
+    Generate full consensus from MSA where any non-gap base means inclusion.
+
+    Unlike create_consensus_from_msa where gaps can win by majority vote,
+    the full consensus includes a position if ANY variant has a base there.
+    This captures all variation from all contributing variants.
+
+    Args:
+        aligned_seqs: MSA sequences with gaps as '-'
+        variants: Original ConsensusInfo objects (for metadata)
+
+    Returns:
+        ConsensusInfo with full consensus sequence
+    """
+    consensus_seq = []
+    snp_count = 0
+    alignment_length = len(aligned_seqs[0].seq)
+
+    for col_idx in range(alignment_length):
+        column = [str(seq.seq[col_idx]) for seq in aligned_seqs]
+
+        # Collect non-gap bases
+        base_votes = defaultdict(int)
+        for i, base in enumerate(column):
+            upper_base = base.upper()
+            if upper_base != '-':
+                base_votes[upper_base] += variants[i].size
+
+        # Include position if ANY variant has a base (gaps never win)
+        if base_votes:
+            if len(base_votes) == 1:
+                consensus_seq.append(list(base_votes.keys())[0])
+            else:
+                represented_bases = set(base_votes.keys())
+                iupac_code = merge_bases_to_iupac(represented_bases)
+                consensus_seq.append(iupac_code)
+                snp_count += 1
+
+    # Create full ConsensusInfo
+    consensus_sequence = ''.join(consensus_seq)
+    total_size = sum(v.size for v in variants)
+    total_ric = sum(v.ric for v in variants)
+
+    # Collect RiC values, preserving any prior merge history
+    raw_ric_values = []
+    for v in variants:
+        if v.raw_ric:
+            raw_ric_values.extend(v.raw_ric)
+        else:
+            raw_ric_values.append(v.ric)
+    raw_ric_values = sorted(raw_ric_values, reverse=True) if len(variants) > 1 else None
+
+    # Collect lengths, preserving any prior merge history
+    raw_len_values = []
+    for v in variants:
+        if v.raw_len:
+            raw_len_values.extend(v.raw_len)
+        else:
+            raw_len_values.append(len(v.sequence))
+    raw_len_values = sorted(raw_len_values, reverse=True) if len(variants) > 1 else None
+
+    # Use metadata from largest variant
+    largest_variant = max(variants, key=lambda v: v.size)
+
+    return ConsensusInfo(
+        sample_name=largest_variant.sample_name,
+        cluster_id=largest_variant.cluster_id,
+        sequence=consensus_sequence,
+        ric=total_ric,
+        size=total_size,
+        file_path=largest_variant.file_path,
+        snp_count=snp_count if snp_count > 0 else None,
+        primers=largest_variant.primers,
+        raw_ric=raw_ric_values,
+        raw_len=raw_len_values,
+        rid=largest_variant.rid,
+        rid_min=largest_variant.rid_min,
+    )
+
+
 def merge_group_with_msa(variants: List[ConsensusInfo], args) -> Tuple[List[ConsensusInfo], Dict, int, List[OverlapMergeInfo]]:
     """
     Find largest mergeable subset of variants using MSA-based evaluation with exhaustive search.

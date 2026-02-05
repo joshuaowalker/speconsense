@@ -124,8 +124,8 @@ class GroupField(FastaField):
         super().__init__('group', 'Variant group number')
 
     def format_value(self, consensus: ConsensusInfo) -> Optional[str]:
-        # Extract from sample_name (e.g., "...-1.v1" or "...-2.v1.raw1")
-        match = re.search(r'-(\d+)\.v\d+(?:\.raw\d+)?$', consensus.sample_name)
+        # Extract from sample_name (e.g., "...-1.v1", "...-2.v1.raw1", or "...-1.full")
+        match = re.search(r'-(\d+)(?:\.v\d+(?:\.raw\d+)?|\.full)$', consensus.sample_name)
         if match:
             return f"group={match.group(1)}"
         return None
@@ -136,8 +136,10 @@ class VariantField(FastaField):
         super().__init__('variant', 'Variant identifier within group')
 
     def format_value(self, consensus: ConsensusInfo) -> Optional[str]:
-        # Extract from sample_name (e.g., "...-1.v1" -> "v1" or "...-1.v1.raw1" -> "v1")
+        # Extract from sample_name (e.g., "...-1.v1" -> "v1", "...-1.v1.raw1" -> "v1", "...-1.full" -> "full")
         match = re.search(r'\.(v\d+)(?:\.raw\d+)?$', consensus.sample_name)
+        if not match:
+            match = re.search(r'\.(full)$', consensus.sample_name)
         if match:
             return f"variant={match.group(1)}"
         return None
