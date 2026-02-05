@@ -132,6 +132,8 @@ def parse_arguments():
     merging_group = parser.add_argument_group("Merging")
     merging_group.add_argument("--disable-merging", action="store_true",
                                help="Disable all variant merging (skip MSA-based merge evaluation entirely)")
+    merging_group.add_argument("--enable-merging", action="store_false", dest="disable_merging",
+                               help="Override --disable-merging or profile setting")
     merging_group.add_argument("--merge-snp", action=argparse.BooleanOptionalAction, default=True,
                                help="Enable SNP-based merging (default: True, use --no-merge-snp to disable)")
     merging_group.add_argument("--merge-indel-length", type=int, default=0,
@@ -144,6 +146,9 @@ def parse_arguments():
                                help="Minimum overlap in bp for merging sequences of different lengths (default: 200, 0 to disable)")
     merging_group.add_argument("--disable-homopolymer-equivalence", action="store_true",
                                help="Disable homopolymer equivalence in merging (treat AAA vs AAAA as different)")
+    merging_group.add_argument("--enable-homopolymer-equivalence", action="store_false",
+                               dest="disable_homopolymer_equivalence",
+                               help="Override --disable-homopolymer-equivalence or profile setting")
     merging_group.add_argument("--merge-effort", type=str, default="balanced", metavar="LEVEL",
                                help="Merging effort level: fast (8), balanced (10), thorough (12), "
                                     "or numeric 6-14. Higher values allow larger batch sizes for "
@@ -167,6 +172,9 @@ def parse_arguments():
     selection_group.add_argument("--enable-full-consensus", action="store_true",
                                  help="Generate a full consensus per variant group representing all variation "
                                       "from pre-merge variants (gaps never win)")
+    selection_group.add_argument("--disable-full-consensus", action="store_false",
+                                 dest="enable_full_consensus",
+                                 help="Override --enable-full-consensus or profile setting")
 
     # Performance group
     perf_group = parser.add_argument_group("Performance")
