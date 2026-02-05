@@ -9,7 +9,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 - **`--enable-full-consensus` flag** (summarize) — Generates a full IUPAC consensus per variant group from all pre-merge variants (gaps never win). Output named `{specimen}-{group}.full`
-- **`compressed` bundled profile** — Aggressive variant merging with indel support, 20% frequency thresholds, and full consensus enabled
+- **`--select-min-size-ratio` parameter** (summarize) — Filters out post-merge variants whose size ratio to the largest variant in their group falls below the threshold (default: 0 = disabled, e.g. 0.2 for 20% cutoff). Applied after merging, before variant selection
+- **`compressed` bundled profile** — Aggressive variant merging with indel support, 20% frequency thresholds, full consensus, and 20% selection size ratio
 - **Complement flags for all boolean CLI options** — Allows CLI override of profile-set boolean values (e.g., `--enable-merging` overrides `--disable-merging` set by a profile)
 
 ### Changed

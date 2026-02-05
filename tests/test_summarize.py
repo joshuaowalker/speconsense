@@ -520,6 +520,72 @@ class TestFullConsensus:
         assert result.rid == 0.95
 
 
+    def test_full_consensus_filters_small_variants(self):
+        """Test that merge_min_size_ratio filters out small variants from full consensus."""
+        from speconsense.summarize.merging import create_full_consensus_from_msa
+        from speconsense.summarize.analysis import run_spoa_msa
+        from speconsense.types import ConsensusInfo
+
+        # Large variant: ACGTACGTACGTACGT (no insertion)
+        # Small variant: ACGTACGTAAACGTACGT (extra AA insertion at position 8)
+        # With ratio 5/100 = 0.05 < 0.1 threshold, the small variant should be filtered out
+        large_seq = "ACGTACGTACGTACGT"
+        small_seq = "ACGTACGTAAACGTACGT"
+
+        pre_merge_variants = [
+            ConsensusInfo("s1", "c1", large_seq, ric=100, size=100, file_path="f"),
+            ConsensusInfo("s2", "c2", small_seq, ric=5, size=5, file_path="f"),
+        ]
+
+        # Apply the same filter as cli.py
+        merge_min_size_ratio = 0.1
+        largest_size = max(v.size for v in pre_merge_variants)
+        filtered = [v for v in pre_merge_variants
+                    if (v.size / largest_size) >= merge_min_size_ratio]
+
+        assert len(filtered) == 1
+        assert filtered[0].size == 100
+
+        # With only one variant, full consensus is just a copy (no MSA needed)
+        full_consensus = filtered[0]._replace(sample_name="test-1.full")
+        # The spurious insertion from the small variant should NOT appear
+        assert "AA" not in full_consensus.sequence
+        assert full_consensus.sequence == large_seq
+
+    def test_full_consensus_no_filter_when_disabled(self):
+        """Test that merge_min_size_ratio=0 preserves all variants (current behavior)."""
+        from speconsense.summarize.merging import create_full_consensus_from_msa
+        from speconsense.summarize.analysis import run_spoa_msa
+        from speconsense.types import ConsensusInfo
+
+        large_seq = "ACGTACGTACGTACGT"
+        small_seq = "ACGTACGTAAACGTACGT"  # Extra AA insertion
+
+        pre_merge_variants = [
+            ConsensusInfo("s1", "c1", large_seq, ric=100, size=100, file_path="f"),
+            ConsensusInfo("s2", "c2", small_seq, ric=5, size=5, file_path="f"),
+        ]
+
+        # With ratio=0, no filtering occurs
+        merge_min_size_ratio = 0
+        if merge_min_size_ratio > 0 and len(pre_merge_variants) > 1:
+            largest_size = max(v.size for v in pre_merge_variants)
+            pre_merge_variants = [v for v in pre_merge_variants
+                                  if (v.size / largest_size) >= merge_min_size_ratio]
+
+        # All variants remain
+        assert len(pre_merge_variants) == 2
+
+        # MSA should include the insertion from the small variant (gaps never win)
+        sequences = [v.sequence for v in pre_merge_variants]
+        aligned_seqs = run_spoa_msa(sequences, alignment_mode=1)
+        full_consensus = create_full_consensus_from_msa(aligned_seqs, pre_merge_variants)
+
+        # The "AA" insertion from small variant should be present (gaps never win)
+        assert "AA" in full_consensus.sequence
+        assert full_consensus.ric == 105
+
+
 class TestFieldRegexFullConsensus:
     """Tests for GroupField and VariantField regex handling of .full names."""
 
@@ -576,6 +642,101 @@ class TestFieldRegexFullConsensus:
         field = VariantField()
         cons = ConsensusInfo("specimen-1.v1.raw2", "c1", "ACGT", ric=10, size=10, file_path="f")
         assert field.format_value(cons) == "variant=v1"
+
+
+class TestSelectMinSizeRatio:
+    """Tests for --select-min-size-ratio filtering."""
+
+    def test_select_min_size_ratio_filters_small_variants(self):
+        """Integration test: --select-min-size-ratio 0.1 filters out tiny variants."""
+        temp_dir = tempfile.mkdtemp()
+        source_dir = os.path.join(temp_dir, "clusters")
+        summary_dir = os.path.join(temp_dir, "__Summary__")
+        os.makedirs(source_dir)
+
+        try:
+            seq1 = "ATCGATCGATCGATCGATCGATCG"
+            seq2 = "ATCGATCGATCAATCGATCGATCG"  # One SNP — different enough to not merge
+
+            fasta_content = f""">test-c1 size=100 ric=100 primers=test
+{seq1}
+>test-c2 size=3 ric=3 primers=test
+{seq2}
+"""
+            fasta_file = os.path.join(source_dir, "test-all.fasta")
+            with open(fasta_file, 'w') as f:
+                f.write(fasta_content)
+
+            result = subprocess.run(
+                [
+                    "speconsense-summarize",
+                    "--source", source_dir,
+                    "--summary-dir", summary_dir,
+                    "--min-ric", "3",
+                    "--select-min-size-ratio", "0.1",
+                    "--disable-merging",
+                ],
+                capture_output=True,
+                text=True
+            )
+
+            assert result.returncode == 0, f"speconsense-summarize failed: {result.stderr}"
+
+            output_fasta = os.path.join(summary_dir, "summary.fasta")
+            output_sequences = list(SeqIO.parse(output_fasta, "fasta"))
+
+            # Only the large variant should remain (3/100 = 0.03 < 0.1)
+            assert len(output_sequences) == 1, \
+                f"Expected 1 sequence after filtering, got {len(output_sequences)}"
+            assert "size=100" in output_sequences[0].description
+
+        finally:
+            shutil.rmtree(temp_dir)
+
+    def test_select_min_size_ratio_disabled_preserves_all(self):
+        """Integration test: --select-min-size-ratio 0 preserves all variants."""
+        temp_dir = tempfile.mkdtemp()
+        source_dir = os.path.join(temp_dir, "clusters")
+        summary_dir = os.path.join(temp_dir, "__Summary__")
+        os.makedirs(source_dir)
+
+        try:
+            seq1 = "ATCGATCGATCGATCGATCGATCG"
+            seq2 = "ATCGATCGATCAATCGATCGATCG"  # One SNP
+
+            fasta_content = f""">test-c1 size=100 ric=100 primers=test
+{seq1}
+>test-c2 size=3 ric=3 primers=test
+{seq2}
+"""
+            fasta_file = os.path.join(source_dir, "test-all.fasta")
+            with open(fasta_file, 'w') as f:
+                f.write(fasta_content)
+
+            result = subprocess.run(
+                [
+                    "speconsense-summarize",
+                    "--source", source_dir,
+                    "--summary-dir", summary_dir,
+                    "--min-ric", "3",
+                    "--select-min-size-ratio", "0",
+                    "--disable-merging",
+                ],
+                capture_output=True,
+                text=True
+            )
+
+            assert result.returncode == 0, f"speconsense-summarize failed: {result.stderr}"
+
+            output_fasta = os.path.join(summary_dir, "summary.fasta")
+            output_sequences = list(SeqIO.parse(output_fasta, "fasta"))
+
+            # Both variants should be preserved
+            assert len(output_sequences) == 2, \
+                f"Expected 2 sequences with ratio=0, got {len(output_sequences)}"
+
+        finally:
+            shutil.rmtree(temp_dir)
 
 
 class TestFullConsensusIntegration:

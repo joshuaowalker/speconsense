@@ -103,6 +103,7 @@ VALID_SUMMARIZE_KEYS = {
     "select-max-groups",
     "select-max-variants",
     "select-strategy",
+    "select-min-size-ratio",
     "enable-full-consensus",
     # Processing
     "scale-threshold",

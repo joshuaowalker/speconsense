@@ -91,6 +91,7 @@ speconsense-summarize:
   # select-max-groups: -1         # Max groups to output (-1 = no limit)
   # select-max-variants: -1       # Max variants per group (-1 = no limit)
   # select-strategy: size         # Selection strategy: size or diversity
+  # select-min-size-ratio: 0    # Min size ratio to include variant (0 = disabled)
 
   # --- Processing ---
   # threads: 0                    # Max threads (0 = auto-detect)

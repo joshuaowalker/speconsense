@@ -169,6 +169,9 @@ def parse_arguments():
     selection_group.add_argument("--select-strategy", "--variant-selection",
                                  dest="select_strategy", choices=["size", "diversity"], default="size",
                                  help="Variant selection strategy: size or diversity (default: size)")
+    selection_group.add_argument("--select-min-size-ratio", type=float, default=0,
+                                 help="Minimum size ratio (variant/largest) to include in output "
+                                      "(default: 0 = disabled, e.g. 0.2 for 20%% cutoff)")
     selection_group.add_argument("--enable-full-consensus", action="store_true",
                                  help="Generate a full consensus per variant group representing all variation "
                                       "from pre-merge variants (gaps never win)")
@@ -359,6 +362,18 @@ def process_single_specimen(file_consensuses: List[ConsensusInfo],
     for group_idx, (group_id, group_members) in enumerate(sorted_groups):
         final_group_name = group_idx + 1
 
+        # Apply select-min-size-ratio filter
+        if args.select_min_size_ratio > 0 and len(group_members) > 1:
+            largest_size = max(v.size for v in group_members)
+            filtered = [v for v in group_members
+                        if (v.size / largest_size) >= args.select_min_size_ratio]
+            if len(filtered) < len(group_members):
+                filtered_count = len(group_members) - len(filtered)
+                logging.debug(f"Group {group_idx + 1}: filtered out {filtered_count} "
+                              f"variants with size ratio < {args.select_min_size_ratio} "
+                              f"relative to largest (size={largest_size})")
+                group_members = filtered
+
         # Select variants for this group
         selected_variants = select_variants(group_members, args.select_max_variants, args.select_strategy, group_number=final_group_name)
 
@@ -380,6 +395,17 @@ def process_single_specimen(file_consensuses: List[ConsensusInfo],
         # Generate full consensus from PRE-MERGE variants
         if getattr(args, 'enable_full_consensus', False):
             pre_merge_variants = variant_groups[group_id]
+
+            # Apply size-ratio filter (same as merge pipeline)
+            if args.merge_min_size_ratio > 0 and len(pre_merge_variants) > 1:
+                largest_size = max(v.size for v in pre_merge_variants)
+                filtered = [v for v in pre_merge_variants
+                            if (v.size / largest_size) >= args.merge_min_size_ratio]
+                if len(filtered) < len(pre_merge_variants):
+                    filtered_count = len(pre_merge_variants) - len(filtered)
+                    logging.debug(f"Full consensus: filtered out {filtered_count} variants with size ratio < {args.merge_min_size_ratio} relative to largest (size={largest_size})")
+                    pre_merge_variants = filtered
+
             specimen_base = selected_variants[0].sample_name.rsplit('-c', 1)[0]
             full_name = f"{specimen_base}-{group_idx + 1}.full"
 
@@ -450,6 +476,7 @@ def main():
     logging.info(f"  --select-max-variants: {args.select_max_variants}")
     logging.info(f"  --select-max-groups: {args.select_max_groups}")
     logging.info(f"  --select-strategy: {args.select_strategy}")
+    logging.info(f"  --select-min-size-ratio: {args.select_min_size_ratio}")
     logging.info(f"  --enable-full-consensus: {args.enable_full_consensus}")
     logging.info(f"  --log-level: {args.log_level}")
     logging.info("")
