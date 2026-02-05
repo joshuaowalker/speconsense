@@ -260,14 +260,14 @@ When using `speconsense-summarize` for post-processing, creates `__Summary__/` d
 |---------------|-------------|------------|-------------|
 | **Original** | Source `cluster_debug/` | `-c1`, `-c2`, `-c3` | Preserves speconsense clustering results |
 | **Summarization** | `__Summary__/`, `FASTQ Files/`, `variants/` | `-1.v1`, `-1.v2`, `-2.v1`, `.raw1` | Post-processing groups and variants |
-| **Full consensus** | `__Summary__/` | `-1.full` | IUPAC consensus from all pre-merge variants in a group |
+| **Full consensus** | `__Summary__/` | `-1.full` | IUPAC consensus from pre-merge components of surviving variants |
 
 ### Example Directory Structure
 ```
 __Summary__/
 ├── sample-1.v1-RiC45.fasta                  # Primary variant (group 1, merged)
 ├── sample-1.v2-RiC23.fasta                  # Additional variant (not merged)
-├── sample-1.full-RiC68.fasta                # Full IUPAC consensus for group 1 (all pre-merge variants)
+├── sample-1.full-RiC68.fasta                # Full IUPAC consensus for group 1 (surviving variants' components)
 ├── sample-2.v1-RiC30.fasta                  # Second organism group, primary variant
 ├── summary.fasta                            # All final consensus sequences (excludes .raw)
 ├── summary.txt                              # Statistics
@@ -794,7 +794,7 @@ For high-throughput workflows (e.g., 100K sequences/year), this prioritization e
 ```bash
 speconsense-summarize --enable-full-consensus
 ```
-- Generates a full IUPAC consensus sequence per variant group from all pre-merge variants
+- Generates a full IUPAC consensus sequence per variant group from pre-merge variants that contributed to surviving post-merge variants
 - Output named `{specimen}-{group}.full-RiC{reads}.fasta` in the `__Summary__/` directory
 - Uses majority voting across all variants in the group; **gaps never win** — at each alignment column, the most common non-gap base is chosen, with IUPAC codes for ties among bases
 - Useful when you want a single representative sequence that captures all variation within a group as IUPAC ambiguity codes
@@ -1038,7 +1038,7 @@ The complete speconsense-summarize workflow operates in this order:
 4. **Homopolymer-aware MSA-based variant merging** within each group, including **overlap merging** for different-length sequences (`--disable-merging`, `--merge-effort`, `--merge-position-count`, `--merge-indel-length`, `--min-merge-overlap`, `--merge-snp`, `--merge-min-size-ratio`, `--disable-homopolymer-equivalence`)
 5. **Selection size ratio filtering** to remove tiny post-merge variants (`--select-min-size-ratio`)
 6. **Variant selection** within each group (`--select-max-variants`, `--select-strategy`)
-7. **Full consensus generation** (optional) — IUPAC consensus from all pre-merge variants per group (`--enable-full-consensus`)
+7. **Full consensus generation** (optional) — IUPAC consensus from pre-merge components of surviving post-merge variants (`--enable-full-consensus`)
 8. **Output generation** with customizable header fields (`--fasta-fields`) and full traceability
 
 **Key architectural features**:

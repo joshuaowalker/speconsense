@@ -392,19 +392,19 @@ def process_single_specimen(file_consensuses: List[ConsensusInfo],
             final_consensus.append(renamed_variant)
             group_naming.append((variant.sample_name, new_name))
 
-        # Generate full consensus from PRE-MERGE variants
+        # Generate full consensus from PRE-MERGE variants that contributed
+        # to surviving post-merge variants (after select-min-size-ratio)
         if getattr(args, 'enable_full_consensus', False):
-            pre_merge_variants = variant_groups[group_id]
+            # Collect original cluster names from surviving post-merge variants
+            surviving_originals = set()
+            for v in group_members:
+                if v.sample_name in all_merge_traceability:
+                    surviving_originals.update(all_merge_traceability[v.sample_name])
+                else:
+                    surviving_originals.add(v.sample_name)
 
-            # Apply size-ratio filter (same as merge pipeline)
-            if args.merge_min_size_ratio > 0 and len(pre_merge_variants) > 1:
-                largest_size = max(v.size for v in pre_merge_variants)
-                filtered = [v for v in pre_merge_variants
-                            if (v.size / largest_size) >= args.merge_min_size_ratio]
-                if len(filtered) < len(pre_merge_variants):
-                    filtered_count = len(pre_merge_variants) - len(filtered)
-                    logging.debug(f"Full consensus: filtered out {filtered_count} variants with size ratio < {args.merge_min_size_ratio} relative to largest (size={largest_size})")
-                    pre_merge_variants = filtered
+            pre_merge_variants = [v for v in variant_groups[group_id]
+                                  if v.sample_name in surviving_originals]
 
             specimen_base = selected_variants[0].sample_name.rsplit('-c', 1)[0]
             full_name = f"{specimen_base}-{group_idx + 1}.full"

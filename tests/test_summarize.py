@@ -521,7 +521,7 @@ class TestFullConsensus:
 
 
     def test_full_consensus_filters_small_variants(self):
-        """Integration test: merge_min_size_ratio filters small variants from full consensus."""
+        """Integration test: select_min_size_ratio filters small variants from full consensus."""
         temp_dir = tempfile.mkdtemp()
         source_dir = os.path.join(temp_dir, "clusters")
         summary_dir = os.path.join(temp_dir, "__Summary__")
@@ -529,7 +529,7 @@ class TestFullConsensus:
 
         try:
             # Two similar sequences (1 SNP at position 12: G vs A)
-            # Very different sizes so the small one is filtered by merge_min_size_ratio
+            # Very different sizes so the small one is filtered by select_min_size_ratio
             seq_large = "ATCGATCGATCGATCGATCGATCG"  # G at position 12
             seq_small = "ATCGATCGATCAATCGATCGATCG"  # A at position 12
 
@@ -542,7 +542,8 @@ class TestFullConsensus:
             with open(fasta_file, 'w') as f:
                 f.write(fasta_content)
 
-            # merge-min-size-ratio 0.1 filters 5/100=0.05 from full consensus
+            # select-min-size-ratio 0.1 filters 5/100=0.05 post-merge variant,
+            # so its pre-merge components are excluded from .full consensus
             result = subprocess.run(
                 [
                     "speconsense-summarize",
@@ -550,7 +551,7 @@ class TestFullConsensus:
                     "--summary-dir", summary_dir,
                     "--min-ric", "3",
                     "--enable-full-consensus",
-                    "--merge-min-size-ratio", "0.1",
+                    "--select-min-size-ratio", "0.1",
                     "--disable-merging",
                     "--min-merge-overlap", "0",
                 ],
@@ -574,8 +575,8 @@ class TestFullConsensus:
         finally:
             shutil.rmtree(temp_dir)
 
-    def test_full_consensus_no_filter_when_disabled(self):
-        """Integration test: merge_min_size_ratio=0 preserves all variants in full consensus."""
+    def test_full_consensus_no_filter_when_all_survive(self):
+        """Integration test: all post-merge variants surviving means all contribute to .full."""
         temp_dir = tempfile.mkdtemp()
         source_dir = os.path.join(temp_dir, "clusters")
         summary_dir = os.path.join(temp_dir, "__Summary__")
@@ -595,7 +596,7 @@ class TestFullConsensus:
             with open(fasta_file, 'w') as f:
                 f.write(fasta_content)
 
-            # merge-min-size-ratio 0 disables filtering — both contribute to .full
+            # No select-min-size-ratio — both variants survive, both contribute to .full
             result = subprocess.run(
                 [
                     "speconsense-summarize",
@@ -603,7 +604,6 @@ class TestFullConsensus:
                     "--summary-dir", summary_dir,
                     "--min-ric", "3",
                     "--enable-full-consensus",
-                    "--merge-min-size-ratio", "0",
                     "--disable-merging",
                     "--min-merge-overlap", "0",
                 ],

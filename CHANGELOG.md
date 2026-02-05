@@ -5,11 +5,15 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.7.5] - 2026-02-05
+
+### Fixed
+- **Full consensus now includes only surviving variants' components** — `.full` consensus previously applied `merge-min-size-ratio` independently against pre-merge sizes, which used a different (looser) reference than the post-merge `select-min-size-ratio` filter. This caused `.full` RiC to exceed the sum of variant RiCs when merging inflated the denominator. Now `.full` is built from exactly the pre-merge variants that contributed to post-merge variants surviving `select-min-size-ratio`
+
 ## [0.7.4] - 2026-02-05
 
 ### Added
 - **`--select-min-size-ratio` parameter** (summarize) — Filters out post-merge variants whose size ratio to the largest variant in their group falls below the threshold (default: 0 = disabled, e.g. 0.2 for 20% cutoff). Applied after merging, before variant selection
-- **Full consensus size-ratio filtering** — `merge-min-size-ratio` now also filters tiny pre-merge variants from `.full` IUPAC consensus generation, consistent with merge pipeline behavior
 
 ### Changed
 - **`compressed` bundled profile** — Now includes `select-min-size-ratio: 0.2` to match 20% calling threshold theme
