@@ -54,8 +54,8 @@ from .io import (
     write_output_files,
 )
 from .clustering import perform_hac_clustering, select_variants
-from .merging import merge_group_with_msa
-from .analysis import MAX_MSA_MERGE_VARIANTS, MIN_MERGE_BATCH, MAX_MERGE_BATCH
+from .merging import merge_group_with_msa, create_full_consensus_from_msa
+from .analysis import run_spoa_msa, MAX_MSA_MERGE_VARIANTS, MIN_MERGE_BATCH, MAX_MERGE_BATCH
 
 
 # Merge effort configuration
@@ -132,6 +132,8 @@ def parse_arguments():
     merging_group = parser.add_argument_group("Merging")
     merging_group.add_argument("--disable-merging", action="store_true",
                                help="Disable all variant merging (skip MSA-based merge evaluation entirely)")
+    merging_group.add_argument("--enable-merging", action="store_false", dest="disable_merging",
+                               help="Override --disable-merging or profile setting")
     merging_group.add_argument("--merge-snp", action=argparse.BooleanOptionalAction, default=True,
                                help="Enable SNP-based merging (default: True, use --no-merge-snp to disable)")
     merging_group.add_argument("--merge-indel-length", type=int, default=0,
@@ -144,6 +146,9 @@ def parse_arguments():
                                help="Minimum overlap in bp for merging sequences of different lengths (default: 200, 0 to disable)")
     merging_group.add_argument("--disable-homopolymer-equivalence", action="store_true",
                                help="Disable homopolymer equivalence in merging (treat AAA vs AAAA as different)")
+    merging_group.add_argument("--enable-homopolymer-equivalence", action="store_false",
+                               dest="disable_homopolymer_equivalence",
+                               help="Override --disable-homopolymer-equivalence or profile setting")
     merging_group.add_argument("--merge-effort", type=str, default="balanced", metavar="LEVEL",
                                help="Merging effort level: fast (8), balanced (10), thorough (12), "
                                     "or numeric 6-14. Higher values allow larger batch sizes for "
@@ -164,6 +169,12 @@ def parse_arguments():
     selection_group.add_argument("--select-strategy", "--variant-selection",
                                  dest="select_strategy", choices=["size", "diversity"], default="size",
                                  help="Variant selection strategy: size or diversity (default: size)")
+    selection_group.add_argument("--enable-full-consensus", action="store_true",
+                                 help="Generate a full consensus per variant group representing all variation "
+                                      "from pre-merge variants (gaps never win)")
+    selection_group.add_argument("--disable-full-consensus", action="store_false",
+                                 dest="enable_full_consensus",
+                                 help="Override --enable-full-consensus or profile setting")
 
     # Performance group
     perf_group = parser.add_argument_group("Performance")
@@ -345,7 +356,7 @@ def process_single_specimen(file_consensuses: List[ConsensusInfo],
                           key=lambda x: max(m.size for m in x[1]),
                           reverse=True)
 
-    for group_idx, (_, group_members) in enumerate(sorted_groups):
+    for group_idx, (group_id, group_members) in enumerate(sorted_groups):
         final_group_name = group_idx + 1
 
         # Select variants for this group
@@ -365,6 +376,24 @@ def process_single_specimen(file_consensuses: List[ConsensusInfo],
 
             final_consensus.append(renamed_variant)
             group_naming.append((variant.sample_name, new_name))
+
+        # Generate full consensus from PRE-MERGE variants
+        if getattr(args, 'enable_full_consensus', False):
+            pre_merge_variants = variant_groups[group_id]
+            specimen_base = selected_variants[0].sample_name.rsplit('-c', 1)[0]
+            full_name = f"{specimen_base}-{group_idx + 1}.full"
+
+            if len(pre_merge_variants) == 1:
+                # Single variant — copy directly
+                full_consensus = pre_merge_variants[0]._replace(sample_name=full_name)
+            else:
+                # MSA on pre-merge variants, full consensus logic
+                sequences = [v.sequence for v in pre_merge_variants]
+                aligned_seqs = run_spoa_msa(sequences, alignment_mode=1)
+                full_consensus = create_full_consensus_from_msa(aligned_seqs, pre_merge_variants)
+                full_consensus = full_consensus._replace(sample_name=full_name)
+
+            final_consensus.append(full_consensus)
 
         naming_info[group_idx + 1] = group_naming
 
@@ -421,6 +450,7 @@ def main():
     logging.info(f"  --select-max-variants: {args.select_max_variants}")
     logging.info(f"  --select-max-groups: {args.select_max_groups}")
     logging.info(f"  --select-strategy: {args.select_strategy}")
+    logging.info(f"  --enable-full-consensus: {args.enable_full_consensus}")
     logging.info(f"  --log-level: {args.log_level}")
     logging.info("")
     logging.info("Processing each specimen file independently to organize variants within specimens")

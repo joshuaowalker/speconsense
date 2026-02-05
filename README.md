@@ -136,6 +136,7 @@ speconsense input.fastq -p herbarium --min-size 10
 ```
 
 **Bundled profiles:**
+- `compressed` — Compress variants into minimal IUPAC consensus sequences (aggressive merging with indels, 20% thresholds, full consensus)
 - `herbarium` — High-recall for degraded DNA/type specimens
 - `largedata` — Experimental settings for large input files
 - `nostalgia` — Simulate older bioinformatics pipelines
@@ -259,12 +260,14 @@ When using `speconsense-summarize` for post-processing, creates `__Summary__/` d
 |---------------|-------------|------------|-------------|
 | **Original** | Source `cluster_debug/` | `-c1`, `-c2`, `-c3` | Preserves speconsense clustering results |
 | **Summarization** | `__Summary__/`, `FASTQ Files/`, `variants/` | `-1.v1`, `-1.v2`, `-2.v1`, `.raw1` | Post-processing groups and variants |
+| **Full consensus** | `__Summary__/` | `-1.full` | IUPAC consensus from all pre-merge variants in a group |
 
 ### Example Directory Structure
 ```
 __Summary__/
 ├── sample-1.v1-RiC45.fasta                  # Primary variant (group 1, merged)
 ├── sample-1.v2-RiC23.fasta                  # Additional variant (not merged)
+├── sample-1.full-RiC68.fasta                # Full IUPAC consensus for group 1 (all pre-merge variants)
 ├── sample-2.v1-RiC30.fasta                  # Second organism group, primary variant
 ├── summary.fasta                            # All final consensus sequences (excludes .raw)
 ├── summary.txt                              # Statistics
@@ -775,6 +778,18 @@ For high-throughput workflows (e.g., 100K sequences/year), this prioritization e
 
 ### Additional Summarize Options
 
+**Full Consensus:**
+```bash
+speconsense-summarize --enable-full-consensus
+```
+- Generates a full IUPAC consensus sequence per variant group from all pre-merge variants
+- Output named `{specimen}-{group}.full-RiC{reads}.fasta` in the `__Summary__/` directory
+- Uses majority voting across all variants in the group; **gaps never win** — at each alignment column, the most common non-gap base is chosen, with IUPAC codes for ties among bases
+- Useful when you want a single representative sequence that captures all variation within a group as IUPAC ambiguity codes
+- Included in `summary.fasta` (but excluded from total RiC to avoid double-counting)
+- Enabled by default in the `compressed` profile
+- Use `--disable-full-consensus` to override when set by a profile
+
 **Quality Filtering:**
 ```bash
 speconsense-summarize --min-ric 5
@@ -1010,7 +1025,8 @@ The complete speconsense-summarize workflow operates in this order:
 3. **Group filtering** to limit output groups (`--select-max-groups`)
 4. **Homopolymer-aware MSA-based variant merging** within each group, including **overlap merging** for different-length sequences (`--disable-merging`, `--merge-effort`, `--merge-position-count`, `--merge-indel-length`, `--min-merge-overlap`, `--merge-snp`, `--merge-min-size-ratio`, `--disable-homopolymer-equivalence`)
 5. **Variant selection** within each group (`--select-max-variants`, `--select-strategy`)
-6. **Output generation** with customizable header fields (`--fasta-fields`) and full traceability
+6. **Full consensus generation** (optional) — IUPAC consensus from all pre-merge variants per group (`--enable-full-consensus`)
+7. **Output generation** with customizable header fields (`--fasta-fields`) and full traceability
 
 **Key architectural features**:
 - HAC grouping occurs BEFORE merging to prevent inappropriate merging of dissimilar sequences (e.g., contaminants with primary targets)
@@ -1063,17 +1079,20 @@ usage: speconsense [-h] [-O OUTPUT_DIR] [--primers PRIMERS]
                    [--min-cluster-ratio MIN_CLUSTER_RATIO]
                    [--max-sample-size MAX_SAMPLE_SIZE]
                    [--outlier-identity OUTLIER_IDENTITY]
-                   [--disable-position-phasing]
+                   [--disable-position-phasing] [--enable-position-phasing]
                    [--min-variant-frequency MIN_VARIANT_FREQUENCY]
                    [--min-variant-count MIN_VARIANT_COUNT]
-                   [--disable-ambiguity-calling]
+                   [--disable-ambiguity-calling] [--enable-ambiguity-calling]
                    [--min-ambiguity-frequency MIN_AMBIGUITY_FREQUENCY]
                    [--min-ambiguity-count MIN_AMBIGUITY_COUNT]
-                   [--disable-cluster-merging]
+                   [--disable-cluster-merging] [--enable-cluster-merging]
                    [--disable-homopolymer-equivalence]
+                   [--enable-homopolymer-equivalence]
                    [--orient-mode {skip,keep-all,filter-failed}]
                    [--presample PRESAMPLE] [--scale-threshold SCALE_THRESHOLD]
-                   [--threads N] [--enable-early-filter] [--collect-discards]
+                   [--threads N] [--enable-early-filter]
+                   [--disable-early-filter] [--collect-discards]
+                   [--no-collect-discards]
                    [--log-level {DEBUG,INFO,WARNING,ERROR,CRITICAL}]
                    [--version] [-p NAME] [--list-profiles]
                    input_file
@@ -1132,6 +1151,8 @@ Variant Phasing:
                         default). MCL graph clustering already separates most
                         variants; this second pass analyzes MSA positions to
                         phase remaining variants.
+  --enable-position-phasing
+                        Override --disable-position-phasing or profile setting
   --min-variant-frequency MIN_VARIANT_FREQUENCY
                         Minimum alternative allele frequency to call variant
                         (default: 0.10 for 10%)
@@ -1143,6 +1164,9 @@ Ambiguity Calling:
   --disable-ambiguity-calling
                         Disable IUPAC ambiguity code calling for unphased
                         variant positions
+  --enable-ambiguity-calling
+                        Override --disable-ambiguity-calling or profile
+                        setting
   --min-ambiguity-frequency MIN_AMBIGUITY_FREQUENCY
                         Minimum alternative allele frequency for IUPAC
                         ambiguity calling (default: 0.10 for 10%)
@@ -1154,9 +1178,14 @@ Cluster Merging:
   --disable-cluster-merging
                         Disable merging of clusters with identical consensus
                         sequences
+  --enable-cluster-merging
+                        Override --disable-cluster-merging or profile setting
   --disable-homopolymer-equivalence
                         Disable homopolymer equivalence in cluster merging
                         (only merge identical sequences)
+  --enable-homopolymer-equivalence
+                        Override --disable-homopolymer-equivalence or profile
+                        setting
 
 Orientation:
   --orient-mode {skip,keep-all,filter-failed}
@@ -1178,10 +1207,14 @@ Performance:
                         Enable early filtering to skip small clusters before
                         variant phasing (improves performance for large
                         datasets)
+  --disable-early-filter
+                        Override --enable-early-filter or profile setting
 
 Debugging:
   --collect-discards    Write discarded reads (outliers and filtered clusters)
                         to cluster_debug/{sample}-discards.fastq
+  --no-collect-discards
+                        Override --collect-discards or profile setting
   --log-level {DEBUG,INFO,WARNING,ERROR,CRITICAL}
 ```
 
@@ -1192,15 +1225,21 @@ usage: speconsense-summarize [-h] [--source SOURCE]
                              [--summary-dir SUMMARY_DIR]
                              [--fasta-fields FASTA_FIELDS] [--min-ric MIN_RIC]
                              [--min-len MIN_LEN] [--max-len MAX_LEN]
-                             [--group-identity GROUP_IDENTITY] [--merge-snp]
+                             [--group-identity GROUP_IDENTITY]
+                             [--disable-merging] [--enable-merging]
+                             [--merge-snp | --no-merge-snp]
                              [--merge-indel-length MERGE_INDEL_LENGTH]
                              [--merge-position-count MERGE_POSITION_COUNT]
                              [--merge-min-size-ratio MERGE_MIN_SIZE_RATIO]
                              [--min-merge-overlap MIN_MERGE_OVERLAP]
                              [--disable-homopolymer-equivalence]
+                             [--enable-homopolymer-equivalence]
+                             [--merge-effort LEVEL]
                              [--select-max-groups SELECT_MAX_GROUPS]
                              [--select-max-variants SELECT_MAX_VARIANTS]
                              [--select-strategy {size,diversity}]
+                             [--enable-full-consensus]
+                             [--disable-full-consensus]
                              [--scale-threshold SCALE_THRESHOLD] [--threads N]
                              [--log-level {DEBUG,INFO,WARNING,ERROR,CRITICAL}]
                              [--version] [-p NAME] [--list-profiles]
@@ -1246,10 +1285,7 @@ Grouping:
 Merging:
   --disable-merging     Disable all variant merging (skip MSA-based merge
                         evaluation entirely)
-  --merge-effort LEVEL  Merging effort level: fast (8), balanced (10),
-                        thorough (12), or numeric 6-14. Higher values allow
-                        larger batch sizes for exhaustive subset search.
-                        Default: balanced
+  --enable-merging      Override --disable-merging or profile setting
   --merge-snp, --no-merge-snp
                         Enable SNP-based merging (default: True, use --no-
                         merge-snp to disable)
@@ -1268,6 +1304,13 @@ Merging:
   --disable-homopolymer-equivalence
                         Disable homopolymer equivalence in merging (treat AAA
                         vs AAAA as different)
+  --enable-homopolymer-equivalence
+                        Override --disable-homopolymer-equivalence or profile
+                        setting
+  --merge-effort LEVEL  Merging effort level: fast (8), balanced (10),
+                        thorough (12), or numeric 6-14. Higher values allow
+                        larger batch sizes for exhaustive subset search.
+                        Default: balanced
 
 Selection:
   --select-max-groups SELECT_MAX_GROUPS, --max-groups SELECT_MAX_GROUPS
@@ -1279,6 +1322,12 @@ Selection:
   --select-strategy {size,diversity}, --variant-selection {size,diversity}
                         Variant selection strategy: size or diversity
                         (default: size)
+  --enable-full-consensus
+                        Generate a full consensus per variant group
+                        representing all variation from pre-merge variants
+                        (gaps never win)
+  --disable-full-consensus
+                        Override --enable-full-consensus or profile setting
 
 Performance:
   --scale-threshold SCALE_THRESHOLD

@@ -358,6 +358,9 @@ def write_specimen_data_files(specimen_consensus: List[ConsensusInfo],
     # Generate .raw file consensuses for merged variants
     raw_file_consensuses = []
     for consensus in specimen_consensus:
+        # Skip .raw generation for .full consensus (synthetic/derived)
+        if consensus.sample_name.endswith('.full'):
+            continue
         # Only create .raw files if this consensus was actually merged
         if consensus.raw_ric and len(consensus.raw_ric) > 1:
             # Find the original cluster name from naming_info
@@ -412,6 +415,9 @@ def write_specimen_data_files(specimen_consensus: List[ConsensusInfo],
 
     # Write FASTQ files for each final consensus containing all contributing reads
     for consensus in specimen_consensus:
+        # Skip FASTQ for .full consensus (synthetic/derived, no traceable cluster reads)
+        if consensus.sample_name.endswith('.full'):
+            continue
         write_consensus_fastq(consensus, merge_traceability, naming_info, fastq_dir, fastq_lookup, original_consensus_lookup)
 
     # Write .raw files (individual FASTA and FASTQ for pre-merge variants)
@@ -704,7 +710,10 @@ def write_output_files(final_consensus: List[ConsensusInfo],
             multiple_id = specimen_counters[base_name]
             writer.writerow([consensus.sample_name, len(consensus.sequence), consensus.ric, multiple_id])
             unique_samples.add(base_name)
-            total_ric += consensus.ric
+            # Exclude .full from total RiC to avoid double-counting
+            # (.full aggregates reads already counted in merged variants)
+            if not consensus.sample_name.endswith('.full'):
+                total_ric += consensus.ric
 
         writer.writerow([])
         writer.writerow(['Total Unique Samples', len(unique_samples)])

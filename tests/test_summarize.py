@@ -437,3 +437,206 @@ class TestMergeEffort:
         # Very large group should be clamped to 4
         assert compute_merge_batch_size(1000, 10) == MIN_MERGE_BATCH
         assert compute_merge_batch_size(10000, 6) == MIN_MERGE_BATCH
+
+
+class TestFullConsensus:
+    """Tests for create_full_consensus_from_msa and --enable-full-consensus feature."""
+
+    def test_full_consensus_indel_always_included(self):
+        """Test that gaps never win - indel content is always included."""
+        from speconsense.summarize.merging import create_full_consensus_from_msa
+        from speconsense.types import ConsensusInfo
+        from Bio.SeqRecord import SeqRecord
+        from Bio.Seq import Seq
+
+        # Sequence 1: ACGT (no insertion)
+        # Sequence 2: AC-GT with an extra base -> aligned as AC[A]GT
+        # In MSA: seq1 = "AC-GT", seq2 = "ACAGT"
+        aligned = [
+            SeqRecord(Seq("AC-GT"), id="s1"),
+            SeqRecord(Seq("ACAGT"), id="s2"),
+        ]
+        variants = [
+            ConsensusInfo("s1", "c1", "ACGT", ric=10, size=10, file_path="f"),
+            ConsensusInfo("s2", "c2", "ACAGT", ric=5, size=5, file_path="f"),
+        ]
+
+        result = create_full_consensus_from_msa(aligned, variants)
+
+        # Full consensus should include the inserted A (gaps never win)
+        assert result.sequence == "ACAGT"
+        assert result.ric == 15
+        assert result.size == 15
+
+    def test_full_consensus_snp_produces_iupac(self):
+        """Test that SNP positions produce IUPAC ambiguity codes."""
+        from speconsense.summarize.merging import create_full_consensus_from_msa
+        from speconsense.types import ConsensusInfo
+        from Bio.SeqRecord import SeqRecord
+        from Bio.Seq import Seq
+
+        # Two sequences differing at position 2: A vs G
+        aligned = [
+            SeqRecord(Seq("AACGT"), id="s1"),
+            SeqRecord(Seq("AGCGT"), id="s2"),
+        ]
+        variants = [
+            ConsensusInfo("s1", "c1", "AACGT", ric=10, size=10, file_path="f"),
+            ConsensusInfo("s2", "c2", "AGCGT", ric=8, size=8, file_path="f"),
+        ]
+
+        result = create_full_consensus_from_msa(aligned, variants)
+
+        # Position 2 should be R (A or G)
+        assert result.sequence == "ARCGT"
+        assert result.snp_count == 1
+
+    def test_full_consensus_metadata_aggregation(self):
+        """Test that metadata is correctly aggregated from all variants."""
+        from speconsense.summarize.merging import create_full_consensus_from_msa
+        from speconsense.types import ConsensusInfo
+        from Bio.SeqRecord import SeqRecord
+        from Bio.Seq import Seq
+
+        aligned = [
+            SeqRecord(Seq("ACGT"), id="s1"),
+            SeqRecord(Seq("ACGT"), id="s2"),
+        ]
+        variants = [
+            ConsensusInfo("s1", "c1", "ACGT", ric=20, size=20, file_path="f",
+                         primers=["ITS1", "ITS4"], rid=0.95, rid_min=0.90),
+            ConsensusInfo("s2", "c2", "ACGT", ric=10, size=10, file_path="f",
+                         primers=["ITS1", "ITS4"], rid=0.90, rid_min=0.85),
+        ]
+
+        result = create_full_consensus_from_msa(aligned, variants)
+
+        assert result.ric == 30
+        assert result.size == 30
+        assert result.raw_ric == [20, 10]  # Sorted descending
+        assert result.raw_len == [4, 4]
+        # Largest variant (s1) metadata used for primers/rid
+        assert result.primers == ["ITS1", "ITS4"]
+        assert result.rid == 0.95
+
+
+class TestFieldRegexFullConsensus:
+    """Tests for GroupField and VariantField regex handling of .full names."""
+
+    def test_group_field_matches_full(self):
+        """GroupField should extract group number from .full names."""
+        from speconsense.summarize.fields import GroupField
+        from speconsense.types import ConsensusInfo
+
+        field = GroupField()
+        cons = ConsensusInfo("specimen-1.full", "c1", "ACGT", ric=10, size=10, file_path="f")
+        assert field.format_value(cons) == "group=1"
+
+    def test_group_field_matches_full_multidigit(self):
+        """GroupField should handle multi-digit group numbers with .full."""
+        from speconsense.summarize.fields import GroupField
+        from speconsense.types import ConsensusInfo
+
+        field = GroupField()
+        cons = ConsensusInfo("specimen-12.full", "c1", "ACGT", ric=10, size=10, file_path="f")
+        assert field.format_value(cons) == "group=12"
+
+    def test_group_field_still_matches_variant(self):
+        """GroupField should still match standard .v names."""
+        from speconsense.summarize.fields import GroupField
+        from speconsense.types import ConsensusInfo
+
+        field = GroupField()
+        cons = ConsensusInfo("specimen-1.v1", "c1", "ACGT", ric=10, size=10, file_path="f")
+        assert field.format_value(cons) == "group=1"
+
+    def test_variant_field_matches_full(self):
+        """VariantField should return variant=full for .full names."""
+        from speconsense.summarize.fields import VariantField
+        from speconsense.types import ConsensusInfo
+
+        field = VariantField()
+        cons = ConsensusInfo("specimen-1.full", "c1", "ACGT", ric=10, size=10, file_path="f")
+        assert field.format_value(cons) == "variant=full"
+
+    def test_variant_field_still_matches_v(self):
+        """VariantField should still match standard .v names."""
+        from speconsense.summarize.fields import VariantField
+        from speconsense.types import ConsensusInfo
+
+        field = VariantField()
+        cons = ConsensusInfo("specimen-1.v2", "c1", "ACGT", ric=10, size=10, file_path="f")
+        assert field.format_value(cons) == "variant=v2"
+
+    def test_variant_field_still_matches_raw(self):
+        """VariantField should still match .raw names."""
+        from speconsense.summarize.fields import VariantField
+        from speconsense.types import ConsensusInfo
+
+        field = VariantField()
+        cons = ConsensusInfo("specimen-1.v1.raw2", "c1", "ACGT", ric=10, size=10, file_path="f")
+        assert field.format_value(cons) == "variant=v1"
+
+
+class TestFullConsensusIntegration:
+    """Integration test for --enable-full-consensus."""
+
+    def test_full_consensus_appears_in_summary(self):
+        """Test that .full sequences appear in summary.fasta with --enable-full-consensus."""
+        # Create temporary directory structure
+        temp_dir = tempfile.mkdtemp()
+        source_dir = os.path.join(temp_dir, "clusters")
+        summary_dir = os.path.join(temp_dir, "__Summary__")
+        os.makedirs(source_dir)
+
+        try:
+            # Create two sequences that will be in the same group
+            seq1 = "ATCGATCGATCGATCGATCGATCG"
+            seq2 = "ATCGATCGATCAATCGATCGATCG"  # One SNP at position 12
+
+            fasta_content = f""">test-c1 size=10 ric=10 primers=test
+{seq1}
+>test-c2 size=8 ric=8 primers=test
+{seq2}
+"""
+            fasta_file = os.path.join(source_dir, "test-all.fasta")
+            with open(fasta_file, 'w') as f:
+                f.write(fasta_content)
+
+            result = subprocess.run(
+                [
+                    "speconsense-summarize",
+                    "--source", source_dir,
+                    "--summary-dir", summary_dir,
+                    "--min-ric", "3",
+                    "--enable-full-consensus",
+                    "--min-merge-overlap", "0",
+                ],
+                capture_output=True,
+                text=True
+            )
+
+            assert result.returncode == 0, f"speconsense-summarize failed: {result.stderr}"
+
+            output_fasta = os.path.join(summary_dir, "summary.fasta")
+            assert os.path.exists(output_fasta)
+
+            output_sequences = list(SeqIO.parse(output_fasta, "fasta"))
+
+            # Find the .full sequence
+            full_seqs = [s for s in output_sequences if '.full' in s.id]
+            assert len(full_seqs) == 1, f"Expected 1 .full sequence, got {len(full_seqs)}"
+
+            full_seq = full_seqs[0]
+            # .full should be at least as long as the longest input
+            assert len(full_seq.seq) >= max(len(seq1), len(seq2))
+
+            # Verify no FASTQ for .full
+            fastq_dir = os.path.join(summary_dir, "FASTQ Files")
+            if os.path.exists(fastq_dir):
+                fastq_files = os.listdir(fastq_dir)
+                full_fastqs = [f for f in fastq_files if '.full' in f]
+                assert len(full_fastqs) == 0, f"Should be no FASTQ for .full, got: {full_fastqs}"
+
+        finally:
+            shutil.rmtree(temp_dir)

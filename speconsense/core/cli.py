@@ -66,6 +66,9 @@ def main():
                                help="Disable position-based variant phasing (enabled by default). "
                                     "MCL graph clustering already separates most variants; this "
                                     "second pass analyzes MSA positions to phase remaining variants.")
+    phasing_group.add_argument("--enable-position-phasing", action="store_false",
+                               dest="disable_position_phasing",
+                               help="Override --disable-position-phasing or profile setting")
     phasing_group.add_argument("--min-variant-frequency", type=float, default=0.10,
                                help="Minimum alternative allele frequency to call variant (default: 0.10 for 10%%)")
     phasing_group.add_argument("--min-variant-count", type=int, default=5,
@@ -75,6 +78,9 @@ def main():
     ambiguity_group = parser.add_argument_group("Ambiguity Calling")
     ambiguity_group.add_argument("--disable-ambiguity-calling", action="store_true",
                                  help="Disable IUPAC ambiguity code calling for unphased variant positions")
+    ambiguity_group.add_argument("--enable-ambiguity-calling", action="store_false",
+                                 dest="disable_ambiguity_calling",
+                                 help="Override --disable-ambiguity-calling or profile setting")
     ambiguity_group.add_argument("--min-ambiguity-frequency", type=float, default=0.10,
                                  help="Minimum alternative allele frequency for IUPAC ambiguity calling (default: 0.10 for 10%%)")
     ambiguity_group.add_argument("--min-ambiguity-count", type=int, default=3,
@@ -84,8 +90,14 @@ def main():
     merging_group = parser.add_argument_group("Cluster Merging")
     merging_group.add_argument("--disable-cluster-merging", action="store_true",
                                help="Disable merging of clusters with identical consensus sequences")
+    merging_group.add_argument("--enable-cluster-merging", action="store_false",
+                               dest="disable_cluster_merging",
+                               help="Override --disable-cluster-merging or profile setting")
     merging_group.add_argument("--disable-homopolymer-equivalence", action="store_true",
                                help="Disable homopolymer equivalence in cluster merging (only merge identical sequences)")
+    merging_group.add_argument("--enable-homopolymer-equivalence", action="store_false",
+                               dest="disable_homopolymer_equivalence",
+                               help="Override --disable-homopolymer-equivalence or profile setting")
 
     # Orientation group
     orient_group = parser.add_argument_group("Orientation")
@@ -104,11 +116,17 @@ def main():
                                  "0=auto-detect, default=1 (safe for parallel workflows).")
     perf_group.add_argument("--enable-early-filter", action="store_true",
                             help="Enable early filtering to skip small clusters before variant phasing (improves performance for large datasets)")
+    perf_group.add_argument("--disable-early-filter", action="store_false",
+                            dest="enable_early_filter",
+                            help="Override --enable-early-filter or profile setting")
 
     # Debugging group
     debug_group = parser.add_argument_group("Debugging")
     debug_group.add_argument("--collect-discards", action="store_true",
                              help="Write discarded reads (outliers and filtered clusters) to cluster_debug/{sample}-discards.fastq")
+    debug_group.add_argument("--no-collect-discards", action="store_false",
+                             dest="collect_discards",
+                             help="Override --collect-discards or profile setting")
     debug_group.add_argument("--log-level", default="INFO",
                              choices=["DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL"])
 
