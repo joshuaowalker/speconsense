@@ -136,7 +136,7 @@ speconsense input.fastq -p herbarium --min-size 10
 ```
 
 **Bundled profiles:**
-- `compressed` — Compress variants into minimal IUPAC consensus sequences (aggressive merging with indels, 20% thresholds, full consensus)
+- `compressed` — Compress variants into minimal IUPAC consensus sequences (aggressive merging with indels, 20% thresholds, full consensus, 20% selection size ratio)
 - `herbarium` — High-recall for degraded DNA/type specimens
 - `largedata` — Experimental settings for large input files
 - `nostalgia` — Simulate older bioinformatics pipelines
@@ -643,6 +643,18 @@ speconsense-summarize --select-strategy diversity --select-max-variants 2
    - Output up to select_max_variants per group
 3. Final output contains representatives from all groups, ensuring both biological diversity (between groups) and appropriate sampling within each biological entity (within groups)
 
+**Selection Size Ratio Filtering:**
+```bash
+speconsense-summarize --select-min-size-ratio 0.2
+```
+- Filters out post-merge variants whose size is too small relative to the largest variant in their group
+- Ratio calculated as `variant_size / largest_size` — must be ≥ threshold to keep
+- Example: `--select-min-size-ratio 0.2` means a variant must have ≥20% the reads of the largest variant in its group
+- Default is 0 (disabled) — all post-merge variants pass through to selection
+- Applied after merging but before variant selection
+- Useful for suppressing noise variants that survived merging but are too small to be meaningful
+- Set to 0.2 in the `compressed` profile to match the 20% calling threshold theme
+
 This two-stage process ensures that distinct biological sequences are preserved as separate groups, while providing control over variant complexity within each group.
 
 ### Customizing FASTA Header Fields
@@ -1024,9 +1036,10 @@ The complete speconsense-summarize workflow operates in this order:
 2. **HAC variant grouping** by sequence identity to separate dissimilar sequences (`--group-identity`); uses single-linkage when overlap merging is enabled
 3. **Group filtering** to limit output groups (`--select-max-groups`)
 4. **Homopolymer-aware MSA-based variant merging** within each group, including **overlap merging** for different-length sequences (`--disable-merging`, `--merge-effort`, `--merge-position-count`, `--merge-indel-length`, `--min-merge-overlap`, `--merge-snp`, `--merge-min-size-ratio`, `--disable-homopolymer-equivalence`)
-5. **Variant selection** within each group (`--select-max-variants`, `--select-strategy`)
-6. **Full consensus generation** (optional) — IUPAC consensus from all pre-merge variants per group (`--enable-full-consensus`)
-7. **Output generation** with customizable header fields (`--fasta-fields`) and full traceability
+5. **Selection size ratio filtering** to remove tiny post-merge variants (`--select-min-size-ratio`)
+6. **Variant selection** within each group (`--select-max-variants`, `--select-strategy`)
+7. **Full consensus generation** (optional) — IUPAC consensus from all pre-merge variants per group (`--enable-full-consensus`)
+8. **Output generation** with customizable header fields (`--fasta-fields`) and full traceability
 
 **Key architectural features**:
 - HAC grouping occurs BEFORE merging to prevent inappropriate merging of dissimilar sequences (e.g., contaminants with primary targets)
@@ -1238,6 +1251,7 @@ usage: speconsense-summarize [-h] [--source SOURCE]
                              [--select-max-groups SELECT_MAX_GROUPS]
                              [--select-max-variants SELECT_MAX_VARIANTS]
                              [--select-strategy {size,diversity}]
+                             [--select-min-size-ratio SELECT_MIN_SIZE_RATIO]
                              [--enable-full-consensus]
                              [--disable-full-consensus]
                              [--scale-threshold SCALE_THRESHOLD] [--threads N]
@@ -1322,6 +1336,10 @@ Selection:
   --select-strategy {size,diversity}, --variant-selection {size,diversity}
                         Variant selection strategy: size or diversity
                         (default: size)
+  --select-min-size-ratio SELECT_MIN_SIZE_RATIO
+                        Minimum size ratio (variant/largest) to include in
+                        output (default: 0 = disabled, e.g. 0.2 for 20%
+                        cutoff)
   --enable-full-consensus
                         Generate a full consensus per variant group
                         representing all variation from pre-merge variants

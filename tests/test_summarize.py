@@ -520,6 +520,114 @@ class TestFullConsensus:
         assert result.rid == 0.95
 
 
+    def test_full_consensus_filters_small_variants(self):
+        """Integration test: merge_min_size_ratio filters small variants from full consensus."""
+        temp_dir = tempfile.mkdtemp()
+        source_dir = os.path.join(temp_dir, "clusters")
+        summary_dir = os.path.join(temp_dir, "__Summary__")
+        os.makedirs(source_dir)
+
+        try:
+            # Two similar sequences (1 SNP at position 12: G vs A)
+            # Very different sizes so the small one is filtered by merge_min_size_ratio
+            seq_large = "ATCGATCGATCGATCGATCGATCG"  # G at position 12
+            seq_small = "ATCGATCGATCAATCGATCGATCG"  # A at position 12
+
+            fasta_content = f""">test-c1 size=100 ric=100 primers=test
+{seq_large}
+>test-c2 size=5 ric=5 primers=test
+{seq_small}
+"""
+            fasta_file = os.path.join(source_dir, "test-all.fasta")
+            with open(fasta_file, 'w') as f:
+                f.write(fasta_content)
+
+            # merge-min-size-ratio 0.1 filters 5/100=0.05 from full consensus
+            result = subprocess.run(
+                [
+                    "speconsense-summarize",
+                    "--source", source_dir,
+                    "--summary-dir", summary_dir,
+                    "--min-ric", "3",
+                    "--enable-full-consensus",
+                    "--merge-min-size-ratio", "0.1",
+                    "--disable-merging",
+                    "--min-merge-overlap", "0",
+                ],
+                capture_output=True,
+                text=True
+            )
+
+            assert result.returncode == 0, f"speconsense-summarize failed: {result.stderr}"
+
+            output_fasta = os.path.join(summary_dir, "summary.fasta")
+            output_sequences = list(SeqIO.parse(output_fasta, "fasta"))
+
+            full_seqs = [s for s in output_sequences if '.full' in s.id]
+            assert len(full_seqs) == 1, f"Expected 1 .full sequence, got {len(full_seqs)}"
+
+            # Small variant was filtered — .full should be the large variant only (no IUPAC)
+            full_seq_str = str(full_seqs[0].seq)
+            assert full_seq_str == seq_large, \
+                f"Expected large variant sequence, got {full_seq_str}"
+
+        finally:
+            shutil.rmtree(temp_dir)
+
+    def test_full_consensus_no_filter_when_disabled(self):
+        """Integration test: merge_min_size_ratio=0 preserves all variants in full consensus."""
+        temp_dir = tempfile.mkdtemp()
+        source_dir = os.path.join(temp_dir, "clusters")
+        summary_dir = os.path.join(temp_dir, "__Summary__")
+        os.makedirs(source_dir)
+
+        try:
+            # Same sequences as above — 1 SNP at position 12 (G vs A)
+            seq_large = "ATCGATCGATCGATCGATCGATCG"
+            seq_small = "ATCGATCGATCAATCGATCGATCG"
+
+            fasta_content = f""">test-c1 size=100 ric=100 primers=test
+{seq_large}
+>test-c2 size=5 ric=5 primers=test
+{seq_small}
+"""
+            fasta_file = os.path.join(source_dir, "test-all.fasta")
+            with open(fasta_file, 'w') as f:
+                f.write(fasta_content)
+
+            # merge-min-size-ratio 0 disables filtering — both contribute to .full
+            result = subprocess.run(
+                [
+                    "speconsense-summarize",
+                    "--source", source_dir,
+                    "--summary-dir", summary_dir,
+                    "--min-ric", "3",
+                    "--enable-full-consensus",
+                    "--merge-min-size-ratio", "0",
+                    "--disable-merging",
+                    "--min-merge-overlap", "0",
+                ],
+                capture_output=True,
+                text=True
+            )
+
+            assert result.returncode == 0, f"speconsense-summarize failed: {result.stderr}"
+
+            output_fasta = os.path.join(summary_dir, "summary.fasta")
+            output_sequences = list(SeqIO.parse(output_fasta, "fasta"))
+
+            full_seqs = [s for s in output_sequences if '.full' in s.id]
+            assert len(full_seqs) == 1, f"Expected 1 .full sequence, got {len(full_seqs)}"
+
+            # Both variants contribute — SNP position should be IUPAC R (A/G)
+            full_seq_str = str(full_seqs[0].seq)
+            assert "R" in full_seq_str, \
+                f"Expected IUPAC R (A/G) in full consensus, got {full_seq_str}"
+
+        finally:
+            shutil.rmtree(temp_dir)
+
+
 class TestFieldRegexFullConsensus:
     """Tests for GroupField and VariantField regex handling of .full names."""
 
@@ -576,6 +684,101 @@ class TestFieldRegexFullConsensus:
         field = VariantField()
         cons = ConsensusInfo("specimen-1.v1.raw2", "c1", "ACGT", ric=10, size=10, file_path="f")
         assert field.format_value(cons) == "variant=v1"
+
+
+class TestSelectMinSizeRatio:
+    """Tests for --select-min-size-ratio filtering."""
+
+    def test_select_min_size_ratio_filters_small_variants(self):
+        """Integration test: --select-min-size-ratio 0.1 filters out tiny variants."""
+        temp_dir = tempfile.mkdtemp()
+        source_dir = os.path.join(temp_dir, "clusters")
+        summary_dir = os.path.join(temp_dir, "__Summary__")
+        os.makedirs(source_dir)
+
+        try:
+            seq1 = "ATCGATCGATCGATCGATCGATCG"
+            seq2 = "ATCGATCGATCAATCGATCGATCG"  # One SNP — different enough to not merge
+
+            fasta_content = f""">test-c1 size=100 ric=100 primers=test
+{seq1}
+>test-c2 size=3 ric=3 primers=test
+{seq2}
+"""
+            fasta_file = os.path.join(source_dir, "test-all.fasta")
+            with open(fasta_file, 'w') as f:
+                f.write(fasta_content)
+
+            result = subprocess.run(
+                [
+                    "speconsense-summarize",
+                    "--source", source_dir,
+                    "--summary-dir", summary_dir,
+                    "--min-ric", "3",
+                    "--select-min-size-ratio", "0.1",
+                    "--disable-merging",
+                ],
+                capture_output=True,
+                text=True
+            )
+
+            assert result.returncode == 0, f"speconsense-summarize failed: {result.stderr}"
+
+            output_fasta = os.path.join(summary_dir, "summary.fasta")
+            output_sequences = list(SeqIO.parse(output_fasta, "fasta"))
+
+            # Only the large variant should remain (3/100 = 0.03 < 0.1)
+            assert len(output_sequences) == 1, \
+                f"Expected 1 sequence after filtering, got {len(output_sequences)}"
+            assert "size=100" in output_sequences[0].description
+
+        finally:
+            shutil.rmtree(temp_dir)
+
+    def test_select_min_size_ratio_disabled_preserves_all(self):
+        """Integration test: --select-min-size-ratio 0 preserves all variants."""
+        temp_dir = tempfile.mkdtemp()
+        source_dir = os.path.join(temp_dir, "clusters")
+        summary_dir = os.path.join(temp_dir, "__Summary__")
+        os.makedirs(source_dir)
+
+        try:
+            seq1 = "ATCGATCGATCGATCGATCGATCG"
+            seq2 = "ATCGATCGATCAATCGATCGATCG"  # One SNP
+
+            fasta_content = f""">test-c1 size=100 ric=100 primers=test
+{seq1}
+>test-c2 size=3 ric=3 primers=test
+{seq2}
+"""
+            fasta_file = os.path.join(source_dir, "test-all.fasta")
+            with open(fasta_file, 'w') as f:
+                f.write(fasta_content)
+
+            result = subprocess.run(
+                [
+                    "speconsense-summarize",
+                    "--source", source_dir,
+                    "--summary-dir", summary_dir,
+                    "--min-ric", "3",
+                    "--select-min-size-ratio", "0",
+                    "--disable-merging",
+                ],
+                capture_output=True,
+                text=True
+            )
+
+            assert result.returncode == 0, f"speconsense-summarize failed: {result.stderr}"
+
+            output_fasta = os.path.join(summary_dir, "summary.fasta")
+            output_sequences = list(SeqIO.parse(output_fasta, "fasta"))
+
+            # Both variants should be preserved
+            assert len(output_sequences) == 2, \
+                f"Expected 2 sequences with ratio=0, got {len(output_sequences)}"
+
+        finally:
+            shutil.rmtree(temp_dir)
 
 
 class TestFullConsensusIntegration:

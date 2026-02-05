@@ -69,6 +69,7 @@ Parameters for the post-processing and summarization tool.
 | `select-max-groups` | Max groups to output per specimen (-1 = all) | -1 | — | — | — | — | — |
 | `select-max-variants` | Max variants per group (-1 = no limit) | -1 | — | — | — | — | — |
 | `select-strategy` | Variant selection: `size` or `diversity` | size | — | — | — | — | — |
+| `select-min-size-ratio` | Min size ratio (variant/largest) to include in output (0 = disabled) | 0 | 0.2 | — | — | — | — |
 | `enable-full-consensus` | Generate full IUPAC consensus per variant group | false | true | — | — | — | — |
 | `fasta-fields` | Header fields: preset or comma-separated list | default | — | — | — | — | — |
 | `scale-threshold` | Sequence count to enable vsearch acceleration (0 = disabled) | 1001 | — | — | — | — | — |
@@ -122,4 +123,4 @@ Profiles specify a `speconsense-version` field (e.g., `"0.7.*"`) indicating comp
 
 ---
 
-*Document generated for speconsense 0.7.3*
+*Document generated for speconsense 0.7.4*
