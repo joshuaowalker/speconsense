@@ -24,3 +24,4 @@ speconsense-summarize:
   merge-position-count: 10      # Allow up to 10 variant positions in a merge
   merge-min-size-ratio: 0.2     # Match 20% calling threshold
   min-merge-overlap: 0          # Disable partial overlap merging
+  enable-full-consensus: true   # Include full IUPAC consensus per group
