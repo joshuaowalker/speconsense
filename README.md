@@ -786,7 +786,7 @@ speconsense-summarize --enable-full-consensus
 - Output named `{specimen}-{group}.full-RiC{reads}.fasta` in the `__Summary__/` directory
 - Uses majority voting across all variants in the group; **gaps never win** — at each alignment column, the most common non-gap base is chosen, with IUPAC codes for ties among bases
 - Useful when you want a single representative sequence that captures all variation within a group as IUPAC ambiguity codes
-- Not included in `summary.fasta` (treated as a supplementary output like `.raw` files)
+- Included in `summary.fasta` (but excluded from total RiC to avoid double-counting)
 - Enabled by default in the `compressed` profile
 - Use `--disable-full-consensus` to override when set by a profile
 

@@ -710,7 +710,10 @@ def write_output_files(final_consensus: List[ConsensusInfo],
             multiple_id = specimen_counters[base_name]
             writer.writerow([consensus.sample_name, len(consensus.sequence), consensus.ric, multiple_id])
             unique_samples.add(base_name)
-            total_ric += consensus.ric
+            # Exclude .full from total RiC to avoid double-counting
+            # (.full aggregates reads already counted in merged variants)
+            if not consensus.sample_name.endswith('.full'):
+                total_ric += consensus.ric
 
         writer.writerow([])
         writer.writerow(['Total Unique Samples', len(unique_samples)])
