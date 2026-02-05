@@ -1,0 +1,26 @@
+# Compress variants into minimal IUPAC consensus sequences
+#
+# Aggressively merges similar variants (including indels) into single
+# IUPAC consensus sequences. Only truly dissimilar sequences remain
+# separate. Uses 20% frequency thresholds throughout.
+#
+# Designed for workflows where reviewers want fewer sequences to
+# examine, with all variation represented via IUPAC ambiguity codes.
+# Partial overlap merging is disabled as a safety measure.
+#
+# Use with:
+#   speconsense input.fastq -p compressed
+#   speconsense-summarize -p compressed
+
+speconsense-version: "0.7.*"
+description: "Compress variants into minimal IUPAC consensus sequences"
+
+speconsense:
+  min-ambiguity-frequency: 0.20  # 20% threshold for IUPAC ambiguity calling
+  min-variant-frequency: 0.20   # 20% threshold for variant phasing
+
+speconsense-summarize:
+  merge-indel-length: 5         # Merge indels up to 5bp
+  merge-position-count: 10      # Allow up to 10 variant positions in a merge
+  merge-min-size-ratio: 0.2     # Match 20% calling threshold
+  min-merge-overlap: 0          # Disable partial overlap merging
