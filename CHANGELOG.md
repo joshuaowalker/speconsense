@@ -5,6 +5,11 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.7.6] - 2026-02-08
+
+### Fixed
+- **Truncated sequences no longer distort HAC grouping** — A short consensus (e.g., 220bp vs 660bp) could cause `calculate_adjusted_identity_distance` to return near-zero distance due to terminal gap exclusion scoring only the overlap region. This caused complete-linkage HAC to split full-length sequences (>99% identical) into separate groups. Added coverage and adjustment-ratio guards that fall back to raw edlib identity when adjusted identity is unreliable
+
 ## [0.7.5] - 2026-02-05
 
 ### Fixed

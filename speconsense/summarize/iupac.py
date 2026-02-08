@@ -33,6 +33,11 @@ STANDARD_ADJUSTMENT_PARAMS = AdjustmentParams(
     max_repeat_motif_length=1       # Single-base repeats for homopolymer normalization
 )
 
+# Safeguards for unreliable adjusted identity on length-mismatched sequences.
+# When terminal gap exclusion inflates identity, fall back to raw edlib identity.
+MIN_COVERAGE_THRESHOLD = 0.5   # min(seq1_coverage, seq2_coverage) floor
+MAX_ADJUSTMENT_RATIO = 1.5     # max adjusted_identity / raw_identity
+
 
 def primers_are_same(p1: Optional[List[str]], p2: Optional[List[str]]) -> bool:
     """Check if two primer annotations indicate the same amplicon.
@@ -226,6 +231,9 @@ def calculate_adjusted_identity_distance(seq1: str, seq2: str) -> float:
     if result["editDistance"] == -1:
         return 1.0
 
+    # Raw identity from edlib (global, no adjustments)
+    raw_identity = 1.0 - (result["editDistance"] / max(len(seq1), len(seq2)))
+
     # Get nice alignment for adjusted identity scoring
     alignment = edlib.getNiceAlignment(result, seq1, seq2)
     if not alignment or not alignment.get('query_aligned') or not alignment.get('target_aligned'):
@@ -237,9 +245,21 @@ def calculate_adjusted_identity_distance(seq1: str, seq2: str) -> float:
         alignment['target_aligned'],
         adjustment_params=STANDARD_ADJUSTMENT_PARAMS
     )
+    adjusted_identity = score_result.identity
+
+    # Guard: coverage too low → adjusted identity unreliable
+    # (e.g. 220bp vs 660bp: terminal gap exclusion scores only the overlap)
+    min_coverage = min(score_result.seq1_coverage, score_result.seq2_coverage)
+    if min_coverage < MIN_COVERAGE_THRESHOLD:
+        return 1.0 - raw_identity
+
+    # Guard: adjustment inflated identity beyond reasonable bounds
+    # (legitimate HP normalization raises identity by ~1-5%, not 3x)
+    if raw_identity > 0 and adjusted_identity > raw_identity * MAX_ADJUSTMENT_RATIO:
+        return 1.0 - raw_identity
 
     # Convert adjusted identity to distance
-    return 1.0 - score_result.identity
+    return 1.0 - adjusted_identity
 
 
 def calculate_overlap_aware_distance(seq1: str, seq2: str, min_overlap_bp: int) -> float:
