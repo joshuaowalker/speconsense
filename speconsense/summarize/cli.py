@@ -394,7 +394,7 @@ def process_single_specimen(file_consensuses: List[ConsensusInfo],
 
         # Generate full consensus from PRE-MERGE variants that contributed
         # to surviving post-merge variants (after select-min-size-ratio)
-        if getattr(args, 'enable_full_consensus', False):
+        if getattr(args, 'enable_full_consensus', False) and len(group_members) > 1:
             # Collect original cluster names from surviving post-merge variants
             surviving_originals = set()
             for v in group_members:
@@ -420,6 +420,8 @@ def process_single_specimen(file_consensuses: List[ConsensusInfo],
                 full_consensus = full_consensus._replace(sample_name=full_name)
 
             final_consensus.append(full_consensus)
+        elif getattr(args, 'enable_full_consensus', False):
+            logging.debug(f"Group {group_idx + 1}: skipping .full consensus (single variant in group)")
 
         naming_info[group_idx + 1] = group_naming
 

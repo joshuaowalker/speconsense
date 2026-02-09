@@ -7,6 +7,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [0.7.6] - 2026-02-08
 
+### Changed
+- **`.full` consensus suppressed for single-variant groups** — When `--enable-full-consensus` is active but a group has only one surviving post-merge variant, the `.full` output is now omitted (it would be redundant). `.full` is still generated when multiple post-merge variants survive in the group, even if `--select-max-variants` limits the number actually output
+
 ### Fixed
 - **Truncated sequences no longer distort HAC grouping** — A short consensus (e.g., 220bp vs 660bp) could cause `calculate_adjusted_identity_distance` to return near-zero distance due to terminal gap exclusion scoring only the overlap region. This caused complete-linkage HAC to split full-length sequences (>99% identical) into separate groups. Added coverage and adjustment-ratio guards that fall back to raw edlib identity when adjusted identity is unreliable
 
