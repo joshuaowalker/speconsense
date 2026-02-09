@@ -565,12 +565,12 @@ class TestFullConsensus:
             output_sequences = list(SeqIO.parse(output_fasta, "fasta"))
 
             full_seqs = [s for s in output_sequences if '.full' in s.id]
-            assert len(full_seqs) == 1, f"Expected 1 .full sequence, got {len(full_seqs)}"
+            assert len(full_seqs) == 0, \
+                f"Expected no .full sequence when group has single surviving variant, got {len(full_seqs)}"
 
-            # Small variant was filtered — .full should be the large variant only (no IUPAC)
-            full_seq_str = str(full_seqs[0].seq)
-            assert full_seq_str == seq_large, \
-                f"Expected large variant sequence, got {full_seq_str}"
+            # Only the large variant should survive (small filtered by size ratio)
+            variant_seqs = [s for s in output_sequences if '.v' in s.id]
+            assert len(variant_seqs) == 1, f"Expected 1 variant, got {len(variant_seqs)}"
 
         finally:
             shutil.rmtree(temp_dir)
@@ -813,6 +813,7 @@ class TestFullConsensusIntegration:
                     "--summary-dir", summary_dir,
                     "--min-ric", "3",
                     "--enable-full-consensus",
+                    "--disable-merging",
                     "--min-merge-overlap", "0",
                 ],
                 capture_output=True,
@@ -826,7 +827,7 @@ class TestFullConsensusIntegration:
 
             output_sequences = list(SeqIO.parse(output_fasta, "fasta"))
 
-            # Find the .full sequence
+            # Find the .full sequence (needs 2+ variants in group, so merging is disabled)
             full_seqs = [s for s in output_sequences if '.full' in s.id]
             assert len(full_seqs) == 1, f"Expected 1 .full sequence, got {len(full_seqs)}"
 
@@ -840,6 +841,51 @@ class TestFullConsensusIntegration:
                 fastq_files = os.listdir(fastq_dir)
                 full_fastqs = [f for f in fastq_files if '.full' in f]
                 assert len(full_fastqs) == 0, f"Should be no FASTQ for .full, got: {full_fastqs}"
+
+        finally:
+            shutil.rmtree(temp_dir)
+
+    def test_full_consensus_suppressed_for_single_variant(self):
+        """Test that .full is not generated when a group has only one variant."""
+        temp_dir = tempfile.mkdtemp()
+        source_dir = os.path.join(temp_dir, "clusters")
+        summary_dir = os.path.join(temp_dir, "__Summary__")
+        os.makedirs(source_dir)
+
+        try:
+            seq1 = "ATCGATCGATCGATCGATCGATCG"
+
+            fasta_content = f""">test-c1 size=50 ric=50 primers=test
+{seq1}
+"""
+            fasta_file = os.path.join(source_dir, "test-all.fasta")
+            with open(fasta_file, 'w') as f:
+                f.write(fasta_content)
+
+            result = subprocess.run(
+                [
+                    "speconsense-summarize",
+                    "--source", source_dir,
+                    "--summary-dir", summary_dir,
+                    "--min-ric", "3",
+                    "--enable-full-consensus",
+                    "--min-merge-overlap", "0",
+                ],
+                capture_output=True,
+                text=True
+            )
+
+            assert result.returncode == 0, f"speconsense-summarize failed: {result.stderr}"
+
+            output_fasta = os.path.join(summary_dir, "summary.fasta")
+            output_sequences = list(SeqIO.parse(output_fasta, "fasta"))
+
+            full_seqs = [s for s in output_sequences if '.full' in s.id]
+            assert len(full_seqs) == 0, \
+                f"Expected no .full for single-variant group, got {len(full_seqs)}"
+
+            variant_seqs = [s for s in output_sequences if '.v' in s.id]
+            assert len(variant_seqs) == 1, f"Expected 1 variant, got {len(variant_seqs)}"
 
         finally:
             shutil.rmtree(temp_dir)
