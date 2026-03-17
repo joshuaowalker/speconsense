@@ -179,3 +179,9 @@ The `scripts/` directory (git-ignored) contains local development utilities:
 - `verify_refactor_at_commit.py`: Same verification against specific git commits
 
 These scripts compare original monolithic files against refactored subpackages to detect transcription errors. Useful for future refactoring work.
+
+## Integration with specimux-suite
+
+See `~/mm/code/specimux-suite/INTEGRATION.md` for integration contracts with specimux-suite, including:
+- Profile system (`-p/--profile`, `--list-profiles`) — profiles in `~/.config/speconsense/profiles/` and bundled
+- Subprocess invocation contract — how specimux-suite constructs speconsense commands
