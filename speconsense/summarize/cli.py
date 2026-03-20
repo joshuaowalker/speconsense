@@ -3,7 +3,10 @@
 Provides argument parsing, logging setup, and main entry point.
 """
 
+import glob
+import json
 import os
+import shutil
 import sys
 import argparse
 import logging
@@ -49,6 +52,7 @@ from speconsense.types import ConsensusInfo, OverlapMergeInfo
 from .fields import parse_fasta_fields
 from .io import (
     load_consensus_sequences,
+    load_existing_specimen_outputs,
     build_fastq_lookup_table,
     write_specimen_data_files,
     write_output_files,
@@ -104,6 +108,10 @@ def parse_arguments():
                           help="Source directory containing Speconsense output (default: clusters)")
     io_group.add_argument("--summary-dir", type=str, default="__Summary__",
                           help="Output directory for summary files (default: __Summary__)")
+    io_group.add_argument("--specimen", type=str, default=None,
+                          help="Process only this specimen. Loads only <specimen>-all.fasta from --source.")
+    io_group.add_argument("--aggregate-only", action="store_true",
+                          help="Skip processing. Generate aggregate summary from existing per-specimen outputs.")
     io_group.add_argument("--fasta-fields", type=str, default="default",
                           help="FASTA header fields to output. Can be: "
                                "(1) a preset name (default, minimal, qc, full, id-only), "
@@ -241,6 +249,10 @@ def parse_arguments():
         if '--snp-merge-limit' in sys.argv:
             logging.warning("--snp-merge-limit is deprecated, use --merge-position-count instead")
         args.merge_position_count = args._snp_merge_limit_deprecated
+
+    # Validate mutual exclusion of --specimen and --aggregate-only
+    if args.specimen and args.aggregate_only:
+        parser.error("--specimen and --aggregate-only are mutually exclusive")
 
     if '--variant-group-identity' in sys.argv:
         logging.warning("--variant-group-identity is deprecated, use --group-identity instead")
@@ -430,6 +442,40 @@ def process_single_specimen(file_consensuses: List[ConsensusInfo],
     return final_consensus, all_merge_traceability, naming_info, total_limited_count, all_overlap_merges
 
 
+def _clean_specimen_output(summary_dir: str, specimen_id: str) -> None:
+    """Remove previous output files for a specimen before reprocessing.
+
+    Cleans files matching {specimen_id}* from summary_dir and its subdirs
+    to prevent stale files from accumulating when variant counts change.
+    """
+    dirs_to_clean = [
+        summary_dir,
+        os.path.join(summary_dir, 'FASTQ Files'),
+        os.path.join(summary_dir, 'variants'),
+        os.path.join(summary_dir, 'variants', 'FASTQ Files'),
+    ]
+    removed = 0
+    for d in dirs_to_clean:
+        if not os.path.exists(d):
+            continue
+        for f in glob.glob(os.path.join(d, f"{glob.escape(specimen_id)}*")):
+            try:
+                os.unlink(f)
+                removed += 1
+            except OSError as e:
+                logging.warning(f"Could not remove stale file {f}: {e}")
+    if removed:
+        logging.info(f"Cleaned {removed} previous output files for {specimen_id}")
+
+
+def _cleanup_log(log_path: str) -> None:
+    """Clean up temporary log file."""
+    try:
+        os.unlink(log_path)
+    except Exception as e:
+        logging.debug(f"Could not clean up temporary log file: {e}")
+
+
 def main():
     """Main function to process command line arguments and run the summarization."""
     args = parse_arguments()
@@ -482,14 +528,38 @@ def main():
     logging.info(f"  --enable-full-consensus: {args.enable_full_consensus}")
     logging.info(f"  --log-level: {args.log_level}")
     logging.info("")
+
+    # --- Aggregate-only mode ---
+    if args.aggregate_only:
+        logging.info("Aggregate-only mode: generating summary from existing per-specimen outputs")
+        all_final_consensus = load_existing_specimen_outputs(args.summary_dir)
+        if not all_final_consensus:
+            logging.error("No existing specimen outputs found in summary directory")
+            _cleanup_log(temp_log_file.name)
+            return
+
+        write_output_files(
+            all_final_consensus,
+            [],  # no raw consensuses available in aggregate mode
+            args.summary_dir,
+            temp_log_file.name,
+            fasta_fields
+        )
+
+        logging.info(f"Aggregate summary complete: {len(all_final_consensus)} sequences")
+        _cleanup_log(temp_log_file.name)
+        return
+
     logging.info("Processing each specimen file independently to organize variants within specimens")
 
-    # Load all consensus sequences
+    # Load consensus sequences (optionally filtered to single specimen)
     consensus_list = load_consensus_sequences(
-        args.source, args.min_ric, args.min_len, args.max_len
+        args.source, args.min_ric, args.min_len, args.max_len,
+        specimen_id=args.specimen
     )
     if not consensus_list:
         logging.error("No consensus sequences found")
+        _cleanup_log(temp_log_file.name)
         return
 
     # Group consensus sequences by input file (one file per specimen)
@@ -502,6 +572,10 @@ def main():
     os.makedirs(os.path.join(args.summary_dir, 'FASTQ Files'), exist_ok=True)
     os.makedirs(os.path.join(args.summary_dir, 'variants'), exist_ok=True)
     os.makedirs(os.path.join(args.summary_dir, 'variants', 'FASTQ Files'), exist_ok=True)
+
+    # In single-specimen mode, clean previous output for this specimen
+    if args.specimen:
+        _clean_specimen_output(args.summary_dir, args.specimen)
 
     # Build lookup tables once before processing loop
     fastq_lookup = build_fastq_lookup_table(args.source)
@@ -549,6 +623,26 @@ def main():
             unique_key = f"{file_name}_{group_id}"
             all_naming_info[unique_key] = group_naming
 
+    # --- Single-specimen mode: print JSON to stdout, skip aggregate files ---
+    if args.specimen:
+        variants = []
+        for cons in all_final_consensus:
+            variants.append({
+                "name": cons.sample_name,
+                "ric": cons.ric,
+                "size": cons.size,
+                "length": len(cons.sequence),
+            })
+        result = {
+            "specimen_id": args.specimen,
+            "variant_count": len(variants),
+            "variants": variants,
+        }
+        print(json.dumps(result))
+        logging.info(f"Single-specimen mode complete: {len(variants)} variants for {args.specimen}")
+        _cleanup_log(temp_log_file.name)
+        return
+
     # Write summary files at end (after all processing)
     write_output_files(
         all_final_consensus,
@@ -576,11 +670,7 @@ def main():
     if total_limited_merges > 0:
         logging.info(f"Note: {total_limited_merges} variant group(s) had >{MAX_MSA_MERGE_VARIANTS} variants (results potentially suboptimal)")
 
-    # Clean up temporary log file
-    try:
-        os.unlink(temp_log_file.name)
-    except Exception as e:
-        logging.debug(f"Could not clean up temporary log file: {e}")
+    _cleanup_log(temp_log_file.name)
 
 
 if __name__ == "__main__":

@@ -5,6 +5,17 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.7.7] - 2026-03-17
+
+### Added
+- **`--specimen` flag** (summarize) — Process only a single specimen, outputting per-specimen files and a JSON summary to stdout. Designed for incremental invocation by specimux-suite orchestration layer
+- **`--aggregate-only` flag** (summarize) — Regenerate aggregate `summary.fasta` from existing per-specimen outputs without reprocessing. Parses metadata (`raw_ric`, `raw_len`, `snp_count`) back from FASTA headers for full-fidelity reconstruction
+
+### Fixed
+- **Stale output file cleanup** — Single-specimen mode removes previous output files before reprocessing to prevent accumulation when variant counts change between runs
+- **Temp log file leak** — Early-return paths (e.g., no sequences found) now clean up the temporary log file
+- **Glob escaping in specimen cleanup** — Specimen IDs containing glob metacharacters no longer match unintended files
+
 ## [0.7.6] - 2026-02-08
 
 ### Changed

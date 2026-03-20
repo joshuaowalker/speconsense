@@ -24,18 +24,19 @@ from .clustering import select_variants
 
 
 def parse_consensus_header(header: str) -> Tuple[Optional[str], Optional[int], Optional[int],
-                                                   Optional[List[str]], Optional[float], Optional[float]]:
+                                                   Optional[List[str]], Optional[float], Optional[float],
+                                                   Optional[List[int]], Optional[List[int]], Optional[int]]:
     """
     Extract information from Speconsense consensus FASTA header.
 
-    Parses read identity metrics.
+    Parses read identity metrics and merge metadata.
 
     Returns:
-        Tuple of (sample_name, ric, size, primers, rid, rid_min)
+        Tuple of (sample_name, ric, size, primers, rid, rid_min, raw_ric, raw_len, snp_count)
     """
     sample_match = re.match(r'>([^ ]+) (.+)', header)
     if not sample_match:
-        return None, None, None, None, None, None
+        return None, None, None, None, None, None, None, None, None
 
     sample_name = sample_match.group(1)
     info_string = sample_match.group(2)
@@ -59,22 +60,34 @@ def parse_consensus_header(header: str) -> Tuple[Optional[str], Optional[int], O
     rid_min_match = re.search(r'rid_min=([\d.]+)', info_string)
     rid_min = float(rid_min_match.group(1)) / 100.0 if rid_min_match else None
 
-    return sample_name, ric, size, primers, rid, rid_min
+    # Extract merge metadata (plus-delimited lists)
+    rawric_match = re.search(r'rawric=(\d+(?:\+\d+)*)', info_string)
+    raw_ric = [int(x) for x in rawric_match.group(1).split('+')] if rawric_match else None
+
+    rawlen_match = re.search(r'rawlen=(\d+(?:\+\d+)*)', info_string)
+    raw_len = [int(x) for x in rawlen_match.group(1).split('+')] if rawlen_match else None
+
+    snp_match = re.search(r'snp=(\d+)', info_string)
+    snp_count = int(snp_match.group(1)) if snp_match else None
+
+    return sample_name, ric, size, primers, rid, rid_min, raw_ric, raw_len, snp_count
 
 
 def load_consensus_sequences(
     source_folder: str,
     min_ric: int,
     min_len: int = 0,
-    max_len: int = 0
+    max_len: int = 0,
+    specimen_id: str = None
 ) -> List[ConsensusInfo]:
-    """Load all consensus sequences from speconsense output files.
+    """Load consensus sequences from speconsense output files.
 
     Args:
         source_folder: Directory containing speconsense output files
         min_ric: Minimum Reads in Consensus threshold
         min_len: Minimum sequence length (0 = disabled)
         max_len: Maximum sequence length (0 = disabled)
+        specimen_id: If set, load only {specimen_id}-all.fasta instead of all
 
     Returns:
         List of ConsensusInfo objects passing all filters
@@ -83,8 +96,11 @@ def load_consensus_sequences(
     filtered_by_ric = 0
     filtered_by_len = 0
 
-    # Find all consensus FASTA files matching the new naming pattern
-    fasta_pattern = os.path.join(source_folder, "*-all.fasta")
+    # Find consensus FASTA files — narrow to single specimen if requested
+    if specimen_id:
+        fasta_pattern = os.path.join(source_folder, f"{specimen_id}-all.fasta")
+    else:
+        fasta_pattern = os.path.join(source_folder, "*-all.fasta")
     fasta_files = sorted(glob.glob(fasta_pattern))
 
     for fasta_file in fasta_files:
@@ -92,7 +108,7 @@ def load_consensus_sequences(
 
         with open(fasta_file, 'r') as f:
             for record in SeqIO.parse(f, "fasta"):
-                sample_name, ric, size, primers, rid, rid_min = \
+                sample_name, ric, size, primers, rid, rid_min, _, _, _ = \
                     parse_consensus_header(f">{record.description}")
 
                 if not sample_name:
@@ -659,6 +675,55 @@ def write_position_debug_file(
                 f.write("\n")
 
     logging.info(f"Position error debug file written to: {debug_path}")
+
+
+def load_existing_specimen_outputs(summary_dir: str) -> List[ConsensusInfo]:
+    """Load per-specimen FASTA outputs for aggregate-only mode.
+
+    Scans summary_dir for individual specimen FASTA files (excluding summary.fasta),
+    reconstructing ConsensusInfo objects from their headers.
+
+    Returns:
+        List of ConsensusInfo objects from existing per-specimen files
+    """
+    consensus_list = []
+    fasta_pattern = os.path.join(summary_dir, "*.fasta")
+    fasta_files = sorted(glob.glob(fasta_pattern))
+
+    for fasta_file in fasta_files:
+        basename = os.path.basename(fasta_file)
+        if basename == "summary.fasta":
+            continue
+
+        with open(fasta_file, 'r') as f:
+            for record in SeqIO.parse(f, "fasta"):
+                sample_name, ric, size, primers, rid, rid_min, raw_ric, raw_len, snp_count = \
+                    parse_consensus_header(f">{record.description}")
+
+                if not sample_name:
+                    continue
+
+                cluster_match = re.search(r'-c(\d+)$', sample_name)
+                cluster_id = cluster_match.group(0) if cluster_match else sample_name
+
+                consensus_info = ConsensusInfo(
+                    sample_name=sample_name,
+                    cluster_id=cluster_id,
+                    sequence=str(record.seq),
+                    ric=ric,
+                    size=size,
+                    file_path=fasta_file,
+                    snp_count=snp_count,
+                    primers=primers,
+                    raw_ric=raw_ric,
+                    raw_len=raw_len,
+                    rid=rid,
+                    rid_min=rid_min,
+                )
+                consensus_list.append(consensus_info)
+
+    logging.info(f"Loaded {len(consensus_list)} existing sequences from {len(fasta_files)} files in {summary_dir}")
+    return consensus_list
 
 
 def write_output_files(final_consensus: List[ConsensusInfo],
