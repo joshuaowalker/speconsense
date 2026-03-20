@@ -29,6 +29,8 @@ those of current nanopore chemistry to be explained as artifacts. We present
 results under both a conservative error model ($q = p$, maximally biased
 substitution) and a uniform model ($q = p/3$), and examine the effect of
 significance level on variant confidence across a range of operating conditions.
+We additionally provide minimum read-support thresholds at assumed error rates,
+enabling direct lookup of the evidence required for variant confidence.
 \end{abstract}
 
 \section{Introduction}
@@ -94,8 +96,8 @@ reads, so this is bounded.
 This determines the multiple testing correction.
 
 \item $K$: Number of variant positions distinguishing a given variant from all
-other variants produced from the same specimen. The main analysis uses $K = 1$
-(single-position variants), the hardest case.
+other variants produced from the same specimen. We use $K = 1$ (single-position
+variants) throughout as the conservative bound (Section~\ref{sec:multiposition}).
 
 \item $\alpha$: Significance level. We examine $\alpha = 0.05$ (per-variant),
 $\alpha = 10^{-3}$, and $\alpha = 10^{-5}$ (appropriate when correcting for
@@ -142,26 +144,15 @@ $\alpha \approx 0.05 / 3000 \approx 1.7 \times 10^{-5}$. We therefore present
 results at $\alpha = 10^{-5}$ as a practical run-corrected threshold alongside
 the per-variant $\alpha = 0.05$.
 
-\subsection{Extension to multi-position variants ($K > 1$)}
+\subsection{Multi-position variants ($K > 1$)}
+\label{sec:multiposition}
 
-When $K$ positions independently distinguish a variant, the probability under the
-null that all $K$ simultaneously exhibit the same allele pattern is:
-\begin{equation}
-P(\text{$K$-position artifact}) \leq \binom{L}{K} \cdot
-\Bigl[P\bigl(\text{Binom}(N,\, q) \geq M\bigr)\Bigr]^K
-\end{equation}
-
-Setting this equal to $\alpha$ and solving for $p^*$ yields a per-position target:
-\begin{equation}
-P\bigl(\text{Binom}(N,\, q^*) \geq M\bigr) =
-\left(\frac{\alpha}{\binom{L}{K}}\right)^{1/K}
-\end{equation}
-
-Although the combinatorial correction $\binom{L}{K}$ grows rapidly ($\binom{700}{2}
-= 244{,}650$; $\binom{700}{3} = 57{,}085{,}400$), the $K$-th root dominates, and
-the per-position target actually \emph{increases} with $K$. In practice, any
-variant distinguished at $K \geq 2$ positions is at least as significant as a
-single-position variant.
+When a variant is distinguished from other variants at $K > 1$ positions, the
+joint probability under the null that all $K$ positions simultaneously exhibit a
+variant-like pattern drops exponentially. Although the combinatorial correction
+$\binom{L}{K}$ grows with $K$, the $K$-th root dominates, and any multi-position
+variant is at least as significant as a single-position variant. The analysis
+that follows therefore uses $K = 1$ throughout as the conservative bound.
 
 \section{Results}
 
@@ -219,14 +210,6 @@ read counts $N$ ($K = 1$, $L = 700$, $\alpha = 0.05$). Left: conservative model
 \label{fig:by_N}
 \end{figure}
 
-\subsection{Multi-position variants}
-
-For variants distinguished at $K \geq 2$ positions, the critical error rate
-increases modestly (Appendix, Figure~\ref{fig:K_comparison}). The improvement is
-small in absolute terms because the single-position binomial test is already
-highly sensitive at these sample sizes. Any variant distinguished at multiple
-positions is at least as well-supported as a single-position variant.
-
 \subsection{Summary of key values}
 
 Table~\ref{tab:key_values} summarizes critical error rates for representative
@@ -253,6 +236,54 @@ $N$ & $M$ & $\alpha$ & $q = p$ & $q = p/3$ & Note \\
 \bottomrule
 \end{tabular}
 \end{table}
+
+\subsection{Minimum read support at assumed error rates}
+
+While Table~\ref{tab:key_values} shows the error rate required to explain a given
+variant as artifact, practitioners often need the converse: given an assumed
+platform error rate, how many reads must support a variant for it to be
+considered trustworthy? Table~\ref{tab:min_M} inverts the analysis to answer this
+directly.
+
+\begin{table}[htbp]
+\centering
+\caption{Minimum variant read count $M$ required for significance at assumed
+per-position error rates ($K = 1$, $L = 700$). Upper panel: conservative model
+($q = p$). Lower panel: uniform model ($q = p/3$).}
+\label{tab:min_M}
+\small
+\begin{tabular}{r rrr rrr rrr}
+\toprule
+ & \multicolumn{3}{c}{$p = 1\%$}
+ & \multicolumn{3}{c}{$p = 3\%$}
+ & \multicolumn{3}{c}{$p = 5\%$} \\
+\cmidrule(lr){2-4} \cmidrule(lr){5-7} \cmidrule(lr){8-10}
+$N$ & 0.05 & $10^{-3}$ & $10^{-5}$
+    & 0.05 & $10^{-3}$ & $10^{-5}$
+    & 0.05 & $10^{-3}$ & $10^{-5}$ \\
+\midrule
+\multicolumn{10}{l}{\emph{Conservative ($q = p$)}} \\[2pt]
+100  &  7 &  9 & 11 & 12 & 15 & 17 & 16 & 19 & 22 \\
+200  & 10 & 12 & 15 & 18 & 21 & 24 & 25 & 28 & 32 \\
+500  & 16 & 19 & 22 & 32 & 37 & 41 & 46 & 52 & 57 \\
+1000 & 25 & 29 & 33 & 53 & 59 & 65 & 79 & 86 & 93 \\
+\midrule
+\multicolumn{10}{l}{\emph{Uniform ($q = p/3$)}} \\[2pt]
+100  &  5 &  6 &  8 &  7 &  9 & 11 &  9 & 11 & 13 \\
+200  &  6 &  8 & 10 & 10 & 12 & 15 & 13 & 16 & 18 \\
+500  &  9 & 11 & 14 & 16 & 19 & 22 & 22 & 26 & 29 \\
+1000 & 13 & 16 & 19 & 25 & 29 & 33 & 35 & 40 & 44 \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+At the standard operating point ($N = 1000$) under the conservative model, a
+variant needs $M \geq 93$ reads to be significant at the run-corrected
+$\alpha = 10^{-5}$ when the assumed error rate is 5\%, but only $M \geq 33$ at
+1\% assumed error. Under the uniform model, these thresholds drop to 44 and 19
+respectively. At moderate coverage ($N = 100$), even the most stringent
+combination (5\% error, $\alpha = 10^{-5}$, conservative) requires only
+$M \geq 22$, representing 22\% of total reads.
 
 \section{Discussion}
 
@@ -292,9 +323,8 @@ would be less likely.
 tests is conservative; nearby positions in amplicon sequences are not truly
 independent, so the effective number of tests is smaller than $L$.
 
-\item \textbf{Minimum $K$.} Using the minimum number of distinguishing positions
-across all variant pairs represents the weakest case. Most variants are
-distinguished at multiple positions, further increasing significance.
+\item \textbf{Minimum $K$.} Using $K = 1$ represents the weakest case; most
+variants are distinguished at multiple positions, further increasing significance.
 \end{enumerate}
 
 \subsection{Homopolymer normalization}
@@ -342,10 +372,9 @@ $M = 100$), critical rates of 5.5--6.8\% (conservative) or 16.6--20.3\%
 (uniform) are well above realistic nanopore error, even at run-corrected
 significance levels. At lower coverage ($N = 100$, $M = 10$), the conservative
 model yields $p^* = 0.8$--$2.2\%$, approaching the boundary of
-distinguishability for lower-quality reads. The framework allows users to assess
-variant confidence for any specific $(N, M)$ combination by reading directly from
-the presented curves, without requiring calibration against empirical error rate
-estimates.
+distinguishability for lower-quality reads. Table~\ref{tab:min_M} provides direct lookup of the minimum read support needed
+at assumed error rates of 1--5\%, enabling practitioners to assess variant
+confidence without computation.
 
 \begin{thebibliography}{9}
 
@@ -364,23 +393,5 @@ R.~R. Wick, L.~M. Judd, and K.~E. Holt.
 \newblock \emph{PLOS Computational Biology}, 19(3):e1010905, 2023.
 
 \end{thebibliography}
-
-\appendix
-
-\section{Multi-position variant analysis}
-
-Figure~\ref{fig:K_comparison} compares critical error rates for $K = 1, 2, 3$
-variant positions at $N = 1000$. The curves are nearly coincident, confirming
-that the single-position analysis ($K = 1$) represents the conservative bound
-and that multi-position variants provide at least equivalent statistical support.
-
-\begin{figure}[htbp]
-\centering
-\includegraphics[width=0.7\textwidth]{figures/fig3_K_comparison.pdf}
-\caption{Critical error rate $p^*$ as a function of variant read count $M$ for
-$K = 1, 2, 3$ variant positions ($N = 1000$, $L = 700$, $\alpha = 0.05$,
-conservative model).}
-\label{fig:K_comparison}
-\end{figure}
 
 \end{document}

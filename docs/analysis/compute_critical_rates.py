@@ -76,6 +76,29 @@ def effective_M(N, min_count=5, min_freq=0.10):
     return max(min_count, math.ceil(min_freq * N))
 
 
+def minimum_M(N, p_assumed, L=700, alpha=0.05, uniform=False):
+    """Minimum variant read count M for significance at assumed error rate.
+
+    Returns the smallest M such that observing M of N reads with the same
+    alternative allele is significant at level alpha (Bonferroni-corrected
+    over L positions) when the true per-position error rate is p_assumed.
+
+    Returns None if no M <= N is sufficient.
+    """
+    q = p_assumed / 3.0 if uniform else p_assumed
+    target = alpha / L
+    # Find M where P(Binom(N, q) >= M) <= target
+    M_raw = binom.isf(target, N, q)
+    M_cand = int(math.ceil(M_raw))
+    # Verify (isf can be imprecise at discrete boundaries)
+    while M_cand > 0 and binom.sf(M_cand - 1, N, q) > target:
+        M_cand += 1
+    # Check feasibility
+    if M_cand > N:
+        return None
+    return M_cand
+
+
 def generate_figure1():
     """Critical error rate vs N for K=1 (main figure).
 
@@ -189,40 +212,6 @@ def generate_figure2():
     print("Figure 2 saved.")
 
 
-def generate_figure3():
-    """K=1,2,3 comparison for N=1000 (appendix figure)."""
-    M_values = np.arange(5, 201)
-    N = 1000
-    K_values = [1, 2, 3]
-    colors = ['#1f77b4', '#ff7f0e', '#2ca02c']
-    styles = ['-', '--', ':']
-
-    fig, ax = plt.subplots(figsize=(5, 4))
-
-    for K, color, style in zip(K_values, colors, styles):
-        curve = []
-        for M in M_values:
-            curve.append(critical_error_rate(N, M, K=K))
-        ax.plot(M_values, curve, style, color=color, linewidth=1.8,
-                label=f'K = {K}')
-
-    ax.axhline(y=0.05, color='red', linestyle=':', linewidth=1, alpha=0.7)
-    ax.axhline(y=0.01, color='darkred', linestyle=':', linewidth=1, alpha=0.7)
-
-    ax.set_yscale('log')
-    ax.set_xlabel('M (variant read count)')
-    ax.set_ylabel(r'Critical error rate $p^*$')
-    ax.set_title('Effect of variant position count (N = 1000)')
-    ax.set_xlim(5, 200)
-    ax.set_ylim(0.001, 1.0)
-    ax.legend(loc='upper right')
-    ax.grid(True, alpha=0.3, which='both')
-
-    fig.savefig(FIGURES_DIR / 'fig3_K_comparison.pdf')
-    plt.close(fig)
-    print("Figure 3 saved.")
-
-
 def print_key_values():
     """Print key numerical results for use in the paper text."""
     print("\n=== Key numerical values (conservative q=p) ===\n")
@@ -261,9 +250,37 @@ def print_key_values():
     print()
 
 
+def print_minimum_M_table():
+    """Print minimum M values for Table 2 (assumed error rate framing)."""
+    N_values = [100, 200, 500, 1000]
+    p_values = [0.01, 0.03, 0.05]
+    alphas = [0.05, 1e-3, 1e-5]
+
+    for model_name, uniform in [('Conservative (q=p)', False), ('Uniform (q=p/3)', True)]:
+        print(f"\n=== Minimum M — {model_name} ===\n")
+        # Header
+        header = f"{'N':>6}"
+        for p in p_values:
+            for a in alphas:
+                header += f"  {p*100:.0f}%/a={a:.0e}"
+            header += "  |"
+        print(header)
+        print("-" * len(header))
+
+        for N in N_values:
+            row = f"{N:>6}"
+            for p in p_values:
+                for a in alphas:
+                    M = minimum_M(N, p, alpha=a, uniform=uniform)
+                    row += f"  {M if M is not None else '>N':>13}"
+                row += "  |"
+            print(row)
+    print()
+
+
 if __name__ == '__main__':
     FIGURES_DIR.mkdir(parents=True, exist_ok=True)
     generate_figure1()
     generate_figure2()
-    generate_figure3()
     print_key_values()
+    print_minimum_M_table()
