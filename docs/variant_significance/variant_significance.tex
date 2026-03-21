@@ -124,8 +124,8 @@ The critical error rate $p^*$ is defined as the value of $p$ satisfying:
 \label{eq:critical}
 L \cdot P\bigl(\text{Binom}(N,\, q^*) \geq M\bigr) = \alpha
 \end{equation}
-
-This is a single-variable equation solved numerically via root-finding on the
+where $q^* = p^*$ under the conservative model or $q^* = p^*/3$ under the
+uniform model. This is a single-variable equation solved numerically via root-finding on the
 log-scale survival function. If $p^*$ substantially exceeds the actual
 per-position error rate of the sequencing platform, the variant cannot plausibly
 be explained by error.
@@ -268,18 +268,29 @@ $N$ & 0.05 & $10^{-3}$ & $10^{-5}$
     & 0.05 & $10^{-3}$ & $10^{-5}$ \\
 \midrule
 \multicolumn{10}{l}{\emph{Conservative ($q = p$)}} \\[2pt]
+10   &  4 &  5 &  6$^\dagger$ &  5 &  6$^\dagger$ &  7$^\dagger$ &  5 &  7$^\dagger$ &  8$^\dagger$ \\
+20   &  4 &  5 &  7 &  6 &  7 &  9 &  7 &  9 & 10 \\
+50   &  6 &  7 &  9 &  9 & 11 & 13 & 11 & 13 & 15 \\
 100  &  7 &  9 & 11 & 12 & 15 & 17 & 16 & 19 & 22 \\
 200  & 10 & 12 & 15 & 18 & 21 & 24 & 25 & 28 & 32 \\
 500  & 16 & 19 & 22 & 32 & 37 & 41 & 46 & 52 & 57 \\
 1000 & 25 & 29 & 33 & 53 & 59 & 65 & 79 & 86 & 93 \\
 \midrule
 \multicolumn{10}{l}{\emph{Uniform ($q = p/3$)}} \\[2pt]
+10   &  3 &  4 &  5 &  4 &  5 &  6$^\dagger$ &  4 &  5 &  6$^\dagger$ \\
+20   &  3 &  4 &  5 &  4 &  5 &  7 &  5 &  6 &  8 \\
+50   &  4 &  5 &  7 &  6 &  7 &  9 &  7 &  9 & 10 \\
 100  &  5 &  6 &  8 &  7 &  9 & 11 &  9 & 11 & 13 \\
 200  &  6 &  8 & 10 & 10 & 12 & 15 & 13 & 16 & 18 \\
 500  &  9 & 11 & 14 & 16 & 19 & 22 & 22 & 26 & 29 \\
 1000 & 13 & 16 & 19 & 25 & 29 & 33 & 35 & 40 & 44 \\
 \bottomrule
 \end{tabular}
+
+\smallskip
+\noindent$^\dagger$\small{$M > N/2$: the required read support exceeds half the
+total reads, making detection of multiple variants impossible at this sample
+size.}
 \end{table}
 
 At the standard operating point ($N = 1000$) under the conservative model, a
@@ -318,9 +329,12 @@ bounds on variant significance:
 \begin{enumerate}
 \item \textbf{Denominator choice.} Using the total input read count $N$ rather
 than the cluster size assumes the worst case: the clustering algorithm could have
-drawn any subset from the full pool. In practice, reads are first clustered by
-sequence similarity before phasing, so the effective denominator for error-driven
-patterns is the cluster size, which is smaller than $N$.
+drawn any subset from the full pool. In practice, coarse clustering first
+separates clearly unrelated sequences (e.g., different loci or contaminant
+reads), reducing the effective pool. However, finer-grained cluster boundaries
+are themselves determined by the variant signal under evaluation, so using
+cluster size as the denominator would be circular. The analysis uses total input
+reads to avoid this dependency.
 
 \item \textbf{Maximally biased substitution.} The conservative model ($q = p$)
 assumes all errors at a position produce the same alternative base. If errors
@@ -418,6 +432,14 @@ detected variants requires downstream validation against reference databases.
 Table~\ref{tab:min_M} provides direct lookup of the minimum read support needed
 at assumed error rates of 1--5\%, enabling practitioners to assess variant
 confidence without computation.
+
+\subsection*{Acknowledgments}
+
+Substantial portions of the text were drafted with the assistance of Claude
+(Anthropic, Opus~4.6). The core ideas, analytical framing, and mathematical
+approach were provided by the author; the AI contributed to exposition, \LaTeX{}
+formatting, and iterative drafting under human direction. The author takes full
+responsibility for the content.
 
 \begin{thebibliography}{99}
 
