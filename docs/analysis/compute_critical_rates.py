@@ -278,9 +278,21 @@ def print_minimum_M_table():
     print()
 
 
+def print_k_comparison():
+    """Verify K=1 vs K=2 values cited in the worked example."""
+    print("\n=== K=1 vs K=2 comparison (N=1000, M=100, alpha=0.05) ===\n")
+    N, M = 1000, 100
+    for K in [1, 2]:
+        p_cons = critical_error_rate(N, M, K=K, uniform=False)
+        correction = 700 if K == 1 else math.comb(700, K)
+        print(f"  K={K}: p*(q=p) = {p_cons*100:.2f}%, correction = {correction:,}")
+    print()
+
+
 if __name__ == '__main__':
     FIGURES_DIR.mkdir(parents=True, exist_ok=True)
     generate_figure1()
     generate_figure2()
     print_key_values()
     print_minimum_M_table()
+    print_k_comparison()

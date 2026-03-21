@@ -151,8 +151,12 @@ When a variant is distinguished from other variants at $K > 1$ positions, the
 joint probability under the null that all $K$ positions simultaneously exhibit a
 variant-like pattern drops exponentially. Although the combinatorial correction
 $\binom{L}{K}$ grows with $K$, the $K$-th root dominates, and any multi-position
-variant is at least as significant as a single-position variant. The analysis
-that follows therefore uses $K = 1$ throughout as the conservative bound.
+variant is at least as significant as a single-position variant. As a concrete
+example, at $N = 1000$, $M = 100$: $K = 1$ gives $p^* = 6.75\%$, while $K = 2$
+gives $p^* = 7.12\%$. The combinatorial correction grows from $L = 700$ to
+$\binom{700}{2} = 244{,}650$ (a $350{\times}$ increase), but the squared
+per-position probability overwhelmingly compensates. The analysis that follows
+therefore uses $K = 1$ throughout as the conservative bound.
 
 \section{Results}
 
@@ -164,8 +168,8 @@ Curves are shown for three significance levels under the conservative model
 ($q = p$), with the uniform model ($q = p/3$) overlaid at $\alpha = 0.05$ and
 $\alpha = 10^{-5}$ for comparison.
 
-Under the conservative model at $\alpha = 0.05$, a variant supported by $M = 50$
-reads exceeds the 5\% error rate reference line, and $M = 100$ yields
+Under the conservative model at $\alpha = 0.05$, the critical error rate crosses
+the 5\% reference line at approximately $M = 80$, and $M = 100$ yields
 $p^* = 6.8\%$. Even at the stringent run-corrected $\alpha = 10^{-5}$, $M = 100$
 gives $p^* = 5.5\%$---still well above realistic nanopore error rates. The
 difference between significance levels is modest at high $M$, reflecting the
@@ -174,10 +178,11 @@ exponential sensitivity of the binomial test.
 Under the uniform model, the same cases yield $p^* = 20.3\%$ and $16.6\%$
 respectively, providing comfortable margins.
 
-At low $M$ (${<}20$ reads), the critical error rate drops below 1\% under the
-conservative model regardless of significance level, indicating that variants
-with very few supporting reads approach the boundary of statistical
-distinguishability.
+At low $M$, the test's power drops rapidly. The boundary where variants become
+questionable depends on $N$, but for typical coverage ($N = 100$--$1000$),
+variants with fewer than ${\sim}20$--$30$ supporting reads under the conservative
+model yield $p^*$ values in the range of realistic nanopore error rates (1--5\%),
+making them difficult to distinguish from artifacts.
 
 \begin{figure}[htbp]
 \centering
@@ -372,18 +377,32 @@ the initial cluster contains reads from a single source.
 
 \subsection{Limitations}
 
-The null model assumes independence of errors across positions within a read.
-While nanopore errors can exhibit local correlations---e.g., in homopolymer
-regions or around specific sequence motifs~\cite{delahaye2021}---the homopolymer normalization step
-addresses the primary source of such correlation. Remaining context-dependent
-error biases are not modeled, but would need to affect the same specific base at
-the same position across a substantial fraction of reads to create a false
-variant---a scenario not consistent with known nanopore error profiles.
+The null model assumes independence of errors across reads at each position.
+Nanopore errors exhibit well-documented sequence-context dependencies---certain
+k-mer contexts systematically produce higher error rates and biased substitution
+patterns~\cite{delahaye2021}. The homopolymer normalization step addresses the
+largest class of such correlation, and the conservative model ($q = p$) accounts
+for substitution directionality by assuming all errors at a position produce the
+same alternative base. However, neither addresses the possibility that
+context-dependent effects elevate the per-position error rate at specific sites
+substantially above the platform average. The critical error rate framework is
+designed to accommodate this uncertainty: rather than assuming a fixed error
+rate, it reports $p^*$ and leaves the reader to judge whether that rate is
+plausible given their platform, chemistry, and sequence context. A variant with
+$p^* = 6.8\%$ is robust if the worst-case positional error rate is 2\%, but not
+if context effects at that position could plausibly reach 7\%. As nanopore
+chemistry continues to improve, both mean error rates and context-dependent
+profiles change, making fixed thresholds unreliable; $p^*$ remains interpretable
+against whatever platform characterization is current.
 
-The analysis also does not model the possibility of PCR-induced errors during
-amplification. However, PCR errors introduced early in amplification would
-produce read patterns indistinguishable from real variants at this level of
-analysis, and are arguably real signals in the context of the sequenced library.
+This framework addresses bioinformatic artifacts---sequences that never
+physically existed in the sequenced library. PCR errors introduced early in
+amplification produce sequences that physically exist in the library, and are
+therefore out of scope by design: passing the critical error rate test
+establishes physical presence in the library, not biological reality. For
+taxonomic identification, the primary mitigation against PCR artifacts and other
+non-biological sequences is robust reference databases where variants have been
+replicated across independent specimens.
 
 \section{Conclusion}
 
@@ -393,7 +412,10 @@ $M = 100$), critical rates of 5.5--6.8\% (conservative) or 16.6--20.3\%
 (uniform) are well above realistic nanopore error, even at run-corrected
 significance levels. At lower coverage ($N = 100$, $M = 10$), the conservative
 model yields $p^* = 0.8$--$2.2\%$, approaching the boundary of
-distinguishability for lower-quality reads. Table~\ref{tab:min_M} provides direct lookup of the minimum read support needed
+distinguishability for lower-quality reads. The framework distinguishes physical
+library presence from bioinformatic hallucination; biological significance of
+detected variants requires downstream validation against reference databases.
+Table~\ref{tab:min_M} provides direct lookup of the minimum read support needed
 at assumed error rates of 1--5\%, enabling practitioners to assess variant
 confidence without computation.
 
