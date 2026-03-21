@@ -50,6 +50,11 @@ htmlcov/
 ehthumbs.db
 Thumbs.db
 
+# LaTeX build artifacts
+*.aux
+*.log
+*.out
+
 # Reference files (not part of project)
 msalign.py
 
