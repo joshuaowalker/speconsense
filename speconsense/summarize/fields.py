@@ -119,6 +119,26 @@ class RidMinField(FastaField):
         return None
 
 
+class CerField(FastaField):
+    def __init__(self):
+        super().__init__('cer', 'Critical error rate (p*) from variant significance')
+
+    def format_value(self, consensus: ConsensusInfo) -> Optional[str]:
+        if consensus.cer is not None:
+            return f"cer={consensus.cer:.4f}"
+        return None
+
+
+class CerAlphaField(FastaField):
+    def __init__(self):
+        super().__init__('cer_alpha', 'Significance level (alpha) for CER')
+
+    def format_value(self, consensus: ConsensusInfo) -> Optional[str]:
+        if consensus.cer_alpha is not None:
+            return f"cer.a={consensus.cer_alpha:.0e}"
+        return None
+
+
 class GroupField(FastaField):
     def __init__(self):
         super().__init__('group', 'Variant group number')
@@ -156,6 +176,8 @@ FASTA_FIELDS = {
     'ambig': AmbigField(),
     'rid': RidField(),
     'rid_min': RidMinField(),
+    'cer': CerField(),
+    'cer_alpha': CerAlphaField(),
     'primers': PrimersField(),
     'group': GroupField(),
     'variant': VariantField(),
@@ -165,8 +187,8 @@ FASTA_FIELDS = {
 FASTA_FIELD_PRESETS = {
     'default': ['size', 'ric', 'rawric', 'rawlen', 'snp', 'ambig', 'primers'],
     'minimal': ['size', 'ric'],
-    'qc': ['size', 'ric', 'length', 'rid', 'ambig'],
-    'full': ['size', 'ric', 'length', 'rawric', 'rawlen', 'snp', 'ambig', 'rid', 'primers'],
+    'qc': ['size', 'ric', 'length', 'rid', 'ambig', 'cer', 'cer_alpha'],
+    'full': ['size', 'ric', 'length', 'rawric', 'rawlen', 'snp', 'ambig', 'rid', 'cer', 'cer_alpha', 'primers'],
     'id-only': [],
 }
 

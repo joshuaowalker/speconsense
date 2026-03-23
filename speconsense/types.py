@@ -23,6 +23,8 @@ class ConsensusInfo(NamedTuple):
     rid: Optional[float] = None  # Mean read identity (internal consistency metric)
     rid_min: Optional[float] = None  # Minimum read identity (worst-case read)
     merge_indel_count: Optional[int] = None  # Number of indels consumed by merging (for cumulative tracking)
+    cer: Optional[float] = None  # Critical error rate (p*) from variant significance testing
+    cer_alpha: Optional[float] = None  # Significance level (alpha) used for CER computation
 
 
 class OverlapMergeInfo(NamedTuple):

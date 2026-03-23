@@ -22,6 +22,7 @@ except ImportError:
     __version__ = "dev"
 
 from speconsense.msa import ReadAlignment
+from speconsense.significance import compute_critical_error_rate
 from speconsense.scalability import (
     VsearchCandidateFinder,
     ScalablePairwiseOperation,
@@ -61,7 +62,9 @@ class SpecimenClusterer:
                  scale_threshold: int = 1001,
                  max_threads: int = 1,
                  early_filter: bool = False,
-                 collect_discards: bool = False):
+                 collect_discards: bool = False,
+                 assumed_error_rate: float = 0.02,
+                 significance_level: float = 1e-5):
         self.min_identity = min_identity
         self.inflation = inflation
         self.min_size = min_size
@@ -93,6 +96,8 @@ class SpecimenClusterer:
         self.max_threads = max_threads
         self.early_filter = early_filter
         self.collect_discards = collect_discards
+        self.assumed_error_rate = assumed_error_rate
+        self.significance_level = significance_level
         self.discarded_read_ids: Set[str] = set()  # Track all discarded reads (outliers + filtered)
 
         # Initialize scalability configuration
@@ -152,6 +157,8 @@ class SpecimenClusterer:
                 "scale_threshold": self.scale_threshold,
                 "max_threads": self.max_threads,
                 "orient_mode": self.orient_mode,
+                "assumed_error_rate": self.assumed_error_rate,
+                "significance_level": self.significance_level,
             },
             "input_file": self.input_file,
             "augment_input": self.augment_input,
@@ -600,7 +607,9 @@ class SpecimenClusterer:
                             msa: Optional[str] = None,
                             sorted_cluster_ids: Optional[List[str]] = None,
                             sorted_sampled_ids: Optional[List[str]] = None,
-                            iupac_count: int = 0) -> None:
+                            iupac_count: int = 0,
+                            cer: Optional[float] = None,
+                            cer_alpha: Optional[float] = None) -> None:
         """Write cluster files: reads FASTQ, MSA, and consensus FASTA.
 
         Read identity metrics measure internal cluster consistency (not accuracy vs. ground truth):
@@ -626,6 +635,10 @@ class SpecimenClusterer:
             info_parts.append(f"primers={','.join(found_primers)}")
         if iupac_count > 0:
             info_parts.append(f"ambig={iupac_count}")
+        if cer is not None:
+            info_parts.append(f"cer={cer:.4f}")
+        if cer_alpha is not None:
+            info_parts.append(f"cer.a={cer_alpha:.0e}")
         info_str = " ".join(info_parts)
 
         # Write reads FASTQ to debug directory with new naming convention
@@ -904,7 +917,10 @@ class SpecimenClusterer:
             enable_secondpass_phasing=self.enable_secondpass_phasing,
             disable_homopolymer_equivalence=self.disable_homopolymer_equivalence,
             min_variant_frequency=self.min_variant_frequency,
-            min_variant_count=self.min_variant_count
+            min_variant_count=self.min_variant_count,
+            total_specimen_reads=len(self.sequences),
+            assumed_error_rate=self.assumed_error_rate,
+            significance_level=self.significance_level
         )
 
         # Build work packages with per-cluster data
@@ -1096,6 +1112,20 @@ class SpecimenClusterer:
                         total_ambiguity_positions += iupac_count
                         clusters_with_ambiguities += 1
 
+                    # Compute CER from final cluster size and consensus length
+                    cluster_cer = None
+                    cluster_cer_alpha = None
+                    if self.assumed_error_rate > 0:
+                        total_N = len(self.sequences)
+                        cluster_M = len(cluster)
+                        consensus_L = len(consensus)
+                        if total_N > 0 and consensus_L > 0:
+                            cluster_cer = compute_critical_error_rate(
+                                N=total_N, M=cluster_M, L=consensus_L,
+                                alpha=self.significance_level
+                            )
+                            cluster_cer_alpha = self.significance_level
+
                     # Write output files
                     self.write_cluster_files(
                         cluster_num=final_idx,
@@ -1111,7 +1141,9 @@ class SpecimenClusterer:
                         msa=result['msa'],
                         sorted_cluster_ids=result['sorted_cluster_ids'],
                         sorted_sampled_ids=result['sorted_sampled_ids'],
-                        iupac_count=iupac_count
+                        iupac_count=iupac_count,
+                        cer=cluster_cer,
+                        cer_alpha=cluster_cer_alpha
                     )
 
         return clusters_with_ambiguities, total_ambiguity_positions
@@ -1242,7 +1274,10 @@ class SpecimenClusterer:
             enable_secondpass_phasing=self.enable_secondpass_phasing,
             disable_homopolymer_equivalence=self.disable_homopolymer_equivalence,
             min_variant_frequency=self.min_variant_frequency,
-            min_variant_count=self.min_variant_count
+            min_variant_count=self.min_variant_count,
+            total_specimen_reads=len(self.sequences),
+            assumed_error_rate=self.assumed_error_rate,
+            significance_level=self.significance_level
         )
 
         return _phase_reads_by_variants_standalone(

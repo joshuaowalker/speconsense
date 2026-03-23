@@ -317,8 +317,8 @@ class TestFieldRegistry:
         """All expected fields should be in the registry."""
         expected = {
             'size', 'ric', 'length', 'rawric', 'rawlen',
-            'snp', 'ambig', 'rid', 'rid_min', 'primers',
-            'group', 'variant'
+            'snp', 'ambig', 'rid', 'rid_min', 'cer', 'cer_alpha',
+            'primers', 'group', 'variant'
         }
         assert set(FASTA_FIELDS.keys()) == expected
 

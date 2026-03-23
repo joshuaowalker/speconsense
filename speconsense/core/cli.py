@@ -73,6 +73,11 @@ def main():
                                help="Minimum alternative allele frequency to call variant (default: 0.10 for 10%%)")
     phasing_group.add_argument("--min-variant-count", type=int, default=5,
                                help="Minimum alternative allele read count to call variant (default: 5)")
+    phasing_group.add_argument("--assumed-error-rate", type=float, default=0.02,
+                               help="Assumed per-position error rate for variant significance (uniform model). "
+                                    "Set to 0 to disable. (default: 0.02)")
+    phasing_group.add_argument("--significance-level", type=float, default=1e-5,
+                               help="Significance level (alpha) for variant significance testing (default: 1e-5)")
 
     # Ambiguity Calling group
     ambiguity_group = parser.add_argument_group("Ambiguity Calling")
@@ -214,7 +219,9 @@ def main():
         scale_threshold=args.scale_threshold,
         max_threads=threads,
         early_filter=args.enable_early_filter,
-        collect_discards=args.collect_discards
+        collect_discards=args.collect_discards,
+        assumed_error_rate=args.assumed_error_rate,
+        significance_level=args.significance_level
     )
 
     # Log configuration

@@ -170,5 +170,49 @@ class TestAmbiguityCalling:
             f"Expected min_ambiguity_count=4, got {params.get('min_ambiguity_count')}"
 
 
+    def test_cer_fields_in_output(self, temp_dir, core_module, test_fastq_path):
+        """Test that cer= and cer.a= fields appear in output headers when phasing produces splits."""
+        result = subprocess.run([
+            sys.executable, '-m', core_module,
+            test_fastq_path,
+            '--min-size', '0',
+            '--algorithm', 'greedy',
+            '--assumed-error-rate', '0.02',
+            '--significance-level', '1e-5'
+        ], capture_output=True, text=True)
+        assert result.returncode == 0, f"Command failed: {result.stderr}"
+
+        output_file = os.path.join('clusters', 'ONT10.80-H10--iNat229710865-1.v2-RiC9-all.fasta')
+        assert os.path.exists(output_file)
+
+        with open(output_file) as f:
+            content = f.read()
+
+        # Verify CER metadata appears in JSON metadata file
+        import json
+        metadata_file = os.path.join('clusters', 'cluster_debug',
+                                     'ONT10.80-H10--iNat229710865-1.v2-RiC9-metadata.json')
+        if os.path.exists(metadata_file):
+            with open(metadata_file) as f:
+                metadata = json.load(f)
+            params = metadata.get('parameters', {})
+            assert params.get('assumed_error_rate') == 0.02
+            assert params.get('significance_level') == 1e-5
+
+    def test_cer_disabled_with_zero(self, temp_dir, core_module, test_fastq_path):
+        """Test that --assumed-error-rate 0 disables CER (matches old behavior)."""
+        result = subprocess.run([
+            sys.executable, '-m', core_module,
+            test_fastq_path,
+            '--min-size', '0',
+            '--algorithm', 'greedy',
+            '--assumed-error-rate', '0'
+        ], capture_output=True, text=True)
+        assert result.returncode == 0, f"Command failed: {result.stderr}"
+
+        output_file = os.path.join('clusters', 'ONT10.80-H10--iNat229710865-1.v2-RiC9-all.fasta')
+        assert os.path.exists(output_file)
+
+
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])

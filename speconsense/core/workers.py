@@ -26,6 +26,7 @@ from speconsense.msa import (
     group_reads_by_single_position,
     is_variant_position_with_composition,
 )
+from speconsense.significance import is_variant_significant
 
 
 # Configuration classes for parallel processing
@@ -36,18 +37,25 @@ class ClusterProcessingConfig:
     Passed to worker processes to avoid needing to pickle the entire SpecimenClusterer.
     """
     __slots__ = ['outlier_identity_threshold', 'enable_secondpass_phasing',
-                 'disable_homopolymer_equivalence', 'min_variant_frequency', 'min_variant_count']
+                 'disable_homopolymer_equivalence', 'min_variant_frequency', 'min_variant_count',
+                 'total_specimen_reads', 'assumed_error_rate', 'significance_level']
 
     def __init__(self, outlier_identity_threshold: Optional[float],
                  enable_secondpass_phasing: bool,
                  disable_homopolymer_equivalence: bool,
                  min_variant_frequency: float,
-                 min_variant_count: int):
+                 min_variant_count: int,
+                 total_specimen_reads: int = 0,
+                 assumed_error_rate: float = 0.02,
+                 significance_level: float = 1e-5):
         self.outlier_identity_threshold = outlier_identity_threshold
         self.enable_secondpass_phasing = enable_secondpass_phasing
         self.disable_homopolymer_equivalence = disable_homopolymer_equivalence
         self.min_variant_frequency = min_variant_frequency
         self.min_variant_count = min_variant_count
+        self.total_specimen_reads = total_specimen_reads
+        self.assumed_error_rate = assumed_error_rate
+        self.significance_level = significance_level
 
 
 class ConsensusGenerationConfig:
@@ -352,6 +360,19 @@ def _recursive_phase_cluster_standalone(
         )
         if len(qualifying) < 2:
             continue
+
+        # CER gate: check statistical significance before expensive error calculation
+        if config.assumed_error_rate > 0 and config.total_specimen_reads > 0:
+            min_M = min(len(reads) for reads in qualifying.values())
+            is_sig, p_star = is_variant_significant(
+                M=min_M, N=config.total_specimen_reads,
+                L=len(consensus),
+                assumed_error_rate=config.assumed_error_rate,
+                alpha=config.significance_level
+            )
+            if not is_sig:
+                logging.debug(f"CER suppression at MSA pos {pos}: p*={p_star:.4f} < {config.assumed_error_rate}")
+                continue
 
         error = calculate_within_cluster_error(qualifying, read_to_position_alleles, {pos}, all_positions)
         if error < best_error:

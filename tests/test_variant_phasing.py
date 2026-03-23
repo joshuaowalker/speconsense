@@ -411,5 +411,60 @@ def test_iupac_codes_mapping():
     assert IUPAC_CODES.get(frozenset(['C', 'G'])) == 'S'
 
 
+# ==============================================================================
+# Tests for CER (Critical Error Rate) gating in variant phasing
+# ==============================================================================
+
+class TestCERGating:
+    """Test that CER significance filtering integrates with phasing config."""
+
+    def test_cer_disabled_when_error_rate_zero(self):
+        """assumed_error_rate=0 should disable CER filtering."""
+        from speconsense.core.workers import ClusterProcessingConfig
+        from speconsense.significance import is_variant_significant
+
+        config = ClusterProcessingConfig(
+            outlier_identity_threshold=0.95,
+            enable_secondpass_phasing=True,
+            disable_homopolymer_equivalence=False,
+            min_variant_frequency=0.10,
+            min_variant_count=5,
+            total_specimen_reads=1000,
+            assumed_error_rate=0,
+            significance_level=1e-5
+        )
+        # With error rate 0, all variants should pass
+        assert config.assumed_error_rate == 0
+        is_sig, _ = is_variant_significant(
+            M=1, N=config.total_specimen_reads, L=700,
+            assumed_error_rate=config.assumed_error_rate
+        )
+        assert is_sig is True
+
+    def test_cer_suppresses_weak_variant(self):
+        """Small M relative to large N should be suppressed by CER."""
+        from speconsense.significance import is_variant_significant
+
+        # 5 reads out of 1000 at 2% assumed error rate
+        is_sig, p_star = is_variant_significant(
+            M=5, N=1000, L=700,
+            assumed_error_rate=0.02, alpha=1e-5
+        )
+        assert is_sig is False
+        assert p_star < 0.02
+
+    def test_cer_passes_well_supported_variant(self):
+        """Large M relative to N should pass CER."""
+        from speconsense.significance import is_variant_significant
+
+        # 100 reads out of 1000 at 2% assumed error rate
+        is_sig, p_star = is_variant_significant(
+            M=100, N=1000, L=700,
+            assumed_error_rate=0.02, alpha=1e-5
+        )
+        assert is_sig is True
+        assert p_star > 0.02
+
+
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])

@@ -129,6 +129,12 @@ def parse_arguments():
                                  help="Minimum sequence length in bp (default: 0 = disabled)")
     filtering_group.add_argument("--max-len", type=int, default=0,
                                  help="Maximum sequence length in bp (default: 0 = disabled)")
+    filtering_group.add_argument("--assumed-error-rate", type=float, default=0.0,
+                                 help="Assumed per-position error rate. Variants with critical error rate (cer) "
+                                      "below this value are filtered as potentially artifactual. Set to 0 to "
+                                      "disable. (default: 0 = disabled)")
+    filtering_group.add_argument("--no-cer-filter", action="store_true", default=False,
+                                 help="Disable all CER-based filtering, even when --assumed-error-rate is set")
 
     # Grouping group
     grouping_group = parser.add_argument_group("Grouping")
@@ -512,6 +518,8 @@ def main():
     logging.info(f"  --min-ric: {args.min_ric}")
     logging.info(f"  --min-len: {args.min_len}")
     logging.info(f"  --max-len: {args.max_len}")
+    logging.info(f"  --assumed-error-rate: {args.assumed_error_rate}")
+    logging.info(f"  --no-cer-filter: {args.no_cer_filter}")
     logging.info(f"  --fasta-fields: {args.fasta_fields}")
     logging.info(f"  --merge-snp: {args.merge_snp}")
     logging.info(f"  --merge-indel-length: {args.merge_indel_length}")
@@ -552,10 +560,14 @@ def main():
 
     logging.info("Processing each specimen file independently to organize variants within specimens")
 
+    # Determine effective CER filter rate
+    cer_filter_rate = 0.0 if args.no_cer_filter else args.assumed_error_rate
+
     # Load consensus sequences (optionally filtered to single specimen)
     consensus_list = load_consensus_sequences(
         args.source, args.min_ric, args.min_len, args.max_len,
-        specimen_id=args.specimen
+        specimen_id=args.specimen,
+        assumed_error_rate=cer_filter_rate
     )
     if not consensus_list:
         logging.error("No consensus sequences found")
