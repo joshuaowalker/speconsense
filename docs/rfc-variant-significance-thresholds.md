@@ -2,7 +2,7 @@
 
 **Status:** Draft — seeking feedback from sequence validators
 **Author:** Josh Walker
-**Date:** 2026-03-22
+**Date:** 2026-03-25
 **Affects:** speconsense (core), speconsense-summarize
 
 ---
@@ -87,7 +87,7 @@ Two new CLI parameters in the Filtering group:
                              --assumed-error-rate is set.
 ```
 
-The summarize tool's `--assumed-error-rate` defaults to 0 (disabled) because it may process output from runs with different parameters. When enabled, it filters input variants whose `cer` header value falls below the specified rate. Variants without a `cer` header (e.g., from older speconsense output) are never filtered.
+The summarize tool's `--assumed-error-rate` defaults to 0 (disabled) because it may process output from runs with different parameters. When enabled, CER filtering is applied **after HAC grouping**, only to **secondary variants** within each group. The primary (largest) variant in each group is never filtered by CER — the artifact hypothesis requires a stronger competing signal, and the primary has none. This prevents eliminating single-cluster specimens or dominant variants where the CER question ("artifact of what?") is not coherent. Variants without a `cer` header (e.g., from older speconsense output) are never filtered.
 
 Both are also available as profile keys (`assumed-error-rate`, `no-cer-filter`). The `assumed-error-rate` key can be set once in a profile to apply to both tools.
 
@@ -104,7 +104,9 @@ When variant phasing produces a split, the output FASTA headers include two new 
 | `cer=0.17` | Critical error rate (p\*) — the per-position error rate that would make this cluster's read count plausible as artifact. Higher is better. |
 | `cer.a=1e-05` | The alpha (significance level) used to compute this p\*. |
 
-The `cer` value is computed at output time from the final cluster's read count (M), total specimen reads (N), and consensus length (L). Every cluster gets a `cer` annotation when `--assumed-error-rate` is set, regardless of how it was formed (MCL clustering, phasing, merging). The annotation answers a simple question: "could this many reads be sequencing error?"
+The `cer` value is computed at output time from the final cluster's read count (M), total specimen reads (N), and consensus length (L). The annotation answers a simple question: "could this many reads be sequencing error?"
+
+CER is only reported when the value is physically meaningful — specifically, when p\* < 0.75. Under the uniform error model, p\* = 0.75 is the **signal destruction threshold**: each of the 4 bases becomes equally likely (25% each), and the implied reference population (reads carrying the true sequence) equals the variant count. Above this, the "true sequence" has fewer supporting reads than the variant, making the artifact hypothesis incoherent. In practice, this means dominant clusters (typically >33% of reads at N=1000) receive no `cer` annotation — they are the presumed true sequence, not artifact candidates.
 
 When `--assumed-error-rate 0` is set (CER disabled), no `cer` fields appear.
 
@@ -155,6 +157,7 @@ The `cer` field provides a direct quality signal for variant triage:
 - **cer > 0.10:** Very robust. Would require >10% per-position error to explain as artifact.
 - **cer = 0.02-0.10:** Moderate. Significant at the default threshold, but closer to the boundary.
 - **cer < 0.02:** Below default threshold (would be suppressed by CER gate). If seen, it means the variant was produced with CER disabled or a lower assumed error rate.
+- **No `cer` field:** The cluster is too large relative to total specimen reads for the artifact hypothesis to be meaningful (p\* >= 0.75). This is expected for dominant clusters and is not a quality concern.
 
 The `cer` value is interpretable independently of the specific alpha used — it represents the error rate needed, not a p-value. As platform chemistry improves and error rates drop, the same `cer` values become more convincing without changing any parameters.
 
@@ -205,11 +208,71 @@ Since 7% > 2%, this variant passes despite having the same M=6 as Example 2. At 
 
 - **Output format:** The `cer=` and `cer.a=` header fields are additive. Downstream tools that don't recognize them will ignore them (they appear after existing fields in the space-delimited header).
 - **Default behavior change:** The default `--assumed-error-rate 0.02` means the CER gate is active by default. Some variants that were previously reported will now be suppressed. To preserve exact previous behavior, set `--assumed-error-rate 0`.
-- **speconsense-summarize:** CER filtering is disabled by default (`--assumed-error-rate 0`). Existing summarize workflows are unaffected unless explicitly opted in.
+- **speconsense-summarize:** CER filtering is disabled by default (`--assumed-error-rate 0`). Existing summarize workflows are unaffected unless explicitly opted in. When enabled, filtering is applied after HAC grouping and only affects secondary variants — primary variants are always retained.
 - **Profiles:** The `assumed-error-rate` key works in both `speconsense` and `speconsense-summarize` sections of a profile, allowing a single profile to configure both tools consistently.
 - **ConsensusInfo type:** Two new optional fields (`cer`, `cer_alpha`) with `None` defaults. Existing code using ConsensusInfo will not break.
 
-## 8. Open questions for reviewers
+## 8. Real-world validation (ONT98 dataset)
+
+The CER framework was validated on the ONT98 dataset (955 specimens across 10 ONT runs, ITS amplicons). Both speconsense and speconsense-summarize were run with `--assumed-error-rate 0.02`.
+
+### Impact on variant counts
+
+**Speconsense (core):**
+
+| Metric | Baseline | CER-aware |
+|--------|----------|-----------|
+| Total clusters | 3,792 | 3,424 (-9.7%) |
+| Specimens affected | — | 200 reduced, 3 gained |
+
+The modest reduction at the cluster level reflects CER gating during recursive phasing — weak splits (M ~ 5-15 from N ~ 1000) are suppressed while well-supported variants pass unchanged.
+
+**Speconsense-summarize (with `--assumed-error-rate 0.02`):**
+
+| Metric | Baseline | CER-aware |
+|--------|----------|-----------|
+| Output files | 3,186 | 1,602 (-50%) |
+| Single-variant specimens | 226 (27%) | 452 (54%) |
+| 1-2 variant specimens | 373 (45%) | 658 (79%) |
+| 5+ variant specimens | 269 (32%) | 41 (5%) |
+| Specimens lost | — | 0 |
+
+The combined effect of CER gating (phasing) and CER filtering (summarize) halves the output while preserving all specimens. The shift toward single-variant output is consistent with the hypothesis that many baseline variants were error-driven splits.
+
+### Precision and recall
+
+Evaluated against a verified reference set of 1,159 organisms:
+
+- **Precision: 100%** at all RIC thresholds — no false positives introduced
+- **Recall: 100%** at RIC >= 1 — all organisms recovered
+- **All 1,600 variant matches at >= 99.5% identity**
+- **PRAUC: 0.9991**
+
+Zero organisms were lost. The 1,584 removed variants were all secondary sequences that did not contribute unique organism detections.
+
+### Quality metrics
+
+**CER value distribution** (cluster-level, 2,632 annotated variants):
+
+| CER range | Count | Interpretation |
+|-----------|-------|----------------|
+| < 0.01 | 1,603 (61%) | Low support, many below 2% threshold |
+| 0.01 - 0.02 | 128 (5%) | Near threshold boundary |
+| 0.02 - 0.10 | 355 (13%) | Moderate to good support |
+| 0.10 - 0.75 | 546 (21%) | Strong support |
+| No CER (dominant) | 792 | p\* >= 0.75, not applicable |
+
+**Read identity:** Mean RID improved slightly (99.37% → 99.40%) as noisier low-support clusters were eliminated.
+
+**IUPAC ambiguities:** Total ambiguous bases in cluster output increased from 936 to 1,561 (+67%). When CER prevents a split, the variation that would have produced a separate variant is instead captured as IUPAC ambiguity codes in the parent cluster. This is the expected tradeoff — positional ambiguity in a strong consensus vs. a separate weak variant — and is generally preferable for taxonomic identification.
+
+### Edge cases observed
+
+**Small specimens (N < 25):** The CER gate is effectively inert because few variants can reach the significance threshold. The existing frequency/count filters remain the gatekeepers. This is by design — at very low N, even the frequency-based filters provide adequate protection.
+
+**Correlated multi-position variation:** One cluster (ONT01.19, size=11) accumulated 35 IUPAC ambiguities after CER prevented splitting reads that differed at multiple correlated positions. The current framework evaluates positions independently (K=1), so correlated variation is not modeled. This is acknowledged in the companion paper as out of scope for this version — multi-position variants are at least as significant as single-position variants, so the K=1 analysis is conservative.
+
+## 9. Open questions for reviewers
 
 1. **Is 2% the right default assumed error rate?** This is based on typical ONT per-position substitution rates for R10 chemistry. Should we default higher (more permissive, fewer suppressed variants) or lower (more aggressive filtering)?
 
@@ -220,6 +283,8 @@ Since 7% > 2%, this variant passes despite having the same M=6 as Example 2. At 
 4. **Is the `cer` annotation useful for your validation workflows?** Would you use it for triage? Should it appear in additional presets (e.g., `default`)?
 
 5. ~~**Edge case: MCL-only clusters.**~~ Resolved: all clusters now receive `cer` annotation computed from final cluster size, so MCL-only and phasing-split clusters are treated uniformly.
+
+6. ~~**Should CER filtering protect primary variants?**~~ Resolved: CER filtering in speconsense-summarize now operates after HAC grouping and protects the primary (largest) variant in each group. Single-cluster specimens are never eliminated by CER filtering. This was validated on the ONT98 dataset — zero specimens lost with the updated filtering.
 
 ---
 
