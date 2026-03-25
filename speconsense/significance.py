@@ -111,7 +111,7 @@ def is_cer_reportable(p_star: float) -> bool:
 
 
 def compute_minimum_M(N: int, L: int, alpha: float = 1e-5,
-                      assumed_error_rate: float = 0.02) -> int:
+                      assumed_error_rate: float = 0.015) -> int:
     """Compute minimum M for significance at assumed error rate.
 
     Binary search over M to find smallest M where p* >= assumed_error_rate.
@@ -148,7 +148,7 @@ def compute_minimum_M(N: int, L: int, alpha: float = 1e-5,
 
 
 def is_variant_significant(M: int, N: int, L: int,
-                           assumed_error_rate: float = 0.02,
+                           assumed_error_rate: float = 0.015,
                            alpha: float = 1e-5) -> Tuple[bool, float]:
     """Test whether a variant is statistically significant.
 

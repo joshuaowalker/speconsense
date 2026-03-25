@@ -63,7 +63,7 @@ class SpecimenClusterer:
                  max_threads: int = 1,
                  early_filter: bool = False,
                  collect_discards: bool = False,
-                 assumed_error_rate: float = 0.02,
+                 assumed_error_rate: float = 0.015,
                  significance_level: float = 1e-5):
         self.min_identity = min_identity
         self.inflation = inflation

@@ -65,7 +65,7 @@ Two new CLI parameters in the Variant Phasing group:
 ```
 --assumed-error-rate FLOAT   Assumed per-position error rate for variant
                              significance (uniform model). Set to 0 to disable.
-                             (default: 0.02)
+                             (default: 0.015)
 
 --significance-level FLOAT   Significance level (alpha) for variant significance
                              testing. (default: 1e-5)
@@ -78,16 +78,17 @@ Both are also available as profile keys (`assumed-error-rate`, `significance-lev
 Two new CLI parameters in the Filtering group:
 
 ```
---assumed-error-rate FLOAT   Assumed per-position error rate. Variants with
-                             critical error rate (cer) below this value are
-                             filtered as potentially artifactual. Set to 0 to
-                             disable. (default: 0 = disabled)
+--assumed-error-rate FLOAT   Assumed per-position error rate. Secondary variants
+                             with critical error rate (cer) below this value are
+                             filtered as potentially artifactual. Primary variants
+                             are never filtered. Set to 0 to disable.
+                             (default: 0.015)
 
 --no-cer-filter              Disable all CER-based filtering, even when
                              --assumed-error-rate is set.
 ```
 
-The summarize tool's `--assumed-error-rate` defaults to 0 (disabled) because it may process output from runs with different parameters. When enabled, CER filtering is applied **after HAC grouping**, only to **secondary variants** within each group. The primary (largest) variant in each group is never filtered by CER — the artifact hypothesis requires a stronger competing signal, and the primary has none. This prevents eliminating single-cluster specimens or dominant variants where the CER question ("artifact of what?") is not coherent. Variants without a `cer` header (e.g., from older speconsense output) are never filtered.
+CER filtering in speconsense-summarize is applied **after HAC grouping**, only to **secondary variants** within each group. The primary (largest) variant in each group is never filtered by CER — the artifact hypothesis requires a stronger competing signal, and the primary has none. This prevents eliminating single-cluster specimens or dominant variants where the CER question ("artifact of what?") is not coherent. Variants without a `cer` header (e.g., from older speconsense output) are never filtered.
 
 Both are also available as profile keys (`assumed-error-rate`, `no-cer-filter`). The `assumed-error-rate` key can be set once in a profile to apply to both tools.
 
@@ -120,11 +121,13 @@ The `cer` and `cer_alpha` fields are available in the `--fasta-fields` system:
 
 ## 4. Defaults and behavior
 
-### Default: 2% assumed error rate, alpha = 1e-5
+### Default: 1.5% assumed error rate, alpha = 1e-5
 
-At the standard operating point (N=1000 presample, L~700 for ITS), this requires roughly **M >= 19 reads** for a variant to pass the significance test at 1% assumed error, or **M >= 25** at 2%. (See the paper's Table 2 for the full matrix.)
+At the standard operating point (N=1000 presample, L~700 for ITS), this requires roughly **M >= 19 reads** for a variant to pass the significance test at 1% assumed error, or **M >= 17** at 1.5%. (See the paper's Table 2 for the full matrix.)
 
 For comparison, the existing `--min-variant-count 5` threshold allows splits with as few as 5 reads. The CER gate will suppress most of these at high N, while still allowing them at low N where 5 reads represents stronger evidence.
+
+The default of 1.5% is slightly below the typical ONT R10 per-position substitution rate of ~2%, providing a margin that avoids filtering variants near the boundary while still catching clear artifacts.
 
 ### Interaction with existing thresholds
 
@@ -144,7 +147,7 @@ Setting `--assumed-error-rate 0` disables the CER gate entirely. All variant spl
 
 ### What changes in output?
 
-With the default 2% assumed error rate:
+With the default 1.5% assumed error rate:
 
 - **Well-supported variants (M >> 20):** No change. These variants have p\* well above any realistic error rate and will continue to be reported.
 - **Marginal variants (M ~ 5-20 from large specimens):** Some will be suppressed. These are the variants most likely to be error-driven splits. Validators currently spending time on these can expect fewer of them.
@@ -156,7 +159,7 @@ The `cer` field provides a direct quality signal for variant triage:
 
 - **cer > 0.10:** Very robust. Would require >10% per-position error to explain as artifact.
 - **cer = 0.02-0.10:** Moderate. Significant at the default threshold, but closer to the boundary.
-- **cer < 0.02:** Below default threshold (would be suppressed by CER gate). If seen, it means the variant was produced with CER disabled or a lower assumed error rate.
+- **cer < 0.015:** Below default threshold (would be suppressed by CER gate). If seen, it means the variant was produced with CER disabled or a lower assumed error rate.
 - **No `cer` field:** The cluster is too large relative to total specimen reads for the artifact hypothesis to be meaningful (p\* >= 0.75). This is expected for dominant clusters and is not a quality concern.
 
 The `cer` value depends on the alpha used (recorded in the `cer.a` field), so values computed at different significance levels are not directly comparable. However, unlike a p-value, `cer` has a concrete physical interpretation: it is the per-position error rate needed to explain the observation as artifact. As platform chemistry improves and error rates drop, the same `cer` values become more convincing without changing any parameters.
@@ -180,7 +183,7 @@ p* = compute_critical_error_rate(N=1000, M=80, L=700, alpha=1e-5)
 # p* ≈ 0.13 (13%)
 ```
 
-Since 13% >> 2% (assumed error rate), this variant passes. Header: `cer=0.13 cer.a=1e-05`.
+Since 13% >> 1.5% (assumed error rate), this variant passes. Header: `cer=0.13 cer.a=1e-05`.
 
 ### Example 2: Weak variant suppressed
 
@@ -191,7 +194,7 @@ p* = compute_critical_error_rate(N=1000, M=6, L=700, alpha=1e-5)
 # p* ≈ 0.003 (0.3%)
 ```
 
-Since 0.3% < 2% (assumed error rate), this variant is suppressed. The split does not occur, and those 6 reads remain in their parent cluster.
+Since 0.3% < 1.5% (assumed error rate), this variant is suppressed. The split does not occur, and those 6 reads remain in their parent cluster.
 
 ### Example 3: Small specimen, same count passes
 
@@ -202,13 +205,13 @@ p* = compute_critical_error_rate(N=20, M=6, L=700, alpha=1e-5)
 # p* ≈ 0.07 (7%)
 ```
 
-Since 7% > 2%, this variant passes despite having the same M=6 as Example 2. At N=20, 6 reads represent 30% of the specimen, which is much stronger evidence than 6/1000.
+Since 7% > 1.5%, this variant passes despite having the same M=6 as Example 2. At N=20, 6 reads represent 30% of the specimen, which is much stronger evidence than 6/1000.
 
 ## 7. Migration and backward compatibility
 
 - **Output format:** The `cer=` and `cer.a=` header fields are additive. Downstream tools that don't recognize them will ignore them (they appear after existing fields in the space-delimited header).
-- **Default behavior change:** The default `--assumed-error-rate 0.02` means the CER gate is active by default. Some variants that were previously reported will now be suppressed. To preserve exact previous behavior, set `--assumed-error-rate 0`.
-- **speconsense-summarize:** CER filtering is disabled by default (`--assumed-error-rate 0`). Existing summarize workflows are unaffected unless explicitly opted in. When enabled, filtering is applied after HAC grouping and only affects secondary variants — primary variants are always retained.
+- **Default behavior change:** The default `--assumed-error-rate 0.015` means the CER gate is active by default in both tools. Some variants that were previously reported will now be suppressed. To preserve exact previous behavior, set `--assumed-error-rate 0`.
+- **speconsense-summarize:** CER filtering is now active by default (`--assumed-error-rate 0.015`), applied after HAC grouping to secondary variants only — primary variants are always retained. Use `--assumed-error-rate 0` or `--no-cer-filter` to disable.
 - **Profiles:** The `assumed-error-rate` key works in both `speconsense` and `speconsense-summarize` sections of a profile, allowing a single profile to configure both tools consistently.
 - **ConsensusInfo type:** Two new optional fields (`cer`, `cer_alpha`) with `None` defaults. Existing code using ConsensusInfo will not break.
 
@@ -274,11 +277,11 @@ Zero organisms were lost. The 1,584 removed variants were all secondary sequence
 
 ## 9. Open questions for reviewers
 
-1. **Is 2% the right default assumed error rate?** This is based on typical ONT per-position substitution rates for R10 chemistry. Should we default higher (more permissive, fewer suppressed variants) or lower (more aggressive filtering)?
+1. ~~**Is 2% the right default assumed error rate?**~~ Resolved: default set to 1.5%, slightly below the typical ONT R10 per-position substitution rate of ~2%. This provides a margin that avoids filtering variants near the boundary while still catching clear artifacts.
 
 2. **Should the default alpha be 1e-5 or something else?** The paper suggests 1e-5 as a "run-corrected" level (accounting for ~100 specimens per run). A per-specimen alpha of 0.05 would be more permissive.
 
-3. **Should CER filtering in speconsense-summarize default to enabled?** Currently it defaults to 0 (disabled) to avoid surprising behavior when summarizing output from older runs. If most users will want it enabled, we could match the core tool's default of 0.02.
+3. ~~**Should CER filtering in speconsense-summarize default to enabled?**~~ Resolved: yes, defaults to 0.015 to match the core tool. With primary-variant protection, the risk of surprising behavior is minimal — only secondary variants with weak statistical support are affected. Use `--no-cer-filter` to disable.
 
 4. **Is the `cer` annotation useful for your validation workflows?** Would you use it for triage? Should it appear in additional presets (e.g., `default`)?
 

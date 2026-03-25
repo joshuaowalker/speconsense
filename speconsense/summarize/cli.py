@@ -129,10 +129,11 @@ def parse_arguments():
                                  help="Minimum sequence length in bp (default: 0 = disabled)")
     filtering_group.add_argument("--max-len", type=int, default=0,
                                  help="Maximum sequence length in bp (default: 0 = disabled)")
-    filtering_group.add_argument("--assumed-error-rate", type=float, default=0.0,
-                                 help="Assumed per-position error rate. Variants with critical error rate (cer) "
-                                      "below this value are filtered as potentially artifactual. Set to 0 to "
-                                      "disable. (default: 0 = disabled)")
+    filtering_group.add_argument("--assumed-error-rate", type=float, default=0.015,
+                                 help="Assumed per-position error rate. Secondary variants with critical error "
+                                      "rate (cer) below this value are filtered as potentially artifactual. "
+                                      "Primary variants are never filtered. Set to 0 to disable. "
+                                      "(default: 0.015)")
     filtering_group.add_argument("--no-cer-filter", action="store_true", default=False,
                                  help="Disable all CER-based filtering, even when --assumed-error-rate is set")
 

@@ -46,7 +46,7 @@ class ClusterProcessingConfig:
                  min_variant_frequency: float,
                  min_variant_count: int,
                  total_specimen_reads: int = 0,
-                 assumed_error_rate: float = 0.02,
+                 assumed_error_rate: float = 0.015,
                  significance_level: float = 1e-5):
         self.outlier_identity_threshold = outlier_identity_threshold
         self.enable_secondpass_phasing = enable_secondpass_phasing

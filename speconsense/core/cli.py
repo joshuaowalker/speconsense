@@ -73,9 +73,9 @@ def main():
                                help="Minimum alternative allele frequency to call variant (default: 0.10 for 10%%)")
     phasing_group.add_argument("--min-variant-count", type=int, default=5,
                                help="Minimum alternative allele read count to call variant (default: 5)")
-    phasing_group.add_argument("--assumed-error-rate", type=float, default=0.02,
+    phasing_group.add_argument("--assumed-error-rate", type=float, default=0.015,
                                help="Assumed per-position error rate for variant significance (uniform model). "
-                                    "Set to 0 to disable. (default: 0.02)")
+                                    "Set to 0 to disable. (default: 0.015)")
     phasing_group.add_argument("--significance-level", type=float, default=1e-5,
                                help="Significance level (alpha) for variant significance testing (default: 1e-5)")
 
