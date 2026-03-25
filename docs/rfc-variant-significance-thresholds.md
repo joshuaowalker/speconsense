@@ -159,7 +159,7 @@ The `cer` field provides a direct quality signal for variant triage:
 - **cer < 0.02:** Below default threshold (would be suppressed by CER gate). If seen, it means the variant was produced with CER disabled or a lower assumed error rate.
 - **No `cer` field:** The cluster is too large relative to total specimen reads for the artifact hypothesis to be meaningful (p\* >= 0.75). This is expected for dominant clusters and is not a quality concern.
 
-The `cer` value is interpretable independently of the specific alpha used — it represents the error rate needed, not a p-value. As platform chemistry improves and error rates drop, the same `cer` values become more convincing without changing any parameters.
+The `cer` value depends on the alpha used (recorded in the `cer.a` field), so values computed at different significance levels are not directly comparable. However, unlike a p-value, `cer` has a concrete physical interpretation: it is the per-position error rate needed to explain the observation as artifact. As platform chemistry improves and error rates drop, the same `cer` values become more convincing without changing any parameters.
 
 ### Comparison with existing quality signals
 
