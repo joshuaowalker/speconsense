@@ -87,7 +87,6 @@ def load_consensus_sequences(
     min_len: int = 0,
     max_len: int = 0,
     specimen_id: str = None,
-    assumed_error_rate: float = 0.0
 ) -> List[ConsensusInfo]:
     """Load consensus sequences from speconsense output files.
 
@@ -97,7 +96,6 @@ def load_consensus_sequences(
         min_len: Minimum sequence length (0 = disabled)
         max_len: Maximum sequence length (0 = disabled)
         specimen_id: If set, load only {specimen_id}-all.fasta instead of all
-        assumed_error_rate: Filter variants with cer < this value (0 = disabled)
 
     Returns:
         List of ConsensusInfo objects passing all filters
@@ -105,7 +103,6 @@ def load_consensus_sequences(
     consensus_list = []
     filtered_by_ric = 0
     filtered_by_len = 0
-    filtered_by_cer = 0
 
     # Find consensus FASTA files — narrow to single specimen if requested
     if specimen_id:
@@ -141,13 +138,6 @@ def load_consensus_sequences(
                     filtered_by_len += 1
                     continue
 
-                # CER filter: variants with cer below assumed error rate are
-                # potentially artifactual (only when cer is present and filter enabled)
-                if assumed_error_rate > 0 and cer is not None and cer < assumed_error_rate:
-                    logging.debug(f"Filtered {sample_name}: cer={cer:.4f} < assumed_error_rate={assumed_error_rate}")
-                    filtered_by_cer += 1
-                    continue
-
                 # Extract cluster ID from sample name (e.g., "sample-c1" -> "c1")
                 cluster_match = re.search(r'-c(\d+)$', sample_name)
                 cluster_id = cluster_match.group(0) if cluster_match else sample_name
@@ -175,8 +165,6 @@ def load_consensus_sequences(
         filter_parts.append(f"filtered {filtered_by_ric} by RiC")
     if filtered_by_len > 0:
         filter_parts.append(f"filtered {filtered_by_len} by length")
-    if filtered_by_cer > 0:
-        filter_parts.append(f"filtered {filtered_by_cer} by CER")
     logging.info(", ".join(filter_parts))
 
     return consensus_list

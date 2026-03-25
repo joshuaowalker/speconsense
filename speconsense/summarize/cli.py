@@ -304,7 +304,7 @@ def setup_logging(log_level: str, log_file: str = None):
 
 
 def process_single_specimen(file_consensuses: List[ConsensusInfo],
-                           args) -> Tuple[List[ConsensusInfo], Dict[str, List[str]], Dict, int, List[OverlapMergeInfo]]:
+                           args, cer_filter_rate: float = 0.0) -> Tuple[List[ConsensusInfo], Dict[str, List[str]], Dict, int, List[OverlapMergeInfo]]:
     """
     Process a single specimen file: HAC cluster, MSA-based merge per group, and select final variants.
     Returns final consensus list, merge traceability, naming info, limited_count, and overlap merge info.
@@ -348,6 +348,34 @@ def process_single_specimen(file_consensuses: List[ConsensusInfo],
         # Keep only top N groups
         variant_groups = dict(sorted_for_filtering[:args.select_max_groups])
         logging.info(f"Filtered to top {args.select_max_groups} groups by size (from {len(sorted_for_filtering)} total groups)")
+
+    # CER filter: remove secondary variants with low CER before merging.
+    # The primary (largest) variant in each group is never filtered — CER
+    # measures artifact risk relative to other variants, and the primary
+    # has no stronger competing signal.
+    if cer_filter_rate > 0:
+        total_cer_filtered = 0
+        for group_id, group_members in variant_groups.items():
+            if len(group_members) <= 1:
+                continue
+            largest_size = max(v.size for v in group_members)
+            filtered = []
+            filtered_count = 0
+            for v in group_members:
+                is_primary = (v.size == largest_size and
+                              not any(f.size == largest_size for f in filtered))
+                if is_primary or v.cer is None or v.cer >= cer_filter_rate:
+                    filtered.append(v)
+                else:
+                    filtered_count += 1
+                    logging.debug(f"CER filter: {v.sample_name} cer={v.cer:.4f} "
+                                  f"< {cer_filter_rate} (secondary variant)")
+            if filtered_count > 0:
+                total_cer_filtered += filtered_count
+                variant_groups[group_id] = filtered
+        if total_cer_filtered > 0:
+            logging.info(f"CER filter: removed {total_cer_filtered} secondary variant(s) "
+                         f"with CER < {cer_filter_rate}")
 
     # Phase 2: MSA-based merging within each group
     merged_groups = {}
@@ -567,7 +595,6 @@ def main():
     consensus_list = load_consensus_sequences(
         args.source, args.min_ric, args.min_len, args.max_len,
         specimen_id=args.specimen,
-        assumed_error_rate=cer_filter_rate
     )
     if not consensus_list:
         logging.error("No consensus sequences found")
@@ -607,7 +634,7 @@ def main():
 
         # Process specimen
         final_consensus, merge_traceability, naming_info, limited_count, overlap_merges = process_single_specimen(
-            file_consensuses, args
+            file_consensuses, args, cer_filter_rate=cer_filter_rate
         )
 
         # Write individual data files immediately

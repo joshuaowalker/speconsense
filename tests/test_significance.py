@@ -9,8 +9,10 @@ import os
 import tempfile
 import pytest
 from speconsense.significance import (
+    SIGNAL_DESTRUCTION_THRESHOLD,
     compute_critical_error_rate,
     compute_minimum_M,
+    is_cer_reportable,
     is_variant_significant,
 )
 from speconsense.summarize.io import parse_consensus_header, load_consensus_sequences
@@ -60,9 +62,9 @@ class TestComputeCriticalErrorRate:
         assert compute_critical_error_rate(N=1000, M=10, L=0) == 0.0
 
     def test_edge_M_equals_N(self):
-        """M=N should give high p* (all reads support variant)."""
+        """M=N should give p* > 1.0 (uncapped, beyond coherent range)."""
         p_star = compute_critical_error_rate(N=100, M=100, L=700, alpha=0.05)
-        assert p_star == 1.0  # Capped at 1.0 (obviously not error)
+        assert p_star > 1.0  # Uncapped — CER not applicable at this M/N ratio
 
     def test_monotonicity_in_M(self):
         """p* should increase with M (more reads = stronger evidence)."""
@@ -84,6 +86,63 @@ class TestComputeCriticalErrorRate:
         """M=1 should give very low p* (single read is weak evidence)."""
         p_star = compute_critical_error_rate(N=1000, M=1, L=700, alpha=0.05)
         assert p_star < 0.01  # Should be well below 1%
+
+    def test_no_cap_at_high_M(self):
+        """p* should not be capped — raw solver value returned for diagnostics."""
+        p_star = compute_critical_error_rate(N=1000, M=500, L=700, alpha=1e-5)
+        assert p_star > 1.0  # Raw value exceeds 1.0
+
+
+# ==============================================================================
+# Tests for is_cer_reportable() — signal destruction threshold
+# ==============================================================================
+
+class TestIsCerReportable:
+    """CER is meaningful only when p* < 0.75 (signal destruction threshold).
+
+    At p* = 0.75, each of the 4 bases is equally likely under the uniform
+    error model — the reference population equals the variant count.
+    """
+
+    def test_low_p_star(self):
+        """p*=0.10 is well below threshold — reportable."""
+        assert is_cer_reportable(0.10) is True
+
+    def test_at_threshold(self):
+        """p*=0.75 is at threshold — not reportable."""
+        assert is_cer_reportable(0.75) is False
+
+    def test_above_threshold(self):
+        """p*=0.90 is above threshold — not reportable."""
+        assert is_cer_reportable(0.90) is False
+
+    def test_well_above_threshold(self):
+        """p*=1.5 (uncapped solver output) — not reportable."""
+        assert is_cer_reportable(1.5) is False
+
+    def test_zero(self):
+        """p*=0.0 is reportable."""
+        assert is_cer_reportable(0.0) is True
+
+    def test_just_below_threshold(self):
+        """p*=0.749 — reportable."""
+        assert is_cer_reportable(0.749) is True
+
+    def test_large_N_boundary(self):
+        """N=1000, M=329: p* crosses 0.75, should not be reportable."""
+        p_star = compute_critical_error_rate(N=1000, M=329, L=700, alpha=1e-5)
+        assert is_cer_reportable(p_star) is False
+
+    def test_large_N_below_boundary(self):
+        """N=1000, M=328: p* just below 0.75, should be reportable."""
+        p_star = compute_critical_error_rate(N=1000, M=328, L=700, alpha=1e-5)
+        assert is_cer_reportable(p_star) is True
+
+    def test_small_N_all_reportable(self):
+        """At N=10, p* never reaches 0.75 — all variants are reportable."""
+        for M in range(1, 11):
+            p_star = compute_critical_error_rate(N=10, M=M, L=700, alpha=1e-5)
+            assert is_cer_reportable(p_star) is True, f"N=10, M={M}: p*={p_star}"
 
 
 # ==============================================================================
@@ -184,6 +243,34 @@ class TestIsVariantSignificant:
                                             assumed_error_rate=0)
         assert p_star > 0
 
+    def test_large_M_still_significant(self):
+        """Large M: p* exceeds assumed error rate, so significant."""
+        is_sig, p_star = is_variant_significant(M=300, N=1000, L=700,
+                                                 assumed_error_rate=0.02)
+        assert is_sig is True
+        assert p_star > 0.02  # p* is computed (not None), just above threshold
+
+    def test_large_M_p_star_above_threshold(self):
+        """Large M: p* above signal destruction threshold but still returned."""
+        is_sig, p_star = is_variant_significant(M=500, N=1000, L=700,
+                                                 assumed_error_rate=0.02)
+        assert is_sig is True
+        assert p_star >= SIGNAL_DESTRUCTION_THRESHOLD  # Above 0.75
+
+    def test_small_N_large_fraction_not_auto_passed(self):
+        """N=10, M=3 (30%): must be tested, not auto-passed."""
+        is_sig, p_star = is_variant_significant(M=3, N=10, L=700,
+                                                 assumed_error_rate=0.02)
+        assert is_sig is False  # p*=0.0015 < 0.02
+        assert p_star < 0.02
+
+    def test_small_N_significant_variant(self):
+        """N=10, M=5 (50%): genuinely significant."""
+        is_sig, p_star = is_variant_significant(M=5, N=10, L=700,
+                                                 assumed_error_rate=0.02)
+        assert is_sig is True
+        assert p_star > 0.02
+
     def test_boundary_case(self):
         """Test at the boundary: minimum M for 2% at N=1000."""
         min_M = compute_minimum_M(N=1000, L=700, alpha=1e-5, assumed_error_rate=0.02)
@@ -229,11 +316,15 @@ class TestCERHeaderParsing:
 
 
 # ==============================================================================
-# Tests for CER-based filtering in load_consensus_sequences
+# Tests for CER value loading (no filtering at load time)
 # ==============================================================================
 
-class TestCERFiltering:
-    """Test CER-based variant filtering in load_consensus_sequences."""
+class TestCERLoading:
+    """Test that CER values are loaded but not filtered in load_consensus_sequences.
+
+    CER filtering now happens after HAC grouping in process_single_specimen,
+    not at load time. Load should preserve all variants regardless of CER.
+    """
 
     @pytest.fixture
     def fasta_dir(self, tmp_path):
@@ -250,31 +341,10 @@ class TestCERFiltering:
         fasta_file.write_text(fasta_content)
         return tmp_path
 
-    def test_cer_filter_removes_low_cer(self, fasta_dir):
-        """Variants with cer < assumed_error_rate should be filtered."""
-        result = load_consensus_sequences(
-            str(fasta_dir), min_ric=1, assumed_error_rate=0.02
-        )
-        # c1 (cer=0.15) passes, c2 (cer=0.01) filtered, c3 (no cer) passes
-        names = [c.sample_name for c in result]
-        assert "specimen-c1" in names
-        assert "specimen-c2" not in names
-        assert "specimen-c3" in names
-        assert len(result) == 2
-
-    def test_cer_filter_disabled_by_default(self, fasta_dir):
-        """Default assumed_error_rate=0 should not filter anything."""
+    def test_all_variants_loaded(self, fasta_dir):
+        """All variants should load regardless of CER value."""
         result = load_consensus_sequences(str(fasta_dir), min_ric=1)
         assert len(result) == 3
-
-    def test_no_cer_header_not_filtered(self, fasta_dir):
-        """Variants without cer header should never be filtered by CER."""
-        result = load_consensus_sequences(
-            str(fasta_dir), min_ric=1, assumed_error_rate=0.10
-        )
-        # c1 (cer=0.15) passes, c2 (cer=0.01) filtered, c3 (no cer) passes
-        names = [c.sample_name for c in result]
-        assert "specimen-c3" in names
 
     def test_cer_values_preserved(self, fasta_dir):
         """CER values should be preserved in ConsensusInfo."""
@@ -282,5 +352,132 @@ class TestCERFiltering:
         by_name = {c.sample_name: c for c in result}
         assert by_name["specimen-c1"].cer == pytest.approx(0.15)
         assert by_name["specimen-c1"].cer_alpha == pytest.approx(1e-5)
+        assert by_name["specimen-c2"].cer == pytest.approx(0.01)
         assert by_name["specimen-c3"].cer is None
         assert by_name["specimen-c3"].cer_alpha is None
+
+
+# ==============================================================================
+# Tests for CER-based filtering in process_single_specimen (post-HAC)
+# ==============================================================================
+
+class TestCERFilteringPostHAC:
+    """Test CER-based variant filtering after HAC grouping.
+
+    CER filtering protects the primary (largest) variant in each group and
+    only filters secondary variants with cer < assumed_error_rate. This
+    prevents eliminating the dominant sequence when there's no stronger
+    competing signal.
+    """
+
+    @pytest.fixture
+    def fasta_dir_multi(self, tmp_path):
+        """Create test FASTA with a primary and secondary variants.
+
+        All sequences are identical so they land in a single HAC group.
+        """
+        seq = "ACGT" * 50  # 200bp identical sequence
+        fasta_content = (
+            f">specimen-c1 size=200 ric=100 cer=0.15 cer.a=1e-05\n"
+            f"{seq}\n"
+            f">specimen-c2 size=50 ric=25 cer=0.01 cer.a=1e-05\n"
+            f"{seq}\n"
+            f">specimen-c3 size=30 ric=15\n"
+            f"{seq}\n"
+        )
+        fasta_file = tmp_path / "specimen-all.fasta"
+        fasta_file.write_text(fasta_content)
+        return tmp_path
+
+    @pytest.fixture
+    def fasta_dir_single(self, tmp_path):
+        """Create test FASTA with a single low-CER variant."""
+        seq = "ACGT" * 50
+        fasta_content = (
+            f">specimen-c1 size=5 ric=5 cer=0.019 cer.a=1e-05\n"
+            f"{seq}\n"
+        )
+        fasta_file = tmp_path / "specimen-all.fasta"
+        fasta_file.write_text(fasta_content)
+        return tmp_path
+
+    @pytest.fixture
+    def fasta_dir_primary_low_cer(self, tmp_path):
+        """Create test FASTA where the primary variant has low CER."""
+        seq = "ACGT" * 50
+        fasta_content = (
+            f">specimen-c1 size=100 ric=50 cer=0.015 cer.a=1e-05\n"
+            f"{seq}\n"
+            f">specimen-c2 size=10 ric=10 cer=0.005 cer.a=1e-05\n"
+            f"{seq}\n"
+        )
+        fasta_file = tmp_path / "specimen-all.fasta"
+        fasta_file.write_text(fasta_content)
+        return tmp_path
+
+    def _run_summarize(self, fasta_dir, assumed_error_rate):
+        """Run process_single_specimen with given CER filter rate."""
+        from speconsense.summarize.io import load_consensus_sequences
+        from speconsense.summarize.cli import process_single_specimen
+        from argparse import Namespace
+
+        consensuses = load_consensus_sequences(str(fasta_dir), min_ric=1)
+        args = Namespace(
+            group_identity=0.95,
+            min_merge_overlap=0,
+            select_max_groups=0,
+            disable_merging=True,
+            select_min_size_ratio=0,
+            select_max_variants=0,
+            select_strategy='size',
+            scale_threshold=0,
+            threads=1,
+            source=str(fasta_dir),
+            enable_full_consensus=False,
+        )
+        final, _, _, _, _ = process_single_specimen(
+            consensuses, args, cer_filter_rate=assumed_error_rate
+        )
+        return final
+
+    def test_secondary_low_cer_filtered(self, fasta_dir_multi):
+        """Secondary variant with cer < threshold should be filtered."""
+        result = self._run_summarize(fasta_dir_multi, assumed_error_rate=0.02)
+        # process_single_specimen renames variants, so check by size
+        sizes = sorted([c.size for c in result], reverse=True)
+        assert 200 in sizes  # Primary (cer=0.15, passes)
+        assert 50 not in sizes  # Secondary (cer=0.01, filtered)
+        assert 30 in sizes  # No CER header, never filtered
+        assert len(result) == 2
+
+    def test_primary_never_filtered(self, fasta_dir_primary_low_cer):
+        """Primary variant should never be filtered, even with low CER."""
+        result = self._run_summarize(fasta_dir_primary_low_cer, assumed_error_rate=0.02)
+        sizes = [c.size for c in result]
+        assert 100 in sizes  # Primary protected despite cer=0.015
+
+    def test_secondary_with_low_cer_filtered_but_primary_kept(self, fasta_dir_primary_low_cer):
+        """Secondary filtered, primary kept even when both have low CER."""
+        result = self._run_summarize(fasta_dir_primary_low_cer, assumed_error_rate=0.02)
+        sizes = [c.size for c in result]
+        assert 100 in sizes  # Primary (largest)
+        assert 10 not in sizes  # Secondary (cer=0.005 < 0.02)
+        assert len(result) == 1
+
+    def test_single_variant_never_filtered(self, fasta_dir_single):
+        """Single-variant specimen should never be filtered by CER."""
+        result = self._run_summarize(fasta_dir_single, assumed_error_rate=0.02)
+        assert len(result) == 1
+        assert result[0].size == 5
+
+    def test_cer_filter_disabled(self, fasta_dir_multi):
+        """CER filter disabled when rate=0 — all variants pass."""
+        result = self._run_summarize(fasta_dir_multi, assumed_error_rate=0)
+        assert len(result) == 3
+
+    def test_no_cer_header_never_filtered(self, fasta_dir_multi):
+        """Variants without CER header are never filtered."""
+        result = self._run_summarize(fasta_dir_multi, assumed_error_rate=0.50)
+        sizes = [c.size for c in result]
+        # c3 (size=30) has no CER, should survive even at high threshold
+        assert 30 in sizes

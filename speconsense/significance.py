@@ -6,19 +6,36 @@ determine whether an observed variant count M out of N total reads at L position
 is statistically distinguishable from sequencing error.
 
 Error model: uniform (q = p/3), where p is total per-position error rate.
+
+Interpretability constraint: Under the uniform model, the implied reference
+population (reads carrying the true sequence) at error rate p* is N(1-p*).
+At p* = 0.75 (the signal destruction threshold), the reference population
+equals the variant count — each of the 4 bases is equally likely. Above this,
+the "true sequence" has fewer supporting reads than the variant, making the
+artifact hypothesis incoherent. CER is therefore only reported when p* < 0.75.
 """
 
 import math
-from typing import Tuple
+from typing import Optional, Tuple
 
 from scipy.stats import binom
 from scipy.optimize import brentq
+
+# Signal destruction threshold: at p* = 0.75, each of the 4 bases has equal
+# probability (25%) under the uniform error model. Above this, the implied
+# reference population is smaller than the variant count.
+SIGNAL_DESTRUCTION_THRESHOLD = 0.75
 
 
 def compute_critical_error_rate(N: int, M: int, L: int, alpha: float = 1e-5) -> float:
     """Compute p* under uniform error model (q = p/3).
 
     Solves: L * P(Binom(N, p*/3) >= M) = alpha for p*.
+
+    Returns the raw p* without capping. Values at or above
+    SIGNAL_DESTRUCTION_THRESHOLD (0.75) indicate the variant has more support
+    than the implied reference population under the error model. Callers
+    should check p* < SIGNAL_DESTRUCTION_THRESHOLD before reporting.
 
     Args:
         N: Total specimen reads (denominator)
@@ -27,7 +44,7 @@ def compute_critical_error_rate(N: int, M: int, L: int, alpha: float = 1e-5) -> 
         alpha: Significance level
 
     Returns:
-        p* as total error rate, or 0.0 if M <= 0
+        p* as total error rate (uncapped), or 0.0 if M <= 0
     """
     if M <= 0 or N <= 0 or L <= 0:
         return 0.0
@@ -56,7 +73,7 @@ def compute_critical_error_rate(N: int, M: int, L: int, alpha: float = 1e-5) -> 
 
     # If objective is negative at upper bound, no solution (M too large relative to N)
     if val_high < 0:
-        return 1.0  # p* exceeds maximum — obviously not error
+        return float('inf')
 
     # If objective is positive at lower bound, M is too small
     if val_low > 0:
@@ -64,9 +81,33 @@ def compute_critical_error_rate(N: int, M: int, L: int, alpha: float = 1e-5) -> 
 
     try:
         p_star = brentq(objective, eps, 3.0, xtol=1e-10)
-        return min(p_star, 1.0)
+        return p_star
     except (ValueError, RuntimeError):
         return 0.0
+
+
+def is_cer_reportable(p_star: float) -> bool:
+    """Check whether a computed p* value is meaningful for reporting.
+
+    Under the uniform error model, at p* = 0.75 (the signal destruction
+    threshold), each of the 4 bases is equally likely — the reference
+    population carrying the true sequence equals the variant count. Above
+    this, the artifact hypothesis is incoherent because the "true sequence"
+    has fewer supporting reads than the variant.
+
+    p* values below the threshold are physically meaningful and can be
+    reported as CER annotations. p* values at or above the threshold
+    indicate the variant is too well-supported for the error framework
+    to apply.
+
+    Args:
+        p_star: Computed critical error rate
+
+    Returns:
+        True if p* is below the signal destruction threshold (meaningful),
+        False otherwise.
+    """
+    return p_star < SIGNAL_DESTRUCTION_THRESHOLD
 
 
 def compute_minimum_M(N: int, L: int, alpha: float = 1e-5,
@@ -114,6 +155,11 @@ def is_variant_significant(M: int, N: int, L: int,
     A variant is significant when p* >= assumed_error_rate, meaning the
     observed pattern would require an error rate at least as high as the
     assumed rate to be explained as artifact.
+
+    Always computes p* and uses it for the significance decision, even when
+    the value is above the signal destruction threshold. Callers that need
+    to display p* should check is_cer_reportable() to determine whether the
+    value is physically meaningful.
 
     Args:
         M: Variant read count (smallest haplotype at split position)

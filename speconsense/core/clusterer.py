@@ -22,7 +22,7 @@ except ImportError:
     __version__ = "dev"
 
 from speconsense.msa import ReadAlignment
-from speconsense.significance import compute_critical_error_rate
+from speconsense.significance import compute_critical_error_rate, is_cer_reportable
 from speconsense.scalability import (
     VsearchCandidateFinder,
     ScalablePairwiseOperation,
@@ -1112,7 +1112,11 @@ class SpecimenClusterer:
                         total_ambiguity_positions += iupac_count
                         clusters_with_ambiguities += 1
 
-                    # Compute CER from final cluster size and consensus length
+                    # Compute CER from final cluster size and consensus length.
+                    # Only report when p* < 0.75 (the signal destruction
+                    # threshold — above this, the reference population is
+                    # smaller than the variant, making the artifact hypothesis
+                    # incoherent).
                     cluster_cer = None
                     cluster_cer_alpha = None
                     if self.assumed_error_rate > 0:
@@ -1120,11 +1124,13 @@ class SpecimenClusterer:
                         cluster_M = len(cluster)
                         consensus_L = len(consensus)
                         if total_N > 0 and consensus_L > 0:
-                            cluster_cer = compute_critical_error_rate(
+                            p_star = compute_critical_error_rate(
                                 N=total_N, M=cluster_M, L=consensus_L,
                                 alpha=self.significance_level
                             )
-                            cluster_cer_alpha = self.significance_level
+                            if is_cer_reportable(p_star):
+                                cluster_cer = p_star
+                                cluster_cer_alpha = self.significance_level
 
                     # Write output files
                     self.write_cluster_files(
