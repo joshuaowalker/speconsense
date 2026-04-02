@@ -123,7 +123,7 @@ The `cer` and `cer_alpha` fields are available in the `--fasta-fields` system:
 
 ### Default: 1.5% assumed error rate, alpha = 1e-5
 
-At the standard operating point (N=1000 presample, L~700 for ITS), this requires roughly **M >= 19 reads** for a variant to pass the significance test at 1% assumed error, or **M >= 17** at 1.5%. (See the paper's Table 2 for the full matrix.)
+At the standard operating point (N=1000 presample, L~700 for ITS), this requires roughly **M >= 23 reads** for a variant to pass the significance test at the default 1.5% assumed error rate. At lower N, the threshold is a larger fraction of reads (M=9 at N=100, M=6 at N=20), ensuring CER is conservative for small specimens. (See the Appendix for the full matrix.)
 
 For comparison, the existing `--min-variant-count 5` threshold allows splits with as few as 5 reads. The CER gate will suppress most of these at high N, while still allowing them at low N where 5 reads represents stronger evidence.
 
@@ -217,67 +217,82 @@ Since 7% > 1.5%, this variant passes despite having the same M=6 as Example 2. A
 
 ## 8. Real-world validation (ONT98 dataset)
 
-The CER framework was validated on the ONT98 dataset (955 specimens across 10 ONT runs, ITS amplicons). Both speconsense and speconsense-summarize were run with `--assumed-error-rate 0.02`.
+The CER framework was validated on the ONT98 dataset (960 wells across 10 ONT runs, ITS amplicons). Of these, 955 produced clustering output and 837 survived summarize filtering (min-RiC). Both speconsense and speconsense-summarize were run with the default settings (`--assumed-error-rate 0.015`, default `--min-cluster-ratio`).
 
-### Impact on variant counts
+### Two-stage impact
 
-**Speconsense (core):**
+CER operates at two stages, and the relative contribution of each depends on specimen read count:
 
-| Metric | Baseline | CER-aware |
-|--------|----------|-----------|
-| Total clusters | 3,792 | 3,424 (-9.7%) |
-| Specimens affected | — | 200 reduced, 3 gained |
+1. **Split prevention** (speconsense core): The CER gate suppresses weak splits during recursive phasing. Reads that would have formed a separate cluster instead remain in the parent cluster.
+2. **Summarize filtering** (speconsense-summarize): Post-HAC CER filtering removes secondary variants whose CER falls below the assumed error rate. Primary variants are never filtered.
 
-The modest reduction at the cluster level reflects CER gating during recursive phasing — weak splits (M ~ 5-15 from N ~ 1000) are suppressed while well-supported variants pass unchanged.
+| Stage | Variants Removed | Share |
+|-------|-----------------|-------|
+| Split prevention | 323 | 27% |
+| Summarize filtering | 871 | 73% |
+| **Total** | **1,194** | |
 
-**Speconsense-summarize (with `--assumed-error-rate 0.02`):**
+### Overall impact
 
-| Metric | Baseline | CER-aware |
-|--------|----------|-----------|
-| Output files | 3,186 | 1,602 (-50%) |
-| Single-variant specimens | 226 (27%) | 452 (54%) |
-| 1-2 variant specimens | 373 (45%) | 658 (79%) |
-| 5+ variant specimens | 269 (32%) | 41 (5%) |
-| Specimens lost | — | 0 |
+| Metric | Baseline | CER 0.015 | Delta |
+|--------|----------|-----------|-------|
+| Raw clusters (pre-summarize) | 3,369 | 3,046 | -323 (-9.6%) |
+| Summary variants | 2,831 | 1,637 | -1,194 (-42.2%) |
+| Merged (multi-component) variants | 497 | 308 | -189 |
+| Single-variant specimens | 246 (29%) | 446 (53%) | +200 |
+| HAC groups | 1,146 | 1,146 | 0 |
+| Specimens | 837 | 837 | 0 |
 
-The combined effect of CER gating (phasing) and CER filtering (summarize) halves the output while preserving all specimens. The shift toward single-variant output is consistent with the hypothesis that many baseline variants were error-driven splits.
+Zero specimens and zero HAC groups were lost. The 1,194 removed variants were overwhelmingly small secondary clusters (RiC 5-12) from high-read-count specimens.
 
-### Precision and recall
+### Impact by specimen read count
 
-Evaluated against a verified reference set of 1,159 organisms:
+The CER framework's impact scales with specimen size, consistent with its statistical design:
 
-- **Precision: 100%** at all RIC thresholds — no false positives introduced
-- **Recall: 100%** at RIC >= 1 — all organisms recovered
-- **All 1,600 variant matches at >= 99.5% identity**
-- **PRAUC: 0.9991**
+| Specimen Reads | Specimens | Split Prevention | Summarize Filtering | Variant Reduction |
+|----------------|-----------|-----------------|--------------------|--------------------|
+| < 50 | 101 | -9 | +5 | 3.1% |
+| 50–99 | 68 | -11 | +4 | 5.6% |
+| 100–199 | 99 | -33 | +2 | 14.9% |
+| 200–499 | 225 | -129 | -174 | 39.5% |
+| 500–999 | 344 | -141 | -708 | 53.0% |
 
-Zero organisms were lost. The 1,584 removed variants were all secondary sequences that did not contribute unique organism detections.
+**Low-read specimens (< 100 reads):** CER has minimal effect. The minimum M for significance at 1.5% error requires 30–50% of reads at small N (e.g., M=5 at N=10, M=6 at N=20), so most variants that survive the existing frequency/count filters are already significant. Split prevention accounts for nearly all reduction; summarize filtering actually retains slightly *more* variants than baseline because fewer, larger input clusters merge differently during summarization.
+
+**Mid-range specimens (100–499 reads):** Split prevention and summarize filtering both contribute. The minimum M threshold drops to 5–14% of reads, catching more marginal variants.
+
+**High-read specimens (500+ reads):** Summarize filtering dominates (83% of reduction in this bin). The minimum M threshold drops to ~3% of reads, so many small secondary clusters (RiC 5-12) are still split off by speconsense but then correctly identified as statistically insignificant during summarization.
+
+At low read counts, split prevention can occasionally cause parent clusters to remain above size filtering thresholds, preserving variants that the baseline would have lost after splitting. This explains the small positive summarize filtering values in the low-read bins — a net gain of variants through this indirect mechanism.
 
 ### Quality metrics
 
-**CER value distribution** (cluster-level, 2,632 annotated variants):
+**Read identity:** Mean RID improved (99.3% → 99.4%). The quality report flagged 124 low-RID sequences in baseline vs. 67 under CER — the eliminated sequences were disproportionately low-quality small variants. Merged sequences with low-RID components dropped from 8 to 1.
 
-| CER range | Count | Interpretation |
-|-----------|-------|----------------|
-| < 0.01 | 1,603 (61%) | Low support, many below 2% threshold |
-| 0.01 - 0.02 | 128 (5%) | Near threshold boundary |
-| 0.02 - 0.10 | 355 (13%) | Moderate to good support |
-| 0.10 - 0.75 | 546 (21%) | Strong support |
-| No CER (dominant) | 792 | p\* >= 0.75, not applicable |
+**IUPAC ambiguities:**
 
-**Read identity:** Mean RID improved slightly (99.37% → 99.40%) as noisier low-support clusters were eliminated.
+| Level | Baseline | CER 0.015 | Delta |
+|-------|----------|-----------|-------|
+| Raw clusters (pre-summarize) | 928 | 1,575 | +647 (+70%) |
+| Summary output | 1,615 | 1,397 | -218 (-13.5%) |
 
-**IUPAC ambiguities:** Total ambiguous bases in cluster output increased from 936 to 1,561 (+67%). When CER prevents a split, the variation that would have produced a separate variant is instead captured as IUPAC ambiguity codes in the parent cluster. This is the expected tradeoff — positional ambiguity in a strong consensus vs. a separate weak variant — and is generally preferable for taxonomic identification.
+The two levels tell different stories. Raw cluster ambiguities increase because split prevention absorbs variant reads into parent clusters, encoding the variation as IUPAC codes. But after summarization — where the baseline's many small variants would have been merged back together, also introducing ambiguities — the net effect is a 13.5% *decrease* in total ambiguities. The ambiguity tradeoff is concentrated in the 500+ read bin (-259), where summarize filtering prevents low-support variants from introducing spurious IUPAC codes during merging.
+
+**High-error positions:** Flagged sequences dropped from 579 to 479 (-17%). Surviving flagged sequences tend to have larger RiC, representing genuine biological complexity rather than artifact.
+
+**Primary variant stability:** 93% of primary (v1) sequences are identical between baseline and CER. Of 80 that changed, 50 gained ambiguities (from absorbed variant reads) and 18 lost them. The largest changes occur in specimens with many secondary variants.
 
 ### Edge cases observed
 
-**Small specimens (N < 25):** The CER gate is effectively inert because few variants can reach the significance threshold. The existing frequency/count filters remain the gatekeepers. This is by design — at very low N, even the frequency-based filters provide adequate protection.
+**Small specimens (N < 50):** Of 19 multi-variant specimens in this range, CER only affected 3. The framework is appropriately conservative at low N, deferring to the existing frequency/count filters.
 
-**Correlated multi-position variation:** One cluster (ONT01.19, size=11) accumulated 35 IUPAC ambiguities after CER prevented splitting reads that differed at multiple correlated positions. The current framework evaluates positions independently (K=1), so correlated variation is not modeled. This is acknowledged in the companion paper as out of scope for this version — multi-position variants are at least as significant as single-position variants, so the K=1 analysis is conservative.
+**Specimens gaining raw clusters:** 5 specimens had more raw clusters under CER than baseline. Preventing one split can change the size distribution enough to cause a different split to become significant, or alter the clustering graph topology — a plausible indirect effect.
+
+**Correlated multi-position variation:** One cluster (ONT01.19, size=11) accumulated multiple IUPAC ambiguities after CER prevented splitting reads that differed at correlated positions. The current framework evaluates positions independently (K=1), so correlated variation is not modeled. This is acknowledged in the companion paper as out of scope for this version — multi-position variants are at least as significant as single-position variants, so the K=1 analysis is conservative.
 
 ## 9. Open questions for reviewers
 
-1. ~~**Is 2% the right default assumed error rate?**~~ Resolved: default set to 1.5%, slightly below the typical ONT R10 per-position substitution rate of ~2%. This provides a margin that avoids filtering variants near the boundary while still catching clear artifacts.
+1. ~~**Is 2% the right default assumed error rate?**~~ Resolved: default set to 1.5%, slightly below the typical ONT R10 per-position substitution rate of ~2%. This provides a margin that avoids filtering variants near the boundary while still catching clear artifacts. Validated on ONT98: 42% variant reduction with zero specimen loss at 1.5%.
 
 2. **Should the default alpha be 1e-5 or something else?** The paper suggests 1e-5 as a "run-corrected" level (accounting for ~100 specimens per run). A per-specimen alpha of 0.05 would be more permissive.
 
@@ -293,15 +308,31 @@ Zero organisms were lost. The 1,584 removed variants were all secondary sequence
 
 ## Appendix: Reference values
 
-### Minimum M for significance (uniform model, L=700)
+### Minimum M for significance at default settings (uniform model, L=700, alpha=1e-5, p=1.5%)
+
+| N | Min M | % of N |
+|---|-------|--------|
+| 10 | 5 | 50.0% |
+| 15 | 5 | 33.3% |
+| 20 | 6 | 30.0% |
+| 30 | 6 | 20.0% |
+| 50 | 7 | 14.0% |
+| 100 | 9 | 9.0% |
+| 200 | 11 | 5.5% |
+| 500 | 16 | 3.2% |
+| 1000 | 23 | 2.3% |
+
+At low N, the minimum M is a large fraction of reads — CER is conservative and defers to frequency/count filters. At high N, the threshold drops to a few percent, catching weak variants that the frequency filter cannot.
+
+### Minimum M at other operating points (uniform model, L=700)
 
 From the companion paper, Table 2:
 
-| N | p=1%, alpha=0.05 | p=1%, alpha=1e-5 | p=2%, alpha=1e-5 | p=3%, alpha=1e-5 |
-|---|---|---|---|---|
-| 100 | 5 | 8 | 11 | 11 |
-| 500 | 9 | 14 | — | 22 |
-| 1000 | 13 | 19 | — | 33 |
+| N | p=1%, alpha=0.05 | p=1%, alpha=1e-5 | p=1.5%, alpha=1e-5 | p=2%, alpha=1e-5 | p=3%, alpha=1e-5 |
+|---|---|---|---|---|---|
+| 100 | 5 | 8 | 9 | 10 | 11 |
+| 500 | 9 | 14 | 16 | 18 | 22 |
+| 1000 | 13 | 19 | 23 | 26 | 33 |
 
 ### Critical error rate p\* at common operating points (uniform model, L=700)
 
