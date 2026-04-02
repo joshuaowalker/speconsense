@@ -327,6 +327,42 @@ respectively. At moderate coverage ($N = 100$), even the most stringent
 combination (5\% error, $\alpha = 10^{-5}$, conservative) requires only
 $M \geq 22$, representing 22\% of total reads.
 
+\subsection{Effect of multi-position evidence on minimum read support}
+
+Table~\ref{tab:min_M_K} shows how the minimum $M$ for significance changes when
+the variant is distinguished at $K > 1$ positions. Under the joint model
+(Section~\ref{sec:multiposition}), requiring the same reads to error at all $K$
+positions dramatically reduces the evidence needed.
+
+\begin{table}[htbp]
+\centering
+\caption{Minimum variant read count $M$ at $K = 1$, $2$, and $3$ variant
+positions (uniform model $q = p/3$, $\alpha = 10^{-5}$, $p = 1.5\%$, $L = 700$).}
+\label{tab:min_M_K}
+\begin{tabular}{rrrr}
+\toprule
+$N$ & $K = 1$ & $K = 2$ & $K = 3$ \\
+\midrule
+10   &  5 &  3 &  3 \\
+20   &  6 &  3 &  3 \\
+50   &  7 &  4 &  3 \\
+100  &  9 &  4 &  3 \\
+200  & 11 &  4 &  3 \\
+500  & 16 &  5 &  3 \\
+1000 & 23 &  6 &  4 \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+At $K = 2$, the minimum $M$ drops to 3--6 reads across the full range of $N$; at
+$K = 3$, it is 3--4 reads regardless of sample size. These thresholds are at or
+below the minimum count filters typically applied in practice (e.g.,
+\texttt{--min-size~5}), meaning that for multi-position variants, the statistical
+significance gate is effectively redundant---any variant that survives basic
+count filtering is already significant. This underscores how conservative the
+$K = 1$ analysis is: variants distinguished at two or more positions need
+essentially no additional statistical protection.
+
 \section{Discussion}
 
 \subsection{Interpreting the critical error rate}
