@@ -148,15 +148,41 @@ the per-variant $\alpha = 0.05$.
 \label{sec:multiposition}
 
 When a variant is distinguished from other variants at $K > 1$ positions, the
-joint probability under the null that all $K$ positions simultaneously exhibit a
-variant-like pattern drops exponentially. Although the combinatorial correction
-$\binom{L}{K}$ grows with $K$, the $K$-th root dominates, and any multi-position
-variant is at least as significant as a single-position variant. As a concrete
-example, at $N = 1000$, $M = 100$: $K = 1$ gives $p^* = 6.75\%$, while $K = 2$
-gives $p^* = 7.12\%$. The combinatorial correction grows from $L = 700$ to
-$\binom{700}{2} = 244{,}650$ (a $350{\times}$ increase), but the squared
-per-position probability overwhelmingly compensates. The analysis that follows
-therefore uses $K = 1$ throughout as the conservative bound.
+null hypothesis requires that the \emph{same} $M$ reads independently produce the
+matching error at \emph{all} $K$ positions. Under the assumption of independent
+errors across positions, the probability that a single read matches the variant
+allele at all $K$ positions is $q^K$, where $q$ is the per-position error
+probability. The critical error rate equation becomes:
+\begin{equation}
+\label{eq:critical_multiK}
+\binom{L}{K} \cdot P\bigl(\mathrm{Binom}(N,\, (q^*)^K) \geq M\bigr) = \alpha
+\end{equation}
+where $(q^*)^K$ is the joint per-read probability of matching the variant at all
+$K$ positions, and the Bonferroni correction is over $\binom{L}{K}$ possible
+position combinations. No correction over alternative bases (e.g., $3^K$) is
+needed because the alternative alleles are observed, not hypothesized: we
+condition on the specific bases seen in the variant reads.
+
+The effect is dramatic. At $N = 1000$, $M = 100$, $\alpha = 0.05$ (conservative
+model): $K = 1$ gives $p^* = 6.75\%$, while $K = 2$ gives $p^* = 24.19\%$---a
+$3.6{\times}$ increase. The combinatorial correction grows from $L = 700$ to
+$\binom{700}{2} = 244{,}650$ (a $350{\times}$ increase), but the joint error
+probability $q^2$ shrinks so rapidly that it overwhelmingly dominates. Under
+production settings ($p = 1.5\%$ assumed error, uniform model, $\alpha = 10^{-5}$,
+$N = 1000$), the minimum $M$ for significance drops from 23 at $K = 1$ to 6 at
+$K = 2$ and 4 at $K = 3$.
+
+The cross-position independence assumption is strongest when the variant positions
+are distant in the amplicon sequence. Positions within the same k-mer context may
+exhibit correlated error profiles~\cite{delahaye2021}, weakening the $q^K$ bound.
+This is not a reason to avoid the $K > 1$ analysis, but a caveat: for variants
+whose distinguishing positions span different sequence regions, the joint model is
+well-supported; for positions clustered within a few bases, the effective exponent
+may be less than $K$.
+
+The analysis that follows uses $K = 1$ throughout as the conservative bound.
+Multi-position variants are substantially more significant than this bound
+suggests.
 
 \section{Results}
 
@@ -346,7 +372,9 @@ tests is conservative; nearby positions in amplicon sequences are not truly
 independent, so the effective number of tests is smaller than $L$.
 
 \item \textbf{Minimum $K$.} Using $K = 1$ represents the weakest case; most
-variants are distinguished at multiple positions, further increasing significance.
+variants are distinguished at multiple positions. Because the same reads must
+error at all $K$ positions independently, significance increases dramatically
+with $K$ (Section~\ref{sec:multiposition}).
 \end{enumerate}
 
 \subsection{Homopolymer normalization}

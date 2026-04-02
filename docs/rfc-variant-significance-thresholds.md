@@ -288,7 +288,7 @@ The two levels tell different stories. Raw cluster ambiguities increase because 
 
 **Specimens gaining raw clusters:** 5 specimens had more raw clusters under CER than baseline. Preventing one split can change the size distribution enough to cause a different split to become significant, or alter the clustering graph topology — a plausible indirect effect.
 
-**Correlated multi-position variation:** One cluster (ONT01.19, size=11) accumulated multiple IUPAC ambiguities after CER prevented splitting reads that differed at correlated positions. The current framework evaluates positions independently (K=1), so correlated variation is not modeled. This is acknowledged in the companion paper as out of scope for this version — multi-position variants are at least as significant as single-position variants, so the K=1 analysis is conservative.
+**Correlated multi-position variation:** One cluster (ONT01.19, size=11) accumulated multiple IUPAC ambiguities after CER prevented splitting reads that differed at correlated positions. The current framework evaluates positions independently (K=1), so multi-position significance is not exploited. The companion paper shows that multi-position variants (K>1) are dramatically more significant under the joint error model — at production settings, minimum M drops from 23 to 6 at K=2 and 4 at K=3. The K=1 analysis remains correct as a conservative bound. A caveat applies when variant positions are nearby in the same k-mer context, where correlated errors may weaken the independence assumption; positions in different sequence regions are well-modeled by the joint formulation.
 
 ## 9. Open questions for reviewers
 

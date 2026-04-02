@@ -39,24 +39,19 @@ def critical_error_rate(N, M, L=700, alpha=0.05, K=1, uniform=False):
     M or more reads with the same alternative allele at K positions equals alpha.
 
     For K=1: L * P(Binom(N, q) >= M) = alpha
-    For K>1: C(L,K) * [P(Binom(N, q) >= M)]^K = alpha
+    For K>1: C(L,K) * P(Binom(N, q^K) >= M) = alpha
+
+    The K>1 model requires the SAME M reads to error at ALL K positions.
+    Under independent errors across positions, the per-read probability of
+    matching the variant at all K positions is q^K. No 3^K correction for
+    alternative bases is needed because the alternatives are observed.
 
     where q = p (conservative, uniform=False) or q = p/3 (uniform=True).
 
     Returns p* as a per-position error rate.
     """
-    if K == 1:
-        correction = L
-    else:
-        correction = math.comb(L, K)
-
-    # Per-position survival function target
-    if K > 1:
-        per_position_target = (alpha / correction) ** (1.0 / K)
-    else:
-        per_position_target = alpha / correction
-
-    log_target = math.log(per_position_target)
+    correction = math.comb(L, K) if K > 1 else L
+    log_target = math.log(alpha / correction)
 
     divisor = 3.0 if uniform else 1.0
 
@@ -64,7 +59,8 @@ def critical_error_rate(N, M, L=700, alpha=0.05, K=1, uniform=False):
         q = p / divisor
         if q >= 1.0:
             q = 1.0 - 1e-15
-        return binom.logsf(M - 1, N, q) - log_target
+        q_joint = q ** K
+        return binom.logsf(M - 1, N, q_joint) - log_target
 
     p_upper = 1.0 if not uniform else 3.0
     p_star = brentq(equation, 1e-15, p_upper - 1e-15, xtol=1e-12)
@@ -76,22 +72,25 @@ def effective_M(N, min_count=5, min_freq=0.10):
     return max(min_count, math.ceil(min_freq * N))
 
 
-def minimum_M(N, p_assumed, L=700, alpha=0.05, uniform=False):
+def minimum_M(N, p_assumed, L=700, alpha=0.05, K=1, uniform=False):
     """Minimum variant read count M for significance at assumed error rate.
 
     Returns the smallest M such that observing M of N reads with the same
     alternative allele is significant at level alpha (Bonferroni-corrected
-    over L positions) when the true per-position error rate is p_assumed.
+    over C(L,K) position combinations) when the true per-position error rate
+    is p_assumed. For K>1, the per-read error probability is q^K.
 
     Returns None if no M <= N is sufficient.
     """
     q = p_assumed / 3.0 if uniform else p_assumed
-    target = alpha / L
-    # Find M where P(Binom(N, q) >= M) <= target
-    M_raw = binom.isf(target, N, q)
+    q_joint = q ** K
+    correction = math.comb(L, K) if K > 1 else L
+    target = alpha / correction
+    # Find M where P(Binom(N, q_joint) >= M) <= target
+    M_raw = binom.isf(target, N, q_joint)
     M_cand = int(math.ceil(M_raw))
     # Verify (isf can be imprecise at discrete boundaries)
-    while M_cand > 0 and binom.sf(M_cand - 1, N, q) > target:
+    while M_cand > 0 and binom.sf(M_cand - 1, N, q_joint) > target:
         M_cand += 1
     # Check feasibility
     if M_cand > N:
@@ -222,6 +221,7 @@ def print_key_values():
         (50, 5, 1, "N=50, M=5, K=1"),
         (10000, 1000, 1, "N=10000, M=1000, K=1"),
         (1000, 100, 2, "N=1000, M=100, K=2"),
+        (1000, 100, 3, "N=1000, M=100, K=3"),
         (1000, 5, 1, "N=1000, M=5, K=1"),
     ]
 
@@ -279,13 +279,19 @@ def print_minimum_M_table():
 
 
 def print_k_comparison():
-    """Verify K=1 vs K=2 values cited in the worked example."""
-    print("\n=== K=1 vs K=2 comparison (N=1000, M=100, alpha=0.05) ===\n")
+    """Show K=1 vs K>1 comparison demonstrating joint model significance."""
+    print("\n=== K=1 vs K>1 comparison (N=1000, M=100, alpha=0.05) ===\n")
     N, M = 1000, 100
-    for K in [1, 2]:
+    for K in [1, 2, 3]:
         p_cons = critical_error_rate(N, M, K=K, uniform=False)
-        correction = 700 if K == 1 else math.comb(700, K)
-        print(f"  K={K}: p*(q=p) = {p_cons*100:.2f}%, correction = {correction:,}")
+        p_unif = critical_error_rate(N, M, K=K, uniform=True)
+        correction = math.comb(700, K) if K > 1 else 700
+        print(f"  K={K}: p*(q=p) = {p_cons*100:.2f}%, p*(q=p/3) = {p_unif*100:.2f}%, correction = {correction:,}")
+
+    print("\n=== Minimum M at production settings (p=1.5%, uniform, alpha=1e-5, N=1000) ===\n")
+    for K in [1, 2, 3]:
+        M_min = minimum_M(1000, 0.015, alpha=1e-5, K=K, uniform=True)
+        print(f"  K={K}: min M = {M_min}")
     print()
 
 
