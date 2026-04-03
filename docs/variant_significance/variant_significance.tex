@@ -176,13 +176,20 @@ production settings ($p = 1.5\%$ assumed error, uniform model, $\alpha = 10^{-5}
 $N = 1000$), the minimum $M$ for significance drops from 23 at $K = 1$ to 6 at
 $K = 2$ and 4 at $K = 3$.
 
-The cross-position independence assumption is strongest when the variant positions
-are distant in the amplicon sequence. Positions within the same k-mer context may
-exhibit correlated error profiles~\cite{delahaye2021}, weakening the $q^K$ bound.
-This is not a reason to avoid the $K > 1$ analysis, but a caveat: for variants
-whose distinguishing positions span different sequence regions, the joint model is
-well-supported; for positions clustered within a few bases, the effective exponent
-may be less than $K$.
+The thresholds derived from this model are sensitive to the cross-position
+independence assumption. At the production operating point ($N = 1000$, $K = 2$,
+uniform model, $\alpha = 10^{-5}$, $p = 1.5\%$), the minimum $M = 6$ tolerates
+only a $2.2{\times}$ increase in the joint error probability relative to the
+independent value $q^2$. Equivalently, if the conditional probability of error at
+one position given an error at another rises from the independent expectation of
+$0.5\%$ to ${\sim}1.1\%$, the $M = 6$ threshold loses significance.
+Nanopore errors exhibit sequence-context dependencies~\cite{delahaye2021}:
+positions within the same k-mer context may share correlated error profiles, and
+a single problematic translocation event can affect multiple nearby bases.
+For variants whose distinguishing positions are distant in the amplicon (tens of
+bases or more apart), independence is reasonable and the joint model is
+well-supported. For positions clustered within a few bases, the effective
+exponent may be less than $K$, and the $K = 1$ analysis provides the safer bound.
 
 The analysis that follows uses $K = 1$ throughout as the conservative bound.
 Multi-position variants are substantially more significant than this bound
@@ -359,13 +366,16 @@ $N$ & $K = 1$ & $K = 2$ & $K = 3$ \\
 \end{table}
 
 At $K = 2$, the minimum $M$ drops to 3--6 reads across the full range of $N$; at
-$K = 3$, it is 3--4 reads regardless of sample size. These thresholds are at or
-below the minimum count filters typically applied in practice (e.g.,
-\texttt{--min-size~5}), meaning that for multi-position variants, the statistical
-significance gate is effectively redundant---any variant that survives basic
-count filtering is already significant. This underscores how conservative the
-$K = 1$ analysis is: variants distinguished at two or more positions need
-essentially no additional statistical protection.
+$K = 3$, it is 3--4 reads regardless of sample size. Under the independence
+assumption, these thresholds are at or below the minimum count filters typically
+applied in practice (e.g., \texttt{--min-size~5}). However, as noted in
+Section~\ref{sec:multiposition}, the $K > 1$ thresholds are sensitive to
+cross-position error correlation: at $K = 2$, $N = 1000$, the $M = 6$ threshold
+tolerates only a ${\sim}2{\times}$ increase in joint error probability. For
+variants whose distinguishing positions are well-separated in the amplicon,
+the independence assumption is reasonable and these low thresholds apply. For
+nearby positions where error correlation is plausible, the $K = 1$ thresholds
+from Table~\ref{tab:min_M} provide the conservative bound.
 
 \section{Discussion}
 

@@ -295,6 +295,44 @@ def print_k_comparison():
     print()
 
 
+def print_independence_sensitivity():
+    """Quantify how much cross-position correlation the K>1 thresholds tolerate.
+
+    For each (N, K) case in Table 3, compute the maximum joint error probability
+    q_joint_max that still yields significance at the minimum M, and express it
+    as a ratio to the independent q^K.
+    """
+    print("\n=== Independence sensitivity (uniform, p=1.5%, alpha=1e-5, L=700) ===\n")
+    q = 0.015 / 3.0  # uniform model
+    alpha = 1e-5
+    L = 700
+
+    N_values = [10, 20, 50, 100, 200, 500, 1000]
+    for K in [2, 3]:
+        q_indep = q ** K
+        correction = math.comb(L, K)
+        log_target = math.log(alpha / correction)
+        print(f"  K={K} (q^{K} = {q_indep:.2e}, correction = {correction:,}):")
+
+        for N in N_values:
+            M = minimum_M(N, 0.015, alpha=alpha, K=K, uniform=True, L=L)
+            if M is None:
+                continue
+
+            # Find max q_joint where P(Binom(N, q_joint) >= M) <= target
+            def eq(q_j):
+                return binom.logsf(M - 1, N, q_j) - log_target
+
+            q_max = brentq(eq, 1e-15, 0.999, xtol=1e-15)
+            ratio = q_max / q_indep
+            # Express as conditional probability: q_max = q * P(err|err)^(K-1)
+            cond_p = (q_max / q) ** (1.0 / (K - 1)) if K > 1 else q_max
+            print(f"    N={N:>4}, min M={M}: q_max={q_max:.2e} "
+                  f"({ratio:.1f}x independent), "
+                  f"cond P(err|err)={cond_p*100:.2f}%")
+        print()
+
+
 if __name__ == '__main__':
     FIGURES_DIR.mkdir(parents=True, exist_ok=True)
     generate_figure1()
@@ -302,3 +340,4 @@ if __name__ == '__main__':
     print_key_values()
     print_minimum_M_table()
     print_k_comparison()
+    print_independence_sensitivity()
