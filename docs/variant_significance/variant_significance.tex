@@ -436,6 +436,23 @@ presented here does not account for this additional filtering, making the analys
 further conservative: the effective error rate after homopolymer normalization is
 lower than the raw per-position rate.
 
+This approach is conservative but lossy: it treats all homopolymer length
+differences as potential artifacts, even at short hp lengths (1--4~bases) where
+published accuracy exceeds 95\%~\cite{sereika2022} and the error rate may be
+comparable to non-hp positions. A variant that differs from the consensus only by
+a single-base insertion within a dinucleotide repeat is discarded identically to
+one within a length-10 poly-G run, despite the former being far more likely to
+reflect real biology.
+
+Extending the CER framework to evaluate hp-position variants statistically---rather
+than discarding them unconditionally---would require quantitative characterization
+of hp error rates by base and run length under current chemistry and basecaller
+versions. No published study provides this data for the R10.4.1 chemistry and
+Dorado basecallers used in our pipeline. With such data, the critical error rate
+analysis developed here could be applied to hp positions using empirical
+per-position error rates parameterized by hp context, enabling recovery of
+biological hp-length variants that the current blanket normalization discards.
+
 \subsection{Relationship to existing variant calling frameworks}
 
 Prior work on low-frequency variant detection has used binomial and
@@ -506,7 +523,11 @@ library presence from bioinformatic hallucination; biological significance of
 detected variants requires downstream validation against reference databases.
 Table~\ref{tab:min_M} provides direct lookup of the minimum read support needed
 at assumed error rates of 1--5\%, enabling practitioners to assess variant
-confidence without computation.
+confidence without computation. An important next step is extending this
+framework to homopolymer positions, where blanket normalization currently
+discards variants that may be biological; this requires empirical
+characterization of hp error rates by base and run length under current
+sequencing chemistry.
 
 \subsection*{Acknowledgments}
 
@@ -548,6 +569,14 @@ J.~Walker.
 \newblock Speconsense: High-quality clustering and consensus generation for
 {Oxford Nanopore} amplicon reads.
 \newblock \url{https://github.com/joshuaowalker/speconsense}, 2024.
+
+\bibitem[Sereika et~al., 2022]{sereika2022}
+M.~Sereika, R.~H. Kirkegaard, S.~M. Karst, T.~Y. Michaelsen, E.~A.
+S{\o}rensen, R.~D. Wollenberg, and M.~Albertsen.
+\newblock {Oxford Nanopore R10.4} long-read sequencing enables the generation of
+near-finished bacterial genomes from pure cultures and metagenomes without
+short-read or reference polishing.
+\newblock \emph{Nature Methods}, 19:482--488, 2022.
 
 \bibitem[Vaser et~al., 2017]{vaser2017}
 R.~Vaser, I.~Sovi\'{c}, N.~Nagarajan, and M.~\v{S}iki\'{c}.
