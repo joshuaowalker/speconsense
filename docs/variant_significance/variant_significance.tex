@@ -91,8 +91,8 @@ could be drawn. In practice, speconsense uniformly presamples to $N \leq 1000$
 reads, so this is bounded.
 
 \item $M$: Number of reads supporting the variant allele at a position. For
-$K > 1$, $M$ is the minimum minor-allele count across the $K$ variant positions
-(Section~\ref{sec:multiposition}).
+$K > 1$, $M$ is the number of reads supporting the variant allele at all $K$
+positions simultaneously (Section~\ref{sec:multiposition}).
 
 \item $L$: Amplicon length in base pairs. For the ITS region, $L \approx 700$~bp.
 This determines the multiple testing correction.
@@ -150,15 +150,12 @@ the per-variant $\alpha = 0.05$.
 \label{sec:multiposition}
 
 When a variant is distinguished from other variants at $K > 1$ positions, we
-define $M$ as the minimum minor-allele count across those positions---that is, the
-smallest number of reads supporting the variant allele at any single variant
-position. Under the null hypothesis, at least $M$ reads must independently
-produce the matching error at all $K$ positions. With independent errors across
-positions, the probability that a single read matches the variant allele at all
-$K$ positions is $q^K$, where $q$ is the per-position error probability. Since
-$M$ is the minimum per-position count, using it as the threshold for the joint
-test is conservative: the actual number of reads matching at all $K$ positions
-may be smaller. The critical error rate equation becomes:
+define $M$ as the number of reads that support the variant allele at all $K$
+positions simultaneously. Under the null hypothesis, these $M$ reads must each
+independently produce the matching error at all $K$ positions. With independent
+errors across positions, the probability that a single read matches the variant
+allele at all $K$ positions is $q^K$, where $q$ is the per-position error
+probability. The critical error rate equation becomes:
 \begin{equation}
 \label{eq:critical_multiK}
 \binom{L}{K} \cdot P\bigl(\mathrm{Binom}(N,\, (q^*)^K) \geq M\bigr) = \alpha
