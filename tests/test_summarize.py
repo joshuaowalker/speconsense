@@ -65,7 +65,8 @@ def test_merge_behavior_with_full_hac_context():
                 "--source", source_dir,
                 "--summary-dir", summary_dir,
                 "--min-ric", "3",  # Include c4, c7, c8, c9 (all have ric >= 3)
-                "--min-merge-overlap", "0"  # Disable overlap merge for this test
+                "--min-merge-overlap", "0",  # Disable overlap merge for this test
+                "--no-cer-filter",  # Disable CER filter to test merging behavior
             ],
             capture_output=True,
             text=True
@@ -597,6 +598,7 @@ class TestFullConsensus:
                 f.write(fasta_content)
 
             # No select-min-size-ratio — both variants survive, both contribute to .full
+            # --no-cer-filter: disable CER filtering to test full consensus behavior
             result = subprocess.run(
                 [
                     "speconsense-summarize",
@@ -606,6 +608,7 @@ class TestFullConsensus:
                     "--enable-full-consensus",
                     "--disable-merging",
                     "--min-merge-overlap", "0",
+                    "--no-cer-filter",
                 ],
                 capture_output=True,
                 text=True
@@ -763,6 +766,7 @@ class TestSelectMinSizeRatio:
                     "--min-ric", "3",
                     "--select-min-size-ratio", "0",
                     "--disable-merging",
+                    "--no-cer-filter",  # Disable CER filter to test size ratio behavior
                 ],
                 capture_output=True,
                 text=True

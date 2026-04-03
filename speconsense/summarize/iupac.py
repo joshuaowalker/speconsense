@@ -4,7 +4,7 @@ Provides utilities for working with IUPAC nucleotide codes and calculating
 adjusted identity distances between sequences with homopolymer normalization.
 """
 
-from typing import List, Optional
+from typing import List, Optional, Tuple
 
 import edlib
 from adjusted_identity import score_alignment, AdjustmentParams, align_and_score
@@ -132,6 +132,81 @@ def merge_bases_to_iupac(bases: set) -> str:
     return IUPAC_CODES.get(frozenset(all_nucleotides), 'N')
 
 
+def _count_alignment_differences(query_aligned: str, target_aligned: str) -> Tuple[int, int, int, int]:
+    """Count differences in an IUPAC-aware alignment.
+
+    Returns (substitutions, single_nt_indels, short_indels, long_indels)
+    where each contiguous indel counts as one event regardless of length.
+    """
+    substitutions = 0
+    single_nt_indels = 0  # Single nucleotide indels
+    short_indels = 0      # 2-3 nt indels
+    long_indels = 0       # 4+ nt indels
+
+    i = 0
+    while i < len(query_aligned):
+        query_char = query_aligned[i]
+        target_char = target_aligned[i]
+
+        if not bases_match_with_iupac(query_char, target_char):
+            if query_char == '-' or target_char == '-':
+                indel_length = 1
+                j = i + 1
+                while j < len(query_aligned) and (query_aligned[j] == '-' or target_aligned[j] == '-'):
+                    indel_length += 1
+                    j += 1
+
+                if indel_length == 1:
+                    single_nt_indels += 1
+                elif indel_length <= 3:
+                    short_indels += 1
+                else:
+                    long_indels += 1
+
+                i = j
+                continue
+            else:
+                substitutions += 1
+
+        i += 1
+
+    return substitutions, single_nt_indels, short_indels, long_indels
+
+
+def count_variant_differences(seq1: str, seq2: str) -> int:
+    """Count the number of variant-level differences between two sequences.
+
+    Uses IUPAC-aware alignment to count substitutions and indel events
+    (each contiguous indel counts as one difference regardless of length).
+    This count is used as K in multi-position CER evaluation.
+
+    Returns 0 if sequences are identical or IUPAC-compatible.
+    Returns -1 if alignment fails.
+    """
+    if not seq1 or not seq2:
+        return -1
+
+    if seq1 == seq2:
+        return 0
+
+    try:
+        result = edlib.align(seq1, seq2, task="path", additionalEqualities=IUPAC_EQUIV)
+        if result["editDistance"] == -1:
+            return -1
+
+        alignment = edlib.getNiceAlignment(result, seq1, seq2)
+        if not alignment or not alignment.get('query_aligned') or not alignment.get('target_aligned'):
+            return -1
+
+        subs, single_indels, short_indels, long_indels = _count_alignment_differences(
+            alignment['query_aligned'], alignment['target_aligned']
+        )
+        return subs + single_indels + short_indels + long_indels
+
+    except Exception:
+        return -1
+
+
 def create_variant_summary(primary_seq: str, variant_seq: str) -> str:
     """
     Compare a variant sequence to the primary sequence and create a summary string
@@ -145,60 +220,18 @@ def create_variant_summary(primary_seq: str, variant_seq: str) -> str:
         return "identical sequences"
 
     try:
-        # Get alignment from edlib with IUPAC awareness
         result = edlib.align(primary_seq, variant_seq, task="path", additionalEqualities=IUPAC_EQUIV)
         if result["editDistance"] == -1:
             return "alignment failed"
 
-        # Get nice alignment to examine differences
         alignment = edlib.getNiceAlignment(result, primary_seq, variant_seq)
         if not alignment or not alignment.get('query_aligned') or not alignment.get('target_aligned'):
             return f"alignment parsing failed - edit distance {result['editDistance']}"
 
-        query_aligned = alignment['query_aligned']
-        target_aligned = alignment['target_aligned']
+        substitutions, single_nt_indels, short_indels, long_indels = _count_alignment_differences(
+            alignment['query_aligned'], alignment['target_aligned']
+        )
 
-        # Categorize differences
-        substitutions = 0
-        single_nt_indels = 0  # Single nucleotide indels
-        short_indels = 0      # 2-3 nt indels
-        long_indels = 0       # 4+ nt indels
-
-        i = 0
-        while i < len(query_aligned):
-            query_char = query_aligned[i]
-            target_char = target_aligned[i]
-
-            # Check if characters are different, considering IUPAC codes
-            if not bases_match_with_iupac(query_char, target_char):
-                if query_char == '-' or target_char == '-':
-                    # This is an indel - determine its length
-                    indel_length = 1
-
-                    # Count consecutive indels
-                    j = i + 1
-                    while j < len(query_aligned) and (query_aligned[j] == '-' or target_aligned[j] == '-'):
-                        indel_length += 1
-                        j += 1
-
-                    # Categorize by length
-                    if indel_length == 1:
-                        single_nt_indels += 1
-                    elif indel_length <= 3:
-                        short_indels += 1
-                    else:
-                        long_indels += 1
-
-                    # Skip the rest of this indel
-                    i = j
-                    continue
-                else:
-                    # This is a substitution
-                    substitutions += 1
-
-            i += 1
-
-        # Build summary string
         parts = []
         if substitutions > 0:
             parts.append(f"{substitutions} substitution{'s' if substitutions != 1 else ''}")

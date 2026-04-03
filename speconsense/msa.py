@@ -811,3 +811,27 @@ def group_reads_by_single_position(
     return dict(allele_to_reads)
 
 
+def group_reads_by_position_tuple(
+    read_alleles: Dict[str, Dict[int, str]],
+    positions: List[int],
+    read_ids: Set[str]
+) -> Dict[tuple, Set[str]]:
+    """Group reads by their allele tuple at multiple positions.
+
+    Args:
+        read_alleles: Dict mapping read_id -> {msa_position -> allele}
+        positions: List of MSA positions to group by (order matters for tuple)
+        read_ids: Subset of read IDs to consider
+
+    Returns:
+        Dict mapping allele tuple -> set of read_ids
+    """
+    sorted_positions = sorted(positions)
+    allele_to_reads = defaultdict(set)
+    for read_id in read_ids:
+        alleles = read_alleles.get(read_id, {})
+        key = tuple(alleles.get(pos, '-') for pos in sorted_positions)
+        allele_to_reads[key].add(read_id)
+    return dict(allele_to_reads)
+
+

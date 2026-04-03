@@ -465,6 +465,113 @@ class TestCERGating:
         assert is_sig is True
         assert p_star > 0.02
 
+    def test_cer_k2_rescues_weak_k1(self):
+        """K=2 should pass CER where K=1 fails with same M."""
+        from speconsense.significance import is_variant_significant
+
+        M, N, L = 6, 1000, 700
+        # Fails at K=1
+        is_sig_k1, p_k1 = is_variant_significant(
+            M=M, N=N, L=L, assumed_error_rate=0.015, alpha=1e-5, K=1
+        )
+        assert is_sig_k1 is False
+
+        # Passes at K=2
+        is_sig_k2, p_k2 = is_variant_significant(
+            M=M, N=N, L=L, assumed_error_rate=0.015, alpha=1e-5, K=2
+        )
+        assert is_sig_k2 is True
+        assert p_k2 > p_k1
+
+    def test_find_correlated_positions_basic(self):
+        """Test _find_correlated_positions with perfectly correlated positions."""
+        from speconsense.core.workers import _find_correlated_positions, ClusterProcessingConfig
+
+        # Two positions where the same 10 reads have minority alleles
+        minority_reads = {f"read_{i}" for i in range(10)}
+        k1_failed = [
+            (50, minority_reads.copy()),   # MSA pos 50
+            (150, minority_reads.copy()),  # MSA pos 150 (well separated)
+        ]
+
+        # Build read_to_position_alleles: minority reads have 'G' at both positions,
+        # majority reads have 'A' at both positions
+        all_read_ids = set()
+        read_to_position_alleles = {}
+        for i in range(100):
+            rid = f"read_{i}"
+            all_read_ids.add(rid)
+            if rid in minority_reads:
+                read_to_position_alleles[rid] = {50: 'G', 150: 'G'}
+            else:
+                read_to_position_alleles[rid] = {50: 'A', 150: 'A'}
+
+        # Consensus positions: well separated
+        msa_to_consensus_pos = {50: 50, 150: 150}
+
+        config = ClusterProcessingConfig(
+            outlier_identity_threshold=0.95,
+            enable_secondpass_phasing=True,
+            disable_homopolymer_equivalence=False,
+            min_variant_frequency=0.05,
+            min_variant_count=5,
+            total_specimen_reads=1000,
+            assumed_error_rate=0.015,
+            significance_level=1e-5,
+            min_k_position_gap=10,
+            k_correlation_threshold=0.9
+        )
+
+        result = _find_correlated_positions(
+            k1_failed, msa_to_consensus_pos, read_to_position_alleles,
+            all_read_ids, 100, "A" * 700, config
+        )
+
+        # Should find the correlated pair and pass CER at K=2
+        assert result is not None, "Expected K=2 candidate to be found"
+        _, qualifying, _, _ = result
+        assert len(qualifying) >= 2, "Expected at least 2 qualifying haplotype groups"
+
+    def test_find_correlated_positions_proximity_filter(self):
+        """Nearby positions should be filtered by min_k_position_gap."""
+        from speconsense.core.workers import _find_correlated_positions, ClusterProcessingConfig
+
+        minority_reads = {f"read_{i}" for i in range(10)}
+        k1_failed = [
+            (50, minority_reads.copy()),
+            (55, minority_reads.copy()),  # Only 5 consensus positions apart
+        ]
+
+        read_to_position_alleles = {}
+        all_read_ids = set()
+        for i in range(100):
+            rid = f"read_{i}"
+            all_read_ids.add(rid)
+            allele = 'G' if rid in minority_reads else 'A'
+            read_to_position_alleles[rid] = {50: allele, 55: allele}
+
+        msa_to_consensus_pos = {50: 50, 55: 55}
+
+        config = ClusterProcessingConfig(
+            outlier_identity_threshold=0.95,
+            enable_secondpass_phasing=True,
+            disable_homopolymer_equivalence=False,
+            min_variant_frequency=0.05,
+            min_variant_count=5,
+            total_specimen_reads=1000,
+            assumed_error_rate=0.015,
+            significance_level=1e-5,
+            min_k_position_gap=10,  # Gap of 5 < 10: should be filtered
+            k_correlation_threshold=0.9
+        )
+
+        result = _find_correlated_positions(
+            k1_failed, msa_to_consensus_pos, read_to_position_alleles,
+            all_read_ids, 100, "A" * 700, config
+        )
+
+        assert result is None, "Nearby positions should be filtered by proximity"
+
 
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])

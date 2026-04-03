@@ -50,13 +50,17 @@ from speconsense.scalability import ScalabilityConfig
 from speconsense.types import ConsensusInfo, OverlapMergeInfo
 
 from .fields import parse_fasta_fields
+from speconsense.significance import compute_critical_error_rate
+
 from .io import (
     load_consensus_sequences,
     load_existing_specimen_outputs,
+    load_metadata_from_json,
     build_fastq_lookup_table,
     write_specimen_data_files,
     write_output_files,
 )
+from .iupac import count_variant_differences
 from .clustering import perform_hac_clustering, select_variants
 from .merging import merge_group_with_msa, create_full_consensus_from_msa
 from .analysis import run_spoa_msa, MAX_MSA_MERGE_VARIANTS, MIN_MERGE_BATCH, MAX_MERGE_BATCH
@@ -350,33 +354,70 @@ def process_single_specimen(file_consensuses: List[ConsensusInfo],
         variant_groups = dict(sorted_for_filtering[:args.select_max_groups])
         logging.info(f"Filtered to top {args.select_max_groups} groups by size (from {len(sorted_for_filtering)} total groups)")
 
-    # CER filter: remove secondary variants with low CER before merging.
-    # The primary (largest) variant in each group is never filtered — CER
-    # measures artifact risk relative to other variants, and the primary
-    # has no stronger competing signal.
+    # CER filter: pairwise evaluation using K>1 multi-position significance.
+    # The primary (largest) variant in each group is seeded as validated.
+    # Remaining variants are evaluated in decreasing size order against all
+    # validated variants. CER = min(pairwise p*), using K = number of
+    # differing positions between each pair.
     if cer_filter_rate > 0:
+        # Determine N (total specimen reads) from metadata or fallback
+        specimen_base = file_consensuses[0].sample_name.rsplit('-c', 1)[0]
+        source_dir = getattr(args, 'source', '.')
+        metadata = load_metadata_from_json(source_dir, specimen_base)
+        total_N = None
+        if metadata:
+            total_N = metadata.get('total_input_reads')
+        if total_N is None:
+            # Fallback: sum of all variant sizes (lower bound on N)
+            total_N = sum(v.ric for v in file_consensuses)
+
+        alpha = getattr(args, 'significance_level', 1e-5)
         total_cer_filtered = 0
+
         for group_id, group_members in variant_groups.items():
             if len(group_members) <= 1:
                 continue
-            largest_size = max(v.size for v in group_members)
-            filtered = []
-            filtered_count = 0
-            for v in group_members:
-                is_primary = (v.size == largest_size and
-                              not any(f.size == largest_size for f in filtered))
-                if is_primary or v.cer is None or v.cer >= cer_filter_rate:
-                    filtered.append(v)
+
+            # Sort by size descending; seed the largest as validated
+            sorted_members = sorted(group_members, key=lambda v: v.size, reverse=True)
+            validated = [sorted_members[0]]
+            filtered_out = 0
+
+            for candidate in sorted_members[1:]:
+                # Compute pairwise CER against each validated variant
+                min_p_star = float('inf')
+                for ref_variant in validated:
+                    K = count_variant_differences(candidate.sequence, ref_variant.sequence)
+                    if K <= 0:
+                        # K=0: HP-equivalent (will merge later); K=-1: alignment failed
+                        # Skip this comparison — don't filter on it
+                        continue
+                    L = max(len(candidate.sequence), len(ref_variant.sequence))
+                    p_star = compute_critical_error_rate(
+                        N=total_N, M=candidate.ric, L=L, alpha=alpha, K=K
+                    )
+                    if p_star < min_p_star:
+                        min_p_star = p_star
+
+                if min_p_star == float('inf'):
+                    # No valid pairwise comparisons (all K=0 or alignment failed)
+                    validated.append(candidate)
+                elif min_p_star >= cer_filter_rate:
+                    # Validated: update CER annotation
+                    candidate = candidate._replace(cer=min_p_star)
+                    validated.append(candidate)
                 else:
-                    filtered_count += 1
-                    logging.debug(f"CER filter: {v.sample_name} cer={v.cer:.4f} "
-                                  f"< {cer_filter_rate} (secondary variant)")
-            if filtered_count > 0:
-                total_cer_filtered += filtered_count
-                variant_groups[group_id] = filtered
+                    filtered_out += 1
+                    logging.debug(f"CER filter: {candidate.sample_name} pairwise cer={min_p_star:.4f} "
+                                  f"< {cer_filter_rate}")
+
+            if filtered_out > 0:
+                total_cer_filtered += filtered_out
+                variant_groups[group_id] = validated
+
         if total_cer_filtered > 0:
             logging.info(f"CER filter: removed {total_cer_filtered} secondary variant(s) "
-                         f"with CER < {cer_filter_rate}")
+                         f"with pairwise CER < {cer_filter_rate}")
 
     # Phase 2: MSA-based merging within each group
     merged_groups = {}

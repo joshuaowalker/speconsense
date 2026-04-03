@@ -24,6 +24,7 @@ from speconsense.msa import (
     extract_alignments_from_msa,
     filter_qualifying_haplotypes,
     group_reads_by_single_position,
+    group_reads_by_position_tuple,
     is_variant_position_with_composition,
 )
 from speconsense.significance import is_variant_significant
@@ -38,7 +39,8 @@ class ClusterProcessingConfig:
     """
     __slots__ = ['outlier_identity_threshold', 'enable_secondpass_phasing',
                  'disable_homopolymer_equivalence', 'min_variant_frequency', 'min_variant_count',
-                 'total_specimen_reads', 'assumed_error_rate', 'significance_level']
+                 'total_specimen_reads', 'assumed_error_rate', 'significance_level',
+                 'min_k_position_gap', 'k_correlation_threshold']
 
     def __init__(self, outlier_identity_threshold: Optional[float],
                  enable_secondpass_phasing: bool,
@@ -47,7 +49,9 @@ class ClusterProcessingConfig:
                  min_variant_count: int,
                  total_specimen_reads: int = 0,
                  assumed_error_rate: float = 0.015,
-                 significance_level: float = 1e-5):
+                 significance_level: float = 1e-5,
+                 min_k_position_gap: int = 10,
+                 k_correlation_threshold: float = 0.9):
         self.outlier_identity_threshold = outlier_identity_threshold
         self.enable_secondpass_phasing = enable_secondpass_phasing
         self.disable_homopolymer_equivalence = disable_homopolymer_equivalence
@@ -56,6 +60,8 @@ class ClusterProcessingConfig:
         self.total_specimen_reads = total_specimen_reads
         self.assumed_error_rate = assumed_error_rate
         self.significance_level = significance_level
+        self.min_k_position_gap = min_k_position_gap
+        self.k_correlation_threshold = k_correlation_threshold
 
 
 class ConsensusGenerationConfig:
@@ -266,6 +272,91 @@ def _detect_variant_positions_standalone(alignments: List[ReadAlignment], consen
         return []
 
 
+def _find_correlated_positions(
+    k1_failed: List[Tuple[int, Set[str]]],
+    msa_to_consensus_pos: Dict[int, Optional[int]],
+    read_to_position_alleles: Dict[str, Dict[int, str]],
+    all_read_ids: Set[str],
+    total_reads: int,
+    consensus: str,
+    config: 'ClusterProcessingConfig'
+) -> Optional[Tuple[int, Dict, Dict, float]]:
+    """Find correlated variant positions for K>1 CER evaluation.
+
+    For each seed position that failed K=1 CER, find other failed positions
+    whose minority allele correlates with the seed. If the joint K-position
+    pattern passes CER, return the best candidate split.
+
+    Returns (best_pos, qualifying, non_qualifying, error) or None.
+    The best_pos is the seed position; qualifying uses allele tuples as keys.
+    """
+    from speconsense.msa import calculate_within_cluster_error
+
+    best_combo_error = float('inf')
+    best_result = None
+    all_positions = set(pos for pos, _ in k1_failed)
+
+    for seed_idx, (seed_pos, seed_minority_reads) in enumerate(k1_failed):
+        seed_cons_pos = msa_to_consensus_pos.get(seed_pos)
+
+        correlated_positions = [seed_pos]
+        joint_minority_reads = seed_minority_reads.copy()
+
+        for other_idx, (other_pos, other_minority_reads) in enumerate(k1_failed):
+            if other_idx == seed_idx:
+                continue
+
+            # Proximity filter in consensus coordinates
+            other_cons_pos = msa_to_consensus_pos.get(other_pos)
+            if seed_cons_pos is not None and other_cons_pos is not None:
+                if abs(seed_cons_pos - other_cons_pos) < config.min_k_position_gap:
+                    continue
+
+            # Check correlation: what fraction of joint minority reads
+            # also have the minority allele at the other position?
+            overlap = joint_minority_reads & other_minority_reads
+            if len(joint_minority_reads) > 0 and len(overlap) >= len(joint_minority_reads) * config.k_correlation_threshold:
+                correlated_positions.append(other_pos)
+                joint_minority_reads = overlap
+
+        K = len(correlated_positions)
+        if K < 2:
+            continue
+
+        # Group reads by allele tuple at all correlated positions
+        allele_groups = group_reads_by_position_tuple(
+            read_to_position_alleles, correlated_positions, all_read_ids
+        )
+        qualifying, non_qualifying = filter_qualifying_haplotypes(
+            allele_groups, total_reads, config.min_variant_count, config.min_variant_frequency
+        )
+        if len(qualifying) < 2:
+            continue
+
+        min_M = min(len(reads) for reads in qualifying.values())
+        is_sig, p_star = is_variant_significant(
+            M=min_M, N=config.total_specimen_reads,
+            L=len(consensus),
+            assumed_error_rate=config.assumed_error_rate,
+            alpha=config.significance_level,
+            K=K
+        )
+        if not is_sig:
+            continue
+
+        logging.debug(f"K>1 CER pass: K={K} positions {correlated_positions}, "
+                      f"M={min_M}, p*={p_star:.4f}")
+
+        error = calculate_within_cluster_error(
+            qualifying, read_to_position_alleles, set(correlated_positions), all_positions
+        )
+        if error < best_combo_error:
+            best_combo_error = error
+            best_result = (seed_pos, qualifying, non_qualifying, error)
+
+    return best_result
+
+
 def _recursive_phase_cluster_standalone(
     read_ids: Set[str],
     read_sequences: Dict[str, str],
@@ -344,16 +435,21 @@ def _recursive_phase_cluster_standalone(
 
         read_to_position_alleles[read_id] = position_alleles
 
-    # Find best split
+    # Find best split — Phase 1: K=1 evaluation
     best_pos = None
     best_error = float('inf')
     best_qualifying = None
     best_non_qualifying = None
     all_positions = set(variant_msa_positions)
+    all_read_ids = set(read_to_position_alleles.keys())
+    cer_active = config.assumed_error_rate > 0 and config.total_specimen_reads > 0
+
+    # Track positions that fail K=1 CER for potential K>1 fallback
+    k1_failed = []  # list of (pos, minority_reads) for K>1 candidates
 
     for pos in variant_msa_positions:
         allele_groups = group_reads_by_single_position(
-            read_to_position_alleles, pos, set(read_to_position_alleles.keys())
+            read_to_position_alleles, pos, all_read_ids
         )
         qualifying, non_qualifying = filter_qualifying_haplotypes(
             allele_groups, total_reads, config.min_variant_count, config.min_variant_frequency
@@ -362,7 +458,7 @@ def _recursive_phase_cluster_standalone(
             continue
 
         # CER gate: check statistical significance before expensive error calculation
-        if config.assumed_error_rate > 0 and config.total_specimen_reads > 0:
+        if cer_active:
             min_M = min(len(reads) for reads in qualifying.values())
             is_sig, p_star = is_variant_significant(
                 M=min_M, N=config.total_specimen_reads,
@@ -372,6 +468,9 @@ def _recursive_phase_cluster_standalone(
             )
             if not is_sig:
                 logging.debug(f"CER suppression at MSA pos {pos}: p*={p_star:.4f} < {config.assumed_error_rate}")
+                # Save for K>1 fallback: record minority allele reads
+                minority_allele = min(qualifying, key=lambda a: len(qualifying[a]))
+                k1_failed.append((pos, qualifying[minority_allele].copy()))
                 continue
 
         error = calculate_within_cluster_error(qualifying, read_to_position_alleles, {pos}, all_positions)
@@ -380,6 +479,15 @@ def _recursive_phase_cluster_standalone(
             best_pos = pos
             best_qualifying = qualifying
             best_non_qualifying = non_qualifying
+
+    # Phase 2: K>1 correlation-based fallback (only if no K=1 candidates found)
+    if best_pos is None and len(k1_failed) >= 2 and cer_active:
+        best_k_combo = _find_correlated_positions(
+            k1_failed, msa_to_consensus_pos, read_to_position_alleles,
+            all_read_ids, total_reads, consensus, config
+        )
+        if best_k_combo is not None:
+            best_pos, best_qualifying, best_non_qualifying, best_error = best_k_combo
 
     if best_pos is None:
         return [(path, consensus, read_ids)], set()

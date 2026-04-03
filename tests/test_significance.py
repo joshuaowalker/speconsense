@@ -94,6 +94,85 @@ class TestComputeCriticalErrorRate:
 
 
 # ==============================================================================
+# Tests for K>1 multi-position CER
+# ==============================================================================
+
+class TestMultiPositionCER:
+    """Verify K>1 p* values against the reference implementation
+    (docs/variant_significance/compute_critical_rates.py).
+    """
+
+    def test_k1_backward_compatible(self):
+        """K=1 should produce identical results to default (no K argument)."""
+        p_default = compute_critical_error_rate(N=1000, M=100, L=700, alpha=0.05)
+        p_k1 = compute_critical_error_rate(N=1000, M=100, L=700, alpha=0.05, K=1)
+        assert p_default == p_k1
+
+    def test_k2_standard_point(self):
+        """N=1000, M=100, K=2, alpha=0.05 => p*≈72.57% (uniform)."""
+        p_star = compute_critical_error_rate(N=1000, M=100, L=700, alpha=0.05, K=2)
+        assert abs(p_star - 0.7257) < 0.005, f"Expected ~72.57%, got {p_star*100:.2f}%"
+
+    def test_k3_standard_point(self):
+        """N=1000, M=100, K=3, alpha=0.05 => p*≈112.18% (uniform, uncapped)."""
+        p_star = compute_critical_error_rate(N=1000, M=100, L=700, alpha=0.05, K=3)
+        assert abs(p_star - 1.1218) < 0.01, f"Expected ~112.18%, got {p_star*100:.2f}%"
+
+    def test_k2_run_corrected(self):
+        """N=1000, M=100, K=2, alpha=1e-5 => p*≈66.63% (uniform)."""
+        p_star = compute_critical_error_rate(N=1000, M=100, L=700, alpha=1e-5, K=2)
+        assert abs(p_star - 0.6663) < 0.005, f"Expected ~66.63%, got {p_star*100:.2f}%"
+
+    def test_k2_small_N(self):
+        """N=100, M=10, K=2, alpha=1e-5 => p*≈20.13% (uniform)."""
+        p_star = compute_critical_error_rate(N=100, M=10, L=700, alpha=1e-5, K=2)
+        assert abs(p_star - 0.2013) < 0.005, f"Expected ~20.13%, got {p_star*100:.2f}%"
+
+    def test_monotonicity_in_K(self):
+        """p* should increase with K (more positions = stronger evidence)."""
+        p_k1 = compute_critical_error_rate(N=1000, M=50, L=700, alpha=1e-5, K=1)
+        p_k2 = compute_critical_error_rate(N=1000, M=50, L=700, alpha=1e-5, K=2)
+        p_k3 = compute_critical_error_rate(N=1000, M=50, L=700, alpha=1e-5, K=3)
+        assert p_k1 < p_k2 < p_k3, f"Expected p* to increase with K: {p_k1}, {p_k2}, {p_k3}"
+
+    def test_minimum_M_k1_paper_table3(self):
+        """Table 3: N=1000, K=1, p=1.5%, alpha=1e-5 => M_min=23."""
+        assert compute_minimum_M(N=1000, L=700, alpha=1e-5, assumed_error_rate=0.015, K=1) == 23
+
+    def test_minimum_M_k2_paper_table3(self):
+        """Table 3: N=1000, K=2, p=1.5%, alpha=1e-5 => M_min=6."""
+        assert compute_minimum_M(N=1000, L=700, alpha=1e-5, assumed_error_rate=0.015, K=2) == 6
+
+    def test_minimum_M_k3_paper_table3(self):
+        """Table 3: N=1000, K=3, p=1.5%, alpha=1e-5 => M_min=4."""
+        assert compute_minimum_M(N=1000, L=700, alpha=1e-5, assumed_error_rate=0.015, K=3) == 4
+
+    def test_is_variant_significant_k2(self):
+        """M=6 at K=2 should be significant (passes at K=2 but not K=1)."""
+        is_sig_k1, _ = is_variant_significant(M=6, N=1000, L=700,
+                                               assumed_error_rate=0.015, K=1)
+        is_sig_k2, _ = is_variant_significant(M=6, N=1000, L=700,
+                                               assumed_error_rate=0.015, K=2)
+        assert is_sig_k1 is False
+        assert is_sig_k2 is True
+
+    def test_edge_K_zero(self):
+        """K=0 should return 0.0."""
+        assert compute_critical_error_rate(N=1000, M=100, L=700, K=0) == 0.0
+
+    def test_edge_K_exceeds_L(self):
+        """K > L should return 0.0 (can't have more positions than amplicon length)."""
+        assert compute_critical_error_rate(N=1000, M=100, L=700, K=701) == 0.0
+
+    def test_minimum_M_decreases_with_K(self):
+        """Minimum M should decrease with K at fixed N, p, alpha."""
+        m1 = compute_minimum_M(N=1000, L=700, alpha=1e-5, assumed_error_rate=0.015, K=1)
+        m2 = compute_minimum_M(N=1000, L=700, alpha=1e-5, assumed_error_rate=0.015, K=2)
+        m3 = compute_minimum_M(N=1000, L=700, alpha=1e-5, assumed_error_rate=0.015, K=3)
+        assert m1 > m2 > m3, f"Expected M to decrease: K=1:{m1}, K=2:{m2}, K=3:{m3}"
+
+
+# ==============================================================================
 # Tests for is_cer_reportable() — signal destruction threshold
 # ==============================================================================
 
@@ -362,28 +441,37 @@ class TestCERLoading:
 # ==============================================================================
 
 class TestCERFilteringPostHAC:
-    """Test CER-based variant filtering after HAC grouping.
+    """Test pairwise CER-based variant filtering after HAC grouping.
 
-    CER filtering protects the primary (largest) variant in each group and
-    only filters secondary variants with cer < assumed_error_rate. This
-    prevents eliminating the dominant sequence when there's no stronger
-    competing signal.
+    The pairwise CER filter seeds the largest variant as validated, then
+    evaluates remaining variants in size order. For each candidate, it computes
+    p* against each validated variant using K = number of differing positions.
+    The candidate's CER = min(pairwise p*). Candidates with CER < threshold
+    are filtered.
     """
+
+    # Base sequence (200bp) and variants with known differences
+    BASE_SEQ = "ACGT" * 50
+    # 1 substitution difference from BASE_SEQ (position 0: A->T)
+    SEQ_1SUB = "TCGT" + "ACGT" * 49
+    # 3 substitution differences (positions 0, 4, 8)
+    SEQ_3SUB = "TCGT" + "TCGT" + "TCGT" + "ACGT" * 47
 
     @pytest.fixture
     def fasta_dir_multi(self, tmp_path):
-        """Create test FASTA with a primary and secondary variants.
+        """Create test FASTA with primary + secondaries that differ.
 
-        All sequences are identical so they land in a single HAC group.
+        - c1 (size=200): primary, base sequence
+        - c2 (size=5): secondary, 1 substitution — K=1, small M, should fail CER
+        - c3 (size=50): secondary, 3 substitutions — K=3, moderate M, should pass
         """
-        seq = "ACGT" * 50  # 200bp identical sequence
         fasta_content = (
-            f">specimen-c1 size=200 ric=100 cer=0.15 cer.a=1e-05\n"
-            f"{seq}\n"
-            f">specimen-c2 size=50 ric=25 cer=0.01 cer.a=1e-05\n"
-            f"{seq}\n"
-            f">specimen-c3 size=30 ric=15\n"
-            f"{seq}\n"
+            f">specimen-c1 size=200 ric=200\n"
+            f"{self.BASE_SEQ}\n"
+            f">specimen-c2 size=5 ric=5\n"
+            f"{self.SEQ_1SUB}\n"
+            f">specimen-c3 size=50 ric=50\n"
+            f"{self.SEQ_3SUB}\n"
         )
         fasta_file = tmp_path / "specimen-all.fasta"
         fasta_file.write_text(fasta_content)
@@ -391,25 +479,23 @@ class TestCERFilteringPostHAC:
 
     @pytest.fixture
     def fasta_dir_single(self, tmp_path):
-        """Create test FASTA with a single low-CER variant."""
-        seq = "ACGT" * 50
+        """Create test FASTA with a single variant."""
         fasta_content = (
-            f">specimen-c1 size=5 ric=5 cer=0.019 cer.a=1e-05\n"
-            f"{seq}\n"
+            f">specimen-c1 size=5 ric=5\n"
+            f"{self.BASE_SEQ}\n"
         )
         fasta_file = tmp_path / "specimen-all.fasta"
         fasta_file.write_text(fasta_content)
         return tmp_path
 
     @pytest.fixture
-    def fasta_dir_primary_low_cer(self, tmp_path):
-        """Create test FASTA where the primary variant has low CER."""
-        seq = "ACGT" * 50
+    def fasta_dir_identical(self, tmp_path):
+        """Create test FASTA where variants are identical (K=0)."""
         fasta_content = (
-            f">specimen-c1 size=100 ric=50 cer=0.015 cer.a=1e-05\n"
-            f"{seq}\n"
-            f">specimen-c2 size=10 ric=10 cer=0.005 cer.a=1e-05\n"
-            f"{seq}\n"
+            f">specimen-c1 size=100 ric=100\n"
+            f"{self.BASE_SEQ}\n"
+            f">specimen-c2 size=10 ric=10\n"
+            f"{self.BASE_SEQ}\n"
         )
         fasta_file = tmp_path / "specimen-all.fasta"
         fasta_file.write_text(fasta_content)
@@ -440,29 +526,31 @@ class TestCERFilteringPostHAC:
         )
         return final
 
-    def test_secondary_low_cer_filtered(self, fasta_dir_multi):
-        """Secondary variant with cer < threshold should be filtered."""
-        result = self._run_summarize(fasta_dir_multi, assumed_error_rate=0.02)
-        # process_single_specimen renames variants, so check by size
+    def test_weak_secondary_filtered(self, fasta_dir_multi):
+        """Secondary with K=1 and M=5 should be filtered (low pairwise CER)."""
+        result = self._run_summarize(fasta_dir_multi, assumed_error_rate=0.015)
         sizes = sorted([c.size for c in result], reverse=True)
-        assert 200 in sizes  # Primary (cer=0.15, passes)
-        assert 50 not in sizes  # Secondary (cer=0.01, filtered)
-        assert 30 in sizes  # No CER header, never filtered
+        assert 200 in sizes  # Primary always kept
+        assert 5 not in sizes  # K=1, M=5, N=255: pairwise p* too low
+        assert 50 in sizes  # K=3, M=50: pairwise p* high
         assert len(result) == 2
 
-    def test_primary_never_filtered(self, fasta_dir_primary_low_cer):
-        """Primary variant should never be filtered, even with low CER."""
-        result = self._run_summarize(fasta_dir_primary_low_cer, assumed_error_rate=0.02)
+    def test_strong_secondary_passes(self, fasta_dir_multi):
+        """Secondary with K=3 and M=50 should pass CER filter."""
+        result = self._run_summarize(fasta_dir_multi, assumed_error_rate=0.015)
         sizes = [c.size for c in result]
-        assert 100 in sizes  # Primary protected despite cer=0.015
+        assert 50 in sizes  # K=3, large M: well-supported
 
-    def test_secondary_with_low_cer_filtered_but_primary_kept(self, fasta_dir_primary_low_cer):
-        """Secondary filtered, primary kept even when both have low CER."""
-        result = self._run_summarize(fasta_dir_primary_low_cer, assumed_error_rate=0.02)
+    def test_primary_never_filtered(self, fasta_dir_multi):
+        """Primary variant should never be filtered."""
+        result = self._run_summarize(fasta_dir_multi, assumed_error_rate=0.99)
         sizes = [c.size for c in result]
-        assert 100 in sizes  # Primary (largest)
-        assert 10 not in sizes  # Secondary (cer=0.005 < 0.02)
-        assert len(result) == 1
+        assert 200 in sizes  # Primary always kept
+
+    def test_identical_sequences_not_filtered(self, fasta_dir_identical):
+        """Identical sequences (K=0) should pass — no pairwise comparison."""
+        result = self._run_summarize(fasta_dir_identical, assumed_error_rate=0.015)
+        assert len(result) == 2
 
     def test_single_variant_never_filtered(self, fasta_dir_single):
         """Single-variant specimen should never be filtered by CER."""
@@ -475,9 +563,9 @@ class TestCERFilteringPostHAC:
         result = self._run_summarize(fasta_dir_multi, assumed_error_rate=0)
         assert len(result) == 3
 
-    def test_no_cer_header_never_filtered(self, fasta_dir_multi):
-        """Variants without CER header are never filtered."""
+    def test_high_k_survives_high_threshold(self, fasta_dir_multi):
+        """K=3 variant with good support passes even at high threshold."""
         result = self._run_summarize(fasta_dir_multi, assumed_error_rate=0.50)
         sizes = [c.size for c in result]
-        # c3 (size=30) has no CER, should survive even at high threshold
-        assert 30 in sizes
+        # c3 (size=50, K=3): pairwise p* >> 50%, should survive
+        assert 50 in sizes
