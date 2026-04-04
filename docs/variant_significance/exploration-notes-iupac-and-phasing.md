@@ -140,3 +140,90 @@ The F=755 case takes minutes (dominated by the K=1 evaluation of all 755 positio
 4. **Selection criterion.** We settled on within-cluster error as the selector (CER as gate). This could be revisited — p* captures statistical confidence while error captures split cleanliness. A combined metric might be better.
 
 5. **Beam width and depth.** B=20, K_max=5 were chosen pragmatically. The beam width affects whether the search finds non-greedy solutions (where the best K=2 pair doesn't contain the best K=1 position). The depth affects how many correlated positions can be jointly evaluated. Both could be tuned or made adaptive.
+
+## 6. Bidirectional best-first search — replacing the beam search
+
+**Date:** 2026-04-04
+
+The beam search (section 3) had a greedy bias: it expanded position sets one position at a time, so the best K=2 pair had to contain a top-20 K=1 position. It also struggled with high F (many variant positions) due to O(K × B × min(F,50) × N) complexity.
+
+### Core insight: start from reads, not positions
+
+Reads carrying minor alleles at multiple variant positions (high "variant load") are likely members of a minority haplotype. Their shared positions define the correlated set directly — this is the transpose of the beam search's position-first approach.
+
+### Algorithm
+
+**Phase 1: K=1 scan** — same as before, but now also computes:
+- `majority_allele[pos]`: most common allele per qualifying position
+- `allele_read_sets[pos]`: `{allele: set(read_ids)}` for each non-majority, non-gap allele (allele-aware — prevents vote inflation at multiallelic positions)
+- `variant_load[rid]`: count of qualifying positions where the read carries any minority allele
+
+**Phase 2: Bidirectional search for K>1**
+
+Two expansion operations alternate, driven by a priority queue ordered by CER p*:
+
+1. **reads → positions** (`expand_reads_to_positions`): For each qualifying position, compute per-allele votes (`max over alleles of |allele_reads ∩ seed_reads|`). Iterate unique vote thresholds descending — each threshold yields a candidate position set. Apply proximity filter, evaluate via CER.
+
+2. **positions → reads** (`expand_positions_to_reads`): For each read, count how many of the positions it carries a minority allele at. Iterate unique match thresholds descending — each threshold yields a candidate read set, which feeds back into step 1.
+
+Seed: reads with `variant_load >= 2`. Budget: 200 position-set evaluations (each is O(K × N) for group refinement).
+
+Selection: lowest within-cluster error among all CER-significant results across K=1 and K>1. CER gates admission; error selects the winner. p* is used only for queue priority.
+
+### Key design decisions
+
+- **Allele-aware voting.** At a triallelic position (A=60, G=25, T=15), the vote for that position is `max(|G ∩ reads|, |T ∩ reads|)`, not `|G ∪ T ∩ reads|`. This prevents inflated votes at multiallelic sites.
+
+- **No K cap.** Unlike the beam search (K_max=5), the bidirectional search imposes no limit on K. If 3 reads agree at 54 positions, the CER p*=0.81 correctly reflects that this is almost certainly real variation — the probability of 3 independent error-correlated reads matching at 54 positions is vanishingly small. Splitting these reads out serves two purposes: identifying the sub-variant AND purifying the source cluster's consensus.
+
+- **Greedy proximity filter.** Position sets are generated in bulk (not one-at-a-time), so the beam search's incremental proximity check is replaced with a greedy set filter: sort by vote count descending, skip positions within `min_k_position_gap` of already-selected ones.
+
+- **Unique threshold iteration.** Instead of iterating all integers from J to 2, iterate only the distinct vote/match values. This skips thresholds that produce duplicate position/read sets.
+
+### Results on ONT08.31
+
+| Metric | Beam search | Bidirectional best-first |
+|--------|------------|--------------------------|
+| Clusters | 13 | 13 |
+| c1 size / IUPAC | 77 / 1 | 77 / 1 |
+| K>1 splits | K=3 (M=26), K=2 (M=5), K=2 (M=5) | K=3 (M=26), K=2 (M=5), K=2 (M=5) |
+| Total IUPAC | 16 | 16 |
+
+Same results — the bidirectional search finds the same splits as the beam search for this specimen at default thresholds.
+
+### Scaling with F (variant positions per cluster)
+
+Tested on ONT10.20 (3788 reads), varying `--min-variant-frequency` with `--min-variant-count 3`:
+
+| freq | F (cluster 1) | Runtime | K>1 result |
+|------|--------------|---------|------------|
+| 0.10 | 0 | 29.6s | — |
+| 0.01 | 11 | 34.6s | K=9, M=8, p*=0.73 |
+| 0.001 | ~142 | 39.1s | — |
+| 0.0001 | 142 | 39.0s | K=54, M=3, p*=0.81 |
+
+Runtime increases by ~30% from F=0 to F=142 (dominated by the O(F×N) K=1 scan). The bidirectional Phase 2 search stays bounded by the 200-evaluation budget regardless of F.
+
+At `freq=0.0001`, the search correctly finds a K=54 split where 3 reads share minority alleles at 54 positions. The progression shows the algorithm tightening the haplotype definition:
+
+```
+K=3,  M=7,  p*=0.11, error=0.0068
+K=4,  M=7,  p*=0.21, error=0.0066
+K=6,  M=4,  p*=0.18, error=0.0064
+K=11, M=3,  p*=0.24, error=0.0059
+K=20, M=3,  p*=0.43, error=0.0052
+K=40, M=3,  p*=0.69, error=0.0044
+K=54, M=3,  p*=0.81, error=0.0035  ← selected (lowest error)
+```
+
+This is expected behavior: more positions = finer haplotype resolution = lower within-cluster error. The M=3 floor is set by `--min-variant-count 3`.
+
+### Parameters removed
+
+- `--k-correlation-threshold` — removed in the beam search iteration (section 3), still gone
+
+### Complexity
+
+- Phase 1: O(F × N) — same as all previous algorithms
+- Phase 2: O(budget × K × N) with budget=200 — independent of F
+- Total: O(F × N + 200 × K × N) — linear in F, bounded in K>1 search

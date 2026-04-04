@@ -4,6 +4,7 @@ These must be at module level to be picklable for multiprocessing.
 Includes standalone versions of functions used by workers and config classes.
 """
 
+import heapq
 import logging
 import os
 import subprocess
@@ -291,6 +292,39 @@ def _refine_groups(
     return new_groups
 
 
+def _proximity_filter_positions(
+    positions: List[int],
+    cons_pos_map: Dict[int, Optional[int]],
+    min_gap: int,
+    priority: Dict[int, float],
+) -> List[int]:
+    """Greedy proximity filter for a set of positions.
+
+    Sorts positions by priority (descending), then greedily selects positions
+    that are at least min_gap apart in consensus space.
+
+    Returns filtered positions sorted ascending by MSA position.
+    """
+    if min_gap <= 0:
+        return sorted(positions)
+
+    sorted_candidates = sorted(positions, key=lambda p: (-priority.get(p, 0), p))
+    selected = []
+    selected_consensus = []
+
+    for pos in sorted_candidates:
+        cp = cons_pos_map.get(pos)
+        if cp is None:
+            selected.append(pos)
+            continue
+        too_close = any(abs(cp - scp) < min_gap for scp in selected_consensus)
+        if not too_close:
+            selected.append(pos)
+            selected_consensus.append(cp)
+
+    return sorted(selected)
+
+
 def _find_best_phasing_subset(
     variant_msa_positions: List[int],
     msa_to_consensus_pos: Dict[int, Optional[int]],
@@ -300,53 +334,39 @@ def _find_best_phasing_subset(
     consensus_length: int,
     config: 'ClusterProcessingConfig',
 ) -> Optional[Tuple[List[int], Dict, Dict, float, float]]:
-    """Find the best subset of variant positions for phasing via beam search.
+    """Find the best subset of variant positions for phasing.
 
-    Uses a beam search over position subsets of increasing K (number of
-    positions). At each level, expands the top B candidates by trying each
-    remaining position, then keeps the top B for the next level.
+    Uses a bidirectional best-first search that alternates between read-space
+    and position-space. Phase 1 evaluates each position at K=1 and computes
+    per-position allele read sets. Phase 2 seeds from reads with high
+    "variant load" (minority alleles at multiple positions), then alternates:
+    reads → position sets (by vote threshold) and position sets → read sets
+    (by match threshold), guided by a CER-priority queue.
 
-    Complexity: O(K_max * B * min(F, expand_limit) * R) where
-    F = candidate positions, B = beam width, R = reads.
-
-    Selection: among all CER-significant subsets found across all levels,
-    returns the one with lowest within-cluster error (best split quality).
+    Selection: among all CER-significant subsets found, returns the one with
+    lowest within-cluster error (best split quality).
 
     Returns:
         (positions, qualifying, non_qualifying, error, p_star) or None.
     """
     cer_active = config.assumed_error_rate > 0 and config.total_specimen_reads > 0
     all_positions = set(variant_msa_positions)
+    N = config.total_specimen_reads
+    L = consensus_length
+    alpha = config.significance_level
+    error_rate = config.assumed_error_rate
 
-    # Beam search parameters
-    beam_width = 20
-    max_k = 5
-    max_expand_per_entry = 50  # max positions to try per beam entry at K>1
-
-    # Level 1 (K=1): evaluate all candidate positions, build beam
-    # This also serves as the pre-filter (positions without >=2 qualifying
-    # alleles are skipped). Groups are kept in tuple-key format for
-    # incremental refinement at K>1.
-    best = None  # (error, p_star, positions, qualifying, non_qualifying)
-    beam = []  # (ranking_key, [positions], groups_dict)
-
+    cons_pos = {p: msa_to_consensus_pos.get(p) for p in variant_msa_positions}
     initial_groups = {(): all_read_ids.copy()}
 
-    # Pre-compute consensus positions for proximity filter
-    cons_pos = {p: msa_to_consensus_pos.get(p) for p in variant_msa_positions}
+    best = None  # (error, p_star, positions, qualifying, non_qualifying)
 
-    def violates_proximity(pos, selected_positions):
-        """Check if pos is too close to any position in the selected set."""
-        if config.min_k_position_gap <= 0 or not selected_positions:
-            return False
-        cp = cons_pos.get(pos)
-        if cp is None:
-            return False
-        for existing_pos in selected_positions:
-            ecp = cons_pos.get(existing_pos)
-            if ecp is not None and abs(cp - ecp) < config.min_k_position_gap:
-                return True
-        return False
+    # --- Phase 1: K=1 scan ---
+    # Also builds allele_read_sets and variant_load for Phase 2.
+    majority_allele = {}       # pos -> allele string
+    allele_read_sets = {}      # pos -> {allele: set(read_ids)} for non-majority, non-gap
+    qualifying_positions = []  # positions with >=2 qualifying alleles
+    variant_load = {}          # rid -> count of positions where read is minority
 
     for pos in variant_msa_positions:
         groups = _refine_groups(initial_groups, pos, read_to_position_alleles)
@@ -356,15 +376,32 @@ def _find_best_phasing_subset(
         if len(qualifying) < 2:
             continue
 
-        min_M = min(len(reads) for reads in qualifying.values())
+        qualifying_positions.append(pos)
 
+        # Majority allele: qualifying group with most reads
+        best_combo = max(qualifying.keys(), key=lambda c: len(qualifying[c]))
+        maj = best_combo[0]
+        majority_allele[pos] = maj
+
+        # Allele-aware read sets: each non-majority, non-gap allele -> read set
+        ars = {}
+        for allele_tuple, read_set in groups.items():
+            allele = allele_tuple[0]
+            if allele != maj and allele != '-':
+                ars[allele] = read_set
+        allele_read_sets[pos] = ars
+
+        # Update variant_load for reads carrying any minority allele
+        for allele_reads in ars.values():
+            for rid in allele_reads:
+                variant_load[rid] = variant_load.get(rid, 0) + 1
+
+        # CER test for K=1
+        min_M = min(len(reads) for reads in qualifying.values())
         if cer_active:
             is_sig, p_star = is_variant_significant(
-                M=min_M, N=config.total_specimen_reads,
-                L=consensus_length,
-                assumed_error_rate=config.assumed_error_rate,
-                alpha=config.significance_level,
-                K=1
+                M=min_M, N=N, L=L,
+                assumed_error_rate=error_rate, alpha=alpha, K=1
             )
         else:
             is_sig, p_star = True, float('inf')
@@ -376,81 +413,155 @@ def _find_best_phasing_subset(
             if best is None or error < best[0]:
                 best = (error, p_star, [pos], qualifying, non_qualifying)
 
-        # Add to beam ranked by minority size (higher = more split potential at K>1)
-        beam.append((-min_M, [pos], groups))
-
-    if not beam:
+    if not qualifying_positions:
         return None
 
-    # Keep top beam_width entries (highest min_M first)
-    beam.sort(key=lambda x: x[0])
-    beam = beam[:beam_width]
+    # --- Phase 2: Bidirectional search for K>1 ---
+    seed_reads = {rid for rid, load in variant_load.items() if load >= 2}
 
-    # Pre-compute position indices for O(1) lookup in the sorted beam positions.
-    # candidate_positions preserves the ordering used by beam entries.
-    candidate_positions = [pos for pos in variant_msa_positions]
-    pos_to_idx = {p: i for i, p in enumerate(candidate_positions)}
-    F = len(candidate_positions)
+    if not seed_reads or len(qualifying_positions) < 2:
+        if best is None:
+            return None
+        error, p_star, positions, qualifying, non_qualifying = best
+        return (positions, qualifying, non_qualifying, error, p_star)
 
-    # Levels 2..max_k: expand each beam entry by adding positions
-    for K in range(2, max_k + 1):
-        next_beam = []
-        for _rank, positions, groups in beam:
-            # Start after the last position to avoid duplicate subsets
-            start_idx = pos_to_idx[positions[-1]] + 1
-            tried = 0
+    seen = set()    # frozensets of position sets already evaluated
+    budget = [200]  # mutable for closures
+    counter = [0]   # tiebreaker for heap stability
+    queue = []      # min-heap of (-p_star, counter, positions_frozenset)
 
-            for i in range(start_idx, F):
-                if tried >= max_expand_per_entry:
-                    break
-                next_pos = candidate_positions[i]
+    def evaluate_position_set(pos_set_frozen):
+        """Evaluate a position set by grouping all reads. Updates best."""
+        if pos_set_frozen in seen or len(pos_set_frozen) < 2:
+            return
+        seen.add(pos_set_frozen)
+        budget[0] -= 1
 
-                if violates_proximity(next_pos, positions):
-                    continue
+        positions_sorted = sorted(pos_set_frozen)
+        K = len(positions_sorted)
 
-                new_groups = _refine_groups(groups, next_pos, read_to_position_alleles)
+        groups = {(): all_read_ids.copy()}
+        for p in positions_sorted:
+            groups = _refine_groups(groups, p, read_to_position_alleles)
 
-                qualifying, non_qualifying = filter_qualifying_haplotypes(
-                    new_groups, total_reads,
-                    config.min_variant_count, config.min_variant_frequency
+        qualifying, non_qualifying = filter_qualifying_haplotypes(
+            groups, total_reads, config.min_variant_count, config.min_variant_frequency
+        )
+        if len(qualifying) < 2:
+            return
+
+        min_M = min(len(reads) for reads in qualifying.values())
+
+        if cer_active:
+            is_sig, p_star = is_variant_significant(
+                M=min_M, N=N, L=L,
+                assumed_error_rate=error_rate, alpha=alpha, K=K
+            )
+        else:
+            is_sig, p_star = True, float('inf')
+
+        nonlocal best
+        if is_sig:
+            error = calculate_within_cluster_error(
+                qualifying, read_to_position_alleles,
+                set(positions_sorted), all_positions
+            )
+            if best is None or error < best[0]:
+                best = (error, p_star, list(positions_sorted), qualifying, non_qualifying)
+                logging.debug(
+                    f"K>1 best-first: K={K} positions {positions_sorted}, "
+                    f"M={min_M}, p*={p_star:.4f}, error={error:.4f}"
                 )
-                if len(qualifying) < 2:
-                    continue
 
-                tried += 1
-                min_M = min(len(reads) for reads in qualifying.values())
-                new_positions = positions + [next_pos]
+            counter[0] += 1
+            heapq.heappush(queue, (-p_star, counter[0], pos_set_frozen))
 
-                if cer_active:
-                    is_sig, p_star = is_variant_significant(
-                        M=min_M, N=config.total_specimen_reads,
-                        L=consensus_length,
-                        assumed_error_rate=config.assumed_error_rate,
-                        alpha=config.significance_level,
-                        K=K
-                    )
-                else:
-                    is_sig, p_star = True, float('inf')
+    def expand_reads_to_positions(reads):
+        """Generate candidate position sets from a read set via allele-aware voting."""
+        if budget[0] <= 0:
+            return
 
-                if is_sig:
-                    error = calculate_within_cluster_error(
-                        qualifying, read_to_position_alleles,
-                        set(new_positions), all_positions
-                    )
-                    if best is None or error < best[0]:
-                        best = (error, p_star, list(new_positions), qualifying, non_qualifying)
-                        logging.debug(f"K>1 CER pass: K={K} positions {new_positions}, "
-                                      f"M={min_M}, p*={p_star:.4f}")
+        # Per-allele votes: max across alleles at each position
+        votes = {}
+        for pos in qualifying_positions:
+            max_vote = 0
+            for allele_reads in allele_read_sets[pos].values():
+                v = len(allele_reads & reads)
+                if v > max_vote:
+                    max_vote = v
+            if max_vote >= 2:
+                votes[pos] = max_vote
 
-                # Rank beam entries by min_M (higher = better split potential)
-                next_beam.append((-min_M, new_positions, new_groups))
+        if len(votes) < 2:
+            return
 
-        if not next_beam:
-            break
+        unique_thresholds = sorted(set(votes.values()), reverse=True)
+        prev_pos_set = None
 
-        next_beam.sort(key=lambda x: x[0])
-        beam = next_beam[:beam_width]
+        for I in unique_thresholds:
+            if I < 2 or budget[0] <= 0:
+                break
 
+            candidate_positions = [p for p, v in votes.items() if v >= I]
+            if len(candidate_positions) < 2:
+                continue
+
+            filtered = _proximity_filter_positions(
+                candidate_positions, cons_pos, config.min_k_position_gap, votes
+            )
+            if len(filtered) < 2:
+                continue
+
+            pos_frozen = frozenset(filtered)
+            if pos_frozen == prev_pos_set:
+                continue
+            prev_pos_set = pos_frozen
+
+            evaluate_position_set(pos_frozen)
+
+    def expand_positions_to_reads(positions_frozen):
+        """Derive read sets from a position set, then expand each to positions."""
+        if budget[0] <= 0:
+            return
+
+        positions = set(positions_frozen)
+
+        # Match counts: how many of these positions each read is minority at
+        match_counts = {}
+        for rid in all_read_ids:
+            mc = 0
+            for pos in positions:
+                if pos in allele_read_sets:
+                    for allele_reads in allele_read_sets[pos].values():
+                        if rid in allele_reads:
+                            mc += 1
+                            break
+            if mc >= 1:
+                match_counts[rid] = mc
+
+        unique_thresholds = sorted(set(match_counts.values()), reverse=True)
+        prev_reads = None
+
+        for thresh in unique_thresholds:
+            if thresh < 1 or budget[0] <= 0:
+                break
+
+            new_reads = frozenset(rid for rid, mc in match_counts.items() if mc >= thresh)
+            if new_reads == prev_reads or len(new_reads) < 2:
+                continue
+            prev_reads = new_reads
+
+            expand_reads_to_positions(new_reads)
+
+    # Seed expansion
+    expand_reads_to_positions(seed_reads)
+
+    # Best-first loop
+    while queue and budget[0] > 0:
+        _neg_p, _cnt, pos_frozen = heapq.heappop(queue)
+        expand_positions_to_reads(pos_frozen)
+
+    # Return best result
     if best is None:
         return None
 

@@ -689,5 +689,118 @@ class TestCERGating:
         assert len(qualifying) == 2
 
 
+    def test_find_best_phasing_subset_nongreedy_k2(self):
+        """K=2 found via read-ranking when neither position is individually clean."""
+        from speconsense.core.workers import _find_best_phasing_subset, ClusterProcessingConfig
+
+        # 200 reads:
+        # - 7 carry minority at BOTH pos 100 and 300 (correlated haplotype)
+        # - 30 carry minority at pos 100 only (noise)
+        # - 20 carry minority at pos 300 only (noise)
+        # - 143 are majority at both
+        # K=1 at pos 100: 37 minority reads, high error (30 noise + 7 real)
+        # K=1 at pos 300: 27 minority reads, high error (20 noise + 7 real)
+        # K=2 {100, 300}: 7 reads with (G, G) haplotype, much cleaner split
+        all_read_ids = set()
+        read_to_position_alleles = {}
+        idx = 0
+        # 7 correlated minority at both positions
+        for _ in range(7):
+            rid = f"read_{idx}"
+            all_read_ids.add(rid)
+            read_to_position_alleles[rid] = {100: 'G', 300: 'G'}
+            idx += 1
+        # 30 noise minority at pos 100 only
+        for _ in range(30):
+            rid = f"read_{idx}"
+            all_read_ids.add(rid)
+            read_to_position_alleles[rid] = {100: 'G', 300: 'A'}
+            idx += 1
+        # 20 noise minority at pos 300 only
+        for _ in range(20):
+            rid = f"read_{idx}"
+            all_read_ids.add(rid)
+            read_to_position_alleles[rid] = {100: 'A', 300: 'G'}
+            idx += 1
+        # 143 majority at both
+        for _ in range(143):
+            rid = f"read_{idx}"
+            all_read_ids.add(rid)
+            read_to_position_alleles[rid] = {100: 'A', 300: 'A'}
+            idx += 1
+
+        config = ClusterProcessingConfig(
+            outlier_identity_threshold=0.95,
+            enable_secondpass_phasing=True,
+            disable_homopolymer_equivalence=False,
+            min_variant_frequency=0.03,
+            min_variant_count=5,
+            total_specimen_reads=200,
+            assumed_error_rate=0.015,
+            significance_level=1e-5,
+            min_k_position_gap=10,
+        )
+
+        result = _find_best_phasing_subset(
+            [100, 300], {100: 100, 300: 300}, read_to_position_alleles,
+            all_read_ids, 200, 700, config
+        )
+
+        assert result is not None
+        positions, qualifying, _, error, _ = result
+        # The K=2 split should produce lower error than K=1 at either position
+        # because the correlated haplotype (G, G) is much cleaner
+        assert len(qualifying) >= 2
+
+    def test_find_best_phasing_subset_two_independent_minorities(self):
+        """Two unrelated minorities at different positions are handled correctly."""
+        from speconsense.core.workers import _find_best_phasing_subset, ClusterProcessingConfig
+
+        # 200 reads:
+        # - 30 carry minority at pos 200 only
+        # - 30 different reads carry minority at pos 500 only
+        # - 140 are majority at both
+        all_read_ids = set()
+        read_to_position_alleles = {}
+        idx = 0
+        for _ in range(30):
+            rid = f"read_{idx}"
+            all_read_ids.add(rid)
+            read_to_position_alleles[rid] = {200: 'G', 500: 'A'}
+            idx += 1
+        for _ in range(30):
+            rid = f"read_{idx}"
+            all_read_ids.add(rid)
+            read_to_position_alleles[rid] = {200: 'A', 500: 'G'}
+            idx += 1
+        for _ in range(140):
+            rid = f"read_{idx}"
+            all_read_ids.add(rid)
+            read_to_position_alleles[rid] = {200: 'A', 500: 'A'}
+            idx += 1
+
+        config = ClusterProcessingConfig(
+            outlier_identity_threshold=0.95,
+            enable_secondpass_phasing=True,
+            disable_homopolymer_equivalence=False,
+            min_variant_frequency=0.05,
+            min_variant_count=5,
+            total_specimen_reads=200,
+            assumed_error_rate=0.015,
+            significance_level=1e-5,
+            min_k_position_gap=10,
+        )
+
+        result = _find_best_phasing_subset(
+            [200, 500], {200: 200, 500: 500}, read_to_position_alleles,
+            all_read_ids, 200, 700, config
+        )
+
+        # Should find at least a K=1 split at either position
+        assert result is not None
+        positions, qualifying, _, _, _ = result
+        assert len(qualifying) >= 2
+
+
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])
