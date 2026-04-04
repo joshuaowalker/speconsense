@@ -265,10 +265,10 @@ CER operates at two stages:
 
 | Metric | Baseline | CER K>=1 | Delta |
 |--------|----------|----------|-------|
-| Raw clusters (pre-summarize) | 3,369 | 3,033 | -336 (-10.0%) |
-| Summary variants | 2,831 | 2,121 | -710 (-25.1%) |
-| Merged (multi-component) variants | 497 | 321 | -176 |
-| Single-variant specimens | 246 (29%) | 319 (38%) | +73 |
+| Raw clusters (pre-summarize) | 3,369 | 3,088 | -281 (-8.3%) |
+| Summary variants | 2,831 | 2,152 | -679 (-24.0%) |
+| Merged (multi-component) variants | 497 | 335 | -162 |
+| Single-variant specimens | 246 (29%) | 318 (38%) | +72 |
 | HAC groups | 1,146 | 1,146 | 0 |
 | Specimens | 837 | 837 | 0 |
 
@@ -280,18 +280,17 @@ The CER framework's impact scales with specimen size, consistent with its statis
 
 | Specimen Reads | Specimens | Baseline Variants | CER Variants | Delta | Reduction |
 |----------------|-----------|-------------------|--------------|-------|-----------|
-| < 50 | 84 | 95 | 94 | -1 | 1.1% |
-| 50–99 | 60 | 105 | 99 | -6 | 5.7% |
-| 100–199 | 102 | 217 | 196 | -21 | 9.7% |
-| 200–499 | 181 | 548 | 450 | -98 | 17.9% |
-| 500–999 | 196 | 808 | 578 | -230 | 28.5% |
-| 1000+ | 214 | 1,058 | 704 | -354 | 33.5% |
+| < 50 | 101 | 129 | 127 | -2 | 1.6% |
+| 50–99 | 68 | 125 | 118 | -7 | 5.6% |
+| 100–199 | 99 | 208 | 183 | -25 | 12.0% |
+| 200–499 | 225 | 767 | 602 | -165 | 21.5% |
+| 500+ | 344 | 1,602 | 1,122 | -480 | 30.0% |
 
-**Low-read specimens (< 100 reads):** CER has minimal effect (-4.2% combined). The minimum M for significance at 1.5% error requires 30–50% of reads at small N (e.g., M=5 at N=10, M=6 at N=20), so most variants that survive the existing frequency/count filters are already significant.
+**Low-read specimens (< 100 reads):** CER has minimal effect. The minimum M for significance at 1.5% error requires 30–50% of reads at small N (e.g., M=5 at N=10, M=6 at N=20), so most variants that survive the existing frequency/count filters are already significant.
 
 **Mid-range specimens (100–499 reads):** Moderate impact. The minimum M threshold drops to 5–14% of reads, catching more marginal single-position variants.
 
-**High-read specimens (500+ reads):** Largest reduction (-33% for 1000+ reads). Pairwise CER filtering at summarize removes secondary variants with K=1 (identical or nearly identical to a validated neighbor) that have insufficient read support. Multi-position variants (K>1) are retained at much lower M thresholds.
+**High-read specimens (500+ reads):** Largest reduction (-30%). Pairwise CER filtering at summarize removes secondary variants with K=1 (identical or nearly identical to a validated neighbor) that have insufficient read support. Multi-position variants (K>1) are retained at much lower M thresholds.
 
 ### Sequence quality
 
@@ -303,33 +302,38 @@ Cross-comparison with the structured verified dataset (1,145 organisms across 20
 | Recall (RiC >= 1) | 100% |
 | PRAUC | 0.9991 |
 | Mean identity (count-weighted) | 100.00% |
-| Variants >= 99.5% identity | 100% (2,119/2,119) |
-| RiC drift | -3.6% |
+| Variants >= 99.5% identity | 100% (2,150/2,150) |
+| RiC drift | -3.4% |
 
-No organisms were lost or misidentified. All 710 filtered variants were small secondary clusters; no false positives were introduced. The -3.6% RiC drift reflects reads from filtered variants being absorbed into parent clusters.
+No organisms were lost or misidentified. All 679 filtered variants were small secondary clusters; no false positives were introduced. The -3.4% RiC drift reflects reads from filtered variants being absorbed into parent clusters.
 
 ### IUPAC ambiguities
 
 | Level | Baseline | CER K>=1 | Delta |
 |-------|----------|----------|-------|
-| Raw clusters (pre-summarize) | 928 | 1,520 | +592 (+64%) |
-| Summary output | 1,615 | 1,794 | +179 (+11%) |
+| Raw clusters (pre-summarize) | 928 | 1,357 | +429 (+46%) |
+| Summary output | 1,615 | 1,638 | +23 (+1.4%) |
 
-Raw cluster ambiguities increase because split prevention absorbs variant reads into parent clusters, encoding the variation as IUPAC codes rather than separate clusters. At the summary level, pairwise CER filtering removes some secondary variants that would have introduced ambiguities during merging, partially offsetting the increase from larger parent clusters.
+Raw cluster ambiguities increase because K=1 split prevention absorbs variant reads into parent clusters, encoding the variation as IUPAC codes. The K>1 fallback partially counteracts this by rescuing splits at correlated multi-position variants, resolving ~160 ambiguity positions that K=1 alone would have left unphased. At the summary level, the net effect is near-neutral (+1.4%): pairwise CER filtering removes secondary variants that would have introduced ambiguities during merging, while K>1 splits produce cleaner clusters with fewer ambiguous positions.
 
 ### Primary variant stability
 
-95% of primary (v1) sequences are identical between baseline and CER (795/837). Of the 42 that changed, most gained or lost a small number of IUPAC positions due to reads shifting between clusters.
+95.5% of primary (v1) sequences are identical between baseline and CER (799/837). Of the 38 that changed, most gained or lost a small number of IUPAC positions due to reads shifting between clusters.
+
+### K>1 contribution
+
+The K>1 extensions contribute measurably at both stages:
+
+- **Core phasing gate:** The K>1 fallback produced ~55 additional clusters compared to K=1 alone, resolving ~160 IUPAC ambiguity positions. Each K>1 split resolves an average of ~3 ambiguous sites, consistent with these being multi-position variants where correlated alleles at several positions are phased simultaneously.
+- **Summarize pairwise CER:** Multi-position variants (K>1) receive dramatically lower minimum M thresholds during pairwise filtering, preserving variants that K=1 evaluation alone would have filtered.
 
 ### Edge cases observed
 
-**Small specimens (N < 50):** Of 84 specimens in this range, CER affected only 1 variant. The framework is appropriately conservative at low N, deferring to the existing frequency/count filters.
-
-**K>1 fallback at core level:** The K>1 phasing gate fallback fires rarely — it requires all candidate positions to fail K=1 significance AND correlate with each other. The primary K>1 impact is at the summarize level, where pairwise CER naturally incorporates multi-position differences between consensus sequences.
+**Small specimens (N < 50):** Of 101 specimens in this range, CER affected only 2 variants. The framework is appropriately conservative at low N, deferring to the existing frequency/count filters.
 
 ## 9. Open questions for reviewers
 
-1. ~~**Is 2% the right default assumed error rate?**~~ Resolved: default set to 1.5%, slightly below the typical ONT R10 per-position substitution rate of ~2%. This provides a margin that avoids filtering variants near the boundary while still catching clear artifacts. Validated on ONT98: 25% variant reduction with zero specimen loss at 1.5%.
+1. ~~**Is 2% the right default assumed error rate?**~~ Resolved: default set to 1.5%, slightly below the typical ONT R10 per-position substitution rate of ~2%. This provides a margin that avoids filtering variants near the boundary while still catching clear artifacts. Validated on ONT98: 24% variant reduction with zero specimen loss at 1.5%.
 
 2. **Should the default alpha be 1e-5 or something else?** The paper suggests 1e-5 as a "run-corrected" level (accounting for ~100 specimens per run). A per-specimen alpha of 0.05 would be more permissive.
 

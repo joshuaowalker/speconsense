@@ -500,7 +500,9 @@ def _recursive_phase_cluster_standalone(
     # Recurse
     all_leaves = []
     for allele, sub_read_ids in sorted(best_qualifying.items()):
-        new_path = path + [allele]
+        # K>1 alleles are tuples (e.g. ('A', 'G', 'T')); convert to string for path
+        allele_str = ''.join(allele) if isinstance(allele, tuple) else allele
+        new_path = path + [allele_str]
         sub_leaves, sub_deferred = _recursive_phase_cluster_standalone(
             sub_read_ids, read_sequences, new_path, depth + 1, config
         )
