@@ -65,8 +65,7 @@ class SpecimenClusterer:
                  collect_discards: bool = False,
                  assumed_error_rate: float = 0.015,
                  significance_level: float = 1e-5,
-                 min_k_position_gap: int = 10,
-                 k_correlation_threshold: float = 0.9):
+                 min_k_position_gap: int = 10):
         self.min_identity = min_identity
         self.inflation = inflation
         self.min_size = min_size
@@ -101,7 +100,6 @@ class SpecimenClusterer:
         self.assumed_error_rate = assumed_error_rate
         self.significance_level = significance_level
         self.min_k_position_gap = min_k_position_gap
-        self.k_correlation_threshold = k_correlation_threshold
         self.discarded_read_ids: Set[str] = set()  # Track all discarded reads (outliers + filtered)
 
         # Initialize scalability configuration
@@ -926,8 +924,7 @@ class SpecimenClusterer:
             total_specimen_reads=len(self.sequences),
             assumed_error_rate=self.assumed_error_rate,
             significance_level=self.significance_level,
-            min_k_position_gap=self.min_k_position_gap,
-            k_correlation_threshold=self.k_correlation_threshold
+            min_k_position_gap=self.min_k_position_gap
         )
 
         # Build work packages with per-cluster data
@@ -1291,8 +1288,7 @@ class SpecimenClusterer:
             total_specimen_reads=len(self.sequences),
             assumed_error_rate=self.assumed_error_rate,
             significance_level=self.significance_level,
-            min_k_position_gap=self.min_k_position_gap,
-            k_correlation_threshold=self.k_correlation_threshold
+            min_k_position_gap=self.min_k_position_gap
         )
 
         return _phase_reads_by_variants_standalone(

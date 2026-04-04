@@ -81,9 +81,6 @@ def main():
     phasing_group.add_argument("--min-k-position-gap", type=int, default=10,
                                help="Minimum gap in consensus positions between correlated variant "
                                     "positions for K>1 CER evaluation (default: 10)")
-    phasing_group.add_argument("--k-correlation-threshold", type=float, default=0.9,
-                               help="Minimum fraction of minority reads that must overlap for "
-                                    "positions to be considered correlated in K>1 CER (default: 0.9)")
 
     # Ambiguity Calling group
     ambiguity_group = parser.add_argument_group("Ambiguity Calling")
@@ -229,7 +226,6 @@ def main():
         assumed_error_rate=args.assumed_error_rate,
         significance_level=args.significance_level,
         min_k_position_gap=args.min_k_position_gap,
-        k_correlation_threshold=args.k_correlation_threshold
     )
 
     # Log configuration

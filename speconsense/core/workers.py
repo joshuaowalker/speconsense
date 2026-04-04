@@ -24,7 +24,6 @@ from speconsense.msa import (
     extract_alignments_from_msa,
     filter_qualifying_haplotypes,
     group_reads_by_single_position,
-    group_reads_by_position_tuple,
     is_variant_position_with_composition,
 )
 from speconsense.significance import is_variant_significant
@@ -40,7 +39,7 @@ class ClusterProcessingConfig:
     __slots__ = ['outlier_identity_threshold', 'enable_secondpass_phasing',
                  'disable_homopolymer_equivalence', 'min_variant_frequency', 'min_variant_count',
                  'total_specimen_reads', 'assumed_error_rate', 'significance_level',
-                 'min_k_position_gap', 'k_correlation_threshold']
+                 'min_k_position_gap']
 
     def __init__(self, outlier_identity_threshold: Optional[float],
                  enable_secondpass_phasing: bool,
@@ -50,8 +49,7 @@ class ClusterProcessingConfig:
                  total_specimen_reads: int = 0,
                  assumed_error_rate: float = 0.015,
                  significance_level: float = 1e-5,
-                 min_k_position_gap: int = 10,
-                 k_correlation_threshold: float = 0.9):
+                 min_k_position_gap: int = 10):
         self.outlier_identity_threshold = outlier_identity_threshold
         self.enable_secondpass_phasing = enable_secondpass_phasing
         self.disable_homopolymer_equivalence = disable_homopolymer_equivalence
@@ -61,7 +59,6 @@ class ClusterProcessingConfig:
         self.assumed_error_rate = assumed_error_rate
         self.significance_level = significance_level
         self.min_k_position_gap = min_k_position_gap
-        self.k_correlation_threshold = k_correlation_threshold
 
 
 class ConsensusGenerationConfig:
@@ -272,89 +269,193 @@ def _detect_variant_positions_standalone(alignments: List[ReadAlignment], consen
         return []
 
 
-def _find_correlated_positions(
-    k1_failed: List[Tuple[int, Set[str]]],
+def _refine_groups(
+    current_groups: Dict[tuple, Set[str]],
+    position: int,
+    read_to_position_alleles: Dict[str, Dict[int, str]],
+) -> Dict[tuple, Set[str]]:
+    """Split each allele-tuple group by allele at a new position.
+
+    Used by _find_best_phasing_subset for incremental group refinement
+    during beam search.
+    """
+    new_groups: Dict[tuple, Set[str]] = {}
+    for allele_key, read_ids in current_groups.items():
+        for rid in read_ids:
+            allele = read_to_position_alleles.get(rid, {}).get(position, '-')
+            new_key = allele_key + (allele,)
+            if new_key in new_groups:
+                new_groups[new_key].add(rid)
+            else:
+                new_groups[new_key] = {rid}
+    return new_groups
+
+
+def _find_best_phasing_subset(
+    variant_msa_positions: List[int],
     msa_to_consensus_pos: Dict[int, Optional[int]],
     read_to_position_alleles: Dict[str, Dict[int, str]],
     all_read_ids: Set[str],
     total_reads: int,
-    consensus: str,
-    config: 'ClusterProcessingConfig'
-) -> Optional[Tuple[int, Dict, Dict, float]]:
-    """Find correlated variant positions for K>1 CER evaluation.
+    consensus_length: int,
+    config: 'ClusterProcessingConfig',
+) -> Optional[Tuple[List[int], Dict, Dict, float, float]]:
+    """Find the best subset of variant positions for phasing via beam search.
 
-    For each seed position that failed K=1 CER, find other failed positions
-    whose minority allele correlates with the seed. If the joint K-position
-    pattern passes CER, return the best candidate split.
+    Uses a beam search over position subsets of increasing K (number of
+    positions). At each level, expands the top B candidates by trying each
+    remaining position, then keeps the top B for the next level.
 
-    Returns (best_pos, qualifying, non_qualifying, error) or None.
-    The best_pos is the seed position; qualifying uses allele tuples as keys.
+    Complexity: O(K_max * B * min(F, expand_limit) * R) where
+    F = candidate positions, B = beam width, R = reads.
+
+    Selection: among all CER-significant subsets found across all levels,
+    returns the one with lowest within-cluster error (best split quality).
+
+    Returns:
+        (positions, qualifying, non_qualifying, error, p_star) or None.
     """
-    from speconsense.msa import calculate_within_cluster_error
+    cer_active = config.assumed_error_rate > 0 and config.total_specimen_reads > 0
+    all_positions = set(variant_msa_positions)
 
-    best_combo_error = float('inf')
-    best_result = None
-    all_positions = set(pos for pos, _ in k1_failed)
+    # Beam search parameters
+    beam_width = 20
+    max_k = 5
+    max_expand_per_entry = 50  # max positions to try per beam entry at K>1
 
-    for seed_idx, (seed_pos, seed_minority_reads) in enumerate(k1_failed):
-        seed_cons_pos = msa_to_consensus_pos.get(seed_pos)
+    # Level 1 (K=1): evaluate all candidate positions, build beam
+    # This also serves as the pre-filter (positions without >=2 qualifying
+    # alleles are skipped). Groups are kept in tuple-key format for
+    # incremental refinement at K>1.
+    best = None  # (error, p_star, positions, qualifying, non_qualifying)
+    beam = []  # (ranking_key, [positions], groups_dict)
 
-        correlated_positions = [seed_pos]
-        joint_minority_reads = seed_minority_reads.copy()
+    initial_groups = {(): all_read_ids.copy()}
 
-        for other_idx, (other_pos, other_minority_reads) in enumerate(k1_failed):
-            if other_idx == seed_idx:
-                continue
+    # Pre-compute consensus positions for proximity filter
+    cons_pos = {p: msa_to_consensus_pos.get(p) for p in variant_msa_positions}
 
-            # Proximity filter in consensus coordinates
-            other_cons_pos = msa_to_consensus_pos.get(other_pos)
-            if seed_cons_pos is not None and other_cons_pos is not None:
-                if abs(seed_cons_pos - other_cons_pos) < config.min_k_position_gap:
-                    continue
+    def violates_proximity(pos, selected_positions):
+        """Check if pos is too close to any position in the selected set."""
+        if config.min_k_position_gap <= 0 or not selected_positions:
+            return False
+        cp = cons_pos.get(pos)
+        if cp is None:
+            return False
+        for existing_pos in selected_positions:
+            ecp = cons_pos.get(existing_pos)
+            if ecp is not None and abs(cp - ecp) < config.min_k_position_gap:
+                return True
+        return False
 
-            # Check correlation: what fraction of joint minority reads
-            # also have the minority allele at the other position?
-            overlap = joint_minority_reads & other_minority_reads
-            if len(joint_minority_reads) > 0 and len(overlap) >= len(joint_minority_reads) * config.k_correlation_threshold:
-                correlated_positions.append(other_pos)
-                joint_minority_reads = overlap
-
-        K = len(correlated_positions)
-        if K < 2:
-            continue
-
-        # Group reads by allele tuple at all correlated positions
-        allele_groups = group_reads_by_position_tuple(
-            read_to_position_alleles, correlated_positions, all_read_ids
-        )
+    for pos in variant_msa_positions:
+        groups = _refine_groups(initial_groups, pos, read_to_position_alleles)
         qualifying, non_qualifying = filter_qualifying_haplotypes(
-            allele_groups, total_reads, config.min_variant_count, config.min_variant_frequency
+            groups, total_reads, config.min_variant_count, config.min_variant_frequency
         )
         if len(qualifying) < 2:
             continue
 
         min_M = min(len(reads) for reads in qualifying.values())
-        is_sig, p_star = is_variant_significant(
-            M=min_M, N=config.total_specimen_reads,
-            L=len(consensus),
-            assumed_error_rate=config.assumed_error_rate,
-            alpha=config.significance_level,
-            K=K
-        )
-        if not is_sig:
-            continue
 
-        logging.debug(f"K>1 CER pass: K={K} positions {correlated_positions}, "
-                      f"M={min_M}, p*={p_star:.4f}")
+        if cer_active:
+            is_sig, p_star = is_variant_significant(
+                M=min_M, N=config.total_specimen_reads,
+                L=consensus_length,
+                assumed_error_rate=config.assumed_error_rate,
+                alpha=config.significance_level,
+                K=1
+            )
+        else:
+            is_sig, p_star = True, float('inf')
 
-        error = calculate_within_cluster_error(
-            qualifying, read_to_position_alleles, set(correlated_positions), all_positions
-        )
-        if error < best_combo_error:
-            best_combo_error = error
-            best_result = (seed_pos, qualifying, non_qualifying, error)
+        if is_sig:
+            error = calculate_within_cluster_error(
+                qualifying, read_to_position_alleles, {pos}, all_positions
+            )
+            if best is None or error < best[0]:
+                best = (error, p_star, [pos], qualifying, non_qualifying)
 
-    return best_result
+        # Add to beam ranked by minority size (higher = more split potential at K>1)
+        beam.append((-min_M, [pos], groups))
+
+    if not beam:
+        return None
+
+    # Keep top beam_width entries (highest min_M first)
+    beam.sort(key=lambda x: x[0])
+    beam = beam[:beam_width]
+
+    # Pre-compute position indices for O(1) lookup in the sorted beam positions.
+    # candidate_positions preserves the ordering used by beam entries.
+    candidate_positions = [pos for pos in variant_msa_positions]
+    pos_to_idx = {p: i for i, p in enumerate(candidate_positions)}
+    F = len(candidate_positions)
+
+    # Levels 2..max_k: expand each beam entry by adding positions
+    for K in range(2, max_k + 1):
+        next_beam = []
+        for _rank, positions, groups in beam:
+            # Start after the last position to avoid duplicate subsets
+            start_idx = pos_to_idx[positions[-1]] + 1
+            tried = 0
+
+            for i in range(start_idx, F):
+                if tried >= max_expand_per_entry:
+                    break
+                next_pos = candidate_positions[i]
+
+                if violates_proximity(next_pos, positions):
+                    continue
+
+                new_groups = _refine_groups(groups, next_pos, read_to_position_alleles)
+
+                qualifying, non_qualifying = filter_qualifying_haplotypes(
+                    new_groups, total_reads,
+                    config.min_variant_count, config.min_variant_frequency
+                )
+                if len(qualifying) < 2:
+                    continue
+
+                tried += 1
+                min_M = min(len(reads) for reads in qualifying.values())
+                new_positions = positions + [next_pos]
+
+                if cer_active:
+                    is_sig, p_star = is_variant_significant(
+                        M=min_M, N=config.total_specimen_reads,
+                        L=consensus_length,
+                        assumed_error_rate=config.assumed_error_rate,
+                        alpha=config.significance_level,
+                        K=K
+                    )
+                else:
+                    is_sig, p_star = True, float('inf')
+
+                if is_sig:
+                    error = calculate_within_cluster_error(
+                        qualifying, read_to_position_alleles,
+                        set(new_positions), all_positions
+                    )
+                    if best is None or error < best[0]:
+                        best = (error, p_star, list(new_positions), qualifying, non_qualifying)
+                        logging.debug(f"K>1 CER pass: K={K} positions {new_positions}, "
+                                      f"M={min_M}, p*={p_star:.4f}")
+
+                # Rank beam entries by min_M (higher = better split potential)
+                next_beam.append((-min_M, new_positions, new_groups))
+
+        if not next_beam:
+            break
+
+        next_beam.sort(key=lambda x: x[0])
+        beam = next_beam[:beam_width]
+
+    if best is None:
+        return None
+
+    error, p_star, positions, qualifying, non_qualifying = best
+    return (positions, qualifying, non_qualifying, error, p_star)
 
 
 def _recursive_phase_cluster_standalone(
@@ -435,59 +536,19 @@ def _recursive_phase_cluster_standalone(
 
         read_to_position_alleles[read_id] = position_alleles
 
-    # Find best split — Phase 1: K=1 evaluation
-    best_pos = None
-    best_error = float('inf')
-    best_qualifying = None
-    best_non_qualifying = None
-    all_positions = set(variant_msa_positions)
+    # Find best split via unified branch-and-bound search over all (K, M) combinations
     all_read_ids = set(read_to_position_alleles.keys())
-    cer_active = config.assumed_error_rate > 0 and config.total_specimen_reads > 0
 
-    # Track positions that fail K=1 CER for potential K>1 fallback
-    k1_failed = []  # list of (pos, minority_reads) for K>1 candidates
+    result = _find_best_phasing_subset(
+        variant_msa_positions, msa_to_consensus_pos, read_to_position_alleles,
+        all_read_ids, total_reads, len(consensus), config
+    )
 
-    for pos in variant_msa_positions:
-        allele_groups = group_reads_by_single_position(
-            read_to_position_alleles, pos, all_read_ids
-        )
-        qualifying, non_qualifying = filter_qualifying_haplotypes(
-            allele_groups, total_reads, config.min_variant_count, config.min_variant_frequency
-        )
-        if len(qualifying) < 2:
-            continue
-
-        # CER gate: check statistical significance before expensive error calculation
-        if cer_active:
-            min_M = min(len(reads) for reads in qualifying.values())
-            is_sig, p_star = is_variant_significant(
-                M=min_M, N=config.total_specimen_reads,
-                L=len(consensus),
-                assumed_error_rate=config.assumed_error_rate,
-                alpha=config.significance_level
-            )
-            if not is_sig:
-                logging.debug(f"CER suppression at MSA pos {pos}: p*={p_star:.4f} < {config.assumed_error_rate}")
-                # Save for K>1 fallback: record minority allele reads
-                minority_allele = min(qualifying, key=lambda a: len(qualifying[a]))
-                k1_failed.append((pos, qualifying[minority_allele].copy()))
-                continue
-
-        error = calculate_within_cluster_error(qualifying, read_to_position_alleles, {pos}, all_positions)
-        if error < best_error:
-            best_error = error
-            best_pos = pos
-            best_qualifying = qualifying
-            best_non_qualifying = non_qualifying
-
-    # Phase 2: K>1 correlation-based fallback (only if no K=1 candidates found)
-    if best_pos is None and len(k1_failed) >= 2 and cer_active:
-        best_k_combo = _find_correlated_positions(
-            k1_failed, msa_to_consensus_pos, read_to_position_alleles,
-            all_read_ids, total_reads, consensus, config
-        )
-        if best_k_combo is not None:
-            best_pos, best_qualifying, best_non_qualifying, best_error = best_k_combo
+    if result is not None:
+        best_positions, best_qualifying, best_non_qualifying, best_error, best_p_star = result
+        best_pos = best_positions[0]
+    else:
+        best_pos = None
 
     if best_pos is None:
         return [(path, consensus, read_ids)], set()
