@@ -227,3 +227,49 @@ This is expected behavior: more positions = finer haplotype resolution = lower w
 - Phase 1: O(F × N) — same as all previous algorithms
 - Phase 2: O(budget × K × N) with budget=200 — independent of F
 - Total: O(F × N + 200 × K × N) — linear in F, bounded in K>1 search
+
+### ONT98 full dataset evaluation
+
+Compared four runs across 955 specimens (837 after summarization CER filtering):
+
+**Pre-summarization (clusters/ output):**
+
+| Metric | baseline-def | kg1 | kbest (beam) | kbest-v2 (bidir) |
+|--------|-------------|-----|--------------|------------------|
+| Clusters | 3,369 | 3,088 | 3,132 | 3,099 |
+| IUPAC positions | 931 | 1,360 | 1,287 | 1,365 |
+| Clusters w/ IUPAC | 496 | 631 | 619 | 628 |
+
+**Post-summarization (summary.fasta):**
+
+| Metric | baseline-def | kg1 | kbest (beam) | kbest-v2 (bidir) |
+|--------|-------------|-----|--------------|------------------|
+| Variants | 2,831 | 2,152 | 2,166 | 2,157 |
+| IUPAC positions | 1,615 | 1,638 | 1,581 | 1,657 |
+| Variants w/ IUPAC | 927 | 806 | 798 | 809 |
+
+**Pairwise comparisons (post-summarization):**
+
+| Comparison | Δ Variants | Δ IUPAC | Specimens changed |
+|-----------|-----------|---------|-------------------|
+| kbest (beam) vs kg1 | **+14** (23↑ 11↓) | **-57** (18↑ 47↓) | 65 |
+| kbest-v2 (bidir) vs kg1 | +5 (15↑ 12↓) | +19 (19↑ 26↓) | 45 |
+| kbest-v2 vs kbest (beam) | -9 (9↑ 17↓) | **+76** (33↑ 12↓) | 45 |
+
+### Analysis: why the bidirectional search underperforms
+
+The beam search (kbest) was the best performer: +14 variants and -57 IUPAC vs kg1. The bidirectional search (kbest-v2) regressed — fewer variants than beam (-9) and substantially more IUPAC (+76). It is only modestly better than the original kg1 correlation heuristic.
+
+The bidirectional search misses K>1 splits that the beam search finds. The root cause appears to be the seeding strategy: read-ranking requires reads to carry minority alleles at ≥2 qualifying positions to enter the seed (variant_load ≥ 2). When the minority haplotype's positions are individually weak — each position has many reads carrying the minority allele but few reads carry it at multiple positions simultaneously — the seed is too small or empty, and the bidirectional expansion never starts.
+
+The beam search doesn't have this limitation: it systematically extends every top-20 K=1 position by every other position, so it discovers K=2 pairs even when no individual read carries minority alleles at both. The level-by-level expansion is actually well-suited to finding weakly-correlated positions that become significant when combined.
+
+The bidirectional search's theoretical advantage — finding non-greedy position sets that the beam misses — appears to be less valuable in practice than the beam search's systematic coverage of position pairs. The ONT08.31 case (where both algorithms find the same K=3 split) may have been unrepresentative; across the full dataset, the beam's greedy bias costs less than the bidirectional search's narrow seeding.
+
+### Open questions
+
+1. **Hybrid approach.** Could the beam search's systematic K=1→K=2 expansion be combined with the bidirectional search's read-ranking for K>2? The beam is good at finding pairs; the bidirectional search is good at extending pairs to larger sets.
+
+2. **Relaxed seeding.** The variant_load ≥ 2 threshold may be too restrictive. Seeding from all reads with load ≥ 1 would include every read carrying any minority allele, but the expansion would generate position sets dominated by noise. A middle ground: seed from reads that are in the minority at any position, weighted by their minority allele's qualifying strength.
+
+3. **Budget allocation.** The 200-evaluation budget is spent across all I and threshold values. Most evaluations may be on large position sets (low I) that are unlikely to beat the beam's focused K=2 discoveries. Allocating more budget to small, focused position sets might help.
