@@ -22,6 +22,7 @@ except ImportError:
     __version__ = "dev"
 
 from speconsense.msa import ReadAlignment
+from speconsense.distances import count_variant_differences, calculate_adjusted_identity_distance
 from speconsense.significance import compute_critical_error_rate, is_cer_reportable
 from speconsense.scalability import (
     VsearchCandidateFinder,
@@ -33,6 +34,7 @@ from .workers import (
     ClusterProcessingConfig,
     ConsensusGenerationConfig,
     _run_spoa_worker,
+    _run_spoa_for_cluster_worker,
     _process_cluster_worker,
     _generate_cluster_consensus_worker,
     _trim_primers_standalone,
@@ -65,7 +67,7 @@ class SpecimenClusterer:
                  collect_discards: bool = False,
                  assumed_error_rate: float = 0.015,
                  significance_level: float = 1e-5,
-                 min_k_position_gap: int = 10):
+                 group_identity: float = 0.85):
         self.min_identity = min_identity
         self.inflation = inflation
         self.min_size = min_size
@@ -99,7 +101,7 @@ class SpecimenClusterer:
         self.collect_discards = collect_discards
         self.assumed_error_rate = assumed_error_rate
         self.significance_level = significance_level
-        self.min_k_position_gap = min_k_position_gap
+        self.group_identity = group_identity
         self.discarded_read_ids: Set[str] = set()  # Track all discarded reads (outliers + filtered)
 
         # Initialize scalability configuration
@@ -612,6 +614,7 @@ class SpecimenClusterer:
                             sorted_sampled_ids: Optional[List[str]] = None,
                             iupac_count: int = 0,
                             cer: Optional[float] = None,
+                            cer_status: Optional[str] = None,
                             cer_alpha: Optional[float] = None) -> None:
         """Write cluster files: reads FASTQ, MSA, and consensus FASTA.
 
@@ -640,6 +643,10 @@ class SpecimenClusterer:
             info_parts.append(f"ambig={iupac_count}")
         if cer is not None:
             info_parts.append(f"cer={cer:.4f}")
+        elif cer_status == 'anchor':
+            info_parts.append("cer=anchor")
+        if cer_status == 'ns':
+            info_parts.append("cer.ns")
         if cer_alpha is not None:
             info_parts.append(f"cer.a={cer_alpha:.0e}")
         info_str = " ".join(info_parts)
@@ -924,7 +931,6 @@ class SpecimenClusterer:
             total_specimen_reads=len(self.sequences),
             assumed_error_rate=self.assumed_error_rate,
             significance_level=self.significance_level,
-            min_k_position_gap=self.min_k_position_gap
         )
 
         # Build work packages with per-cluster data
@@ -986,6 +992,175 @@ class SpecimenClusterer:
 
         return self.merge_similar_clusters(subclusters, phase_name="Post-phasing")
 
+    def _run_cer_validation(self, subclusters: List[Dict]) -> List[Dict]:
+        """Phase 4b: Validate clusters via pairwise CER testing.
+
+        Groups clusters by adjusted identity, then within each group:
+        - The largest cluster (anchor) auto-passes
+        - Each non-anchor is tested pairwise against validated clusters
+        - CER = min(pairwise p*) using K = variant differences
+        - Clusters failing CER (p* < assumed_error_rate) are marked 'ns'
+        - All clusters are kept in output with CER annotations
+
+        Annotates each cluster dict with 'cer_status' and 'cer_value'.
+        """
+        if self.assumed_error_rate <= 0:
+            return subclusters
+
+        if len(subclusters) <= 1:
+            if subclusters:
+                subclusters[0]['cer_status'] = 'anchor'
+                subclusters[0]['cer_value'] = None
+            return subclusters
+
+        # Generate consensus for each cluster
+        consensuses = {}
+        for i, cluster_dict in enumerate(subclusters):
+            consensuses[i] = self._generate_consensus_for_validation(cluster_dict['read_ids'])
+
+        # Form identity groups
+        identity_groups = self._form_identity_groups(subclusters, consensuses)
+
+        # Validate within each group
+        validated_count = 0
+        ns_count = 0
+        for group_indices in identity_groups.values():
+            v, n = self._validate_identity_group(subclusters, consensuses, group_indices)
+            validated_count += v
+            ns_count += n
+
+        logging.info(f"CER validation: {validated_count} passed, {ns_count} not significant "
+                     f"({len(identity_groups)} identity group(s))")
+
+        return subclusters
+
+    def _generate_consensus_for_validation(self, read_ids: Set[str]) -> Optional[str]:
+        """Generate consensus sequence for CER validation via SPOA."""
+        if not read_ids:
+            return None
+        if len(read_ids) == 1:
+            rid = next(iter(read_ids))
+            return self.sequences.get(rid)
+
+        # Sort by quality descending, sample if needed
+        sorted_ids = sorted(read_ids,
+            key=lambda x: (-statistics.mean(self.records[x].letter_annotations["phred_quality"]), x))
+        if len(sorted_ids) > self.max_sample_size:
+            sorted_ids = sorted_ids[:self.max_sample_size]
+
+        seqs = {sid: self.sequences[sid] for sid in sorted_ids}
+        result = _run_spoa_for_cluster_worker(seqs, self.disable_homopolymer_equivalence)
+        return result.consensus if result else None
+
+    def _form_identity_groups(self, subclusters: List[Dict],
+                              consensuses: Dict[int, Optional[str]]) -> Dict[int, List[int]]:
+        """Group clusters by pairwise adjusted identity using union-find."""
+        n = len(subclusters)
+        parent = list(range(n))
+
+        def find(x):
+            while parent[x] != x:
+                parent[x] = parent[parent[x]]
+                x = parent[x]
+            return x
+
+        def union(a, b):
+            ra, rb = find(a), find(b)
+            if ra != rb:
+                parent[ra] = rb
+
+        threshold = 1.0 - self.group_identity
+        for i in range(n):
+            for j in range(i + 1, n):
+                ci, cj = consensuses.get(i), consensuses.get(j)
+                if ci and cj:
+                    dist = calculate_adjusted_identity_distance(ci, cj)
+                    if dist <= threshold:
+                        union(i, j)
+
+        groups: Dict[int, List[int]] = defaultdict(list)
+        for i in range(n):
+            groups[find(i)].append(i)
+        return dict(groups)
+
+    def _validate_identity_group(self, subclusters: List[Dict],
+                                 consensuses: Dict[int, Optional[str]],
+                                 group_indices: List[int]) -> Tuple[int, int]:
+        """Validate clusters within an identity group via pairwise CER.
+
+        Returns (validated_count, ns_count).
+        """
+        # Sort by size descending
+        sorted_indices = sorted(group_indices,
+            key=lambda i: len(subclusters[i]['read_ids']), reverse=True)
+
+        # N = total reads in this identity group
+        group_N = sum(len(subclusters[i]['read_ids']) for i in sorted_indices)
+
+        # Anchor: largest cluster auto-passes
+        anchor_idx = sorted_indices[0]
+        subclusters[anchor_idx]['cer_status'] = 'anchor'
+        subclusters[anchor_idx]['cer_value'] = None
+
+        if len(sorted_indices) == 1:
+            return 1, 0
+
+        validated = [anchor_idx]
+        validated_count = 1
+        ns_count = 0
+
+        for candidate_idx in sorted_indices[1:]:
+            candidate_consensus = consensuses.get(candidate_idx)
+            candidate_M = len(subclusters[candidate_idx]['read_ids'])
+
+            if not candidate_consensus:
+                subclusters[candidate_idx]['cer_status'] = 'ns'
+                subclusters[candidate_idx]['cer_value'] = 0.0
+                ns_count += 1
+                continue
+
+            min_p_star = float('inf')
+
+            for ref_idx in validated:
+                ref_consensus = consensuses.get(ref_idx)
+                if not ref_consensus:
+                    continue
+
+                K = count_variant_differences(candidate_consensus, ref_consensus)
+                if K <= 0:
+                    # K=0: identical/HP-equivalent; K=-1: alignment failed
+                    continue
+
+                L = max(len(candidate_consensus), len(ref_consensus))
+                p_star = compute_critical_error_rate(
+                    N=group_N, M=candidate_M, L=L,
+                    alpha=self.significance_level, K=K
+                )
+                if p_star < min_p_star:
+                    min_p_star = p_star
+
+            if min_p_star == float('inf'):
+                # No valid pairwise comparisons (all K=0 or alignment failed)
+                subclusters[candidate_idx]['cer_status'] = 'pass'
+                subclusters[candidate_idx]['cer_value'] = None
+                validated.append(candidate_idx)
+                validated_count += 1
+            elif min_p_star >= self.assumed_error_rate:
+                subclusters[candidate_idx]['cer_status'] = 'pass'
+                subclusters[candidate_idx]['cer_value'] = min_p_star
+                validated.append(candidate_idx)
+                validated_count += 1
+            else:
+                subclusters[candidate_idx]['cer_status'] = 'ns'
+                subclusters[candidate_idx]['cer_value'] = min_p_star
+                ns_count += 1
+                logging.debug(
+                    f"CER ns: cluster with {candidate_M} reads, "
+                    f"p*={min_p_star:.4f} < {self.assumed_error_rate}"
+                )
+
+        return validated_count, ns_count
+
     def _run_size_filtering(self, subclusters: List[Dict]) -> List[Dict]:
         """Phase 5: Filter clusters by size and ratio thresholds.
 
@@ -1008,7 +1183,13 @@ class SpecimenClusterer:
 
         # Filter by relative size ratio
         if large_clusters and self.min_cluster_ratio > 0:
-            largest_size = max(len(c['read_ids']) for c in large_clusters)
+            # Exclude "ns" clusters from ratio denominator
+            validated_sizes = [len(c['read_ids']) for c in large_clusters
+                               if c.get('cer_status') != 'ns']
+            if validated_sizes:
+                largest_size = max(validated_sizes)
+            else:
+                largest_size = max(len(c['read_ids']) for c in large_clusters)
             before_ratio_filter = len(large_clusters)
             passing_ratio = [c for c in large_clusters
                             if len(c['read_ids']) / largest_size >= self.min_cluster_ratio]
@@ -1064,8 +1245,10 @@ class SpecimenClusterer:
 
         # Build work packages for each cluster
         work_packages = []
+        cluster_dicts_by_idx = {}
         for final_idx, cluster_dict in enumerate(clusters, 1):
             cluster = cluster_dict['read_ids']
+            cluster_dicts_by_idx[final_idx] = cluster_dict
             # Pre-compute quality means for each read
             qualities = {}
             for seq_id in cluster:
@@ -1116,25 +1299,11 @@ class SpecimenClusterer:
                         total_ambiguity_positions += iupac_count
                         clusters_with_ambiguities += 1
 
-                    # Compute CER from final cluster size and consensus length.
-                    # Only report when p* < 0.75 (the signal destruction
-                    # threshold — above this, the reference population is
-                    # smaller than the variant, making the artifact hypothesis
-                    # incoherent).
-                    cluster_cer = None
-                    cluster_cer_alpha = None
-                    if self.assumed_error_rate > 0:
-                        total_N = len(self.sequences)
-                        cluster_M = len(cluster)
-                        consensus_L = len(consensus)
-                        if total_N > 0 and consensus_L > 0:
-                            p_star = compute_critical_error_rate(
-                                N=total_N, M=cluster_M, L=consensus_L,
-                                alpha=self.significance_level
-                            )
-                            if is_cer_reportable(p_star):
-                                cluster_cer = p_star
-                                cluster_cer_alpha = self.significance_level
+                    # Look up CER from validation pass
+                    cluster_dict = cluster_dicts_by_idx.get(final_idx, {})
+                    cluster_cer = cluster_dict.get('cer_value')
+                    cluster_cer_status = cluster_dict.get('cer_status')
+                    cluster_cer_alpha = self.significance_level if cluster_cer is not None else None
 
                     # Write output files
                     self.write_cluster_files(
@@ -1153,6 +1322,7 @@ class SpecimenClusterer:
                         sorted_sampled_ids=result['sorted_sampled_ids'],
                         iupac_count=iupac_count,
                         cer=cluster_cer,
+                        cer_status=cluster_cer_status,
                         cer_alpha=cluster_cer_alpha
                     )
 
@@ -1189,6 +1359,7 @@ class SpecimenClusterer:
             2b. Early filtering (optional, skip small clusters before expensive phasing)
             3. Variant detection + phasing (split clusters by haplotype)
             4. Post-phasing merge (combine HP-equivalent subclusters)
+            4b. CER validation (pairwise significance testing within identity groups)
             5. Filtering (size and ratio thresholds)
             6. Output generation
             7. Write discarded reads (optional)
@@ -1212,8 +1383,11 @@ class SpecimenClusterer:
             # Phase 4: Post-phasing merge
             merged_subclusters = self._run_postphasing_merge(all_subclusters)
 
+            # Phase 4b: CER validation
+            validated_subclusters = self._run_cer_validation(merged_subclusters)
+
             # Phase 5: Size filtering
-            filtered_clusters = self._run_size_filtering(merged_subclusters)
+            filtered_clusters = self._run_size_filtering(validated_subclusters)
 
             # Phase 6: Output generation
             consensus_output_file = os.path.join(self.output_dir, f"{self.sample_name}-all.fasta")
@@ -1288,7 +1462,6 @@ class SpecimenClusterer:
             total_specimen_reads=len(self.sequences),
             assumed_error_rate=self.assumed_error_rate,
             significance_level=self.significance_level,
-            min_k_position_gap=self.min_k_position_gap
         )
 
         return _phase_reads_by_variants_standalone(

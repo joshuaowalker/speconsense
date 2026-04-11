@@ -501,10 +501,6 @@ class TestCERGating:
             disable_homopolymer_equivalence=False,
             min_variant_frequency=0.05,
             min_variant_count=5,
-            total_specimen_reads=200,
-            assumed_error_rate=0.015,
-            significance_level=1e-5,
-            min_k_position_gap=10,
         )
 
         result = _find_best_phasing_subset(
@@ -517,8 +513,8 @@ class TestCERGating:
         assert positions == [50]
         assert len(qualifying) == 2
 
-    def test_find_best_phasing_subset_k2_correlated(self):
-        """K=2 with perfectly correlated positions should be found."""
+    def test_find_best_phasing_subset_correlated_positions(self):
+        """Correlated positions should each produce K=1 splits; best by error."""
         from speconsense.core.workers import _find_best_phasing_subset, ClusterProcessingConfig
 
         # 100 reads: 10 have minority alleles at both positions
@@ -539,10 +535,6 @@ class TestCERGating:
             disable_homopolymer_equivalence=False,
             min_variant_frequency=0.05,
             min_variant_count=5,
-            total_specimen_reads=1000,
-            assumed_error_rate=0.015,
-            significance_level=1e-5,
-            min_k_position_gap=10,
         )
 
         result = _find_best_phasing_subset(
@@ -550,14 +542,14 @@ class TestCERGating:
             all_read_ids, 100, 700, config
         )
 
-        assert result is not None, "Expected K=2 split to be found"
-        positions, qualifying, _, _, p_star = result
-        # Should select K=2 since it gives higher p* than K=1
-        assert len(positions) >= 1
-        assert len(qualifying) >= 2
+        assert result is not None, "Expected K=1 split to be found"
+        positions, qualifying, _, _, _ = result
+        # K=1 at either position splits 10 vs 90 — both equivalent
+        assert len(positions) == 1
+        assert len(qualifying) == 2
 
     def test_find_best_phasing_subset_partial_correlation(self):
-        """Partially correlated positions (38% overlap) should be evaluated."""
+        """Partially correlated positions should find K=1 split at best position."""
         from speconsense.core.workers import _find_best_phasing_subset, ClusterProcessingConfig
 
         # Simulate the ONT08.31 case: 3 positions with partial overlap
@@ -580,10 +572,6 @@ class TestCERGating:
             disable_homopolymer_equivalence=False,
             min_variant_frequency=0.05,
             min_variant_count=3,  # Low count to allow partial overlap
-            total_specimen_reads=400,
-            assumed_error_rate=0.015,
-            significance_level=1e-5,
-            min_k_position_gap=10,
         )
 
         result = _find_best_phasing_subset(
@@ -591,51 +579,11 @@ class TestCERGating:
             read_to_position_alleles, all_read_ids, 100, 750, config
         )
 
-        # Should find SOME split — the old correlation heuristic (0.9 threshold)
-        # would have rejected all of these, but the new algorithm evaluates
-        # all subsets directly
-        # At minimum, K=1 at pos 90 or 727 (8 minority reads) should be found
-        assert result is not None, "Expected at least a K=1 split"
-
-    def test_find_best_phasing_subset_proximity_filter(self):
-        """Nearby positions should be filtered by min_k_position_gap."""
-        from speconsense.core.workers import _find_best_phasing_subset, ClusterProcessingConfig
-
-        # Two positions only 5 consensus positions apart
-        # Each individually fails K=1 CER but would pass K=2
-        minority_reads = {f"read_{i}" for i in range(6)}
-        all_read_ids = set()
-        read_to_position_alleles = {}
-        for i in range(100):
-            rid = f"read_{i}"
-            all_read_ids.add(rid)
-            allele = 'G' if rid in minority_reads else 'A'
-            read_to_position_alleles[rid] = {50: allele, 55: allele}
-
-        config = ClusterProcessingConfig(
-            outlier_identity_threshold=0.95,
-            enable_secondpass_phasing=True,
-            disable_homopolymer_equivalence=False,
-            min_variant_frequency=0.05,
-            min_variant_count=5,
-            total_specimen_reads=1000,
-            assumed_error_rate=0.015,
-            significance_level=1e-5,
-            min_k_position_gap=10,  # Gap of 5 < 10: should be filtered
-        )
-
-        result = _find_best_phasing_subset(
-            [50, 55], {50: 50, 55: 55}, read_to_position_alleles,
-            all_read_ids, 100, 700, config
-        )
-
-        # K=2 should be blocked by proximity; K=1 with M=6 likely fails CER at N=1000
-        # So result should be None (no valid split)
-        if result is not None:
-            # If K=1 happened to pass, positions should not include both
-            positions = result[0]
-            assert not (50 in positions and 55 in positions), \
-                "Nearby positions should not be combined in K>1 subset"
+        # K=1 at pos 90 or 727 (8 minority reads) should be found
+        assert result is not None, "Expected K=1 split"
+        positions, qualifying, _, _, _ = result
+        assert len(positions) == 1
+        assert len(qualifying) >= 2
 
     def test_find_best_phasing_subset_no_variants(self):
         """Empty variant positions should return None."""
@@ -647,9 +595,6 @@ class TestCERGating:
             disable_homopolymer_equivalence=False,
             min_variant_frequency=0.10,
             min_variant_count=5,
-            total_specimen_reads=1000,
-            assumed_error_rate=0.015,
-            significance_level=1e-5,
         )
 
         result = _find_best_phasing_subset(
@@ -657,11 +602,11 @@ class TestCERGating:
         )
         assert result is None
 
-    def test_find_best_phasing_subset_cer_disabled(self):
-        """With assumed_error_rate=0, CER gate is disabled; select by error."""
+    def test_find_best_phasing_subset_small_split(self):
+        """Small but qualifying split should be found (no CER gate)."""
         from speconsense.core.workers import _find_best_phasing_subset, ClusterProcessingConfig
 
-        # Clear biallelic split
+        # Clear biallelic split with 10 vs 10
         all_read_ids = set()
         read_to_position_alleles = {}
         for i in range(20):
@@ -675,8 +620,6 @@ class TestCERGating:
             disable_homopolymer_equivalence=False,
             min_variant_frequency=0.10,
             min_variant_count=5,
-            total_specimen_reads=0,  # CER disabled
-            assumed_error_rate=0,
         )
 
         result = _find_best_phasing_subset(
@@ -688,9 +631,8 @@ class TestCERGating:
         positions, qualifying, _, _, _ = result
         assert len(qualifying) == 2
 
-
-    def test_find_best_phasing_subset_nongreedy_k2(self):
-        """K=2 found via read-ranking when neither position is individually clean."""
+    def test_find_best_phasing_subset_noisy_positions(self):
+        """Best K=1 position selected by lowest within-cluster error."""
         from speconsense.core.workers import _find_best_phasing_subset, ClusterProcessingConfig
 
         # 200 reads:
@@ -735,10 +677,6 @@ class TestCERGating:
             disable_homopolymer_equivalence=False,
             min_variant_frequency=0.03,
             min_variant_count=5,
-            total_specimen_reads=200,
-            assumed_error_rate=0.015,
-            significance_level=1e-5,
-            min_k_position_gap=10,
         )
 
         result = _find_best_phasing_subset(
@@ -746,10 +684,11 @@ class TestCERGating:
             all_read_ids, 200, 700, config
         )
 
+        # K=1 at pos 300 (27 minority) has lower error than pos 100 (37 minority)
+        # because fewer noise reads contaminate the majority group
         assert result is not None
         positions, qualifying, _, error, _ = result
-        # The K=2 split should produce lower error than K=1 at either position
-        # because the correlated haplotype (G, G) is much cleaner
+        assert len(positions) == 1
         assert len(qualifying) >= 2
 
     def test_find_best_phasing_subset_two_independent_minorities(self):
@@ -785,10 +724,6 @@ class TestCERGating:
             disable_homopolymer_equivalence=False,
             min_variant_frequency=0.05,
             min_variant_count=5,
-            total_specimen_reads=200,
-            assumed_error_rate=0.015,
-            significance_level=1e-5,
-            min_k_position_gap=10,
         )
 
         result = _find_best_phasing_subset(
@@ -796,9 +731,10 @@ class TestCERGating:
             all_read_ids, 200, 700, config
         )
 
-        # Should find at least a K=1 split at either position
+        # Should find K=1 split at either position (both have 30 minority)
         assert result is not None
         positions, qualifying, _, _, _ = result
+        assert len(positions) == 1
         assert len(qualifying) >= 2
 
 

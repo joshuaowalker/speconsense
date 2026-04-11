@@ -47,10 +47,10 @@ def main():
 
     # Filtering group
     filtering_group = parser.add_argument_group("Filtering")
-    filtering_group.add_argument("--min-size", type=int, default=5,
-                                 help="Minimum cluster size (default: 5, 0 to disable)")
-    filtering_group.add_argument("--min-cluster-ratio", type=float, default=0.01,
-                                 help="Minimum size ratio between a cluster and the largest cluster (default: 0.01, 0 to disable)")
+    filtering_group.add_argument("--min-size", type=int, default=3,
+                                 help="Minimum cluster size (default: 3, 0 to disable)")
+    filtering_group.add_argument("--min-cluster-ratio", type=float, default=0,
+                                 help="Minimum size ratio between a cluster and the largest cluster (default: 0, 0 to disable)")
     filtering_group.add_argument("--max-sample-size", type=int, default=100,
                                  help="Maximum cluster size for consensus (default: 100)")
     filtering_group.add_argument("--outlier-identity", type=float, default=None,
@@ -71,16 +71,16 @@ def main():
                                help="Override --disable-position-phasing or profile setting")
     phasing_group.add_argument("--min-variant-frequency", type=float, default=0.10,
                                help="Minimum alternative allele frequency to call variant (default: 0.10 for 10%%)")
-    phasing_group.add_argument("--min-variant-count", type=int, default=5,
-                               help="Minimum alternative allele read count to call variant (default: 5)")
+    phasing_group.add_argument("--min-variant-count", type=int, default=3,
+                               help="Minimum alternative allele read count to call variant (default: 3)")
     phasing_group.add_argument("--assumed-error-rate", type=float, default=0.015,
                                help="Assumed per-position error rate for variant significance (uniform model). "
                                     "Set to 0 to disable. (default: 0.015)")
     phasing_group.add_argument("--significance-level", type=float, default=1e-5,
                                help="Significance level (alpha) for variant significance testing (default: 1e-5)")
-    phasing_group.add_argument("--min-k-position-gap", type=int, default=10,
-                               help="Minimum gap in consensus positions between correlated variant "
-                                    "positions for K>1 CER evaluation (default: 10)")
+    phasing_group.add_argument("--group-identity", type=float, default=0.85,
+                               help="Minimum pairwise identity to group clusters for CER validation. "
+                                    "Clusters below this threshold are validated independently. (default: 0.85)")
 
     # Ambiguity Calling group
     ambiguity_group = parser.add_argument_group("Ambiguity Calling")
@@ -225,7 +225,7 @@ def main():
         collect_discards=args.collect_discards,
         assumed_error_rate=args.assumed_error_rate,
         significance_level=args.significance_level,
-        min_k_position_gap=args.min_k_position_gap,
+        group_identity=args.group_identity,
     )
 
     # Log configuration
