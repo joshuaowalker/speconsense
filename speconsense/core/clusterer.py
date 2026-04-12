@@ -38,6 +38,7 @@ from .workers import (
     _generate_cluster_consensus_worker,
     _trim_primers_standalone,
     _phase_reads_by_variants_standalone,
+    _detect_variant_positions_standalone,
 )
 
 
@@ -1159,6 +1160,83 @@ class SpecimenClusterer:
 
         return subclusters
 
+    def _run_second_phasing_pass(self, subclusters: List[Dict]) -> List[Dict]:
+        """Phase 4b2: Re-phase subclusters after read reassignment.
+
+        Reassignment can move reads into clusters where they create detectable
+        variants. This pass splits any such clusters. No outlier removal —
+        just variant detection and phasing.
+        """
+        config = ClusterProcessingConfig(
+            outlier_identity_threshold=self.outlier_identity_threshold,
+            enable_secondpass_phasing=self.enable_secondpass_phasing,
+            disable_homopolymer_equivalence=self.disable_homopolymer_equivalence,
+            min_variant_frequency=self.min_variant_frequency,
+            min_variant_count=self.min_variant_count,
+            total_specimen_reads=len(self.sequences),
+            assumed_error_rate=self.assumed_error_rate,
+            significance_level=self.significance_level,
+        )
+
+        result = []
+        split_count = 0
+
+        for cluster_dict in subclusters:
+            read_ids = cluster_dict['read_ids']
+            if len(read_ids) < config.min_variant_count * 2:
+                result.append(cluster_dict)
+                continue
+
+            # Build quality-sorted sequences
+            qualities = {
+                sid: statistics.mean(self.records[sid].letter_annotations["phred_quality"])
+                for sid in read_ids
+            }
+            sorted_ids = sorted(read_ids, key=lambda x: (-qualities.get(x, 0), x))
+            cluster_seqs = {sid: self.sequences[sid] for sid in sorted_ids}
+
+            msa_result = _run_spoa_for_cluster_worker(cluster_seqs, self.disable_homopolymer_equivalence)
+            if msa_result is None:
+                result.append(cluster_dict)
+                continue
+
+            variant_positions = _detect_variant_positions_standalone(
+                msa_result.alignments, msa_result.consensus, msa_result.msa_to_consensus_pos,
+                config.min_variant_frequency, config.min_variant_count
+            )
+
+            if not variant_positions:
+                result.append(cluster_dict)
+                continue
+
+            # Phase
+            phased = _phase_reads_by_variants_standalone(
+                read_ids, self.sequences, qualities, variant_positions, config
+            )
+
+            if len(phased) <= 1:
+                result.append(cluster_dict)
+                continue
+
+            # Split succeeded
+            split_count += 1
+            for allele_combo, haplotype_reads in phased:
+                result.append({
+                    'read_ids': haplotype_reads,
+                    'initial_cluster_num': cluster_dict.get('initial_cluster_num'),
+                    'allele_combo': allele_combo,
+                })
+
+        if split_count > 0:
+            logging.info(f"Second phasing pass: {split_count} clusters split, "
+                        f"{len(result)} sub-clusters from {len(subclusters)}")
+            # Remove empty clusters
+            result = [c for c in result if c['read_ids']]
+        else:
+            logging.info("Second phasing pass: no clusters split")
+
+        return result
+
     def _reassign_reads_in_group(self, subclusters: List[Dict],
                                  consensuses: Dict[int, Optional[str]],
                                  group_indices: List[int],
@@ -1705,8 +1783,11 @@ class SpecimenClusterer:
             # Phase 4b: Read reassignment
             reassigned_subclusters = self._run_read_reassignment(merged_subclusters)
 
+            # Phase 4b2: Second phasing pass (split variants introduced by reassignment)
+            rephased_subclusters = self._run_second_phasing_pass(reassigned_subclusters)
+
             # Phase 4c: CER validation
-            validated_subclusters = self._run_cer_validation(reassigned_subclusters)
+            validated_subclusters = self._run_cer_validation(rephased_subclusters)
 
             # Phase 5: Size filtering
             filtered_clusters = self._run_size_filtering(validated_subclusters)
