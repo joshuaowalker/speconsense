@@ -231,7 +231,7 @@ def parse_score_aligned_for_errors(
 def extract_alignments_from_msa(
     msa_string: str,
     enable_homopolymer_normalization: bool = True,
-    min_hp_length: int = 1
+    min_hp_length: int = 6
 ) -> Tuple[List[ReadAlignment], str, Dict[int, Optional[int]]]:
     """
     Extract read alignments from an MSA string with optional homopolymer normalization.

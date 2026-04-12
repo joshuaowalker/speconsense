@@ -99,13 +99,13 @@ def _run_spoa_worker(args: Tuple[int, Dict[str, str], bool]) -> Tuple[int, Optio
 
     try:
         with tempfile.NamedTemporaryFile(mode='w', delete=False, suffix='.fasta') as f:
-            for read_id, seq in sorted(sampled_seqs.items()):
+            for read_id, seq in sampled_seqs.items():
                 f.write(f">{read_id}\n{seq}\n")
             temp_input = f.name
 
         cmd = [
             "spoa", temp_input,
-            "-r", "2", "-l", "1", "-m", "5", "-n", "-4", "-g", "-8", "-e", "-6",
+            "-r", "2", "-l", "1", "-m", "1", "-n", "-1", "-g", "-1", "-e", "-1",
         ]
         result = subprocess.run(cmd, capture_output=True, text=True, check=True)
         os.unlink(temp_input)
@@ -140,13 +140,13 @@ def _run_spoa_for_cluster_worker(sequences: Dict[str, str],
 
     try:
         with tempfile.NamedTemporaryFile(mode='w', delete=False, suffix='.fasta') as f:
-            for read_id, seq in sorted(sequences.items()):
+            for read_id, seq in sequences.items():
                 f.write(f">{read_id}\n{seq}\n")
             temp_input = f.name
 
         cmd = [
             "spoa", temp_input,
-            "-r", "2", "-l", "1", "-m", "5", "-n", "-4", "-g", "-8", "-e", "-6",
+            "-r", "2", "-l", "1", "-m", "1", "-n", "-1", "-g", "-1", "-e", "-1",
         ]
         result = subprocess.run(cmd, capture_output=True, text=True, check=True)
         os.unlink(temp_input)
@@ -337,6 +337,7 @@ def _find_best_phasing_subset(
 def _recursive_phase_cluster_standalone(
     read_ids: Set[str],
     read_sequences: Dict[str, str],
+    qualities: Dict[str, float],
     path: List[str],
     depth: int,
     config: ClusterProcessingConfig
@@ -344,15 +345,20 @@ def _recursive_phase_cluster_standalone(
     """Recursively phase a cluster. Standalone version for workers."""
     total_reads = len(read_ids)
 
+    def _quality_sorted_seqs(rids):
+        """Build quality-sorted dict of sequences for SPOA input."""
+        sorted_rids = sorted(rids, key=lambda x: (-qualities.get(x, 0), x))
+        return {rid: read_sequences[rid] for rid in sorted_rids}
+
     # Base case: cluster too small
     if total_reads < config.min_variant_count * 2:
-        leaf_seqs = {rid: read_sequences[rid] for rid in read_ids}
+        leaf_seqs = _quality_sorted_seqs(read_ids)
         result = _run_spoa_for_cluster_worker(leaf_seqs, config.disable_homopolymer_equivalence)
         consensus = result.consensus if result else ""
         return [(path, consensus, read_ids)], set()
 
     # Generate MSA
-    cluster_seqs = {rid: read_sequences[rid] for rid in read_ids}
+    cluster_seqs = _quality_sorted_seqs(read_ids)
     result = _run_spoa_for_cluster_worker(cluster_seqs, config.disable_homopolymer_equivalence)
 
     if result is None:
@@ -441,7 +447,7 @@ def _recursive_phase_cluster_standalone(
         allele_str = ''.join(allele) if isinstance(allele, tuple) else allele
         new_path = path + [allele_str]
         sub_leaves, sub_deferred = _recursive_phase_cluster_standalone(
-            sub_read_ids, read_sequences, new_path, depth + 1, config
+            sub_read_ids, read_sequences, qualities, new_path, depth + 1, config
         )
         all_leaves.extend(sub_leaves)
         all_deferred.update(sub_deferred)
@@ -452,6 +458,7 @@ def _recursive_phase_cluster_standalone(
 def _phase_reads_by_variants_standalone(
     cluster_read_ids: Set[str],
     sequences: Dict[str, str],
+    qualities: Dict[str, float],
     variant_positions: List[Dict],
     config: ClusterProcessingConfig
 ) -> List[Tuple[str, Set[str]]]:
@@ -467,7 +474,7 @@ def _phase_reads_by_variants_standalone(
         logging.debug(f"Recursive phasing with MSA regeneration: {len(variant_positions)} initial variants, {len(read_sequences)} reads")
 
         leaves, deferred = _recursive_phase_cluster_standalone(
-            set(read_sequences.keys()), read_sequences, [], 0, config
+            set(read_sequences.keys()), read_sequences, qualities, [], 0, config
         )
 
         if len(leaves) <= 1 and not deferred:
@@ -610,7 +617,7 @@ def _process_cluster_worker(args) -> Tuple[List[Dict], Set[str]]:
 
     # Phase reads
     phased_haplotypes = _phase_reads_by_variants_standalone(
-        cluster, sequences, variant_positions, config
+        cluster, sequences, qualities, variant_positions, config
     )
 
     for haplotype_idx, (allele_combo, haplotype_reads) in enumerate(phased_haplotypes):

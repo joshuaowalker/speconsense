@@ -11,7 +11,6 @@ from datetime import datetime
 from typing import Dict, List, Optional, Set, Tuple
 
 import edlib
-from adjusted_identity import score_alignment, AdjustmentParams, ScoringFormat
 from Bio import SeqIO
 from Bio.Seq import reverse_complement
 from tqdm import tqdm
@@ -22,7 +21,7 @@ except ImportError:
     __version__ = "dev"
 
 from speconsense.msa import ReadAlignment
-from speconsense.distances import count_variant_differences, calculate_adjusted_identity_distance
+from speconsense.distances import count_variant_differences
 from speconsense.significance import compute_critical_error_rate, is_cer_reportable
 from speconsense.scalability import (
     VsearchCandidateFinder,
@@ -110,6 +109,69 @@ def _extract_bases_at_columns(aln, columns: List[int], spoa_consensus_aligned: s
                 base = spoa_consensus_aligned[col] if col < len(spoa_consensus_aligned) else '-'
         bases[col] = base
     return bases
+
+
+def _hp_normalized_pairwise_compare(seq1: str, seq2: str, min_hp_length: int = 6) -> Tuple[float, bool]:
+    """Compare two sequences with HP-normalized global alignment.
+
+    Runs edlib global alignment, builds HP context from both aligned sequences,
+    and scores each position. Within qualifying HP runs (length >= min_hp_length),
+    insertions/deletions of the HP base are treated as matches.
+
+    Args:
+        seq1, seq2: Ungapped sequences to compare
+        min_hp_length: Minimum HP run length to normalize
+
+    Returns:
+        (distance, is_hp_equivalent) where:
+        - distance: 1.0 - (matches / scored_positions), or 1.0 on failure
+        - is_hp_equivalent: True if all differences are HP length differences
+    """
+    from speconsense.msa import _build_hp_context
+
+    if not seq1 or not seq2:
+        return 1.0, False
+    if seq1 == seq2:
+        return 0.0, True
+
+    result = edlib.align(seq1, seq2, task="path")
+    if result["editDistance"] == -1:
+        return 1.0, False
+
+    alignment = edlib.getNiceAlignment(result, seq1, seq2)
+    if not alignment:
+        return 1.0, False
+
+    s1 = alignment['query_aligned']
+    s2 = alignment['target_aligned']
+    n = len(s1)
+
+    hp1 = _build_hp_context(s1, min_hp_length)
+    hp2 = _build_hp_context(s2, min_hp_length)
+
+    matches = 0
+    mismatches = 0
+    hp_equiv = 0
+
+    for i in range(n):
+        b1, b2 = s1[i], s2[i]
+        if b1 == '-' and b2 == '-':
+            continue  # not a scored position
+        if b1 == b2:
+            matches += 1
+        elif hp1[i] is not None and b1 == hp1[i] and b2 == '-':
+            hp_equiv += 1  # deletion of HP base in seq2
+        elif hp2[i] is not None and b2 == hp2[i] and b1 == '-':
+            hp_equiv += 1  # deletion of HP base in seq1
+        else:
+            mismatches += 1
+
+    scored = matches + hp_equiv + mismatches
+    if scored == 0:
+        return 0.0, True
+
+    distance = mismatches / scored
+    return distance, mismatches == 0
 
 
 class SpecimenClusterer:
@@ -1320,7 +1382,7 @@ class SpecimenClusterer:
             for j in range(i + 1, n):
                 ci, cj = consensuses.get(i), consensuses.get(j)
                 if ci and cj:
-                    dist = calculate_adjusted_identity_distance(ci, cj)
+                    dist, _ = _hp_normalized_pairwise_compare(ci, cj)
                     if dist <= threshold:
                         union(i, j)
 
@@ -1724,8 +1786,14 @@ class SpecimenClusterer:
             significance_level=self.significance_level,
         )
 
+        # Build qualities dict for consistent SPOA ordering
+        qualities = {}
+        for rid in cluster_read_ids:
+            if rid in self.records:
+                qualities[rid] = statistics.mean(self.records[rid].letter_annotations["phred_quality"])
+
         return _phase_reads_by_variants_standalone(
-            cluster_read_ids, self.sequences, variant_positions, config
+            cluster_read_ids, self.sequences, qualities, variant_positions, config
         )
 
     def load_primers(self, primer_file: str) -> None:
@@ -1926,110 +1994,19 @@ class SpecimenClusterer:
         primers = getattr(self, 'primers', None)
         return _trim_primers_standalone(sequence, primers)
 
-    def calculate_consensus_distance(self, seq1: str, seq2: str, require_merge_compatible: bool = False) -> int:
-        """Calculate distance between two consensus sequences using adjusted identity.
-
-        Uses custom adjustment parameters that enable only homopolymer normalization:
-        - Homopolymer differences (e.g., AAA vs AAAAA) are treated as identical
-        - Regular substitutions count as mismatches
-        - Non-homopolymer indels optionally prevent merging
-
-        Args:
-            seq1: First consensus sequence
-            seq2: Second consensus sequence
-            require_merge_compatible: If True, return -1 when sequences have variations
-                                     that cannot be represented in IUPAC consensus (indels)
-
-        Returns:
-            Distance between sequences (substitutions only), or -1 if require_merge_compatible=True
-            and sequences contain non-homopolymer indels
-        """
-        if not seq1 or not seq2:
-            return max(len(seq1), len(seq2))
-
-        # Get alignment from edlib (uses global NW alignment by default)
-        result = edlib.align(seq1, seq2, task="path")
-        if result["editDistance"] == -1:
-            # Alignment failed, return maximum possible distance
-            return max(len(seq1), len(seq2))
-
-        # Get nice alignment for adjusted identity scoring
-        alignment = edlib.getNiceAlignment(result, seq1, seq2)
-        if not alignment or not alignment.get('query_aligned') or not alignment.get('target_aligned'):
-            # Fall back to edit distance if alignment extraction fails
-            return result["editDistance"]
-
-        # Configure custom adjustment parameters for homopolymer normalization only
-        # Use max_repeat_motif_length=1 to be consistent with variant detection
-        # (extract_alignments_from_msa also uses length=1)
-        custom_params = AdjustmentParams(
-            normalize_homopolymers=True,    # Enable homopolymer normalization
-            handle_iupac_overlap=False,     # Disable IUPAC overlap handling
-            normalize_indels=False,         # Disable indel normalization
-            end_skip_distance=0,            # Disable end trimming
-            max_repeat_motif_length=1       # Single-base repeats only (consistent with variant detection)
-        )
-
-        # Create custom scoring format to distinguish indels from substitutions
-        custom_format = ScoringFormat(
-            match='|',
-            substitution='X',     # Distinct code for substitutions
-            indel_start='I',      # Distinct code for indels
-            indel_extension='-',
-            homopolymer_extension='=',
-            end_trimmed='.'
-        )
-
-        # Calculate adjusted identity with custom format
-        score_result = score_alignment(
-            alignment['query_aligned'],
-            alignment['target_aligned'],
-            adjustment_params=custom_params,
-            scoring_format=custom_format
-        )
-
-        # Check for merge compatibility if requested
-        # Both non-homopolymer indels ('I') and terminal overhangs ('.') prevent merging
-        if require_merge_compatible:
-            if 'I' in score_result.score_aligned:
-                # logging.debug(f"Non-homopolymer indel detected, sequences not merge-compatible")
-                return -1  # Signal that merging should not occur
-            if '.' in score_result.score_aligned:
-                # logging.debug(f"Terminal overhang detected, sequences not merge-compatible")
-                return -1  # Signal that merging should not occur
-
-        # Count only substitutions (not homopolymer adjustments or indels)
-        # Note: mismatches includes both substitutions and non-homopolymer indels
-        # For accurate distance when indels are present, we use the mismatches count
-        distance = score_result.mismatches
-
-        # Log details about the variations found
-        substitutions = score_result.score_aligned.count('X')
-        indels = score_result.score_aligned.count('I')
-        homopolymers = score_result.score_aligned.count('=')
-
-        # logging.debug(f"Consensus distance: {distance} total mismatches "
-        #              f"({substitutions} substitutions, {indels} indels, "
-        #              f"{homopolymers} homopolymer adjustments)")
-
-        return distance
-
     def are_homopolymer_equivalent(self, seq1: str, seq2: str) -> bool:
-        """Check if two sequences are equivalent when considering only homopolymer differences.
+        """Check if two sequences differ only in HP run lengths.
 
-        Uses adjusted-identity scoring with global alignment. Terminal overhangs (marked as '.')
-        and non-homopolymer indels (marked as 'I') prevent merging, ensuring truncated sequences
-        don't merge with full-length sequences.
+        Uses edlib global alignment with consensus-derived HP context.
+        Only HP runs of length >= min_hp_length (default 6) are normalized.
+        Any non-HP difference (substitution, non-HP indel, terminal overhang)
+        means the sequences are NOT equivalent.
         """
         if not seq1 or not seq2:
             return seq1 == seq2
 
-        # Use calculate_consensus_distance with merge compatibility check
-        # Global alignment ensures terminal gaps are counted as indels
-        # Returns: -1 (non-homopolymer indels), 0 (homopolymer-equivalent), >0 (substitutions)
-        # Only distance == 0 means truly homopolymer-equivalent
-        distance = self.calculate_consensus_distance(seq1, seq2, require_merge_compatible=True)
-        return distance == 0
+        _, is_equiv = _hp_normalized_pairwise_compare(seq1, seq2)
+        return is_equiv
 
     def parse_mcl_output(self, mcl_output_file: str) -> List[Set[str]]:
         """Parse MCL output file into clusters of original sequence IDs."""
