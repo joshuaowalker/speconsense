@@ -17,7 +17,6 @@ import logging
 from typing import List, Set, Tuple, Optional, Dict, NamedTuple
 
 import edlib
-from adjusted_identity import score_alignment, AdjustmentParams
 import numpy as np
 from Bio import SeqIO
 
@@ -99,6 +98,86 @@ class MSAResult(NamedTuple):
 
 
 # ============================================================================
+# HP Context Detection
+# ============================================================================
+
+def _build_hp_context(consensus_aligned: str, min_hp_length: int = 1) -> List[Optional[str]]:
+    """Build per-column HP context from the aligned consensus sequence.
+
+    Scans the consensus for homopolymer runs (consecutive same base, ignoring
+    gap columns) and returns an array where hp_context[col] is the HP base
+    character if that column falls within a qualifying run, or None otherwise.
+
+    Gap columns internal to a run (between two bases of the same run) are
+    included. Gap columns immediately adjacent to a run are also tagged if
+    their nearest non-gap neighbor on the run side matches the HP base.
+
+    Args:
+        consensus_aligned: SPOA consensus with gaps from MSA
+        min_hp_length: Minimum run length (in non-gap consensus bases) to
+                       qualify as an HP region. Default 1 = all runs.
+
+    Returns:
+        List of length len(consensus_aligned). Each element is a base
+        character ('A','C','G','T') if the column is in an HP region,
+        or None.
+    """
+    n = len(consensus_aligned)
+    hp_context: List[Optional[str]] = [None] * n
+
+    # Collect non-gap positions: (msa_col, base)
+    non_gap = [(i, consensus_aligned[i]) for i in range(n) if consensus_aligned[i] != '-']
+    if not non_gap:
+        return hp_context
+
+    # Find runs of the same base in the non-gap sequence
+    runs = []  # [(base, [msa_col, ...])]
+    cur_base = non_gap[0][1]
+    cur_positions = [non_gap[0][0]]
+    for i in range(1, len(non_gap)):
+        pos, base = non_gap[i]
+        if base == cur_base:
+            cur_positions.append(pos)
+        else:
+            runs.append((cur_base, cur_positions))
+            cur_base = base
+            cur_positions = [pos]
+    runs.append((cur_base, cur_positions))
+
+    # Tag MSA columns for qualifying runs (first..last inclusive, covering
+    # internal gap columns)
+    for base, positions in runs:
+        if len(positions) >= min_hp_length:
+            for col in range(positions[0], positions[-1] + 1):
+                hp_context[col] = base
+
+    # Extend into adjacent gap columns: a gap column next to a tagged
+    # column inherits the HP base if the consensus is '-' there.
+    # Repeat until stable so chains of gap columns propagate.
+    changed = True
+    while changed:
+        changed = False
+        for col in range(n):
+            if consensus_aligned[col] != '-' or hp_context[col] is not None:
+                continue
+            left = hp_context[col - 1] if col > 0 else None
+            right = hp_context[col + 1] if col < n - 1 else None
+            if left and right:
+                if left == right:
+                    hp_context[col] = left
+                    changed = True
+                # Different HP bases on each side — leave untagged
+            elif left:
+                hp_context[col] = left
+                changed = True
+            elif right:
+                hp_context[col] = right
+                changed = True
+
+    return hp_context
+
+
+# ============================================================================
 # MSA Analysis Functions
 # ============================================================================
 
@@ -151,7 +230,8 @@ def parse_score_aligned_for_errors(
 
 def extract_alignments_from_msa(
     msa_string: str,
-    enable_homopolymer_normalization: bool = True
+    enable_homopolymer_normalization: bool = True,
+    min_hp_length: int = 1
 ) -> Tuple[List[ReadAlignment], str, Dict[int, Optional[int]]]:
     """
     Extract read alignments from an MSA string with optional homopolymer normalization.
@@ -166,8 +246,11 @@ def extract_alignments_from_msa(
     - Different bases: Substitution
     - Same base: Match (not an error)
 
-    When enable_homopolymer_normalization=True, also computes normalized metrics that
-    exclude homopolymer length differences using adjusted-identity library.
+    When enable_homopolymer_normalization=True, HP regions are identified directly
+    from the SPOA consensus sequence. Within HP regions, insertions or deletions of
+    the HP base are treated as matches (score_aligned='='). All other differences
+    are counted as errors. This operates entirely in MSA coordinates, avoiding the
+    pairwise/MSA coordinate mismatch of the previous adjusted-identity approach.
 
     IMPORTANT: Errors are reported at MSA positions, not consensus positions.
     This avoids ambiguity when multiple insertion columns map to the same consensus position.
@@ -175,6 +258,7 @@ def extract_alignments_from_msa(
     Args:
         msa_string: MSA content in FASTA format
         enable_homopolymer_normalization: If True, compute homopolymer-normalized metrics
+        min_hp_length: Minimum consensus HP run length to normalize (default 1 = all runs)
 
     Returns:
         Tuple of:
@@ -183,16 +267,6 @@ def extract_alignments_from_msa(
         - mapping from MSA position to consensus position (None for insertion columns)
     """
     from io import StringIO
-
-    # Define adjustment parameters for homopolymer normalization
-    # Only normalize homopolymers (single-base repeats), no other adjustments
-    HOMOPOLYMER_ADJUSTMENT_PARAMS = AdjustmentParams(
-        normalize_homopolymers=True,
-        handle_iupac_overlap=False,
-        normalize_indels=False,
-        end_skip_distance=0,
-        max_repeat_motif_length=1  # Single-base repeats only
-    )
 
     # Parse MSA
     msa_handle = StringIO(msa_string)
@@ -233,6 +307,9 @@ def extract_alignments_from_msa(
 
     # Get consensus without gaps for return value
     consensus_ungapped = consensus_aligned.replace('-', '')
+
+    # Build HP context for normalization (computed once, used for all reads)
+    hp_context = _build_hp_context(consensus_aligned, min_hp_length) if enable_homopolymer_normalization else None
 
     # Process each read
     alignments = []
@@ -277,35 +354,38 @@ def extract_alignments_from_msa(
         edit_distance = num_insertions + num_deletions + num_substitutions
         read_length = len(read_aligned.replace('-', ''))  # Length without gaps
 
-        # Compute homopolymer-normalized metrics if enabled
-        if enable_homopolymer_normalization:
-            try:
-                # Use adjusted-identity to get homopolymer-normalized scoring
-                # IMPORTANT: seq1=read, seq2=consensus. The score_aligned visualization
-                # is asymmetric and shows HP extensions from seq1's (the READ's) perspective.
-                # This is what we want since we're identifying which READ bases are extensions.
-                result = score_alignment(
-                    read_aligned,      # seq1 - the read
-                    consensus_aligned, # seq2 - the consensus
-                    HOMOPOLYMER_ADJUSTMENT_PARAMS
-                )
+        # Compute homopolymer-normalized metrics using consensus-derived HP context
+        if hp_context is not None:
+            score_chars = []
+            normalized_error_positions = []
 
-                # Parse score_aligned string to extract normalized errors
-                normalized_error_positions = parse_score_aligned_for_errors(
-                    result.score_aligned,
-                    read_aligned,
-                    consensus_aligned
-                )
+            for msa_pos in range(msa_length):
+                read_base = read_aligned[msa_pos]
+                cons_base = consensus_aligned[msa_pos]
+                hp_base = hp_context[msa_pos]
 
-                normalized_edit_distance = result.mismatches
-                score_aligned_str = result.score_aligned
+                if read_base == '-' and cons_base == '-':
+                    score_chars.append('|')
+                elif read_base == cons_base:
+                    score_chars.append('|')
+                elif hp_base is not None and cons_base == hp_base and read_base == '-':
+                    # Deletion of the HP base — treat as HP match
+                    score_chars.append('=')
+                elif hp_base is not None and cons_base == '-' and read_base == hp_base:
+                    # Insertion of the HP base — treat as HP match
+                    score_chars.append('=')
+                else:
+                    # Real mismatch
+                    score_chars.append(' ')
+                    if read_base == '-' and cons_base != '-':
+                        normalized_error_positions.append(ErrorPosition(msa_pos, 'del'))
+                    elif read_base != '-' and cons_base == '-':
+                        normalized_error_positions.append(ErrorPosition(msa_pos, 'ins'))
+                    else:
+                        normalized_error_positions.append(ErrorPosition(msa_pos, 'sub'))
 
-            except Exception as e:
-                # If normalization fails, fall back to raw metrics
-                logging.warning(f"Homopolymer normalization failed for read {read_record.id}: {e}")
-                normalized_edit_distance = edit_distance
-                normalized_error_positions = error_positions
-                score_aligned_str = ""
+            score_aligned_str = ''.join(score_chars)
+            normalized_edit_distance = len(normalized_error_positions)
         else:
             # Homopolymer normalization disabled - use raw metrics
             normalized_edit_distance = edit_distance
