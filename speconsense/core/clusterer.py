@@ -579,7 +579,8 @@ class SpecimenClusterer:
 
                 for cluster_idx, result in results:
                     if result is None:
-                        logging.warning(f"Cluster {cluster_idx} produced no consensus, skipping")
+                        logging.warning(f"Cluster {cluster_idx} produced no consensus, discarding {len(clusters[cluster_idx]['read_ids'])} reads")
+                        self.discarded_read_ids.update(clusters[cluster_idx]['read_ids'])
                         continue
                     consensus = result.consensus
                     if hasattr(self, 'primers'):
@@ -591,7 +592,8 @@ class SpecimenClusterer:
                 for cluster_idx, sampled_seqs in clusters_needing_spoa:
                     _, result = _run_spoa_worker((cluster_idx, sampled_seqs, self.disable_homopolymer_equivalence))
                     if result is None:
-                        logging.warning(f"Cluster {cluster_idx} produced no consensus, skipping")
+                        logging.warning(f"Cluster {cluster_idx} produced no consensus, discarding {len(clusters[cluster_idx]['read_ids'])} reads")
+                        self.discarded_read_ids.update(clusters[cluster_idx]['read_ids'])
                         continue
                     consensus = result.consensus
                     if hasattr(self, 'primers'):
@@ -952,7 +954,9 @@ class SpecimenClusterer:
 
         # Sort initial clusters by size (largest first)
         initial_clusters.sort(key=lambda c: len(c), reverse=True)
-        logging.info(f"Initial clustering produced {len(initial_clusters)} clusters")
+        clustered_count = sum(len(c) for c in initial_clusters)
+        logging.info(f"Initial clustering produced {len(initial_clusters)} clusters "
+                     f"covering {clustered_count}/{len(self.sequences)} reads")
         return initial_clusters
 
     def _run_prephasing_merge(self, initial_clusters: List[Set[str]]) -> List[Set[str]]:
@@ -1218,14 +1222,19 @@ class SpecimenClusterer:
                 result.append(cluster_dict)
                 continue
 
-            # Split succeeded
+            # Split succeeded — track any reads lost during phasing
             split_count += 1
+            phased_reads = set()
             for allele_combo, haplotype_reads in phased:
+                phased_reads.update(haplotype_reads)
                 result.append({
                     'read_ids': haplotype_reads,
                     'initial_cluster_num': cluster_dict.get('initial_cluster_num'),
                     'allele_combo': allele_combo,
                 })
+            lost = read_ids - phased_reads
+            if lost:
+                self.discarded_read_ids.update(lost)
 
         if split_count > 0:
             logging.info(f"Second phasing pass: {split_count} clusters split, "
@@ -1378,8 +1387,203 @@ class SpecimenClusterer:
 
         return total_reassigned
 
+    def _run_discard_reassignment(self, subclusters: List[Dict]) -> List[Dict]:
+        """Phase 4b3: Reassign discarded reads to existing clusters.
+
+        For each discarded read:
+        1. Find best-matching cluster consensus via edlib (group selection)
+        2. For multi-cluster groups, use SPOA MSA + variant concordance
+        3. Confirm via edit distance
+
+        Returns updated subclusters with recovered reads added.
+        """
+        if not self.discarded_read_ids or not subclusters:
+            return subclusters
+
+        # Generate consensus for each cluster
+        consensuses: Dict[int, Optional[str]] = {}
+        for i, cluster_dict in enumerate(subclusters):
+            consensuses[i] = self._generate_consensus_for_validation(cluster_dict['read_ids'])
+
+        valid_consensuses = {i: c for i, c in consensuses.items() if c}
+        if not valid_consensuses:
+            return subclusters
+
+        # Form identity groups (reuse existing logic)
+        identity_groups = self._form_identity_groups(subclusters, consensuses)
+        # Build reverse map: cluster_index -> group_id
+        cluster_to_group: Dict[int, int] = {}
+        for group_id, indices in identity_groups.items():
+            for idx in indices:
+                cluster_to_group[idx] = group_id
+
+        # Step 1: Screen each discard against all cluster consensuses
+        # Group candidates by identity group
+        group_candidates: Dict[int, List[Tuple[str, str]]] = defaultdict(list)  # group_id -> [(read_id, seq)]
+        rejected = 0
+
+        # Use relaxed threshold: group_identity (0.85) since we just need group membership
+        max_distance = 1.0 - self.group_identity
+
+        for rid in sorted(self.discarded_read_ids):
+            read_seq = self.sequences.get(rid)
+            if not read_seq:
+                continue
+
+            best_idx = None
+            best_dist = float('inf')
+            for idx, cons in valid_consensuses.items():
+                dist = edlib.align(read_seq, cons)['editDistance']
+                norm_dist = dist / max(len(read_seq), len(cons))
+                if norm_dist < best_dist:
+                    best_dist = norm_dist
+                    best_idx = idx
+
+            if best_idx is None or best_dist > max_distance:
+                rejected += 1
+                continue
+
+            group_id = cluster_to_group[best_idx]
+            group_candidates[group_id].append((rid, read_seq))
+
+        total_candidates = sum(len(v) for v in group_candidates.values())
+        if total_candidates == 0:
+            logging.info(f"Discard reassignment: no candidates (all {rejected} reads below threshold)")
+            return subclusters
+
+        # Step 2 & 3: For each group with candidates, run SPOA + concordance
+        total_assigned = 0
+
+        for group_id, candidates in group_candidates.items():
+            group_indices = identity_groups[group_id]
+
+            # Single-cluster group: assign directly via edit distance
+            if len(group_indices) == 1:
+                target_idx = group_indices[0]
+                for rid, read_seq in candidates:
+                    subclusters[target_idx]['read_ids'].add(rid)
+                    self.discarded_read_ids.discard(rid)
+                    total_assigned += 1
+                continue
+
+            # Multi-cluster group: SPOA + variant concordance
+            cluster_consensus_seqs: Dict[int, str] = {}
+            for idx in group_indices:
+                cons = consensuses.get(idx)
+                if cons:
+                    cluster_consensus_seqs[idx] = cons
+
+            if len(cluster_consensus_seqs) <= 1:
+                # Only one valid consensus — assign all to it
+                target_idx = next(iter(cluster_consensus_seqs))
+                for rid, read_seq in candidates:
+                    subclusters[target_idx]['read_ids'].add(rid)
+                    self.discarded_read_ids.discard(rid)
+                    total_assigned += 1
+                continue
+
+            # Build SPOA input: consensus sequences + candidate reads
+            spoa_input: Dict[str, str] = {}
+            consensus_spoa_ids: Dict[str, int] = {}
+            for idx, cons in cluster_consensus_seqs.items():
+                spoa_id = f"__cons_{idx}__"
+                spoa_input[spoa_id] = cons
+                consensus_spoa_ids[spoa_id] = idx
+
+            # Subsample candidates if too many
+            max_candidates = 500
+            if len(candidates) > max_candidates:
+                # Sort by quality descending
+                candidates_with_qual = []
+                for rid, seq in candidates:
+                    rec = self.records.get(rid)
+                    if rec:
+                        qual = statistics.mean(rec.letter_annotations["phred_quality"])
+                    else:
+                        qual = 0.0
+                    candidates_with_qual.append((qual, rid, seq))
+                candidates_with_qual.sort(reverse=True)
+                candidates = [(rid, seq) for _, rid, seq in candidates_with_qual[:max_candidates]]
+
+            for rid, seq in candidates:
+                spoa_input[rid] = seq
+
+            # Run SPOA
+            msa_result = _run_spoa_for_cluster_worker(spoa_input, self.disable_homopolymer_equivalence)
+            if not msa_result:
+                continue
+
+            spoa_consensus_aligned = _extract_consensus_aligned_from_msa(msa_result.msa_string)
+            if not spoa_consensus_aligned:
+                continue
+
+            alignment_by_id = {a.read_id: a for a in msa_result.alignments}
+
+            # Find variant columns between cluster consensuses
+            variant_columns = _find_variant_columns(alignment_by_id, consensus_spoa_ids,
+                                                    spoa_consensus_aligned)
+            if not variant_columns:
+                # No variant positions — assign to closest by edit distance
+                for rid, read_seq in candidates:
+                    best_idx = min(cluster_consensus_seqs.keys(),
+                                   key=lambda i: edlib.align(read_seq, cluster_consensus_seqs[i])['editDistance'])
+                    subclusters[best_idx]['read_ids'].add(rid)
+                    self.discarded_read_ids.discard(rid)
+                    total_assigned += 1
+                continue
+
+            # Extract cluster consensus bases at variant columns
+            cluster_bases: Dict[int, Dict[int, str]] = {}
+            for spoa_id, idx in consensus_spoa_ids.items():
+                aln = alignment_by_id.get(spoa_id)
+                if aln:
+                    cluster_bases[idx] = _extract_bases_at_columns(
+                        aln, variant_columns, spoa_consensus_aligned)
+
+            # Score each candidate and assign
+            for rid, read_seq in candidates:
+                aln = alignment_by_id.get(rid)
+                if not aln:
+                    continue
+
+                read_bases = _extract_bases_at_columns(aln, variant_columns, spoa_consensus_aligned)
+
+                # Concordance: count matches at variant positions for each cluster
+                best_idx = None
+                best_score = -1
+                for idx, cbases in cluster_bases.items():
+                    score = sum(1 for col in variant_columns
+                                if read_bases.get(col) == cbases.get(col))
+                    if score > best_score:
+                        best_score = score
+                        best_idx = idx
+
+                if best_idx is None:
+                    continue
+
+                # Confirm via edit distance: read must be within group threshold
+                target_cons = cluster_consensus_seqs.get(best_idx, '')
+                if target_cons:
+                    dist = edlib.align(read_seq, target_cons)['editDistance']
+                    norm_dist = dist / max(len(read_seq), len(target_cons))
+                    if norm_dist > max_distance:
+                        continue
+
+                subclusters[best_idx]['read_ids'].add(rid)
+                self.discarded_read_ids.discard(rid)
+                total_assigned += 1
+
+        if total_assigned > 0:
+            logging.info(f"Discard reassignment: recovered {total_assigned} of "
+                        f"{total_candidates} candidates ({rejected} reads below threshold)")
+        else:
+            logging.info(f"Discard reassignment: no reads recovered "
+                        f"({total_candidates} candidates, {rejected} below threshold)")
+
+        return subclusters
+
     def _run_cer_validation(self, subclusters: List[Dict]) -> List[Dict]:
-        """Phase 4b: Validate clusters via pairwise CER testing.
+        """Phase 4c: Validate clusters via pairwise CER testing.
 
         Groups clusters by adjusted identity, then within each group:
         - The largest cluster (anchor) auto-passes
@@ -1758,6 +1962,12 @@ class SpecimenClusterer:
             # Phase 1: Initial clustering
             initial_clusters = self._run_initial_clustering(temp_dir, algorithm)
 
+            # Track reads not assigned to any cluster
+            clustered_reads = set().union(*initial_clusters) if initial_clusters else set()
+            unclustered = set(self.sequences.keys()) - clustered_reads
+            if unclustered:
+                self.discarded_read_ids.update(unclustered)
+
             # Hard floor: drop clusters with < 3 reads (no error correction possible)
             min_consensus_reads = 3
             small = [c for c in initial_clusters if len(c) < min_consensus_reads]
@@ -1783,8 +1993,11 @@ class SpecimenClusterer:
             # Phase 4b: Read reassignment
             reassigned_subclusters = self._run_read_reassignment(merged_subclusters)
 
-            # Phase 4b2: Second phasing pass (split variants introduced by reassignment)
-            rephased_subclusters = self._run_second_phasing_pass(reassigned_subclusters)
+            # Phase 4b2: Discard reassignment (recover reads dropped earlier)
+            discard_reassigned = self._run_discard_reassignment(reassigned_subclusters)
+
+            # Phase 4b3: Second phasing pass (split variants introduced by reassignment/recovery)
+            rephased_subclusters = self._run_second_phasing_pass(discard_reassigned)
 
             # Phase 4c: CER validation
             validated_subclusters = self._run_cer_validation(rephased_subclusters)

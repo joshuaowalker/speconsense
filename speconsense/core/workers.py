@@ -620,12 +620,20 @@ def _process_cluster_worker(args) -> Tuple[List[Dict], Set[str]]:
         cluster, sequences, qualities, variant_positions, config
     )
 
+    phased_reads = set()
     for haplotype_idx, (allele_combo, haplotype_reads) in enumerate(phased_haplotypes):
+        phased_reads.update(haplotype_reads)
         subclusters.append({
             'read_ids': haplotype_reads,
             'initial_cluster_num': initial_idx,
             'allele_combo': allele_combo
         })
+
+    # Track reads lost during phasing (e.g. SPOA didn't produce alignment)
+    lost = cluster - phased_reads
+    if lost:
+        logging.debug(f"Initial cluster {initial_idx}: {len(lost)} reads lost during phasing, adding to discards")
+        discarded_ids.update(lost)
 
     return subclusters, discarded_ids
 
