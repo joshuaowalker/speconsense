@@ -21,7 +21,7 @@ try:
 except ImportError:
     __version__ = "dev"
 
-from speconsense.msa import ReadAlignment
+from speconsense.msa import ReadAlignment, analyze_positional_variation, has_no_majority, call_iupac_ambiguities
 from speconsense.distances import count_variant_differences
 from speconsense.significance import compute_critical_error_rate, is_cer_reportable
 from speconsense.scalability import (
@@ -1132,6 +1132,76 @@ class SpecimenClusterer:
 
         return self.merge_similar_clusters(subclusters, phase_name="Post-phasing")
 
+    def _filter_noisy_clusters(self, subclusters: List[Dict]) -> List[Dict]:
+        """Phase 4a: Remove unreliable small clusters with no-majority positions.
+
+        Only applies to clusters below the phasing floor (< min_variant_count * 2),
+        since larger clusters have enough reads for reliable consensus. Disbanded
+        reads go to discards for recovery by the global discard reassignment pass.
+        """
+        phasing_floor = self.min_variant_count * 2
+        result = []
+        total_disbanded = 0
+        disbanded_reads = 0
+
+        for cluster_dict in subclusters:
+            read_ids = cluster_dict['read_ids']
+
+            if len(read_ids) >= phasing_floor:
+                result.append(cluster_dict)
+                continue
+
+            # Generate MSA for this small cluster
+            qualities = {
+                sid: statistics.mean(self.records[sid].letter_annotations["phred_quality"])
+                for sid in read_ids
+            }
+            sorted_ids = sorted(read_ids, key=lambda x: (-qualities.get(x, 0), x))
+            cluster_seqs = {sid: self.sequences[sid] for sid in sorted_ids}
+
+            msa_result = _run_spoa_for_cluster_worker(
+                cluster_seqs, self.disable_homopolymer_equivalence)
+
+            if msa_result is None:
+                self.discarded_read_ids.update(read_ids)
+                total_disbanded += 1
+                disbanded_reads += len(read_ids)
+                continue
+
+            # Build consensus_aligned for positional analysis
+            msa_length = max(msa_result.msa_to_consensus_pos.keys()) + 1
+            consensus_aligned = []
+            for pos in range(msa_length):
+                cons_pos = msa_result.msa_to_consensus_pos.get(pos)
+                if cons_pos is not None and cons_pos < len(msa_result.consensus):
+                    consensus_aligned.append(msa_result.consensus[cons_pos])
+                else:
+                    consensus_aligned.append('-')
+            consensus_aligned = ''.join(consensus_aligned)
+
+            position_stats = analyze_positional_variation(
+                msa_result.alignments, consensus_aligned, msa_result.msa_to_consensus_pos)
+
+            no_majority_count = sum(
+                1 for ps in position_stats
+                if ps.consensus_position is not None and has_no_majority(ps)
+            )
+
+            if no_majority_count > 0:
+                self.discarded_read_ids.update(read_ids)
+                total_disbanded += 1
+                disbanded_reads += len(read_ids)
+                logging.debug(f"Noise filter: disbanded cluster(n={len(read_ids)}) "
+                             f"with {no_majority_count} no-majority positions")
+            else:
+                result.append(cluster_dict)
+
+        if total_disbanded > 0:
+            logging.info(f"Noise filter: disbanded {total_disbanded} unreliable clusters "
+                        f"({disbanded_reads} reads moved to discards)")
+
+        return result
+
     def _run_read_reassignment(self, subclusters: List[Dict]) -> List[Dict]:
         """Phase 4b: Reassign reads to best-matching clusters within identity groups.
 
@@ -1620,10 +1690,12 @@ class SpecimenClusterer:
                 subclusters[0]['cer_value'] = None
             return subclusters
 
-        # Generate consensus for each cluster
+        # Generate consensus for each cluster with ambiguity calling
+        # so CER ignores positions where reads disagree
         consensuses = {}
         for i, cluster_dict in enumerate(subclusters):
-            consensuses[i] = self._generate_consensus_for_validation(cluster_dict['read_ids'])
+            consensuses[i] = self._generate_consensus_for_validation(
+                cluster_dict['read_ids'], apply_ambiguity_calling=True)
 
         # Form identity groups
         identity_groups = self._form_identity_groups(subclusters, consensuses)
@@ -1641,8 +1713,19 @@ class SpecimenClusterer:
 
         return subclusters
 
-    def _generate_consensus_for_validation(self, read_ids: Set[str]) -> Optional[str]:
-        """Generate consensus sequence for CER validation via SPOA."""
+    def _generate_consensus_for_validation(self, read_ids: Set[str],
+                                            apply_ambiguity_calling: bool = False) -> Optional[str]:
+        """Generate consensus sequence via SPOA.
+
+        Args:
+            read_ids: Set of read IDs to include
+            apply_ambiguity_calling: If True, apply IUPAC ambiguity calling so
+                positions where reads disagree are marked with IUPAC codes.
+                Used for CER validation where ambiguous positions should be
+                treated as 'no signal' for inter-cluster distinction.
+                Must NOT be used when the consensus will be input to SPOA
+                (e.g., reassignment), since SPOA doesn't understand IUPAC.
+        """
         if not read_ids:
             return None
         if len(read_ids) == 1:
@@ -1657,7 +1740,20 @@ class SpecimenClusterer:
 
         seqs = {sid: self.sequences[sid] for sid in sorted_ids}
         result = _run_spoa_for_cluster_worker(seqs, self.disable_homopolymer_equivalence)
-        return result.consensus if result else None
+        if not result or not result.consensus:
+            return None
+
+        if apply_ambiguity_calling and self.enable_iupac_calling:
+            consensus, _, _ = call_iupac_ambiguities(
+                consensus=result.consensus,
+                alignments=result.alignments,
+                msa_to_consensus_pos=result.msa_to_consensus_pos,
+                min_variant_frequency=self.min_ambiguity_frequency,
+                min_variant_count=self.min_ambiguity_count
+            )
+            return consensus
+
+        return result.consensus
 
     def _form_identity_groups(self, subclusters: List[Dict],
                               consensuses: Dict[int, Optional[str]]) -> Dict[int, List[int]]:
@@ -2007,8 +2103,11 @@ class SpecimenClusterer:
             # Phase 4: Post-phasing merge
             merged_subclusters = self._run_postphasing_merge(all_subclusters)
 
+            # Phase 4a: Filter noisy small clusters
+            cleaned_subclusters = self._filter_noisy_clusters(merged_subclusters)
+
             # Phase 4b: Read reassignment
-            reassigned_subclusters = self._run_read_reassignment(merged_subclusters)
+            reassigned_subclusters = self._run_read_reassignment(cleaned_subclusters)
 
             # Phase 4b2: Discard reassignment (recover reads dropped earlier)
             discard_reassigned = self._run_discard_reassignment(reassigned_subclusters)

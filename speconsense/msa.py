@@ -647,6 +647,25 @@ def is_variant_position_with_composition(
     return False, [], "No variants detected (after HP adjustment)"
 
 
+def has_no_majority(pos_stat: 'PositionStats') -> bool:
+    """Check if a position has no clear majority base (HP-adjusted).
+
+    Returns True if the most frequent base has ≤50% of effective reads.
+    Positions with fewer than 2 effective reads are not assessable and return False.
+    """
+    effective = {}
+    for base in 'ACGT':
+        raw = pos_stat.base_composition.get(base, 0)
+        hp = pos_stat.homopolymer_composition.get(base, 0) if pos_stat.homopolymer_composition else 0
+        eff = raw - hp
+        if eff > 0:
+            effective[base] = eff
+    eff_total = sum(effective.values())
+    if eff_total < 2:
+        return False
+    return max(effective.values()) <= eff_total / 2
+
+
 def call_iupac_ambiguities(
     consensus: str,
     alignments: List['ReadAlignment'],
@@ -752,6 +771,45 @@ def call_iupac_ambiguities(
                 'variant_bases': nucleotide_variants,
                 'base_composition': pos_stat.base_composition
             })
+
+    # Second pass: no-majority positions (coverage-aware fallback)
+    # If no single base exceeds 50% of HP-adjusted reads, call ambiguity
+    # regardless of count/frequency thresholds
+    already_called = {p['consensus_position'] for p in iupac_positions}
+
+    for pos_stat in position_stats:
+        if pos_stat.consensus_position is None:
+            continue
+        if pos_stat.consensus_position in already_called:
+            continue
+        if not has_no_majority(pos_stat):
+            continue
+
+        cons_pos = pos_stat.consensus_position
+        consensus_base = consensus[cons_pos] if cons_pos < len(consensus) else None
+        if consensus_base is None or consensus_base not in 'ACGT':
+            continue
+
+        # Build IUPAC from all present bases (HP-adjusted)
+        effective = {}
+        for base in 'ACGT':
+            raw = pos_stat.base_composition.get(base, 0)
+            hp = pos_stat.homopolymer_composition.get(base, 0) if pos_stat.homopolymer_composition else 0
+            if raw - hp > 0:
+                effective[base] = raw - hp
+
+        all_bases = set(effective.keys())
+        if len(all_bases) <= 1:
+            continue
+
+        iupac_code = IUPAC_CODES.get(frozenset(all_bases), 'N')
+        iupac_positions.append({
+            'consensus_position': cons_pos,
+            'original_base': consensus_base,
+            'iupac_code': iupac_code,
+            'variant_bases': [b for b in all_bases if b != consensus_base],
+            'base_composition': pos_stat.base_composition
+        })
 
     if not iupac_positions:
         return consensus, 0, []
