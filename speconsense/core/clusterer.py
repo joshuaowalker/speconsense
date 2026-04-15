@@ -1,6 +1,7 @@
 """Main SpecimenClusterer class for clustering and consensus generation."""
 
 from collections import defaultdict
+import copy
 import json
 import logging
 import os
@@ -299,7 +300,7 @@ class SpecimenClusterer:
             },
             "input_file": self.input_file,
             "augment_input": self.augment_input,
-            "total_input_reads": len(self.sequences),
+            "total_input_reads": self.total_input_reads,
         }
 
         # Add primer information if loaded
@@ -413,6 +414,8 @@ class SpecimenClusterer:
             else:
                 logging.warning(f"Dataset has {len(self.sequences)} sequences (>= threshold {self.scale_threshold}) "
                                "but vsearch not found. Using brute-force.")
+
+        self.total_input_reads = len(self.sequences)
 
     def _get_scalable_operation(self) -> ScalablePairwiseOperation:
         """Get a ScalablePairwiseOperation for pairwise comparisons."""
@@ -956,7 +959,7 @@ class SpecimenClusterer:
         initial_clusters.sort(key=lambda c: len(c), reverse=True)
         clustered_count = sum(len(c) for c in initial_clusters)
         logging.info(f"Initial clustering produced {len(initial_clusters)} clusters "
-                     f"covering {clustered_count}/{len(self.sequences)} reads")
+                     f"covering {clustered_count}/{self.total_input_reads} reads")
         return initial_clusters
 
     def _run_prephasing_merge(self, initial_clusters: List[Set[str]]) -> List[Set[str]]:
@@ -1065,7 +1068,7 @@ class SpecimenClusterer:
             disable_homopolymer_equivalence=self.disable_homopolymer_equivalence,
             min_variant_frequency=self.min_variant_frequency,
             min_variant_count=self.min_variant_count,
-            total_specimen_reads=len(self.sequences),
+            total_specimen_reads=self.total_input_reads,
             assumed_error_rate=self.assumed_error_rate,
             significance_level=self.significance_level,
         )
@@ -1177,7 +1180,7 @@ class SpecimenClusterer:
             disable_homopolymer_equivalence=self.disable_homopolymer_equivalence,
             min_variant_frequency=self.min_variant_frequency,
             min_variant_count=self.min_variant_count,
-            total_specimen_reads=len(self.sequences),
+            total_specimen_reads=self.total_input_reads,
             assumed_error_rate=self.assumed_error_rate,
             significance_level=self.significance_level,
         )
@@ -1209,9 +1212,15 @@ class SpecimenClusterer:
                 config.min_variant_frequency, config.min_variant_count
             )
 
+            n_discards = sum(1 for sid in read_ids if sid.startswith('d-'))
+            cluster_label = f"cluster(n={len(read_ids)}, d={n_discards})"
+
             if not variant_positions:
+                logging.debug(f"Second phasing: {cluster_label} — no variants detected")
                 result.append(cluster_dict)
                 continue
+
+            logging.debug(f"Second phasing: {cluster_label} — {len(variant_positions)} variant positions detected")
 
             # Phase
             phased = _phase_reads_by_variants_standalone(
@@ -1219,6 +1228,7 @@ class SpecimenClusterer:
             )
 
             if len(phased) <= 1:
+                logging.debug(f"Second phasing: {cluster_label} — variants detected but phasing produced {len(phased)} group(s)")
                 result.append(cluster_dict)
                 continue
 
@@ -1451,6 +1461,17 @@ class SpecimenClusterer:
             logging.info(f"Discard reassignment: no candidates (all {rejected} reads below threshold)")
             return subclusters
 
+        def reassign_read(rid, target_idx):
+            """Move a discarded read to a cluster with 'd-' prefix for traceability."""
+            new_rid = f"d-{rid}"
+            self.sequences[new_rid] = self.sequences[rid]
+            if rid in self.records:
+                rec = copy.copy(self.records[rid])
+                rec.id = new_rid
+                self.records[new_rid] = rec
+            subclusters[target_idx]['read_ids'].add(new_rid)
+            self.discarded_read_ids.discard(rid)
+
         # Step 2 & 3: For each group with candidates, run SPOA + concordance
         total_assigned = 0
 
@@ -1461,8 +1482,7 @@ class SpecimenClusterer:
             if len(group_indices) == 1:
                 target_idx = group_indices[0]
                 for rid, read_seq in candidates:
-                    subclusters[target_idx]['read_ids'].add(rid)
-                    self.discarded_read_ids.discard(rid)
+                    reassign_read(rid, target_idx)
                     total_assigned += 1
                 continue
 
@@ -1477,8 +1497,7 @@ class SpecimenClusterer:
                 # Only one valid consensus — assign all to it
                 target_idx = next(iter(cluster_consensus_seqs))
                 for rid, read_seq in candidates:
-                    subclusters[target_idx]['read_ids'].add(rid)
-                    self.discarded_read_ids.discard(rid)
+                    reassign_read(rid, target_idx)
                     total_assigned += 1
                 continue
 
@@ -1527,8 +1546,7 @@ class SpecimenClusterer:
                 for rid, read_seq in candidates:
                     best_idx = min(cluster_consensus_seqs.keys(),
                                    key=lambda i: edlib.align(read_seq, cluster_consensus_seqs[i])['editDistance'])
-                    subclusters[best_idx]['read_ids'].add(rid)
-                    self.discarded_read_ids.discard(rid)
+                    reassign_read(rid, best_idx)
                     total_assigned += 1
                 continue
 
@@ -1569,8 +1587,7 @@ class SpecimenClusterer:
                     if norm_dist > max_distance:
                         continue
 
-                subclusters[best_idx]['read_ids'].add(rid)
-                self.discarded_read_ids.discard(rid)
+                reassign_read(rid, best_idx)
                 total_assigned += 1
 
         if total_assigned > 0:
@@ -1798,7 +1815,7 @@ class SpecimenClusterer:
         # Sort by size and renumber as c1, c2, c3...
         large_clusters.sort(key=lambda c: len(c['read_ids']), reverse=True)
 
-        total_sequences = len(self.sequences)
+        total_sequences = self.total_input_reads
         sequences_covered = sum(len(c['read_ids']) for c in large_clusters)
 
         if total_sequences > 0:
@@ -2075,7 +2092,7 @@ class SpecimenClusterer:
             disable_homopolymer_equivalence=self.disable_homopolymer_equivalence,
             min_variant_frequency=self.min_variant_frequency,
             min_variant_count=self.min_variant_count,
-            total_specimen_reads=len(self.sequences),
+            total_specimen_reads=self.total_input_reads,
             assumed_error_rate=self.assumed_error_rate,
             significance_level=self.significance_level,
         )

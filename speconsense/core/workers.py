@@ -374,8 +374,12 @@ def _recursive_phase_cluster_standalone(
         config.min_variant_frequency, config.min_variant_count
     )
 
+    n_discards = sum(1 for rid in read_ids if rid.startswith('d-'))
     if not variant_positions:
+        logging.debug(f"Recursive phasing depth={depth}: leaf(n={total_reads}, d={n_discards}) — no variants")
         return [(path, consensus, read_ids)], set()
+
+    logging.debug(f"Recursive phasing depth={depth}: node(n={total_reads}, d={n_discards}) — {len(variant_positions)} variants, splitting")
 
     # Parse MSA for consensus_aligned
     msa_handle = StringIO(result.msa_string)
@@ -477,54 +481,17 @@ def _phase_reads_by_variants_standalone(
             set(read_sequences.keys()), read_sequences, qualities, [], 0, config
         )
 
-        if len(leaves) <= 1 and not deferred:
-            if leaves:
-                path, consensus, reads = leaves[0]
-                if not path:
-                    return [(None, cluster_read_ids)]
+        if len(leaves) <= 1:
             return [(None, cluster_read_ids)]
 
-        if len(leaves) == 1:
-            return [(None, cluster_read_ids)]
+        logging.debug(f"Recursive phasing: {len(leaves)} leaf haplotypes, {len(deferred)} deferred to discards")
 
-        logging.debug(f"Recursive phasing: {len(leaves)} leaf haplotypes, {len(deferred)} deferred reads")
-
-        # Reassign deferred reads
-        if deferred:
-            leaf_reads_updated = {tuple(path): set(reads) for path, consensus, reads in leaves}
-            leaf_consensuses = {tuple(path): consensus for path, consensus, reads in leaves}
-
-            for read_id in deferred:
-                if read_id not in read_sequences:
-                    continue
-
-                read_seq = read_sequences[read_id]
-                min_distance = float('inf')
-                nearest_path = None
-
-                for path_tuple, consensus in leaf_consensuses.items():
-                    if not consensus:
-                        continue
-                    result = edlib.align(read_seq, consensus)
-                    distance = result['editDistance']
-                    if distance < min_distance:
-                        min_distance = distance
-                        nearest_path = path_tuple
-
-                if nearest_path is not None:
-                    leaf_reads_updated[nearest_path].add(read_id)
-
-            # Log and decide on phasing
-            total_phased = sum(len(reads) for reads in leaf_reads_updated.values())
-            if total_phased < 2:
-                return [(None, cluster_read_ids)]
-
-            logging.debug(f"Phasing decision: SPLITTING cluster into {len(leaf_reads_updated)} haplotypes")
-
-            return [('-'.join(path), reads) for path, reads in sorted(leaf_reads_updated.items(), key=lambda x: -len(x[1]))]
-        else:
-            logging.debug(f"Phasing decision: SPLITTING cluster into {len(leaves)} haplotypes")
-            return [('-'.join(path), reads) for path, consensus, reads in sorted(leaves, key=lambda x: -len(x[2]))]
+        # Deferred reads (non-qualifying at split positions) are excluded from
+        # haplotypes. Callers track lost reads and route them to discards.
+        # For initial phasing, the subsequent discard reassignment pass has
+        # global visibility and can place them in the correct cluster.
+        logging.debug(f"Phasing decision: SPLITTING cluster into {len(leaves)} haplotypes")
+        return [('-'.join(path), reads) for path, consensus, reads in sorted(leaves, key=lambda x: -len(x[2]))]
 
     except Exception as e:
         logging.warning(f"Failed to phase reads: {e}")
