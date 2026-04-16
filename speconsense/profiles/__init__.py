@@ -90,8 +90,6 @@ VALID_SUMMARIZE_KEYS = {
     "min-ric",
     "min-len",
     "max-len",
-    "assumed-error-rate",
-    "no-cer-filter",
     # Grouping
     "group-identity",
     # Merging

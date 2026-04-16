@@ -50,17 +50,14 @@ from speconsense.scalability import ScalabilityConfig
 from speconsense.types import ConsensusInfo, OverlapMergeInfo
 
 from .fields import parse_fasta_fields
-from speconsense.significance import compute_critical_error_rate
 
 from .io import (
     load_consensus_sequences,
     load_existing_specimen_outputs,
-    load_metadata_from_json,
     build_fastq_lookup_table,
     write_specimen_data_files,
     write_output_files,
 )
-from .iupac import count_variant_differences
 from .clustering import perform_hac_clustering, select_variants
 from .merging import merge_group_with_msa, create_full_consensus_from_msa
 from .analysis import run_spoa_msa, MAX_MSA_MERGE_VARIANTS, MIN_MERGE_BATCH, MAX_MERGE_BATCH
@@ -133,14 +130,6 @@ def parse_arguments():
                                  help="Minimum sequence length in bp (default: 0 = disabled)")
     filtering_group.add_argument("--max-len", type=int, default=0,
                                  help="Maximum sequence length in bp (default: 0 = disabled)")
-    filtering_group.add_argument("--assumed-error-rate", type=float, default=0.015,
-                                 help="Assumed per-position error rate. Secondary variants with critical error "
-                                      "rate (cer) below this value are filtered as potentially artifactual. "
-                                      "Primary variants are never filtered. Set to 0 to disable. "
-                                      "(default: 0.015)")
-    filtering_group.add_argument("--no-cer-filter", action="store_true", default=False,
-                                 help="Disable all CER-based filtering, even when --assumed-error-rate is set")
-
     # Grouping group
     grouping_group = parser.add_argument_group("Grouping")
     grouping_group.add_argument("--group-identity", "--variant-group-identity",
@@ -309,7 +298,7 @@ def setup_logging(log_level: str, log_file: str = None):
 
 
 def process_single_specimen(file_consensuses: List[ConsensusInfo],
-                           args, cer_filter_rate: float = 0.0) -> Tuple[List[ConsensusInfo], Dict[str, List[str]], Dict, int, List[OverlapMergeInfo]]:
+                           args) -> Tuple[List[ConsensusInfo], Dict[str, List[str]], Dict, int, List[OverlapMergeInfo]]:
     """
     Process a single specimen file: HAC cluster, MSA-based merge per group, and select final variants.
     Returns final consensus list, merge traceability, naming info, limited_count, and overlap merge info.
@@ -353,71 +342,6 @@ def process_single_specimen(file_consensuses: List[ConsensusInfo],
         # Keep only top N groups
         variant_groups = dict(sorted_for_filtering[:args.select_max_groups])
         logging.info(f"Filtered to top {args.select_max_groups} groups by size (from {len(sorted_for_filtering)} total groups)")
-
-    # CER filter: pairwise evaluation using K>1 multi-position significance.
-    # The primary (largest) variant in each group is seeded as validated.
-    # Remaining variants are evaluated in decreasing size order against all
-    # validated variants. CER = min(pairwise p*), using K = number of
-    # differing positions between each pair.
-    if cer_filter_rate > 0:
-        # Determine N (total specimen reads) from metadata or fallback
-        specimen_base = file_consensuses[0].sample_name.rsplit('-c', 1)[0]
-        source_dir = getattr(args, 'source', '.')
-        metadata = load_metadata_from_json(source_dir, specimen_base)
-        total_N = None
-        if metadata:
-            total_N = metadata.get('total_input_reads')
-        if total_N is None:
-            # Fallback: sum of all variant sizes (lower bound on N)
-            total_N = sum(v.ric for v in file_consensuses)
-
-        alpha = getattr(args, 'significance_level', 1e-5)
-        total_cer_filtered = 0
-
-        for group_id, group_members in variant_groups.items():
-            if len(group_members) <= 1:
-                continue
-
-            # Sort by size descending; seed the largest as validated
-            sorted_members = sorted(group_members, key=lambda v: v.size, reverse=True)
-            validated = [sorted_members[0]]
-            filtered_out = 0
-
-            for candidate in sorted_members[1:]:
-                # Compute pairwise CER against each validated variant
-                min_p_star = float('inf')
-                for ref_variant in validated:
-                    K = count_variant_differences(candidate.sequence, ref_variant.sequence)
-                    if K <= 0:
-                        # K=0: HP-equivalent (will merge later); K=-1: alignment failed
-                        # Skip this comparison — don't filter on it
-                        continue
-                    L = max(len(candidate.sequence), len(ref_variant.sequence))
-                    p_star = compute_critical_error_rate(
-                        N=total_N, M=candidate.ric, L=L, alpha=alpha, K=K
-                    )
-                    if p_star < min_p_star:
-                        min_p_star = p_star
-
-                if min_p_star == float('inf'):
-                    # No valid pairwise comparisons (all K=0 or alignment failed)
-                    validated.append(candidate)
-                elif min_p_star >= cer_filter_rate:
-                    # Validated: update CER annotation
-                    candidate = candidate._replace(cer=min_p_star)
-                    validated.append(candidate)
-                else:
-                    filtered_out += 1
-                    logging.debug(f"CER filter: {candidate.sample_name} pairwise cer={min_p_star:.4f} "
-                                  f"< {cer_filter_rate}")
-
-            if filtered_out > 0:
-                total_cer_filtered += filtered_out
-                variant_groups[group_id] = validated
-
-        if total_cer_filtered > 0:
-            logging.info(f"CER filter: removed {total_cer_filtered} secondary variant(s) "
-                         f"with pairwise CER < {cer_filter_rate}")
 
     # Phase 2: MSA-based merging within each group
     merged_groups = {}
@@ -588,8 +512,6 @@ def main():
     logging.info(f"  --min-ric: {args.min_ric}")
     logging.info(f"  --min-len: {args.min_len}")
     logging.info(f"  --max-len: {args.max_len}")
-    logging.info(f"  --assumed-error-rate: {args.assumed_error_rate}")
-    logging.info(f"  --no-cer-filter: {args.no_cer_filter}")
     logging.info(f"  --fasta-fields: {args.fasta_fields}")
     logging.info(f"  --merge-snp: {args.merge_snp}")
     logging.info(f"  --merge-indel-length: {args.merge_indel_length}")
@@ -629,9 +551,6 @@ def main():
         return
 
     logging.info("Processing each specimen file independently to organize variants within specimens")
-
-    # Determine effective CER filter rate
-    cer_filter_rate = 0.0 if args.no_cer_filter else args.assumed_error_rate
 
     # Load consensus sequences (optionally filtered to single specimen)
     consensus_list = load_consensus_sequences(
@@ -676,7 +595,7 @@ def main():
 
         # Process specimen
         final_consensus, merge_traceability, naming_info, limited_count, overlap_merges = process_single_specimen(
-            file_consensuses, args, cer_filter_rate=cer_filter_rate
+            file_consensuses, args
         )
 
         # Write individual data files immediately

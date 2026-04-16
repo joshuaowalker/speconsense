@@ -26,18 +26,18 @@ from .clustering import select_variants
 def parse_consensus_header(header: str) -> Tuple[Optional[str], Optional[int], Optional[int],
                                                    Optional[List[str]], Optional[float], Optional[float],
                                                    Optional[List[int]], Optional[List[int]], Optional[int],
-                                                   Optional[float], Optional[float]]:
+                                                   Optional[float], Optional[float], bool]:
     """
     Extract information from Speconsense consensus FASTA header.
 
     Parses read identity metrics, merge metadata, and CER fields.
 
     Returns:
-        Tuple of (sample_name, ric, size, primers, rid, rid_min, raw_ric, raw_len, snp_count, cer, cer_alpha)
+        Tuple of (sample_name, ric, size, primers, rid, rid_min, raw_ric, raw_len, snp_count, cer, cer_alpha, cer_ns)
     """
     sample_match = re.match(r'>([^ ]+) (.+)', header)
     if not sample_match:
-        return None, None, None, None, None, None, None, None, None, None, None
+        return None, None, None, None, None, None, None, None, None, None, None, False
 
     sample_name = sample_match.group(1)
     info_string = sample_match.group(2)
@@ -78,7 +78,9 @@ def parse_consensus_header(header: str) -> Tuple[Optional[str], Optional[int], O
     cer_alpha_match = re.search(r'cer\.a=(\S+)', info_string)
     cer_alpha = float(cer_alpha_match.group(1)) if cer_alpha_match else None
 
-    return sample_name, ric, size, primers, rid, rid_min, raw_ric, raw_len, snp_count, cer, cer_alpha
+    cer_ns = bool(re.search(r'\bcer\.ns\b', info_string))
+
+    return sample_name, ric, size, primers, rid, rid_min, raw_ric, raw_len, snp_count, cer, cer_alpha, cer_ns
 
 
 def load_consensus_sequences(
@@ -103,6 +105,7 @@ def load_consensus_sequences(
     consensus_list = []
     filtered_by_ric = 0
     filtered_by_len = 0
+    filtered_by_cer_ns = 0
 
     # Find consensus FASTA files — narrow to single specimen if requested
     if specimen_id:
@@ -116,10 +119,15 @@ def load_consensus_sequences(
 
         with open(fasta_file, 'r') as f:
             for record in SeqIO.parse(f, "fasta"):
-                sample_name, ric, size, primers, rid, rid_min, _, _, _, cer, cer_alpha = \
+                sample_name, ric, size, primers, rid, rid_min, _, _, _, cer, cer_alpha, cer_ns = \
                     parse_consensus_header(f">{record.description}")
 
                 if not sample_name:
+                    continue
+
+                # CER-ns filter: exclude variants marked not-significant by core
+                if cer_ns:
+                    filtered_by_cer_ns += 1
                     continue
 
                 # RiC filter
@@ -161,6 +169,8 @@ def load_consensus_sequences(
 
     # Log loading summary
     filter_parts = [f"Loaded {len(consensus_list)} consensus sequences from {len(fasta_files)} files"]
+    if filtered_by_cer_ns > 0:
+        filter_parts.append(f"filtered {filtered_by_cer_ns} by CER (not significant)")
     if filtered_by_ric > 0:
         filter_parts.append(f"filtered {filtered_by_ric} by RiC")
     if filtered_by_len > 0:
@@ -707,7 +717,7 @@ def load_existing_specimen_outputs(summary_dir: str) -> List[ConsensusInfo]:
 
         with open(fasta_file, 'r') as f:
             for record in SeqIO.parse(f, "fasta"):
-                sample_name, ric, size, primers, rid, rid_min, raw_ric, raw_len, snp_count, cer, cer_alpha = \
+                sample_name, ric, size, primers, rid, rid_min, raw_ric, raw_len, snp_count, cer, cer_alpha, _ = \
                     parse_consensus_header(f">{record.description}")
 
                 if not sample_name:

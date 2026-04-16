@@ -370,7 +370,7 @@ class TestIsVariantSignificant:
 # ==============================================================================
 
 class TestCERHeaderParsing:
-    """Test parsing of cer= and cer.a= fields from FASTA headers."""
+    """Test parsing of cer=, cer.a=, and cer.ns fields from FASTA headers."""
 
     def test_parse_cer_fields(self):
         """Parse cer and cer.a from header."""
@@ -378,13 +378,15 @@ class TestCERHeaderParsing:
         result = parse_consensus_header(header)
         assert result[9] == pytest.approx(0.15)  # cer
         assert result[10] == pytest.approx(1e-5)  # cer_alpha
+        assert result[11] is False  # cer_ns
 
     def test_parse_no_cer_fields(self):
-        """Missing cer fields should return None."""
+        """Missing cer fields should return None/False."""
         header = ">sample-c1 size=100 ric=50"
         result = parse_consensus_header(header)
         assert result[9] is None  # cer
         assert result[10] is None  # cer_alpha
+        assert result[11] is False  # cer_ns
 
     def test_cer_not_confused_with_cer_alpha(self):
         """cer= regex should not match cer.a= prefix."""
@@ -392,6 +394,22 @@ class TestCERHeaderParsing:
         result = parse_consensus_header(header)
         assert result[9] is None  # cer should be None (not matched from cer.a)
         assert result[10] == pytest.approx(1e-5)  # cer_alpha
+        assert result[11] is False  # cer_ns
+
+    def test_parse_cer_ns_tag(self):
+        """cer.ns tag should be detected."""
+        header = ">sample-c3 size=5 ric=5 cer=0.0012 cer.ns cer.a=1e-05"
+        result = parse_consensus_header(header)
+        assert result[9] == pytest.approx(0.0012)  # cer (numeric value still parsed)
+        assert result[10] == pytest.approx(1e-5)  # cer_alpha
+        assert result[11] is True  # cer_ns
+
+    def test_parse_cer_anchor(self):
+        """cer=anchor should not parse as numeric cer, and is not cer.ns."""
+        header = ">sample-c1 size=200 ric=200 cer=anchor"
+        result = parse_consensus_header(header)
+        assert result[9] is None  # cer (anchor is not numeric)
+        assert result[11] is False  # cer_ns
 
 
 # ==============================================================================
@@ -399,10 +417,10 @@ class TestCERHeaderParsing:
 # ==============================================================================
 
 class TestCERLoading:
-    """Test that CER values are loaded but not filtered in load_consensus_sequences.
+    """Test CER loading and cer.ns filtering in load_consensus_sequences.
 
-    CER filtering now happens after HAC grouping in process_single_specimen,
-    not at load time. Load should preserve all variants regardless of CER.
+    Variants marked cer.ns by core are filtered at load time.
+    All other variants (numeric cer, cer=anchor, no cer) are loaded.
     """
 
     @pytest.fixture
@@ -420,8 +438,8 @@ class TestCERLoading:
         fasta_file.write_text(fasta_content)
         return tmp_path
 
-    def test_all_variants_loaded(self, fasta_dir):
-        """All variants should load regardless of CER value."""
+    def test_all_non_ns_variants_loaded(self, fasta_dir):
+        """Variants without cer.ns should load."""
         result = load_consensus_sequences(str(fasta_dir), min_ric=1)
         assert len(result) == 3
 
@@ -435,137 +453,100 @@ class TestCERLoading:
         assert by_name["specimen-c3"].cer is None
         assert by_name["specimen-c3"].cer_alpha is None
 
+    def test_cer_ns_variant_filtered_at_load(self, tmp_path):
+        """Variants with cer.ns should be excluded at load time."""
+        fasta_content = (
+            ">specimen-c1 size=200 ric=100 cer=anchor\n"
+            "ACGTACGTACGT\n"
+            ">specimen-c2 size=50 ric=25 cer=0.15 cer.a=1e-05\n"
+            "ACGTACGTACGT\n"
+            ">specimen-c3 size=5 ric=5 cer=0.0012 cer.ns cer.a=1e-05\n"
+            "ACGTACGTACGT\n"
+        )
+        fasta_file = tmp_path / "specimen-all.fasta"
+        fasta_file.write_text(fasta_content)
+        result = load_consensus_sequences(str(tmp_path), min_ric=1)
+        names = [c.sample_name for c in result]
+        assert len(result) == 2
+        assert "specimen-c1" in names  # anchor loads
+        assert "specimen-c2" in names  # pass loads
+        assert "specimen-c3" not in names  # ns filtered
+
 
 # ==============================================================================
-# Tests for CER-based filtering in process_single_specimen (post-HAC)
+# Tests for CER ns filtering at load time
 # ==============================================================================
 
-class TestCERFilteringPostHAC:
-    """Test pairwise CER-based variant filtering after HAC grouping.
+class TestCERNsFilterAtLoad:
+    """Test that cer.ns variants from core are filtered at load time.
 
-    The pairwise CER filter seeds the largest variant as validated, then
-    evaluates remaining variants in size order. For each candidate, it computes
-    p* against each validated variant using K = number of differing positions.
-    The candidate's CER = min(pairwise p*). Candidates with CER < threshold
-    are filtered.
+    CER computation is done exclusively in the core pipeline. Summarize
+    trusts core's annotations: variants marked cer.ns are excluded at load
+    time; all other variants pass through.
     """
 
-    # Base sequence (200bp) and variants with known differences
-    BASE_SEQ = "ACGT" * 50
-    # 1 substitution difference from BASE_SEQ (position 0: A->T)
-    SEQ_1SUB = "TCGT" + "ACGT" * 49
-    # 3 substitution differences (positions 0, 4, 8)
-    SEQ_3SUB = "TCGT" + "TCGT" + "TCGT" + "ACGT" * 47
-
     @pytest.fixture
-    def fasta_dir_multi(self, tmp_path):
-        """Create test FASTA with primary + secondaries that differ.
+    def fasta_dir_mixed(self, tmp_path):
+        """Create test FASTA with a mix of CER statuses.
 
-        - c1 (size=200): primary, base sequence
-        - c2 (size=5): secondary, 1 substitution — K=1, small M, should fail CER
-        - c3 (size=50): secondary, 3 substitutions — K=3, moderate M, should pass
+        - c1: anchor (cer=anchor)
+        - c2: pass (numeric cer)
+        - c3: not significant (cer.ns)
+        - c4: no CER annotations (e.g., from older core version)
         """
         fasta_content = (
-            f">specimen-c1 size=200 ric=200\n"
-            f"{self.BASE_SEQ}\n"
-            f">specimen-c2 size=5 ric=5\n"
-            f"{self.SEQ_1SUB}\n"
-            f">specimen-c3 size=50 ric=50\n"
-            f"{self.SEQ_3SUB}\n"
+            ">specimen-c1 size=200 ric=200 cer=anchor\n"
+            "ACGTACGTACGT\n"
+            ">specimen-c2 size=50 ric=50 cer=0.1234 cer.a=1e-05\n"
+            "ACGTACGTACGT\n"
+            ">specimen-c3 size=5 ric=5 cer=0.0012 cer.ns cer.a=1e-05\n"
+            "ACGTACGTACGT\n"
+            ">specimen-c4 size=30 ric=30\n"
+            "ACGTACGTACGT\n"
         )
         fasta_file = tmp_path / "specimen-all.fasta"
         fasta_file.write_text(fasta_content)
         return tmp_path
 
-    @pytest.fixture
-    def fasta_dir_single(self, tmp_path):
-        """Create test FASTA with a single variant."""
-        fasta_content = (
-            f">specimen-c1 size=5 ric=5\n"
-            f"{self.BASE_SEQ}\n"
-        )
-        fasta_file = tmp_path / "specimen-all.fasta"
-        fasta_file.write_text(fasta_content)
-        return tmp_path
-
-    @pytest.fixture
-    def fasta_dir_identical(self, tmp_path):
-        """Create test FASTA where variants are identical (K=0)."""
-        fasta_content = (
-            f">specimen-c1 size=100 ric=100\n"
-            f"{self.BASE_SEQ}\n"
-            f">specimen-c2 size=10 ric=10\n"
-            f"{self.BASE_SEQ}\n"
-        )
-        fasta_file = tmp_path / "specimen-all.fasta"
-        fasta_file.write_text(fasta_content)
-        return tmp_path
-
-    def _run_summarize(self, fasta_dir, assumed_error_rate):
-        """Run process_single_specimen with given CER filter rate."""
-        from speconsense.summarize.io import load_consensus_sequences
-        from speconsense.summarize.cli import process_single_specimen
-        from argparse import Namespace
-
-        consensuses = load_consensus_sequences(str(fasta_dir), min_ric=1)
-        args = Namespace(
-            group_identity=0.95,
-            min_merge_overlap=0,
-            select_max_groups=0,
-            disable_merging=True,
-            select_min_size_ratio=0,
-            select_max_variants=0,
-            select_strategy='size',
-            scale_threshold=0,
-            threads=1,
-            source=str(fasta_dir),
-            enable_full_consensus=False,
-        )
-        final, _, _, _, _ = process_single_specimen(
-            consensuses, args, cer_filter_rate=assumed_error_rate
-        )
-        return final
-
-    def test_weak_secondary_filtered(self, fasta_dir_multi):
-        """Secondary with K=1 and M=5 should be filtered (low pairwise CER)."""
-        result = self._run_summarize(fasta_dir_multi, assumed_error_rate=0.015)
-        sizes = sorted([c.size for c in result], reverse=True)
-        assert 200 in sizes  # Primary always kept
-        assert 5 not in sizes  # K=1, M=5, N=255: pairwise p* too low
-        assert 50 in sizes  # K=3, M=50: pairwise p* high
-        assert len(result) == 2
-
-    def test_strong_secondary_passes(self, fasta_dir_multi):
-        """Secondary with K=3 and M=50 should pass CER filter."""
-        result = self._run_summarize(fasta_dir_multi, assumed_error_rate=0.015)
-        sizes = [c.size for c in result]
-        assert 50 in sizes  # K=3, large M: well-supported
-
-    def test_primary_never_filtered(self, fasta_dir_multi):
-        """Primary variant should never be filtered."""
-        result = self._run_summarize(fasta_dir_multi, assumed_error_rate=0.99)
-        sizes = [c.size for c in result]
-        assert 200 in sizes  # Primary always kept
-
-    def test_identical_sequences_not_filtered(self, fasta_dir_identical):
-        """Identical sequences (K=0) should pass — no pairwise comparison."""
-        result = self._run_summarize(fasta_dir_identical, assumed_error_rate=0.015)
-        assert len(result) == 2
-
-    def test_single_variant_never_filtered(self, fasta_dir_single):
-        """Single-variant specimen should never be filtered by CER."""
-        result = self._run_summarize(fasta_dir_single, assumed_error_rate=0.02)
-        assert len(result) == 1
-        assert result[0].size == 5
-
-    def test_cer_filter_disabled(self, fasta_dir_multi):
-        """CER filter disabled when rate=0 — all variants pass."""
-        result = self._run_summarize(fasta_dir_multi, assumed_error_rate=0)
+    def test_ns_excluded_others_loaded(self, fasta_dir_mixed):
+        """Only cer.ns variant should be excluded."""
+        result = load_consensus_sequences(str(fasta_dir_mixed), min_ric=1)
+        names = [c.sample_name for c in result]
         assert len(result) == 3
+        assert "specimen-c1" in names
+        assert "specimen-c2" in names
+        assert "specimen-c3" not in names
+        assert "specimen-c4" in names
 
-    def test_high_k_survives_high_threshold(self, fasta_dir_multi):
-        """K=3 variant with good support passes even at high threshold."""
-        result = self._run_summarize(fasta_dir_multi, assumed_error_rate=0.50)
-        sizes = [c.size for c in result]
-        # c3 (size=50, K=3): pairwise p* >> 50%, should survive
-        assert 50 in sizes
+    def test_anchor_loads_with_no_numeric_cer(self, fasta_dir_mixed):
+        """cer=anchor should load with cer=None (not numeric)."""
+        result = load_consensus_sequences(str(fasta_dir_mixed), min_ric=1)
+        by_name = {c.sample_name: c for c in result}
+        assert by_name["specimen-c1"].cer is None
+
+    def test_pass_preserves_cer_value(self, fasta_dir_mixed):
+        """Numeric cer value should be preserved on passing variants."""
+        result = load_consensus_sequences(str(fasta_dir_mixed), min_ric=1)
+        by_name = {c.sample_name: c for c in result}
+        assert by_name["specimen-c2"].cer == pytest.approx(0.1234)
+        assert by_name["specimen-c2"].cer_alpha == pytest.approx(1e-5)
+
+    def test_no_annotation_loads_normally(self, fasta_dir_mixed):
+        """Variants without any CER annotation should load."""
+        result = load_consensus_sequences(str(fasta_dir_mixed), min_ric=1)
+        by_name = {c.sample_name: c for c in result}
+        assert by_name["specimen-c4"].cer is None
+        assert by_name["specimen-c4"].cer_alpha is None
+
+    def test_no_ns_variants_all_pass(self, tmp_path):
+        """When no cer.ns tags exist, all variants load (backward compatible)."""
+        fasta_content = (
+            ">specimen-c1 size=200 ric=100\n"
+            "ACGTACGTACGT\n"
+            ">specimen-c2 size=50 ric=25\n"
+            "ACGTACGTACGT\n"
+        )
+        fasta_file = tmp_path / "specimen-all.fasta"
+        fasta_file.write_text(fasta_content)
+        result = load_consensus_sequences(str(tmp_path), min_ric=1)
+        assert len(result) == 2
