@@ -284,8 +284,18 @@ class SpecimenClusterer:
         self.primers_file = None
 
     def write_metadata(self) -> None:
-        """Write run metadata to JSON file for use by post-processing tools."""
+        """Write run metadata to JSON file for use by post-processing tools.
+
+        Includes per-cluster CER reproduction data when clustering has
+        completed (self.final_cluster_dicts populated). The schema follows the
+        CER-in-practice paper Appendix A: parameters identify the q_ctx table
+        and CER thresholds, identity_groups describe pairwise comparison
+        membership, and variants contain N, M, K, L, context tags, and
+        per-position q_ctx values sufficient to recompute cer_factor and
+        cer_pstar under revised assumptions without re-running the pipeline.
+        """
         metadata = {
+            "schema_version": "2.0",
             "version": __version__,
             "timestamp": datetime.now().isoformat(),
             "sample_name": self.sample_name,
@@ -312,6 +322,9 @@ class SpecimenClusterer:
                 "orient_mode": self.orient_mode,
                 "assumed_error_rate": self.assumed_error_rate,
                 "significance_level": self.significance_level,
+                "group_identity": self.group_identity,
+                "cer_factor_threshold": self.cer_factor_threshold,
+                "qctx_table": "dorado-v5.0",
             },
             "input_file": self.input_file,
             "augment_input": self.augment_input,
@@ -331,12 +344,55 @@ class SpecimenClusterer:
                     metadata["primers"][primer_name] = primer_seq
                     seen_primers.add(primer_name)
 
+        # Per-cluster CER reproduction data (populated after cluster() completes)
+        cluster_dicts = getattr(self, 'final_cluster_dicts', None)
+        if cluster_dicts is not None:
+            metadata["identity_groups"] = self._build_identity_group_summary(cluster_dicts)
+            metadata["variants"] = [
+                self._build_variant_record(c) for c in cluster_dicts
+            ]
+
         # Write metadata file
         metadata_file = os.path.join(self.debug_dir, f"{self.sample_name}-metadata.json")
         with open(metadata_file, 'w') as f:
             json.dump(metadata, f, indent=2)
 
         logging.debug(f"Wrote run metadata to {metadata_file}")
+
+    @staticmethod
+    def _build_identity_group_summary(cluster_dicts: List[Dict]) -> List[Dict]:
+        """Aggregate per-cluster identity_group_id tags into group records."""
+        groups: Dict[str, Dict] = {}
+        for c in cluster_dicts:
+            gid = c.get('identity_group_id')
+            if gid is None:
+                continue
+            if gid not in groups:
+                groups[gid] = {
+                    'group_id': gid,
+                    'group_N': c.get('cer_group_N'),
+                    'members': [],
+                }
+            groups[gid]['members'].append(c.get('cluster_id') or str(c.get('cluster_idx')))
+        return [groups[k] for k in sorted(groups)]
+
+    @staticmethod
+    def _build_variant_record(cluster_dict: Dict) -> Dict:
+        """Serialize one cluster's CER reproduction data."""
+        details = cluster_dict.get('cer_details') or {}
+        return {
+            'cluster_id': cluster_dict.get('cluster_id'),
+            'identity_group': cluster_dict.get('identity_group_id'),
+            'cer_status': cluster_dict.get('cer_status'),
+            'M': len(cluster_dict.get('read_ids', [])),
+            'N': cluster_dict.get('cer_group_N'),
+            'K': details.get('K') if details else None,
+            'context_tags': details.get('tags') if details else None,
+            'q_ctx_per_position': details.get('q_ctx') if details else None,
+            'compared_against_idx': details.get('ref_idx') if details else None,
+            'cer_factor': cluster_dict.get('cer_factor'),
+            'cer_pstar': cluster_dict.get('cer_pstar'),
+        }
 
     def write_phasing_stats(self, initial_clusters_count: int, after_prephasing_merge_count: int,
                            subclusters_count: int, merged_count: int, final_count: int,
@@ -1703,6 +1759,8 @@ class SpecimenClusterer:
                 subclusters[0]['cer_factor'] = None
                 subclusters[0]['cer_pstar'] = None
                 subclusters[0]['cer_details'] = None
+                subclusters[0]['identity_group_id'] = 'g0'
+                subclusters[0]['cer_group_N'] = len(subclusters[0].get('read_ids', []))
             return subclusters
 
         # Generate consensus for each cluster with ambiguity calling
@@ -1714,6 +1772,15 @@ class SpecimenClusterer:
 
         # Form identity groups
         identity_groups = self._form_identity_groups(subclusters, consensuses)
+
+        # Tag each subcluster with its identity_group_id and group_N
+        # for downstream metadata reporting.
+        for group_index, (_, group_indices) in enumerate(sorted(identity_groups.items())):
+            group_id = f"g{group_index}"
+            group_N = sum(len(subclusters[i].get('read_ids', [])) for i in group_indices)
+            for i in group_indices:
+                subclusters[i]['identity_group_id'] = group_id
+                subclusters[i]['cer_group_N'] = group_N
 
         # Validate within each group
         validated_count = 0
@@ -2051,6 +2118,7 @@ class SpecimenClusterer:
         cluster_dicts_by_idx = {}
         for final_idx, cluster_dict in enumerate(clusters, 1):
             cluster = cluster_dict['read_ids']
+            cluster_dict['cluster_id'] = f"c{final_idx}"
             cluster_dicts_by_idx[final_idx] = cluster_dict
             # Pre-compute quality means for each read
             qualities = {}
@@ -2222,6 +2290,9 @@ class SpecimenClusterer:
 
             # Phase 5: Size filtering
             filtered_clusters = self._run_size_filtering(validated_subclusters)
+
+            # Capture for metadata serialization (write_metadata reads this).
+            self.final_cluster_dicts = filtered_clusters
 
             # Phase 6: Output generation
             consensus_output_file = os.path.join(self.output_dir, f"{self.sample_name}-all.fasta")

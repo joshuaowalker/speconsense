@@ -327,10 +327,11 @@ def main():
         else:
             logging.warning(f"--orient-mode={args.orient_mode} specified but no primers with position information loaded")
 
-    # Write metadata file for use by post-processing tools
-    clusterer.write_metadata()
-
     clusterer.cluster(algorithm=args.algorithm)
+
+    # Write metadata file (after clustering so per-cluster CER reproduction
+    # data can be included for downstream tools).
+    clusterer.write_metadata()
     print()
 
 if __name__ == "__main__":
