@@ -16,7 +16,7 @@ artifact hypothesis incoherent. CER is therefore only reported when p* < 0.75.
 """
 
 import math
-from typing import Optional, Tuple
+from typing import List, Optional, Sequence, Tuple
 
 from scipy.stats import binom
 from scipy.optimize import brentq
@@ -157,6 +157,131 @@ def compute_minimum_M(N: int, L: int, alpha: float = 1e-5,
             lo = mid + 1
 
     return lo
+
+
+# ---------------------------------------------------------------------------
+# Context-aware CER (unified equation) — see docs/cer_in_practice/
+# ---------------------------------------------------------------------------
+
+
+def compute_joint_critical_q(N: int, M: int, n_sites: int,
+                             K: int = 1, alpha: float = 1e-5) -> Optional[float]:
+    """Solve C(n_sites, K) * P(Binom(N, q*) >= M) = alpha for joint q*.
+
+    The unified CER equation (Walker 2026c §2). Unlike compute_critical_error_rate,
+    this returns the joint per-read error probability directly, with no
+    uniform-model q = p/3 conversion. The result is in (0, 1).
+
+    Args:
+        N: Read count denominator (typically the identity-group sum).
+        M: Variant read count.
+        n_sites: Number of independent test sites for Bonferroni correction.
+            Typically (non-HP positions) + (L>=2 HP runs); approximately L for
+            short HP-run densities.
+        K: Number of variant positions distinguishing candidate from reference.
+        alpha: Significance level.
+
+    Returns:
+        joint q* in (0, 1), or None if no solution exists in that range
+        (M too large relative to N for any q < 1 to satisfy).
+        Returns 0.0 if M is small enough that even q=0 satisfies (highly
+        significant).
+    """
+    if M <= 0 or N <= 0 or n_sites <= 0 or K <= 0:
+        return None
+    if M > N:
+        return None
+    if K > n_sites:
+        return None
+
+    log_alpha = math.log(alpha)
+    log_correction = math.log(math.comb(n_sites, K))
+
+    def objective(q: float) -> float:
+        return log_correction + binom.logsf(M - 1, N, q) - log_alpha
+
+    eps = 1e-15
+    upper = 1.0 - eps
+    try:
+        val_low = objective(eps)
+        val_high = objective(upper)
+    except (ValueError, OverflowError):
+        return None
+
+    if val_high < 0:
+        return None    # even q=1 doesn't bring the prob above alpha (M too big)
+    if val_low > 0:
+        return 0.0     # q=0 already satisfies (M too small to need significance)
+
+    try:
+        return brentq(objective, eps, upper, xtol=1e-12)
+    except (ValueError, RuntimeError):
+        return None
+
+
+def compute_per_position_qstar(N: int, M: int, n_sites: int,
+                               K: int = 1, alpha: float = 1e-5) -> Optional[float]:
+    """K-th root of joint q*. Per-position critical rate under uniform error.
+
+    Useful for reporting alongside cer_factor: a per-position rate the reader
+    can compare against platform expectations.
+    """
+    joint = compute_joint_critical_q(N, M, n_sites, K, alpha)
+    if joint is None:
+        return None
+    if joint <= 0:
+        return 0.0
+    return joint ** (1.0 / K)
+
+
+def compute_cer_factor(N: int, M: int, n_sites: int,
+                       q_ctx_per_position: Sequence[float],
+                       alpha: float = 1e-5) -> Optional[float]:
+    """Compute the CER factor for a context-aware pairwise comparison.
+
+    The factor is the per-position multiplicative inflation that the empirical
+    error rates would need to undergo to make the variant plausible as artifact:
+
+        factor = (joint_q* / product(q_ctx_i))^(1/K)
+
+    For K=1 this reduces to factor = q* / q_ctx, matching the paper's headline
+    definition. For K>1 the K-th root keeps the factor in per-position units,
+    so a factor of 4 always means "each position would need to error at 4x its
+    empirical rate" regardless of K.
+
+    Args:
+        N: Read count denominator.
+        M: Variant read count.
+        n_sites: Number of independent test sites for Bonferroni correction.
+        q_ctx_per_position: Sequence of per-position empirical error rates,
+            one per differing position (length K).
+        alpha: Significance level.
+
+    Returns:
+        The per-position CER factor (dimensionless), or None if any q_ctx is
+        invalid or the equation has no solution. Returns float('inf') when
+        the joint q* solver indicates the variant is so strongly supported
+        that no error inflation can explain it (joint q* > 1 is impossible).
+    """
+    if not q_ctx_per_position:
+        return None
+    K = len(q_ctx_per_position)
+
+    actual_joint = 1.0
+    for q in q_ctx_per_position:
+        if q is None or q <= 0:
+            return None
+        actual_joint *= q
+    if actual_joint <= 0 or actual_joint >= 1.0:
+        return None
+
+    joint_qstar = compute_joint_critical_q(N, M, n_sites, K, alpha)
+    if joint_qstar is None:
+        return float('inf')   # M too large for any q < 1 — strongest possible signal
+    if joint_qstar <= 0:
+        return 0.0            # M too small — variant fails CER even with no error
+
+    return (joint_qstar / actual_joint) ** (1.0 / K)
 
 
 def is_variant_significant(M: int, N: int, L: int,
