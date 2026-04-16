@@ -22,8 +22,15 @@ except ImportError:
     __version__ = "dev"
 
 from speconsense.msa import ReadAlignment, analyze_positional_variation, has_no_majority, call_iupac_ambiguities
+from speconsense.context import classify_pairwise_differences
 from speconsense.distances import count_variant_differences
-from speconsense.significance import compute_critical_error_rate, is_cer_reportable
+from speconsense.qctx import DORADO_V5_0, get_qctx
+from speconsense.significance import (
+    compute_cer_factor,
+    compute_critical_error_rate,
+    compute_per_position_qstar,
+    is_cer_reportable,
+)
 from speconsense.scalability import (
     VsearchCandidateFinder,
     ScalablePairwiseOperation,
@@ -236,6 +243,13 @@ class SpecimenClusterer:
         self.assumed_error_rate = assumed_error_rate
         self.significance_level = significance_level
         self.group_identity = group_identity
+        # Context-aware CER configuration. The factor threshold controls
+        # whether a candidate cluster passes pairwise CER validation:
+        # candidates pass when their per-position CER factor (q*/q_ctx) is
+        # >= cer_factor_threshold. Setting assumed_error_rate <= 0 disables
+        # the gate entirely; this is preserved as the disable sentinel.
+        self.qctx_table = DORADO_V5_0
+        self.cer_factor_threshold = 0.0 if assumed_error_rate <= 0 else 1.0
         self.discarded_read_ids: Set[str] = set()  # Track all discarded reads (outliers + filtered)
 
         # Initialize scalability configuration
@@ -1688,6 +1702,9 @@ class SpecimenClusterer:
             if subclusters:
                 subclusters[0]['cer_status'] = 'anchor'
                 subclusters[0]['cer_value'] = None
+                subclusters[0]['cer_factor'] = None
+                subclusters[0]['cer_pstar'] = None
+                subclusters[0]['cer_details'] = None
             return subclusters
 
         # Generate consensus for each cluster with ambiguity calling
@@ -1789,7 +1806,17 @@ class SpecimenClusterer:
     def _validate_identity_group(self, subclusters: List[Dict],
                                  consensuses: Dict[int, Optional[str]],
                                  group_indices: List[int]) -> Tuple[int, int]:
-        """Validate clusters within an identity group via pairwise CER.
+        """Validate clusters within an identity group via context-aware pairwise CER.
+
+        Each candidate cluster is compared pairwise against all already-validated
+        clusters in the group. Each pairwise comparison classifies the differing
+        positions, looks up empirical q_ctx values, and computes a CER factor
+        (per-position multiplicative inflation needed for the variant to be
+        plausible artifact). The candidate's reported factor is the *minimum*
+        across all pairwise comparisons (the nearest plausible artifact source).
+
+        A candidate passes when its minimum factor meets the configured factor
+        threshold. Setting --assumed-error-rate <= 0 disables the CER gate.
 
         Returns (validated_count, ns_count).
         """
@@ -1803,6 +1830,11 @@ class SpecimenClusterer:
         # Anchor: largest cluster auto-passes
         anchor_idx = sorted_indices[0]
         subclusters[anchor_idx]['cer_status'] = 'anchor'
+        subclusters[anchor_idx]['cer_factor'] = None
+        subclusters[anchor_idx]['cer_pstar'] = None
+        subclusters[anchor_idx]['cer_details'] = None
+        # Legacy field for backward-compat with existing FASTA emission;
+        # to be removed when FASTA switches to cer_factor/cer_details.
         subclusters[anchor_idx]['cer_value'] = None
 
         if len(sorted_indices) == 1:
@@ -1811,6 +1843,7 @@ class SpecimenClusterer:
         validated = [anchor_idx]
         validated_count = 1
         ns_count = 0
+        factor_threshold = self.cer_factor_threshold
 
         for candidate_idx in sorted_indices[1:]:
             candidate_consensus = consensuses.get(candidate_idx)
@@ -1818,51 +1851,126 @@ class SpecimenClusterer:
 
             if not candidate_consensus:
                 subclusters[candidate_idx]['cer_status'] = 'ns'
+                subclusters[candidate_idx]['cer_factor'] = 0.0
+                subclusters[candidate_idx]['cer_pstar'] = None
+                subclusters[candidate_idx]['cer_details'] = None
                 subclusters[candidate_idx]['cer_value'] = 0.0
                 ns_count += 1
                 continue
 
-            min_p_star = float('inf')
+            best = self._compare_candidate_against_validated(
+                candidate_consensus=candidate_consensus,
+                candidate_M=candidate_M,
+                group_N=group_N,
+                validated=validated,
+                consensuses=consensuses,
+            )
 
-            for ref_idx in validated:
-                ref_consensus = consensuses.get(ref_idx)
-                if not ref_consensus:
-                    continue
-
-                K = count_variant_differences(candidate_consensus, ref_consensus)
-                if K <= 0:
-                    # K=0: identical/HP-equivalent; K=-1: alignment failed
-                    continue
-
-                L = max(len(candidate_consensus), len(ref_consensus))
-                p_star = compute_critical_error_rate(
-                    N=group_N, M=candidate_M, L=L,
-                    alpha=self.significance_level, K=K
-                )
-                if p_star < min_p_star:
-                    min_p_star = p_star
-
-            if min_p_star == float('inf'):
-                # No valid pairwise comparisons (all K=0 or alignment failed)
+            if best is None:
+                # No valid pairwise comparisons (all K=0 or alignment failed
+                # or all positions had unsupported q_ctx). Auto-pass.
                 subclusters[candidate_idx]['cer_status'] = 'pass'
+                subclusters[candidate_idx]['cer_factor'] = None
+                subclusters[candidate_idx]['cer_pstar'] = None
+                subclusters[candidate_idx]['cer_details'] = None
                 subclusters[candidate_idx]['cer_value'] = None
                 validated.append(candidate_idx)
                 validated_count += 1
-            elif min_p_star >= self.assumed_error_rate:
+                continue
+
+            min_factor, pstar, details = best
+            subclusters[candidate_idx]['cer_factor'] = min_factor
+            subclusters[candidate_idx]['cer_pstar'] = pstar
+            subclusters[candidate_idx]['cer_details'] = details
+            subclusters[candidate_idx]['cer_value'] = pstar
+
+            if factor_threshold <= 0 or min_factor >= factor_threshold:
                 subclusters[candidate_idx]['cer_status'] = 'pass'
-                subclusters[candidate_idx]['cer_value'] = min_p_star
                 validated.append(candidate_idx)
                 validated_count += 1
             else:
                 subclusters[candidate_idx]['cer_status'] = 'ns'
-                subclusters[candidate_idx]['cer_value'] = min_p_star
                 ns_count += 1
                 logging.debug(
                     f"CER ns: cluster with {candidate_M} reads, "
-                    f"p*={min_p_star:.4f} < {self.assumed_error_rate}"
+                    f"factor={min_factor:.3f} < {factor_threshold}"
                 )
 
         return validated_count, ns_count
+
+    def _compare_candidate_against_validated(
+        self,
+        candidate_consensus: str,
+        candidate_M: int,
+        group_N: int,
+        validated: List[int],
+        consensuses: Dict[int, Optional[str]],
+    ) -> Optional[Tuple[float, Optional[float], dict]]:
+        """Compute the worst-case (minimum) CER factor for a candidate.
+
+        Walks each validated reference consensus, classifies the pairwise
+        differences with context-aware tags, looks up q_ctx for each, and
+        computes the per-position CER factor for that pair. The pair that
+        produces the smallest factor (the nearest plausible artifact source)
+        determines the candidate's reported metrics.
+
+        Returns:
+            (min_factor, per_position_pstar, details_dict) for the worst pair,
+            or None if no pair produced a valid evaluation. The details dict
+            contains the K, context tags, q_ctx values, and reference index
+            for the determining pair, suitable for both FASTA annotation and
+            metadata reproducibility.
+        """
+        best: Optional[Tuple[float, Optional[float], dict]] = None
+
+        for ref_idx in validated:
+            ref_consensus = consensuses.get(ref_idx)
+            if not ref_consensus:
+                continue
+
+            tags = classify_pairwise_differences(candidate_consensus, ref_consensus)
+            if tags is None or not tags:
+                # K=0 (identical/IUPAC-compat) or alignment failure
+                continue
+
+            qctx_values: List[float] = []
+            kept_tags = []
+            for tag in tags:
+                q = get_qctx(tag, table=self.qctx_table)
+                if q is None:
+                    continue
+                qctx_values.append(q)
+                kept_tags.append(tag)
+
+            if not qctx_values:
+                # All positions had unsupported q_ctx (e.g., HP L>=6 only).
+                continue
+
+            K = len(qctx_values)
+            L = max(len(candidate_consensus), len(ref_consensus))
+
+            factor = compute_cer_factor(
+                N=group_N, M=candidate_M, n_sites=L,
+                q_ctx_per_position=qctx_values,
+                alpha=self.significance_level,
+            )
+            if factor is None:
+                continue
+
+            if best is None or factor < best[0]:
+                pstar = compute_per_position_qstar(
+                    N=group_N, M=candidate_M, n_sites=L, K=K,
+                    alpha=self.significance_level,
+                )
+                details = {
+                    'K': K,
+                    'tags': [t.to_string() for t in kept_tags],
+                    'q_ctx': qctx_values,
+                    'ref_idx': ref_idx,
+                }
+                best = (factor, pstar, details)
+
+        return best
 
     def _run_size_filtering(self, subclusters: List[Dict]) -> List[Dict]:
         """Phase 5: Filter clusters by size and ratio thresholds.
