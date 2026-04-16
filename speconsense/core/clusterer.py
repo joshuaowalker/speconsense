@@ -1137,7 +1137,6 @@ class SpecimenClusterer:
             disable_homopolymer_equivalence=self.disable_homopolymer_equivalence,
             min_variant_frequency=self.min_variant_frequency,
             min_variant_count=self.min_variant_count,
-            total_specimen_reads=self.total_input_reads,
             assumed_error_rate=self.assumed_error_rate,
             significance_level=self.significance_level,
         )
@@ -1319,7 +1318,6 @@ class SpecimenClusterer:
             disable_homopolymer_equivalence=self.disable_homopolymer_equivalence,
             min_variant_frequency=self.min_variant_frequency,
             min_variant_count=self.min_variant_count,
-            total_specimen_reads=self.total_input_reads,
             assumed_error_rate=self.assumed_error_rate,
             significance_level=self.significance_level,
         )
@@ -2364,7 +2362,6 @@ class SpecimenClusterer:
             disable_homopolymer_equivalence=self.disable_homopolymer_equivalence,
             min_variant_frequency=self.min_variant_frequency,
             min_variant_count=self.min_variant_count,
-            total_specimen_reads=self.total_input_reads,
             assumed_error_rate=self.assumed_error_rate,
             significance_level=self.significance_level,
         )

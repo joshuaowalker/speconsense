@@ -429,14 +429,13 @@ class TestCERGating:
             disable_homopolymer_equivalence=False,
             min_variant_frequency=0.10,
             min_variant_count=5,
-            total_specimen_reads=1000,
             assumed_error_rate=0,
             significance_level=1e-5
         )
         # With error rate 0, all variants should pass
         assert config.assumed_error_rate == 0
         is_sig, _ = is_variant_significant(
-            M=1, N=config.total_specimen_reads, L=700,
+            M=1, N=1000, L=700,
             assumed_error_rate=config.assumed_error_rate
         )
         assert is_sig is True

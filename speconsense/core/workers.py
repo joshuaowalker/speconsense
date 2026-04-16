@@ -37,14 +37,13 @@ class ClusterProcessingConfig:
     """
     __slots__ = ['outlier_identity_threshold', 'enable_secondpass_phasing',
                  'disable_homopolymer_equivalence', 'min_variant_frequency', 'min_variant_count',
-                 'total_specimen_reads', 'assumed_error_rate', 'significance_level']
+                 'assumed_error_rate', 'significance_level']
 
     def __init__(self, outlier_identity_threshold: Optional[float],
                  enable_secondpass_phasing: bool,
                  disable_homopolymer_equivalence: bool,
                  min_variant_frequency: float,
                  min_variant_count: int,
-                 total_specimen_reads: int = 0,
                  assumed_error_rate: float = 0.015,
                  significance_level: float = 1e-5):
         self.outlier_identity_threshold = outlier_identity_threshold
@@ -52,7 +51,6 @@ class ClusterProcessingConfig:
         self.disable_homopolymer_equivalence = disable_homopolymer_equivalence
         self.min_variant_frequency = min_variant_frequency
         self.min_variant_count = min_variant_count
-        self.total_specimen_reads = total_specimen_reads
         self.assumed_error_rate = assumed_error_rate
         self.significance_level = significance_level
 
