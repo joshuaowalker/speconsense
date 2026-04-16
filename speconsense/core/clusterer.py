@@ -1,7 +1,6 @@
 """Main SpecimenClusterer class for clustering and consensus generation."""
 
 from collections import defaultdict
-import copy
 import json
 import logging
 import os
@@ -1349,8 +1348,7 @@ class SpecimenClusterer:
                 config.min_variant_frequency, config.min_variant_count
             )
 
-            n_discards = sum(1 for sid in read_ids if sid.startswith('d-'))
-            cluster_label = f"cluster(n={len(read_ids)}, d={n_discards})"
+            cluster_label = f"cluster(n={len(read_ids)})"
 
             if not variant_positions:
                 logging.debug(f"Second phasing: {cluster_label} — no variants detected")
@@ -1599,14 +1597,7 @@ class SpecimenClusterer:
             return subclusters
 
         def reassign_read(rid, target_idx):
-            """Move a discarded read to a cluster with 'd-' prefix for traceability."""
-            new_rid = f"d-{rid}"
-            self.sequences[new_rid] = self.sequences[rid]
-            if rid in self.records:
-                rec = copy.copy(self.records[rid])
-                rec.id = new_rid
-                self.records[new_rid] = rec
-            subclusters[target_idx]['read_ids'].add(new_rid)
+            subclusters[target_idx]['read_ids'].add(rid)
             self.discarded_read_ids.discard(rid)
 
         # Step 2 & 3: For each group with candidates, run SPOA + concordance

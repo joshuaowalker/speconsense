@@ -372,12 +372,11 @@ def _recursive_phase_cluster_standalone(
         config.min_variant_frequency, config.min_variant_count
     )
 
-    n_discards = sum(1 for rid in read_ids if rid.startswith('d-'))
     if not variant_positions:
-        logging.debug(f"Recursive phasing depth={depth}: leaf(n={total_reads}, d={n_discards}) — no variants")
+        logging.debug(f"Recursive phasing depth={depth}: leaf(n={total_reads}) — no variants")
         return [(path, consensus, read_ids)], set()
 
-    logging.debug(f"Recursive phasing depth={depth}: node(n={total_reads}, d={n_discards}) — {len(variant_positions)} variants, splitting")
+    logging.debug(f"Recursive phasing depth={depth}: node(n={total_reads}) — {len(variant_positions)} variants, splitting")
 
     # Parse MSA for consensus_aligned
     msa_handle = StringIO(result.msa_string)
