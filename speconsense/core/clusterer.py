@@ -29,6 +29,7 @@ from speconsense.significance import (
     compute_cer_factor,
     compute_critical_error_rate,
     compute_per_position_qstar,
+    format_cer_details,
     is_cer_reportable,
 )
 from speconsense.scalability import (
@@ -765,9 +766,8 @@ class SpecimenClusterer:
                             sorted_cluster_ids: Optional[List[str]] = None,
                             sorted_sampled_ids: Optional[List[str]] = None,
                             iupac_count: int = 0,
-                            cer: Optional[float] = None,
-                            cer_status: Optional[str] = None,
-                            cer_alpha: Optional[float] = None) -> None:
+                            cer_factor: Optional[float] = None,
+                            cer_details: Optional[str] = None) -> None:
         """Write cluster files: reads FASTQ, MSA, and consensus FASTA.
 
         Read identity metrics measure internal cluster consistency (not accuracy vs. ground truth):
@@ -793,14 +793,13 @@ class SpecimenClusterer:
             info_parts.append(f"primers={','.join(found_primers)}")
         if iupac_count > 0:
             info_parts.append(f"ambig={iupac_count}")
-        if cer is not None:
-            info_parts.append(f"cer={cer:.4f}")
-        elif cer_status == 'anchor':
-            info_parts.append("cer=anchor")
-        if cer_status == 'ns':
-            info_parts.append("cer.ns")
-        if cer_alpha is not None:
-            info_parts.append(f"cer.a={cer_alpha:.0e}")
+        if cer_factor is not None:
+            if cer_factor == float('inf'):
+                info_parts.append("cer_factor=inf")
+            else:
+                info_parts.append(f"cer_factor={cer_factor:.3f}")
+        if cer_details is not None:
+            info_parts.append(f"cer_details={cer_details}")
         info_str = " ".join(info_parts)
 
         # Write reads FASTQ to debug directory with new naming convention
@@ -1701,7 +1700,6 @@ class SpecimenClusterer:
         if len(subclusters) <= 1:
             if subclusters:
                 subclusters[0]['cer_status'] = 'anchor'
-                subclusters[0]['cer_value'] = None
                 subclusters[0]['cer_factor'] = None
                 subclusters[0]['cer_pstar'] = None
                 subclusters[0]['cer_details'] = None
@@ -1833,9 +1831,6 @@ class SpecimenClusterer:
         subclusters[anchor_idx]['cer_factor'] = None
         subclusters[anchor_idx]['cer_pstar'] = None
         subclusters[anchor_idx]['cer_details'] = None
-        # Legacy field for backward-compat with existing FASTA emission;
-        # to be removed when FASTA switches to cer_factor/cer_details.
-        subclusters[anchor_idx]['cer_value'] = None
 
         if len(sorted_indices) == 1:
             return 1, 0
@@ -1854,7 +1849,6 @@ class SpecimenClusterer:
                 subclusters[candidate_idx]['cer_factor'] = 0.0
                 subclusters[candidate_idx]['cer_pstar'] = None
                 subclusters[candidate_idx]['cer_details'] = None
-                subclusters[candidate_idx]['cer_value'] = 0.0
                 ns_count += 1
                 continue
 
@@ -1873,7 +1867,6 @@ class SpecimenClusterer:
                 subclusters[candidate_idx]['cer_factor'] = None
                 subclusters[candidate_idx]['cer_pstar'] = None
                 subclusters[candidate_idx]['cer_details'] = None
-                subclusters[candidate_idx]['cer_value'] = None
                 validated.append(candidate_idx)
                 validated_count += 1
                 continue
@@ -1882,7 +1875,6 @@ class SpecimenClusterer:
             subclusters[candidate_idx]['cer_factor'] = min_factor
             subclusters[candidate_idx]['cer_pstar'] = pstar
             subclusters[candidate_idx]['cer_details'] = details
-            subclusters[candidate_idx]['cer_value'] = pstar
 
             if factor_threshold <= 0 or min_factor >= factor_threshold:
                 subclusters[candidate_idx]['cer_status'] = 'pass'
@@ -2112,9 +2104,12 @@ class SpecimenClusterer:
 
                     # Look up CER from validation pass
                     cluster_dict = cluster_dicts_by_idx.get(final_idx, {})
-                    cluster_cer = cluster_dict.get('cer_value')
-                    cluster_cer_status = cluster_dict.get('cer_status')
-                    cluster_cer_alpha = self.significance_level if cluster_cer is not None else None
+                    cluster_cer_factor = cluster_dict.get('cer_factor')
+                    cluster_cer_details_dict = cluster_dict.get('cer_details')
+                    cluster_cer_details = format_cer_details(
+                        cluster_dict.get('cer_pstar'),
+                        cluster_cer_details_dict,
+                    )
 
                     # Write output files
                     self.write_cluster_files(
@@ -2132,9 +2127,8 @@ class SpecimenClusterer:
                         sorted_cluster_ids=result['sorted_cluster_ids'],
                         sorted_sampled_ids=result['sorted_sampled_ids'],
                         iupac_count=iupac_count,
-                        cer=cluster_cer,
-                        cer_status=cluster_cer_status,
-                        cer_alpha=cluster_cer_alpha
+                        cer_factor=cluster_cer_factor,
+                        cer_details=cluster_cer_details,
                     )
 
         return clusters_with_ambiguities, total_ambiguity_positions

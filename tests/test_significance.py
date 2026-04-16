@@ -370,66 +370,49 @@ class TestIsVariantSignificant:
 # ==============================================================================
 
 class TestCERHeaderParsing:
-    """Test parsing of cer=, cer.a=, and cer.ns fields from FASTA headers."""
+    """Test parsing of cer_factor= and cer_details= fields from FASTA headers."""
 
-    def test_parse_cer_fields(self):
-        """Parse cer and cer.a from header."""
-        header = ">sample-c1 size=100 ric=50 cer=0.15 cer.a=1e-05"
+    def test_parse_cer_factor_and_details(self):
+        """Parse cer_factor and cer_details from header."""
+        header = ">sample-c1 size=100 ric=50 cer_factor=4.250 cer_details=p*=0.0250;ctx=non-hp-sub;q=0.0059"
         result = parse_consensus_header(header)
-        assert result[9] == pytest.approx(0.15)  # cer
-        assert result[10] == pytest.approx(1e-5)  # cer_alpha
-        assert result[11] is False  # cer_ns
+        assert result[9] == pytest.approx(4.25)         # cer_factor
+        assert result[10] == "p*=0.0250;ctx=non-hp-sub;q=0.0059"  # cer_details
 
     def test_parse_no_cer_fields(self):
-        """Missing cer fields should return None/False."""
+        """Missing cer fields should return None."""
         header = ">sample-c1 size=100 ric=50"
         result = parse_consensus_header(header)
-        assert result[9] is None  # cer
-        assert result[10] is None  # cer_alpha
-        assert result[11] is False  # cer_ns
+        assert result[9] is None     # cer_factor
+        assert result[10] is None    # cer_details
 
-    def test_cer_not_confused_with_cer_alpha(self):
-        """cer= regex should not match cer.a= prefix."""
-        header = ">sample-c1 size=100 ric=50 cer.a=1e-05"
+    def test_parse_cer_factor_inf(self):
+        """cer_factor=inf should parse as float('inf')."""
+        header = ">sample-c1 size=200 ric=100 cer_factor=inf cer_details=p*=0.5000;ctx=non-hp-sub;q=0.0059"
         result = parse_consensus_header(header)
-        assert result[9] is None  # cer should be None (not matched from cer.a)
-        assert result[10] == pytest.approx(1e-5)  # cer_alpha
-        assert result[11] is False  # cer_ns
+        assert result[9] == float('inf')
+        assert result[10] == "p*=0.5000;ctx=non-hp-sub;q=0.0059"
 
-    def test_parse_cer_ns_tag(self):
-        """cer.ns tag should be detected."""
-        header = ">sample-c3 size=5 ric=5 cer=0.0012 cer.ns cer.a=1e-05"
+    def test_parse_low_factor_below_threshold(self):
+        """A factor below 1.0 represents what was previously cer.ns."""
+        header = ">sample-c3 size=5 ric=5 cer_factor=0.340 cer_details=p*=0.0020;ctx=non-hp-sub;q=0.0059"
         result = parse_consensus_header(header)
-        assert result[9] == pytest.approx(0.0012)  # cer (numeric value still parsed)
-        assert result[10] == pytest.approx(1e-5)  # cer_alpha
-        assert result[11] is True  # cer_ns
-
-    def test_parse_cer_anchor(self):
-        """cer=anchor should not parse as numeric cer, and is not cer.ns."""
-        header = ">sample-c1 size=200 ric=200 cer=anchor"
-        result = parse_consensus_header(header)
-        assert result[9] is None  # cer (anchor is not numeric)
-        assert result[11] is False  # cer_ns
+        assert result[9] == pytest.approx(0.34)
 
 
 # ==============================================================================
-# Tests for CER value loading (no filtering at load time)
+# Tests for CER value loading and factor-based filtering
 # ==============================================================================
 
 class TestCERLoading:
-    """Test CER loading and cer.ns filtering in load_consensus_sequences.
-
-    Variants marked cer.ns by core are filtered at load time.
-    All other variants (numeric cer, cer=anchor, no cer) are loaded.
-    """
+    """Test loading of cer_factor / cer_details and threshold filtering."""
 
     @pytest.fixture
     def fasta_dir(self, tmp_path):
-        """Create a temporary directory with test FASTA files."""
         fasta_content = (
-            ">specimen-c1 size=200 ric=100 cer=0.15 cer.a=1e-05\n"
+            ">specimen-c1 size=200 ric=100 cer_factor=15.300 cer_details=p*=0.0900;ctx=non-hp-sub;q=0.0059\n"
             "ACGTACGTACGT\n"
-            ">specimen-c2 size=50 ric=25 cer=0.01 cer.a=1e-05\n"
+            ">specimen-c2 size=50 ric=25 cer_factor=2.100 cer_details=p*=0.0124;ctx=non-hp-sub;q=0.0059\n"
             "ACGTACGTACGT\n"
             ">specimen-c3 size=30 ric=15\n"
             "ACGTACGTACGT\n"
@@ -438,29 +421,27 @@ class TestCERLoading:
         fasta_file.write_text(fasta_content)
         return tmp_path
 
-    def test_all_non_ns_variants_loaded(self, fasta_dir):
-        """Variants without cer.ns should load."""
+    def test_all_passing_variants_loaded(self, fasta_dir):
         result = load_consensus_sequences(str(fasta_dir), min_ric=1)
         assert len(result) == 3
 
-    def test_cer_values_preserved(self, fasta_dir):
-        """CER values should be preserved in ConsensusInfo."""
+    def test_cer_fields_preserved(self, fasta_dir):
         result = load_consensus_sequences(str(fasta_dir), min_ric=1)
         by_name = {c.sample_name: c for c in result}
-        assert by_name["specimen-c1"].cer == pytest.approx(0.15)
-        assert by_name["specimen-c1"].cer_alpha == pytest.approx(1e-5)
-        assert by_name["specimen-c2"].cer == pytest.approx(0.01)
-        assert by_name["specimen-c3"].cer is None
-        assert by_name["specimen-c3"].cer_alpha is None
+        assert by_name["specimen-c1"].cer_factor == pytest.approx(15.3)
+        assert by_name["specimen-c1"].cer_details == "p*=0.0900;ctx=non-hp-sub;q=0.0059"
+        assert by_name["specimen-c2"].cer_factor == pytest.approx(2.1)
+        assert by_name["specimen-c3"].cer_factor is None
+        assert by_name["specimen-c3"].cer_details is None
 
-    def test_cer_ns_variant_filtered_at_load(self, tmp_path):
-        """Variants with cer.ns should be excluded at load time."""
+    def test_low_factor_filtered_at_load(self, tmp_path):
+        """Variants with cer_factor < 1.0 are filtered at load time."""
         fasta_content = (
-            ">specimen-c1 size=200 ric=100 cer=anchor\n"
+            ">specimen-c1 size=200 ric=100\n"   # anchor — no cer fields
             "ACGTACGTACGT\n"
-            ">specimen-c2 size=50 ric=25 cer=0.15 cer.a=1e-05\n"
+            ">specimen-c2 size=50 ric=25 cer_factor=2.100 cer_details=p*=0.0124;ctx=non-hp-sub;q=0.0059\n"
             "ACGTACGTACGT\n"
-            ">specimen-c3 size=5 ric=5 cer=0.0012 cer.ns cer.a=1e-05\n"
+            ">specimen-c3 size=5 ric=5 cer_factor=0.340 cer_details=p*=0.0020;ctx=non-hp-sub;q=0.0059\n"
             "ACGTACGTACGT\n"
         )
         fasta_file = tmp_path / "specimen-all.fasta"
@@ -468,38 +449,29 @@ class TestCERLoading:
         result = load_consensus_sequences(str(tmp_path), min_ric=1)
         names = [c.sample_name for c in result]
         assert len(result) == 2
-        assert "specimen-c1" in names  # anchor loads
-        assert "specimen-c2" in names  # pass loads
-        assert "specimen-c3" not in names  # ns filtered
+        assert "specimen-c1" in names    # anchor (no cer fields) loads
+        assert "specimen-c2" in names    # factor >= 1 loads
+        assert "specimen-c3" not in names  # factor < 1 filtered
 
 
-# ==============================================================================
-# Tests for CER ns filtering at load time
-# ==============================================================================
-
-class TestCERNsFilterAtLoad:
-    """Test that cer.ns variants from core are filtered at load time.
-
-    CER computation is done exclusively in the core pipeline. Summarize
-    trusts core's annotations: variants marked cer.ns are excluded at load
-    time; all other variants pass through.
-    """
+class TestCERFactorFilterAtLoad:
+    """Test factor-threshold filtering across mixed CER status FASTA records."""
 
     @pytest.fixture
     def fasta_dir_mixed(self, tmp_path):
         """Create test FASTA with a mix of CER statuses.
 
-        - c1: anchor (cer=anchor)
-        - c2: pass (numeric cer)
-        - c3: not significant (cer.ns)
-        - c4: no CER annotations (e.g., from older core version)
+        - c1: anchor (no cer fields)
+        - c2: pass (factor >= 1)
+        - c3: ns (factor < 1)
+        - c4: no CER annotations (e.g., older output)
         """
         fasta_content = (
-            ">specimen-c1 size=200 ric=200 cer=anchor\n"
+            ">specimen-c1 size=200 ric=200\n"
             "ACGTACGTACGT\n"
-            ">specimen-c2 size=50 ric=50 cer=0.1234 cer.a=1e-05\n"
+            ">specimen-c2 size=50 ric=50 cer_factor=4.200 cer_details=p*=0.0248;ctx=non-hp-sub;q=0.0059\n"
             "ACGTACGTACGT\n"
-            ">specimen-c3 size=5 ric=5 cer=0.0012 cer.ns cer.a=1e-05\n"
+            ">specimen-c3 size=5 ric=5 cer_factor=0.340 cer_details=p*=0.0020;ctx=non-hp-sub;q=0.0059\n"
             "ACGTACGTACGT\n"
             ">specimen-c4 size=30 ric=30\n"
             "ACGTACGTACGT\n"
@@ -508,8 +480,7 @@ class TestCERNsFilterAtLoad:
         fasta_file.write_text(fasta_content)
         return tmp_path
 
-    def test_ns_excluded_others_loaded(self, fasta_dir_mixed):
-        """Only cer.ns variant should be excluded."""
+    def test_low_factor_excluded_others_loaded(self, fasta_dir_mixed):
         result = load_consensus_sequences(str(fasta_dir_mixed), min_ric=1)
         names = [c.sample_name for c in result]
         assert len(result) == 3
@@ -518,28 +489,26 @@ class TestCERNsFilterAtLoad:
         assert "specimen-c3" not in names
         assert "specimen-c4" in names
 
-    def test_anchor_loads_with_no_numeric_cer(self, fasta_dir_mixed):
-        """cer=anchor should load with cer=None (not numeric)."""
+    def test_anchor_loads_with_no_cer_fields(self, fasta_dir_mixed):
         result = load_consensus_sequences(str(fasta_dir_mixed), min_ric=1)
         by_name = {c.sample_name: c for c in result}
-        assert by_name["specimen-c1"].cer is None
+        assert by_name["specimen-c1"].cer_factor is None
+        assert by_name["specimen-c1"].cer_details is None
 
-    def test_pass_preserves_cer_value(self, fasta_dir_mixed):
-        """Numeric cer value should be preserved on passing variants."""
+    def test_passing_factor_preserved(self, fasta_dir_mixed):
         result = load_consensus_sequences(str(fasta_dir_mixed), min_ric=1)
         by_name = {c.sample_name: c for c in result}
-        assert by_name["specimen-c2"].cer == pytest.approx(0.1234)
-        assert by_name["specimen-c2"].cer_alpha == pytest.approx(1e-5)
+        assert by_name["specimen-c2"].cer_factor == pytest.approx(4.2)
+        assert by_name["specimen-c2"].cer_details == "p*=0.0248;ctx=non-hp-sub;q=0.0059"
 
     def test_no_annotation_loads_normally(self, fasta_dir_mixed):
-        """Variants without any CER annotation should load."""
         result = load_consensus_sequences(str(fasta_dir_mixed), min_ric=1)
         by_name = {c.sample_name: c for c in result}
-        assert by_name["specimen-c4"].cer is None
-        assert by_name["specimen-c4"].cer_alpha is None
+        assert by_name["specimen-c4"].cer_factor is None
+        assert by_name["specimen-c4"].cer_details is None
 
-    def test_no_ns_variants_all_pass(self, tmp_path):
-        """When no cer.ns tags exist, all variants load (backward compatible)."""
+    def test_no_factor_annotations_all_pass(self, tmp_path):
+        """When no cer_factor fields exist, all variants load (anchor-only set)."""
         fasta_content = (
             ">specimen-c1 size=200 ric=100\n"
             "ACGTACGTACGT\n"

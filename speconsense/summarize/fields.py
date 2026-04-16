@@ -119,24 +119,26 @@ class RidMinField(FastaField):
         return None
 
 
-class CerField(FastaField):
+class CerFactorField(FastaField):
     def __init__(self):
-        super().__init__('cer', 'Critical error rate (p*) from variant significance')
+        super().__init__('cer_factor', 'Per-position CER factor (q*/q_ctx)')
 
     def format_value(self, consensus: ConsensusInfo) -> Optional[str]:
-        if consensus.cer is not None:
-            return f"cer={consensus.cer:.4f}"
-        return None
+        if consensus.cer_factor is None:
+            return None
+        if consensus.cer_factor == float('inf'):
+            return "cer_factor=inf"
+        return f"cer_factor={consensus.cer_factor:.3f}"
 
 
-class CerAlphaField(FastaField):
+class CerDetailsField(FastaField):
     def __init__(self):
-        super().__init__('cer_alpha', 'Significance level (alpha) for CER')
+        super().__init__('cer_details', 'Structured CER context (p*, K, ctx, q)')
 
     def format_value(self, consensus: ConsensusInfo) -> Optional[str]:
-        if consensus.cer_alpha is not None:
-            return f"cer.a={consensus.cer_alpha:.0e}"
-        return None
+        if consensus.cer_details is None:
+            return None
+        return f"cer_details={consensus.cer_details}"
 
 
 class GroupField(FastaField):
@@ -176,8 +178,8 @@ FASTA_FIELDS = {
     'ambig': AmbigField(),
     'rid': RidField(),
     'rid_min': RidMinField(),
-    'cer': CerField(),
-    'cer_alpha': CerAlphaField(),
+    'cer_factor': CerFactorField(),
+    'cer_details': CerDetailsField(),
     'primers': PrimersField(),
     'group': GroupField(),
     'variant': VariantField(),
@@ -187,8 +189,8 @@ FASTA_FIELDS = {
 FASTA_FIELD_PRESETS = {
     'default': ['size', 'ric', 'rawric', 'rawlen', 'snp', 'ambig', 'primers'],
     'minimal': ['size', 'ric'],
-    'qc': ['size', 'ric', 'length', 'rid', 'ambig', 'cer', 'cer_alpha'],
-    'full': ['size', 'ric', 'length', 'rawric', 'rawlen', 'snp', 'ambig', 'rid', 'cer', 'cer_alpha', 'primers'],
+    'qc': ['size', 'ric', 'length', 'rid', 'ambig', 'cer_factor', 'cer_details'],
+    'full': ['size', 'ric', 'length', 'rawric', 'rawlen', 'snp', 'ambig', 'rid', 'cer_factor', 'cer_details', 'primers'],
     'id-only': [],
 }
 

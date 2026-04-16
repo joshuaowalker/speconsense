@@ -284,6 +284,38 @@ def compute_cer_factor(N: int, M: int, n_sites: int,
     return (joint_qstar / actual_joint) ** (1.0 / K)
 
 
+def format_cer_details(pstar: Optional[float], details: Optional[dict]) -> Optional[str]:
+    """Format the cer_details FASTA annotation.
+
+    Renders a structured semicolon-separated string per the CER-in-practice
+    paper §3.5. For K=1: ``p*=...;ctx=...;q=...``. For K>1, K is included and
+    per-position values are joined with ``+``: ``p*=...;K=2;ctx=a+b;q=x+y``.
+
+    Args:
+        pstar: Per-position critical rate (output of compute_per_position_qstar).
+            May be None when the candidate has no valid pairwise comparison.
+        details: Dict with keys ``K``, ``tags`` (list[str]), ``q_ctx``
+            (list[float]), and ``ref_idx`` (int). May be None.
+
+    Returns:
+        The formatted string, or None when either input is missing.
+    """
+    if pstar is None or not details:
+        return None
+    K = details.get('K') or len(details.get('tags', []))
+    tags = details.get('tags', [])
+    qs = details.get('q_ctx', [])
+    if not tags or not qs:
+        return None
+
+    parts = [f"p*={pstar:.4f}"]
+    if K and K > 1:
+        parts.append(f"K={K}")
+    parts.append("ctx=" + "+".join(tags))
+    parts.append("q=" + "+".join(f"{q:.4f}" for q in qs))
+    return ";".join(parts)
+
+
 def is_variant_significant(M: int, N: int, L: int,
                            assumed_error_rate: float = 0.015,
                            alpha: float = 1e-5,
