@@ -37,7 +37,7 @@ class ClusterProcessingConfig:
     """
     __slots__ = ['outlier_identity_threshold', 'enable_secondpass_phasing',
                  'disable_homopolymer_equivalence', 'min_variant_frequency', 'min_variant_count',
-                 'assumed_error_rate', 'significance_level']
+                 'assumed_error_rate', 'significance_level', 'min_hp_length']
 
     def __init__(self, outlier_identity_threshold: Optional[float],
                  enable_secondpass_phasing: bool,
@@ -45,7 +45,8 @@ class ClusterProcessingConfig:
                  min_variant_frequency: float,
                  min_variant_count: int,
                  assumed_error_rate: float = 0.015,
-                 significance_level: float = 1e-5):
+                 significance_level: float = 1e-5,
+                 min_hp_length: int = 6):
         self.outlier_identity_threshold = outlier_identity_threshold
         self.enable_secondpass_phasing = enable_secondpass_phasing
         self.disable_homopolymer_equivalence = disable_homopolymer_equivalence
@@ -53,6 +54,7 @@ class ClusterProcessingConfig:
         self.min_variant_count = min_variant_count
         self.assumed_error_rate = assumed_error_rate
         self.significance_level = significance_level
+        self.min_hp_length = min_hp_length
 
 
 class ConsensusGenerationConfig:
@@ -79,18 +81,26 @@ class ConsensusGenerationConfig:
 
 # Worker functions
 
-def _run_spoa_worker(args: Tuple[int, Dict[str, str], bool]) -> Tuple[int, Optional[MSAResult]]:
+def _run_spoa_worker(args: Tuple) -> Tuple[int, Optional[MSAResult]]:
     """Worker function for parallel SPOA execution.
 
     Must be at module level for ProcessPoolExecutor pickling.
 
     Args:
         args: Tuple of (cluster_idx, sampled_seqs, disable_homopolymer_equivalence)
+            or (cluster_idx, sampled_seqs, disable_homopolymer_equivalence,
+            min_hp_length). The 4-element form is preferred; the 3-element
+            form is accepted for backward compatibility and uses
+            min_hp_length=6 (the shipped default).
 
     Returns:
         Tuple of (cluster_idx, MSAResult or None)
     """
-    cluster_idx, sampled_seqs, disable_homopolymer_equivalence = args
+    if len(args) == 4:
+        cluster_idx, sampled_seqs, disable_homopolymer_equivalence, min_hp_length = args
+    else:
+        cluster_idx, sampled_seqs, disable_homopolymer_equivalence = args
+        min_hp_length = 6
 
     if not sampled_seqs:
         return cluster_idx, None
@@ -110,7 +120,9 @@ def _run_spoa_worker(args: Tuple[int, Dict[str, str], bool]) -> Tuple[int, Optio
 
         enable_normalization = not disable_homopolymer_equivalence
         alignments, consensus, msa_to_consensus_pos = extract_alignments_from_msa(
-            result.stdout, enable_homopolymer_normalization=enable_normalization
+            result.stdout,
+            enable_homopolymer_normalization=enable_normalization,
+            min_hp_length=min_hp_length,
         )
 
         if not consensus:
@@ -131,7 +143,8 @@ def _run_spoa_worker(args: Tuple[int, Dict[str, str], bool]) -> Tuple[int, Optio
 
 
 def _run_spoa_for_cluster_worker(sequences: Dict[str, str],
-                                  disable_homopolymer_equivalence: bool) -> Optional[MSAResult]:
+                                  disable_homopolymer_equivalence: bool,
+                                  min_hp_length: int = 6) -> Optional[MSAResult]:
     """Run SPOA for a set of sequences. Used by cluster processing worker."""
     if not sequences:
         return None
@@ -151,7 +164,9 @@ def _run_spoa_for_cluster_worker(sequences: Dict[str, str],
 
         enable_normalization = not disable_homopolymer_equivalence
         alignments, consensus, msa_to_consensus_pos = extract_alignments_from_msa(
-            result.stdout, enable_homopolymer_normalization=enable_normalization
+            result.stdout,
+            enable_homopolymer_normalization=enable_normalization,
+            min_hp_length=min_hp_length,
         )
 
         if not consensus:

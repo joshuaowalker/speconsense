@@ -81,6 +81,18 @@ def main():
     phasing_group.add_argument("--group-identity", type=float, default=0.85,
                                help="Minimum pairwise identity to group clusters for CER validation. "
                                     "Clusters below this threshold are validated independently. (default: 0.85)")
+    phasing_group.add_argument("--hp-min-length", type=int, default=6,
+                               help="Minimum homopolymer run length to treat as HP context in MSA "
+                                    "variant detection. Runs of length >= this value have their length "
+                                    "variants suppressed (blanket normalization); runs below it are "
+                                    "surfaced as candidates and evaluated by context-aware CER. "
+                                    "Default 6 matches the HP paper recommendation of CER-evaluating "
+                                    "L <= 5 HP variants. (default: 6)")
+    phasing_group.add_argument("--qctx-profile", type=str, default="dorado-v5.0",
+                               help="Context-aware error rate table. Either a shipped profile name "
+                                    "('dorado-v5.0' or 'dorado-v3.5') or a filesystem path to a "
+                                    "YAML file with a 'rates' mapping. Used to look up q_ctx values "
+                                    "when computing CER factors. (default: dorado-v5.0)")
 
     # Ambiguity Calling group
     ambiguity_group = parser.add_argument_group("Ambiguity Calling")
@@ -226,6 +238,8 @@ def main():
         assumed_error_rate=args.assumed_error_rate,
         significance_level=args.significance_level,
         group_identity=args.group_identity,
+        min_hp_length=args.hp_min_length,
+        qctx_profile=args.qctx_profile,
     )
 
     # Log configuration

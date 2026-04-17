@@ -23,7 +23,7 @@ except ImportError:
 from speconsense.msa import ReadAlignment, analyze_positional_variation, has_no_majority, call_iupac_ambiguities
 from speconsense.context import classify_pairwise_differences
 from speconsense.distances import count_variant_differences
-from speconsense.qctx import DORADO_V5_0, get_qctx
+from speconsense.qctx import DORADO_V5_0, get_qctx, load_table as load_qctx_table
 from speconsense.significance import (
     compute_cer_factor,
     compute_critical_error_rate,
@@ -208,7 +208,9 @@ class SpecimenClusterer:
                  collect_discards: bool = False,
                  assumed_error_rate: float = 0.015,
                  significance_level: float = 1e-5,
-                 group_identity: float = 0.85):
+                 group_identity: float = 0.85,
+                 min_hp_length: int = 6,
+                 qctx_profile: str = "dorado-v5.0"):
         self.min_identity = min_identity
         self.inflation = inflation
         self.min_size = min_size
@@ -243,12 +245,19 @@ class SpecimenClusterer:
         self.assumed_error_rate = assumed_error_rate
         self.significance_level = significance_level
         self.group_identity = group_identity
+        # HP run length threshold for MSA variant detection. Runs of length
+        # >= min_hp_length are treated as HP context (length variants in them
+        # are suppressed at phasing time). Runs of length < min_hp_length
+        # surface length variants as regular candidates, which the
+        # context-aware CER framework scores via q_ctx lookup.
+        self.min_hp_length = min_hp_length
         # Context-aware CER configuration. The factor threshold controls
         # whether a candidate cluster passes pairwise CER validation:
         # candidates pass when their per-position CER factor (q*/q_ctx) is
         # >= cer_factor_threshold. Setting assumed_error_rate <= 0 disables
         # the gate entirely; this is preserved as the disable sentinel.
-        self.qctx_table = DORADO_V5_0
+        self.qctx_profile = qctx_profile
+        self.qctx_table = load_qctx_table(qctx_profile)
         self.cer_factor_threshold = 0.0 if assumed_error_rate <= 0 else 1.0
         self.discarded_read_ids: Set[str] = set()  # Track all discarded reads (outliers + filtered)
 
@@ -639,7 +648,7 @@ class SpecimenClusterer:
 
                 # Prepare work packages with config
                 work_packages = [
-                    (cluster_idx, sampled_seqs, self.disable_homopolymer_equivalence)
+                    (cluster_idx, sampled_seqs, self.disable_homopolymer_equivalence, self.min_hp_length)
                     for cluster_idx, sampled_seqs in clusters_needing_spoa
                 ]
 
@@ -663,7 +672,7 @@ class SpecimenClusterer:
             else:
                 # Sequential SPOA execution using same worker function as parallel path
                 for cluster_idx, sampled_seqs in clusters_needing_spoa:
-                    _, result = _run_spoa_worker((cluster_idx, sampled_seqs, self.disable_homopolymer_equivalence))
+                    _, result = _run_spoa_worker((cluster_idx, sampled_seqs, self.disable_homopolymer_equivalence, self.min_hp_length))
                     if result is None:
                         logging.warning(f"Cluster {cluster_idx} produced no consensus, discarding {len(clusters[cluster_idx]['read_ids'])} reads")
                         self.discarded_read_ids.update(clusters[cluster_idx]['read_ids'])
@@ -1138,6 +1147,7 @@ class SpecimenClusterer:
             min_variant_count=self.min_variant_count,
             assumed_error_rate=self.assumed_error_rate,
             significance_level=self.significance_level,
+            min_hp_length=self.min_hp_length,
         )
 
         # Build work packages with per-cluster data
@@ -1227,7 +1237,7 @@ class SpecimenClusterer:
             cluster_seqs = {sid: self.sequences[sid] for sid in sorted_ids}
 
             msa_result = _run_spoa_for_cluster_worker(
-                cluster_seqs, self.disable_homopolymer_equivalence)
+                cluster_seqs, self.disable_homopolymer_equivalence, self.min_hp_length)
 
             if msa_result is None:
                 self.discarded_read_ids.update(read_ids)
@@ -1319,6 +1329,7 @@ class SpecimenClusterer:
             min_variant_count=self.min_variant_count,
             assumed_error_rate=self.assumed_error_rate,
             significance_level=self.significance_level,
+            min_hp_length=self.min_hp_length,
         )
 
         result = []
@@ -1338,7 +1349,7 @@ class SpecimenClusterer:
             sorted_ids = sorted(read_ids, key=lambda x: (-qualities.get(x, 0), x))
             cluster_seqs = {sid: self.sequences[sid] for sid in sorted_ids}
 
-            msa_result = _run_spoa_for_cluster_worker(cluster_seqs, self.disable_homopolymer_equivalence)
+            msa_result = _run_spoa_for_cluster_worker(cluster_seqs, self.disable_homopolymer_equivalence, self.min_hp_length)
             if msa_result is None:
                 result.append(cluster_dict)
                 continue
@@ -1445,7 +1456,7 @@ class SpecimenClusterer:
                 reads_in_msa = set(all_read_seqs.keys())
 
             # Run SPOA
-            msa_result = _run_spoa_for_cluster_worker(spoa_input, self.disable_homopolymer_equivalence)
+            msa_result = _run_spoa_for_cluster_worker(spoa_input, self.disable_homopolymer_equivalence, self.min_hp_length)
             if not msa_result:
                 break
 
@@ -1656,7 +1667,7 @@ class SpecimenClusterer:
                 spoa_input[rid] = seq
 
             # Run SPOA
-            msa_result = _run_spoa_for_cluster_worker(spoa_input, self.disable_homopolymer_equivalence)
+            msa_result = _run_spoa_for_cluster_worker(spoa_input, self.disable_homopolymer_equivalence, self.min_hp_length)
             if not msa_result:
                 continue
 
@@ -1810,7 +1821,7 @@ class SpecimenClusterer:
             sorted_ids = sorted_ids[:self.max_sample_size]
 
         seqs = {sid: self.sequences[sid] for sid in sorted_ids}
-        result = _run_spoa_for_cluster_worker(seqs, self.disable_homopolymer_equivalence)
+        result = _run_spoa_for_cluster_worker(seqs, self.disable_homopolymer_equivalence, self.min_hp_length)
         if not result or not result.consensus:
             return None
 
@@ -2355,6 +2366,7 @@ class SpecimenClusterer:
             min_variant_count=self.min_variant_count,
             assumed_error_rate=self.assumed_error_rate,
             significance_level=self.significance_level,
+            min_hp_length=self.min_hp_length,
         )
 
         # Build qualities dict for consistent SPOA ordering
