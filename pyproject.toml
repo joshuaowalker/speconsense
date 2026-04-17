@@ -57,3 +57,4 @@ include = ["speconsense*"]
 
 [tool.setuptools.package-data]
 "speconsense.profiles" = ["*.yaml"]
+"speconsense.qctx_tables" = ["*.yaml"]

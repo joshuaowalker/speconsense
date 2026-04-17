@@ -1,0 +1,23 @@
+# Context-specific error rate table for Dorado v3.5 / R10.4.1 E8.2 chemistry.
+#
+# Values are filtered post-clustering per-position error rates derived from
+# the ont37 dataset in the HP error rate analysis (Walker 2026b). v3.5 rates
+# are approximately 2.2x the v5.0 rates across HP lengths, consistent with
+# the basecaller-version effect documented in that analysis.
+#
+# Intended for users on legacy data; for current chemistry use dorado-v5.0.
+
+name: dorado-v3.5
+chemistry: R10.4.1
+basecaller: Dorado SUP v3.5.x
+source: Walker 2026b (HP error rate analysis)
+dataset: ont37
+
+rates:
+  non-hp-sub:  0.0144     # ont37 substitution rate
+  non-hp-indel: 0.0222    # ont37 deletion + insertion
+  hp-l1: 0.0156
+  hp-l2: 0.0184
+  hp-l3: 0.0217
+  hp-l4: 0.0227
+  hp-l5: 0.0213

@@ -1,75 +1,151 @@
 """Context-specific error rate (q_ctx) tables for context-aware CER.
 
-Provides empirical per-context error rate values from the homopolymer error
-rate analysis (HP paper). Each table is a flat dict from a string lookup key
-(produced by qctx_lookup_key) to a per-position error rate.
+Loads per-basecaller error rate tables from YAML files in
+``speconsense/qctx_tables/``. Users can select a shipped profile by name or
+supply a path to a custom YAML table.
 
-The Phase 1 implementation ships per-basecaller pooled tables. Phase 2 may
-add per-run estimation by replacing or augmenting the shipped tables at
-specimen ingestion time.
+Each table is a flat mapping from a string lookup key (produced by
+``qctx_lookup_key``) to a per-position error rate. The lookup keys are:
 
-Conventions:
-    * All values are filtered post-clustering per-position error rates,
-      conditioned on speconsense's --min-identity 0.90 default.
-    * HP length-change rates are pooled across base; per-base granularity
-      may be added when supplementary per-(base, length) data is wired up.
-    * HP runs of length >= MAX_HP_LENGTH are not represented; callers should
-      treat them via blanket normalization (per HP paper §8.1).
+    non-hp-sub          Substitution at a non-HP position
+    non-hp-indel        Indel at a non-HP position
+    hp-l{N}             Length change in an HP run of reference length N
+
+HP runs of length beyond those represented in the table return None from
+``get_qctx``, signaling that callers should route to blanket HP normalization
+rather than CER evaluation.
+
+Phase 2 per-run estimation, described in the CER-in-practice paper §4.2, is
+not yet implemented; use the shipped per-basecaller tables in the meantime.
 """
 
+from pathlib import Path
 from typing import Dict, Optional
+
+import yaml
 
 from speconsense.context import ContextClass, ContextTag
 
 
+_TABLES_DIR = Path(__file__).parent / "qctx_tables"
+_cache: Dict[str, Dict[str, float]] = {}
+
+
+DEFAULT_TABLE_NAME = "dorado-v5.0"
+
+# Maximum HP length representable in shipped tables. HP runs longer than this
+# are handled via blanket normalization rather than CER evaluation, matching
+# the HP paper §8.1 recommendation. Custom YAML tables may extend beyond this
+# by adding hp-l{N} keys for larger N; this constant is for reference only.
 MAX_HP_LENGTH = 5
 
 
 # ---------------------------------------------------------------------------
-# Default table: Dorado v5.0 / R10.4.1 (derived from ont98 dataset)
+# Table loading
 # ---------------------------------------------------------------------------
 
-# Filtered per-position rates from the HP error rate analysis
-# (Walker 2026b). Values are pooled across bases at each HP length;
-# per-base variation is at most ~1.4x in this regime and per-base
-# refinement is deferred to a future table version.
-DORADO_V5_0: Dict[str, float] = {
-    # Non-HP positions
-    "non-hp-sub":     0.0059,   # Walker 2026b Table 5 (ont98 substitution)
-    "non-hp-indel":   0.0108,   # ont98 deletion + insertion
-    # HP length-change rates by reference run length
-    "hp-l1":          0.0067,   # Walker 2026b Table 4 (filtered)
-    "hp-l2":          0.0083,
-    "hp-l3":          0.0097,
-    "hp-l4":          0.0099,
-    "hp-l5":          0.0113,
-}
+
+def load_table(name_or_path: str) -> Dict[str, float]:
+    """Load a q_ctx table by shipped name or filesystem path.
+
+    Shipped names (``dorado-v5.0``, ``dorado-v3.5``) resolve to YAML files
+    bundled with speconsense. Anything that looks like a path (contains '/' or
+    ends in '.yaml' / '.yml') is treated as a user-supplied file.
+
+    Returns the ``rates`` mapping from the YAML file. Raises FileNotFoundError
+    if the table cannot be resolved and ValueError if the YAML is malformed.
+    """
+    if name_or_path in _cache:
+        return _cache[name_or_path]
+
+    path = _resolve_path(name_or_path)
+    with open(path) as f:
+        data = yaml.safe_load(f)
+
+    if not isinstance(data, dict) or "rates" not in data:
+        raise ValueError(f"Invalid q_ctx table at {path}: missing 'rates' mapping")
+    rates = data["rates"]
+    if not isinstance(rates, dict):
+        raise ValueError(f"Invalid q_ctx table at {path}: 'rates' is not a mapping")
+
+    _cache[name_or_path] = rates
+    return rates
 
 
-# ---------------------------------------------------------------------------
-# Optional table: Dorado v3.5 (older basecaller) for users on legacy data
-# ---------------------------------------------------------------------------
+def _resolve_path(name_or_path: str) -> Path:
+    """Resolve a name-or-path argument to an absolute YAML path."""
+    if "/" in name_or_path or name_or_path.endswith((".yaml", ".yml")):
+        path = Path(name_or_path)
+        if not path.exists():
+            raise FileNotFoundError(f"q_ctx table not found: {name_or_path}")
+        return path
 
-# Filtered per-position rates from the ont37 dataset (Dorado SUP v3.5).
-# Approximately 2.2x the v5.0 rates across HP lengths, consistent with the
-# basecaller-version effect described in Walker 2026b.
-DORADO_V3_5: Dict[str, float] = {
-    "non-hp-sub":     0.0144,   # ont37 substitution rate
-    "non-hp-indel":   0.0222,   # ont37 deletion + insertion
-    "hp-l1":          0.0156,
-    "hp-l2":          0.0184,
-    "hp-l3":          0.0217,
-    "hp-l4":          0.0227,
-    "hp-l5":          0.0213,
-}
+    shipped = _TABLES_DIR / f"{name_or_path}.yaml"
+    if not shipped.exists():
+        available = sorted(p.stem for p in _TABLES_DIR.glob("*.yaml"))
+        raise FileNotFoundError(
+            f"Unknown q_ctx table '{name_or_path}'. "
+            f"Available shipped tables: {', '.join(available)}; "
+            f"or pass a filesystem path to a custom YAML."
+        )
+    return shipped
 
 
-TABLES: Dict[str, Dict[str, float]] = {
+def list_shipped_tables() -> list:
+    """Return the names of all shipped q_ctx tables (for CLI help text etc.)."""
+    return sorted(p.stem for p in _TABLES_DIR.glob("*.yaml"))
+
+
+# Convenience handles for the two shipped defaults. Loaded lazily on access
+# to avoid I/O at import time for code paths that supply their own tables.
+def _shipped(name: str) -> Dict[str, float]:
+    return load_table(name)
+
+
+class _LazyTable:
+    """Dict-like lazy loader for shipped tables (preserves the previous API)."""
+    def __init__(self, name: str):
+        self._name = name
+        self._table: Optional[Dict[str, float]] = None
+
+    def _load(self) -> Dict[str, float]:
+        if self._table is None:
+            self._table = _shipped(self._name)
+        return self._table
+
+    def __getitem__(self, key):
+        return self._load()[key]
+
+    def __iter__(self):
+        return iter(self._load())
+
+    def __len__(self):
+        return len(self._load())
+
+    def __contains__(self, key):
+        return key in self._load()
+
+    def get(self, key, default=None):
+        return self._load().get(key, default)
+
+    def keys(self):
+        return self._load().keys()
+
+    def items(self):
+        return self._load().items()
+
+    def values(self):
+        return self._load().values()
+
+
+DORADO_V5_0 = _LazyTable("dorado-v5.0")
+DORADO_V3_5 = _LazyTable("dorado-v3.5")
+
+# Backward-compat map for code that expects a {name: table} registry.
+TABLES: Dict[str, _LazyTable] = {
     "dorado-v5.0": DORADO_V5_0,
     "dorado-v3.5": DORADO_V3_5,
 }
-
-DEFAULT_TABLE_NAME = "dorado-v5.0"
 
 
 # ---------------------------------------------------------------------------
@@ -81,11 +157,13 @@ def qctx_lookup_key(tag: ContextTag) -> str:
     """Derive the q_ctx table lookup key for a context tag.
 
     HP length-change tags collapse to ``hp-l{length}`` because the shipped
-    Phase 1 tables are pooled across base. The classifier still records the
-    base in ContextTag.base for output annotation; only the lookup is pooled.
+    tables are pooled across base and direction. The classifier still records
+    the base in ``ContextTag.base`` for output annotation; only the lookup is
+    pooled.
 
     Raises:
-        ValueError if the tag's cls is not recognized.
+        ValueError if the tag's cls is not recognized, or if an HP tag is
+        missing the required length.
     """
     if tag.cls == ContextClass.NON_HP_SUB:
         return "non-hp-sub"
@@ -101,14 +179,15 @@ def qctx_lookup_key(tag: ContextTag) -> str:
 def get_qctx(tag: ContextTag, table: Optional[Dict[str, float]] = None) -> Optional[float]:
     """Look up q_ctx for a context tag against a q_ctx table.
 
-    Returns the per-position error rate, or None if the tag is unsupported by
-    the table (e.g., HP length >= MAX_HP_LENGTH + 1, or a missing entry).
-    Callers receiving None should treat the variant as ineligible for CER
-    evaluation (typically: route to blanket normalization for long HPs).
+    Returns the per-position error rate, or None if the tag's lookup key is
+    absent from the table. Callers receiving None should treat the variant as
+    ineligible for CER evaluation (route to blanket normalization for long
+    HPs, or skip the pair).
 
     Args:
         tag: Context tag from speconsense.context.
-        table: Optional q_ctx table dict. Defaults to DORADO_V5_0.
+        table: Optional q_ctx table dict. Defaults to the shipped
+            ``DORADO_V5_0`` table.
     """
     if table is None:
         table = DORADO_V5_0
@@ -122,8 +201,7 @@ def get_qctx(tag: ContextTag, table: Optional[Dict[str, float]] = None) -> Optio
 def is_supported(tag: ContextTag, table: Optional[Dict[str, float]] = None) -> bool:
     """Whether a context tag has a defined q_ctx in the table.
 
-    HP length-change tags with length > MAX_HP_LENGTH return False, signaling
-    that the variant should be treated by blanket HP normalization rather
-    than CER evaluation.
+    HP length-change tags beyond the table's coverage return False, signaling
+    that the variant should be handled via blanket HP normalization.
     """
     return get_qctx(tag, table) is not None

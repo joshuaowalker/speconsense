@@ -1,0 +1,32 @@
+# Context-specific error rate table for Dorado v5.0 / R10.4.1 E8.2 chemistry.
+#
+# Values are filtered post-clustering per-position error rates derived from
+# the ont98 dataset in the HP error rate analysis (Walker 2026b). The filter
+# excludes biological variants via outlier and bimodal distribution detection
+# so the remaining rate reflects sequencing error, not real variation.
+#
+# Rates are pooled across bases at each HP length; per-base variation is at
+# most ~1.4x in this regime and per-base refinement can be added by expanding
+# the rates map with keys like "hp-l5-G".
+#
+# Lookup keys used by speconsense:
+#   non-hp-sub         Substitution at a non-HP position
+#   non-hp-indel       Indel at a non-HP position (sum of Del + Ins)
+#   hp-l{N}            Length change in an HP run of length N (1..5)
+# HP runs of length >= 6 intentionally omitted; they are evaluated by blanket
+# HP normalization rather than CER (HP paper §8.1).
+
+name: dorado-v5.0
+chemistry: R10.4.1
+basecaller: Dorado SUP v5.0.0
+source: Walker 2026b (HP error rate analysis)
+dataset: ont98
+
+rates:
+  non-hp-sub:  0.0059   # Walker 2026b Table 5 (ont98 substitution)
+  non-hp-indel: 0.0108   # ont98 deletion + insertion
+  hp-l1: 0.0067          # Walker 2026b Table 4 (filtered)
+  hp-l2: 0.0083
+  hp-l3: 0.0097
+  hp-l4: 0.0099
+  hp-l5: 0.0113

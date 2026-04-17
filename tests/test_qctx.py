@@ -131,3 +131,55 @@ def test_all_tables_have_required_keys():
     for name, table in TABLES.items():
         missing = [k for k in required_keys if k not in table]
         assert not missing, f"Table {name} missing keys: {missing}"
+
+
+# ---------------------------------------------------------------------------
+# YAML loader
+# ---------------------------------------------------------------------------
+
+
+def test_list_shipped_tables_contains_both_defaults():
+    from speconsense.qctx import list_shipped_tables
+    shipped = list_shipped_tables()
+    assert "dorado-v5.0" in shipped
+    assert "dorado-v3.5" in shipped
+
+
+def test_load_table_by_name():
+    from speconsense.qctx import load_table
+    t = load_table("dorado-v5.0")
+    assert isinstance(t, dict)
+    assert "non-hp-sub" in t
+    assert t["non-hp-sub"] == pytest.approx(0.0059)
+
+
+def test_load_table_unknown_name_raises():
+    from speconsense.qctx import load_table
+    with pytest.raises(FileNotFoundError):
+        load_table("does-not-exist")
+
+
+def test_load_table_from_custom_path(tmp_path):
+    from speconsense.qctx import load_table
+    custom = tmp_path / "custom.yaml"
+    custom.write_text(
+        "name: custom\n"
+        "rates:\n"
+        "  non-hp-sub: 0.01\n"
+        "  non-hp-indel: 0.02\n"
+        "  hp-l1: 0.005\n"
+        "  hp-l2: 0.007\n"
+    )
+    table = load_table(str(custom))
+    assert table["non-hp-sub"] == pytest.approx(0.01)
+    assert table["hp-l2"] == pytest.approx(0.007)
+    # Keys not in the table return None via get_qctx
+    assert table.get("hp-l5") is None
+
+
+def test_load_table_malformed_raises(tmp_path):
+    from speconsense.qctx import load_table
+    bad = tmp_path / "bad.yaml"
+    bad.write_text("name: bad\n# no rates block\n")
+    with pytest.raises(ValueError):
+        load_table(str(bad))
