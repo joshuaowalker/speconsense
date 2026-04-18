@@ -316,11 +316,7 @@ def _refine_groups(
     position: int,
     read_to_position_alleles: Dict[str, Dict[int, str]],
 ) -> Dict[tuple, Set[str]]:
-    """Split each allele-tuple group by allele at a new position.
-
-    Used by _find_best_phasing_subset for incremental group refinement
-    during beam search.
-    """
+    """Split each allele-tuple group by allele at a new position."""
     new_groups: Dict[tuple, Set[str]] = {}
     for allele_key, read_ids in current_groups.items():
         for rid in read_ids:
