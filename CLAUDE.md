@@ -50,8 +50,8 @@ pytest -m "not slow"
 ### Main Components
 
 **speconsense/core/** - Core clustering and consensus generation subpackage:
-- `clusterer.py`: `SpecimenClusterer` class - main orchestrator for the clustering pipeline
-- `workers.py`: Worker functions for parallel processing (SPOA, cluster processing)
+- `clusterer.py`: `SpecimenClusterer` class — main orchestrator for the clustering pipeline
+- `workers.py`: Worker functions for parallel processing (SPOA, cluster processing, phasing, primer trimming)
 - `cli.py`: Command-line interface and argument parsing
 - Two clustering algorithms: graph-based MCL (default) and greedy clustering
 - Consensus generation via external SPOA tool
@@ -60,14 +60,38 @@ pytest -m "not slow"
 
 **speconsense/summarize/** - Post-processing utility subpackage:
 - `cli.py`: Command-line interface and main entry point
-- `iupac.py`: IUPAC ambiguity code utilities and distance calculations
+- `iupac.py`: IUPAC-aware distance calculations (re-exports shared helpers from `distances.py`)
 - `fields.py`: FASTA header field classes and formatting
-- `analysis.py`: MSA analysis and quality assessment
+- `analysis.py`: MSA analysis, cluster quality, outlier detection
 - `merging.py`: MSA-based variant merging with IUPAC consensus
 - `clustering.py`: HAC clustering and variant selection
-- `io.py`: File I/O operations (loading sequences, writing outputs)
+- `io.py`: File I/O (loading sequences, writing consensus FASTA/FASTQ/debug outputs)
 
-**speconsense/synth.py** - Synthetic read generator for testing consensus algorithms
+**Shared top-level modules** (used by both subpackages):
+- `types.py`: `ConsensusInfo`, `OverlapMergeInfo` NamedTuples — avoids circular imports. Use `._replace()` to create modified copies.
+- `msa.py`: SPOA MSA analysis, homopolymer-normalized error detection, IUPAC generation, variant position detection/phasing support. Defines `IUPAC_CODES`.
+- `distances.py`: IUPAC-aware edlib alignment, adjusted-identity distance, variant difference counting. Defines `IUPAC_EQUIV` and `STANDARD_ADJUSTMENT_PARAMS`.
+- `context.py`: Per-position variant context classification (`ContextClass`, `ContextTag`) driving CER q_ctx lookup. HP context comes from the reference consensus.
+- `qctx.py`: Loads context-specific error rate tables from `qctx_tables/*.yaml`. `DEFAULT_TABLE_NAME = "dorado-v5.0"`. HP runs beyond `MAX_HP_LENGTH=5` route to blanket normalization.
+- `significance.py`: Critical error rate (p*) via binomial survival with Bonferroni correction, uniform error model (q=p/3). CER only reported when `p* < SIGNAL_DESTRUCTION_THRESHOLD (0.75)`.
+- `quality_report.py`: Multi-section quality report for `speconsense-summarize`.
+- `cli.py`: Top-level entry-point stub that re-exports `core.main`.
+
+**speconsense/scalability/** - Optional acceleration for O(n²) pairwise work:
+- `base.py`: `CandidateFinder` protocol, `ScalablePairwiseOperation` (K-NN construction for MCL)
+- `vsearch.py`: vsearch-backed candidate finder
+- `config.py`: `ScalabilityConfig`
+
+**speconsense/profiles/** - Profile system for parameter presets:
+- YAML profiles (`compressed`, `herbarium`, `largedata`, `nostalgia`, `strict`, `example`) bundled in the package
+- User profiles in `~/.config/speconsense/profiles/` take precedence over bundled
+- Override order: defaults → profile → explicit CLI arguments
+- Valid keys are strictly validated; profile keys use dashes (e.g., `enable-full-consensus`), argparse attrs use underscores
+- `VALID_SPECONSENSE_KEYS` / `VALID_SUMMARIZE_KEYS` in `profiles/__init__.py` are the source of truth for acceptable keys
+
+**speconsense/qctx_tables/** - Bundled per-basecaller error-rate tables (YAML), loadable by name or path.
+
+**speconsense/synth.py** - Synthetic read generator for testing consensus algorithms.
 
 ### Key Processing Pipeline
 
@@ -94,13 +118,12 @@ Note: HAC grouping occurs BEFORE merging (since 0.4.0) to prevent inappropriate 
 
 ### External Dependencies
 
-- **SPOA**: Required for consensus generation, must be in PATH
-- **MCL**: Optional but recommended for graph clustering
-- **edlib**: Python library for edit distance calculations
-- **adjusted-identity**: Custom library for IUPAC-aware sequence alignment (from GitHub)
-- **BioPython**: Sequence handling and file I/O
-- **NumPy**: Numerical operations
-- **tqdm**: Progress bars
+- **SPOA**: Required for consensus generation, must be in PATH. When running SPOA, the candidate sequence must be the first input.
+- **MCL**: Optional but recommended for graph clustering (falls back to greedy if missing)
+- **vsearch**: Optional; enables the `scalability` candidate-finder backend for large inputs
+- **edlib**: Edit distance calculations; used with `IUPAC_EQUIV` for ambiguity-aware alignment
+- **adjusted-identity**: IUPAC-aware sequence alignment (from GitHub, `>=0.2.4`)
+- **BioPython**, **NumPy**, **SciPy**, **tqdm**, **PyYAML**: see `pyproject.toml`
 
 ### Output Structure
 
@@ -121,13 +144,22 @@ Note: HAC grouping occurs BEFORE merging (since 0.4.0) to prevent inappropriate 
 ### IUPAC Ambiguity Code Handling
 
 The codebase uses IUPAC nucleotide ambiguity codes throughout:
-- `IUPAC_CODES` dict maps nucleotide sets to codes (R=A/G, Y=C/T, etc.)
-- `IUPAC_EQUIV` list enables edlib alignment to treat ambiguity codes as matching their constituent bases
-- `STANDARD_ADJUSTMENT_PARAMS` defines consistent sequence comparison parameters:
+- `IUPAC_CODES` (in `msa.py`) maps nucleotide sets to codes (R=A/G, Y=C/T, etc.)
+- `IUPAC_EQUIV` (in `distances.py`) enables edlib alignment to treat ambiguity codes as matching their constituent bases
+- `STANDARD_ADJUSTMENT_PARAMS` (in `distances.py`) defines consistent sequence comparison parameters:
   - Homopolymer normalization enabled (treats "AAA" = "AAAAA")
   - IUPAC overlap disabled (uses standard IUPAC semantics: Y≠M)
   - No end trimming (`end_skip_distance=0`)
   - Single-base repeats for homopolymer normalization
+- Safeguards `MIN_COVERAGE_THRESHOLD=0.5` and `MAX_ADJUSTMENT_RATIO=1.5` fall back to raw edlib identity when terminal-gap exclusion would inflate adjusted identity on length-mismatched sequences.
+
+### Variant Significance and CER
+
+Phasing uses a three-stage architecture: phase indiscriminately, group by identity, then validate pairwise via CER. There is no phasing-time CER gate. Key pieces:
+- `significance.compute_critical_error_rate(N, M, L, alpha, K)` — p* under uniform model (q=p/3), with combinatorial Bonferroni for `K>1` multi-position variants.
+- `context.classify_variant_context()` produces one `ContextTag` per variant event (substitution or contiguous indel block). HP context comes from the reference consensus — the artifact hypothesis under test is that the candidate's reads are miscalled copies of the reference.
+- `qctx.get_qctx(tag, table)` returns a per-position error rate; HP runs longer than the table's max route to blanket homopolymer normalization.
+- CER is reported only when `p* < 0.75` (signal destruction threshold: at 0.75 the implied reference population equals the variant count under the uniform model).
 
 ### Algorithm Selection
 
@@ -143,21 +175,9 @@ The codebase uses IUPAC nucleotide ambiguity codes throughout:
 
 ### MCL Graph Construction (Design Decision)
 
-The K-NN similarity graph for MCL uses an **asymmetric edge storage pattern** where `similarities[id1]` only contains entries for neighbors `id2 > id1` (lexicographically). This is a weakly-held design decision that produces good clustering results despite the MCL documentation recommending symmetric graphs.
+The K-NN similarity graph for MCL (in `scalability/base.py`) uses an **asymmetric edge storage pattern** where `similarities[id1]` only contains entries for neighbors `id2 > id1` (lexicographically). This is a weakly-held design decision that produces good clustering results despite the MCL documentation recommending symmetric graphs.
 
-**Why asymmetric?** The pattern emerged from the original implementation and affects tie-breaking when multiple neighbors have identical similarity scores. Changing to symmetric storage would alter which neighbors are selected during K-NN construction, potentially changing clustering results.
-
-**Key implementation details** (in `scalability/base.py`):
-```python
-# Asymmetric pattern - matches main branch behavior
-similarities[id1][id2] = score
-similarities.setdefault(id2, {})[id1] = score  # Gets overwritten when id2 is processed
-```
-
-**If considering symmetric graphs in the future:**
-- Would require careful validation against existing test cases
-- May improve MCL convergence (per MCL documentation)
-- Would change clustering results - requires re-tuning or acceptance of different outputs
+**Why asymmetric?** The pattern emerged from the original implementation and affects tie-breaking when multiple neighbors have identical similarity scores. Changing to symmetric storage would alter which neighbors are selected during K-NN construction, potentially changing clustering results. Validate against existing test cases before changing.
 
 ### Integration Context
 
@@ -165,20 +185,14 @@ Designed to replace NGSpeciesID in the ONT fungal barcoding pipeline from protoc
 
 ### Configuration
 
-All parameters controlled via command-line arguments. No configuration files. Key parameters:
+Parameters are controlled via CLI arguments, optionally pre-set via YAML profiles (`-p/--profile`, `--list-profiles`). Key parameters:
 - Identity thresholds (`--min-identity`)
 - Clustering algorithm choice (`--algorithm`)
 - Sample size limits (`--max-sample-size`, `--presample`)
 - Cluster size filtering (`--min-size`, `--min-cluster-ratio`)
 - Primer handling (`--primers`, `--orient-mode`)
-
-### Local Development Scripts
-
-The `scripts/` directory (git-ignored) contains local development utilities:
-- `verify_refactor.py`: AST-based verification of refactoring equivalence against current code
-- `verify_refactor_at_commit.py`: Same verification against specific git commits
-
-These scripts compare original monolithic files against refactored subpackages to detect transcription errors. Useful for future refactoring work.
+- Variant phasing (`--disable-position-phasing`, `--min-variant-frequency`, `--assumed-error-rate`, `--significance-level`)
+- q_ctx table selection (`--qctx-profile`, `--hp-min-length`)
 
 ## Integration with specimux-suite
 
