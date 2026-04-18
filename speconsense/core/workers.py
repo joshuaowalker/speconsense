@@ -37,7 +37,8 @@ class ClusterProcessingConfig:
     """
     __slots__ = ['outlier_identity_threshold', 'enable_secondpass_phasing',
                  'disable_homopolymer_equivalence', 'min_variant_frequency', 'min_variant_count',
-                 'assumed_error_rate', 'significance_level', 'min_hp_length']
+                 'assumed_error_rate', 'significance_level', 'min_hp_length',
+                 'max_sample_size']
 
     def __init__(self, outlier_identity_threshold: Optional[float],
                  enable_secondpass_phasing: bool,
@@ -46,7 +47,8 @@ class ClusterProcessingConfig:
                  min_variant_count: int,
                  assumed_error_rate: float = 0.015,
                  significance_level: float = 1e-5,
-                 min_hp_length: int = 6):
+                 min_hp_length: int = 6,
+                 max_sample_size: Optional[int] = None):
         self.outlier_identity_threshold = outlier_identity_threshold
         self.enable_secondpass_phasing = enable_secondpass_phasing
         self.disable_homopolymer_equivalence = disable_homopolymer_equivalence
@@ -55,6 +57,7 @@ class ClusterProcessingConfig:
         self.assumed_error_rate = assumed_error_rate
         self.significance_level = significance_level
         self.min_hp_length = min_hp_length
+        self.max_sample_size = max_sample_size
 
 
 class ConsensusGenerationConfig:
@@ -236,10 +239,42 @@ def _calculate_read_identity_standalone(alignments: List[ReadAlignment],
 def _detect_variant_positions_standalone(alignments: List[ReadAlignment], consensus_seq: str,
                                           msa_to_consensus_pos: Dict[int, Optional[int]],
                                           min_variant_frequency: float,
-                                          min_variant_count: int) -> List[Dict]:
-    """Detect variant positions in MSA. Standalone version for workers."""
+                                          min_variant_count: int,
+                                          sample_read_ids: Optional[Set[str]] = None) -> List[Dict]:
+    """Detect variant positions in MSA. Standalone version for workers.
+
+    If sample_read_ids is provided and is a strict subset of the alignment set,
+    detection runs twice: once on the full alignments and once on the sample-only
+    alignments. Variant positions from both passes are unioned by msa_position.
+    This aligns phasing eligibility with the IUPAC ambiguity pass, which sees the
+    top-N-by-quality sample.
+    """
     if not alignments or not consensus_seq:
         return []
+
+    def _detect(align_set: List[ReadAlignment]) -> List[Dict]:
+        if not align_set:
+            return []
+        position_stats = analyze_positional_variation(align_set, consensus_aligned, msa_to_consensus_pos)
+        out: List[Dict] = []
+        for pos_stat in position_stats:
+            is_variant, variant_bases, reason = is_variant_position_with_composition(
+                pos_stat,
+                min_variant_frequency=min_variant_frequency,
+                min_variant_count=min_variant_count
+            )
+            if is_variant:
+                out.append({
+                    'msa_position': pos_stat.msa_position,
+                    'consensus_position': pos_stat.consensus_position,
+                    'coverage': pos_stat.coverage,
+                    'variant_bases': variant_bases,
+                    'base_composition': pos_stat.base_composition,
+                    'homopolymer_composition': pos_stat.homopolymer_composition,
+                    'error_rate': pos_stat.error_rate,
+                    'reason': reason
+                })
+        return out
 
     try:
         msa_length = len(alignments[0].aligned_sequence)
@@ -252,28 +287,26 @@ def _detect_variant_positions_standalone(alignments: List[ReadAlignment], consen
                 consensus_aligned.append('-')
         consensus_aligned = ''.join(consensus_aligned)
 
-        position_stats = analyze_positional_variation(alignments, consensus_aligned, msa_to_consensus_pos)
+        full_positions = _detect(alignments)
 
-        variant_positions = []
-        for pos_stat in position_stats:
-            is_variant, variant_bases, reason = is_variant_position_with_composition(
-                pos_stat,
-                min_variant_frequency=min_variant_frequency,
-                min_variant_count=min_variant_count
-            )
-            if is_variant:
-                variant_positions.append({
-                    'msa_position': pos_stat.msa_position,
-                    'consensus_position': pos_stat.consensus_position,
-                    'coverage': pos_stat.coverage,
-                    'variant_bases': variant_bases,
-                    'base_composition': pos_stat.base_composition,
-                    'homopolymer_composition': pos_stat.homopolymer_composition,
-                    'error_rate': pos_stat.error_rate,
-                    'reason': reason
-                })
+        use_sample = (
+            sample_read_ids is not None
+            and len(sample_read_ids) < len({a.read_id for a in alignments})
+        )
+        if not use_sample:
+            return full_positions
 
-        return variant_positions
+        sample_alignments = [a for a in alignments if a.read_id in sample_read_ids]
+        sample_positions = _detect(sample_alignments)
+
+        seen = {v['msa_position'] for v in full_positions}
+        merged = list(full_positions)
+        for v in sample_positions:
+            if v['msa_position'] not in seen:
+                merged.append(v)
+                seen.add(v['msa_position'])
+        merged.sort(key=lambda v: v['msa_position'])
+        return merged
     except Exception:
         return []
 
@@ -308,12 +341,20 @@ def _find_best_phasing_subset(
     total_reads: int,
     consensus_length: int,
     config: 'ClusterProcessingConfig',
+    sample_read_ids: Optional[Set[str]] = None,
 ) -> Optional[Tuple[List[int], Dict, Dict, float, Optional[float]]]:
     """Find the best single variant position for phasing.
 
     Evaluates each variant position at K=1, selecting the position with the
     lowest within-cluster error among those with >= 2 qualifying alleles
     (meeting count and frequency thresholds).
+
+    If sample_read_ids is provided and is a strict subset of all_read_ids,
+    a haplotype combo qualifies when it meets thresholds on EITHER the full
+    set OR the sample-restricted subset. This aligns phasing with the IUPAC
+    ambiguity pass, which sees the top-N-by-quality sample. Qualifying combos
+    still carry their full-cluster read membership so phasing does not discard
+    reads that already pass the full-cluster test.
 
     CER significance is NOT evaluated here — it is applied post-phasing
     by the validation pass in the pipeline.
@@ -324,13 +365,43 @@ def _find_best_phasing_subset(
     all_positions = set(variant_msa_positions)
     initial_groups = {(): all_read_ids.copy()}
 
+    use_sample = (
+        sample_read_ids is not None
+        and 0 < len(sample_read_ids) < len(all_read_ids)
+    )
+    sample_total = len(sample_read_ids) if use_sample else 0
+
     best = None  # (error, positions, qualifying, non_qualifying)
 
     for pos in variant_msa_positions:
         groups = _refine_groups(initial_groups, pos, read_to_position_alleles)
-        qualifying, non_qualifying = filter_qualifying_haplotypes(
+        qualifying_full, non_qualifying_full = filter_qualifying_haplotypes(
             groups, total_reads, config.min_variant_count, config.min_variant_frequency
         )
+
+        if use_sample:
+            sample_groups = {
+                combo: (reads & sample_read_ids)
+                for combo, reads in groups.items()
+            }
+            qualifying_sample, _ = filter_qualifying_haplotypes(
+                sample_groups, sample_total, config.min_variant_count, config.min_variant_frequency
+            )
+            # Union by combo key; keep full-cluster read sets so phasing
+            # doesn't discard full-set-qualifying reads routed through the
+            # sample-qualifying branch.
+            qualifying = dict(qualifying_full)
+            for combo in qualifying_sample:
+                if combo not in qualifying:
+                    qualifying[combo] = groups[combo]
+            non_qualifying = {
+                combo: reads for combo, reads in groups.items()
+                if combo not in qualifying
+            }
+        else:
+            qualifying = qualifying_full
+            non_qualifying = non_qualifying_full
+
         if len(qualifying) < 2:
             continue
 
@@ -363,6 +434,15 @@ def _recursive_phase_cluster_standalone(
         sorted_rids = sorted(rids, key=lambda x: (-qualities.get(x, 0), x))
         return {rid: read_sequences[rid] for rid in sorted_rids}
 
+    # Sample = top-N-by-quality of the current subcluster. Used so phasing
+    # eligibility considers what the final IUPAC ambiguity pass will see.
+    # When subcluster <= max_sample_size, sample == full set and the OR is a no-op.
+    if config.max_sample_size is not None and total_reads > config.max_sample_size:
+        sorted_by_quality = sorted(read_ids, key=lambda x: (-qualities.get(x, 0), x))
+        sample_read_ids: Optional[Set[str]] = set(sorted_by_quality[:config.max_sample_size])
+    else:
+        sample_read_ids = None
+
     # Base case: cluster too small
     if total_reads < config.min_variant_count * 2:
         leaf_seqs = _quality_sorted_seqs(read_ids)
@@ -381,10 +461,11 @@ def _recursive_phase_cluster_standalone(
     alignments = result.alignments
     msa_to_consensus_pos = result.msa_to_consensus_pos
 
-    # Detect variants
+    # Detect variants (OR across full subcluster and quality-biased sample)
     variant_positions = _detect_variant_positions_standalone(
         alignments, consensus, msa_to_consensus_pos,
-        config.min_variant_frequency, config.min_variant_count
+        config.min_variant_frequency, config.min_variant_count,
+        sample_read_ids=sample_read_ids,
     )
 
     if not variant_positions:
@@ -437,9 +518,16 @@ def _recursive_phase_cluster_standalone(
     # Find best split via unified branch-and-bound search over all (K, M) combinations
     all_read_ids = set(read_to_position_alleles.keys())
 
+    # Restrict sample to aligned reads so the sample-frequency denominator
+    # matches what can actually contribute to variant-combo groups.
+    sample_for_split: Optional[Set[str]] = (
+        sample_read_ids & all_read_ids if sample_read_ids is not None else None
+    )
+
     result = _find_best_phasing_subset(
         variant_msa_positions, msa_to_consensus_pos, read_to_position_alleles,
-        all_read_ids, total_reads, len(consensus), config
+        all_read_ids, total_reads, len(consensus), config,
+        sample_read_ids=sample_for_split,
     )
 
     if result is not None:
@@ -583,12 +671,22 @@ def _process_cluster_worker(args) -> Tuple[List[Dict], Set[str]]:
                 msa_to_consensus_pos = result.msa_to_consensus_pos
                 _calculate_read_identity_standalone(alignments, consensus)
 
-    # Detect variants
+    # Detect variants (OR across full cluster and quality-biased sample).
+    # The sample mirrors what the final IUPAC ambiguity pass will see; without
+    # this, a variant sitting below threshold on the full cluster but above
+    # threshold on the sample would short-circuit the phasing gate here and
+    # then resurface as an IUPAC code in the final consensus.
     variant_positions = []
     if consensus and alignments and config.enable_secondpass_phasing:
+        sample_for_detect: Optional[Set[str]] = None
+        if config.max_sample_size is not None and len(cluster) > config.max_sample_size:
+            sorted_by_quality = sorted(cluster, key=lambda x: (-qualities.get(x, 0), x))
+            sample_for_detect = set(sorted_by_quality[:config.max_sample_size])
+
         variant_positions = _detect_variant_positions_standalone(
             alignments, consensus, msa_to_consensus_pos,
-            config.min_variant_frequency, config.min_variant_count
+            config.min_variant_frequency, config.min_variant_count,
+            sample_read_ids=sample_for_detect,
         )
 
         if variant_positions:

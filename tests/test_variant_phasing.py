@@ -737,5 +737,268 @@ class TestCERGating:
         assert len(qualifying) >= 2
 
 
+# ==============================================================================
+# Tests for OR-with-sample phasing qualification
+# ==============================================================================
+
+
+class TestORWithSampleQualification:
+    """Exercises sample_read_ids OR logic in _find_best_phasing_subset.
+
+    Design: a variant can pass phasing thresholds on the full subcluster
+    OR on the top-N-by-quality sample that the final consensus will see.
+    This closes the gap where a quality-biased sample's frequency inflates
+    above the phasing threshold while the full-cluster frequency stays
+    below — the variant would otherwise become an IUPAC ambiguity.
+    """
+
+    def _build_single_position_alleles(self, n_total, minority_ids, pos=50):
+        all_read_ids = set()
+        read_to_position_alleles = {}
+        for i in range(n_total):
+            rid = f"read_{i}"
+            all_read_ids.add(rid)
+            read_to_position_alleles[rid] = {pos: 'G' if rid in minority_ids else 'A'}
+        return all_read_ids, read_to_position_alleles
+
+    def test_sample_triggers_qualification_where_full_fails(self):
+        """Variant diluted below threshold in full cluster but dense in sample."""
+        from speconsense.core.workers import _find_best_phasing_subset, ClusterProcessingConfig
+
+        # 200 reads total; minority allele on reads 0..14 (15 reads = 7.5%).
+        # Top-40 by quality = reads 0..39, so minority-in-sample = 15/40 = 37.5%.
+        total_reads = 200
+        minority = {f"read_{i}" for i in range(15)}
+        sample_ids = {f"read_{i}" for i in range(40)}
+        all_read_ids, r2p = self._build_single_position_alleles(total_reads, minority)
+
+        # Thresholds: 10% frequency, count 3. Fails on full (15/200=7.5%), passes on sample.
+        config = ClusterProcessingConfig(
+            outlier_identity_threshold=0.95, enable_secondpass_phasing=True,
+            disable_homopolymer_equivalence=False,
+            min_variant_frequency=0.10, min_variant_count=3,
+        )
+
+        # Without sample: fails
+        res_no_sample = _find_best_phasing_subset(
+            [50], {50: 50}, r2p, all_read_ids, total_reads, 700, config,
+            sample_read_ids=None,
+        )
+        assert res_no_sample is None, "Full-cluster frequency should be below threshold"
+
+        # With sample: passes
+        res_with_sample = _find_best_phasing_subset(
+            [50], {50: 50}, r2p, all_read_ids, total_reads, 700, config,
+            sample_read_ids=sample_ids,
+        )
+        assert res_with_sample is not None, "Sample-based OR should qualify this split"
+        positions, qualifying, non_qualifying, _, _ = res_with_sample
+        assert positions == [50]
+        assert len(qualifying) == 2
+        # Qualifying combos should carry full-cluster read membership, not just the sample slice.
+        total_in_qualifying = sum(len(r) for r in qualifying.values())
+        assert total_in_qualifying == total_reads, (
+            "Full-cluster reads in sample-qualifying combos should not be discarded"
+        )
+
+    def test_sample_does_not_lower_bar_when_full_passes(self):
+        """When full cluster already passes, sample OR is a no-op."""
+        from speconsense.core.workers import _find_best_phasing_subset, ClusterProcessingConfig
+
+        total_reads = 100
+        minority = {f"read_{i}" for i in range(25)}  # 25% — well above threshold
+        sample_ids = {f"read_{i}" for i in range(40)}
+        all_read_ids, r2p = self._build_single_position_alleles(total_reads, minority)
+
+        config = ClusterProcessingConfig(
+            outlier_identity_threshold=0.95, enable_secondpass_phasing=True,
+            disable_homopolymer_equivalence=False,
+            min_variant_frequency=0.10, min_variant_count=3,
+        )
+
+        res_no_sample = _find_best_phasing_subset(
+            [50], {50: 50}, r2p, all_read_ids, total_reads, 700, config,
+            sample_read_ids=None,
+        )
+        res_with_sample = _find_best_phasing_subset(
+            [50], {50: 50}, r2p, all_read_ids, total_reads, 700, config,
+            sample_read_ids=sample_ids,
+        )
+
+        assert res_no_sample is not None
+        assert res_with_sample is not None
+        # Same qualifying-combo keys.
+        _, qual_no, _, _, _ = res_no_sample
+        _, qual_with, _, _, _ = res_with_sample
+        assert set(qual_no.keys()) == set(qual_with.keys())
+
+    def test_sample_equals_full_is_noop(self):
+        """When sample covers the full set, OR collapses to current behavior."""
+        from speconsense.core.workers import _find_best_phasing_subset, ClusterProcessingConfig
+
+        total_reads = 30
+        minority = {f"read_{i}" for i in range(5)}
+        all_read_ids, r2p = self._build_single_position_alleles(total_reads, minority)
+        full_as_sample = set(all_read_ids)
+
+        config = ClusterProcessingConfig(
+            outlier_identity_threshold=0.95, enable_secondpass_phasing=True,
+            disable_homopolymer_equivalence=False,
+            min_variant_frequency=0.10, min_variant_count=3,
+        )
+
+        res_no_sample = _find_best_phasing_subset(
+            [50], {50: 50}, r2p, all_read_ids, total_reads, 700, config,
+            sample_read_ids=None,
+        )
+        res_sample_eq_full = _find_best_phasing_subset(
+            [50], {50: 50}, r2p, all_read_ids, total_reads, 700, config,
+            sample_read_ids=full_as_sample,
+        )
+
+        # Both should yield identical qualifying keys (strict-subset guard kicks in).
+        if res_no_sample is None:
+            assert res_sample_eq_full is None
+        else:
+            _, qual_no, _, _, _ = res_no_sample
+            _, qual_eq, _, _, _ = res_sample_eq_full
+            assert set(qual_no.keys()) == set(qual_eq.keys())
+
+    def test_variant_fails_on_both_sets_remains_non_qualifying(self):
+        """Variant below threshold on both full and sample stays filtered out."""
+        from speconsense.core.workers import _find_best_phasing_subset, ClusterProcessingConfig
+
+        total_reads = 200
+        # 2 minority reads — way below count threshold on either side.
+        minority = {f"read_{i}" for i in range(2)}
+        sample_ids = {f"read_{i}" for i in range(40)}
+        all_read_ids, r2p = self._build_single_position_alleles(total_reads, minority)
+
+        config = ClusterProcessingConfig(
+            outlier_identity_threshold=0.95, enable_secondpass_phasing=True,
+            disable_homopolymer_equivalence=False,
+            min_variant_frequency=0.10, min_variant_count=3,
+        )
+
+        result = _find_best_phasing_subset(
+            [50], {50: 50}, r2p, all_read_ids, total_reads, 700, config,
+            sample_read_ids=sample_ids,
+        )
+        assert result is None
+
+    def test_empty_sample_ignored(self):
+        """Empty sample set should not disqualify a full-set-qualifying split."""
+        from speconsense.core.workers import _find_best_phasing_subset, ClusterProcessingConfig
+
+        total_reads = 100
+        minority = {f"read_{i}" for i in range(20)}
+        all_read_ids, r2p = self._build_single_position_alleles(total_reads, minority)
+
+        config = ClusterProcessingConfig(
+            outlier_identity_threshold=0.95, enable_secondpass_phasing=True,
+            disable_homopolymer_equivalence=False,
+            min_variant_frequency=0.10, min_variant_count=3,
+        )
+
+        result = _find_best_phasing_subset(
+            [50], {50: 50}, r2p, all_read_ids, total_reads, 700, config,
+            sample_read_ids=set(),
+        )
+        assert result is not None
+
+
+class TestORWithSampleDetection:
+    """Exercises sample_read_ids OR logic in _detect_variant_positions_standalone.
+
+    A variant position should be detected if it meets thresholds on EITHER the
+    full alignment set OR the top-N-by-quality sample. Mirrors the qualification
+    OR and is needed so sample-only variants become phasing candidates at all.
+    """
+
+    def _build_alignments(self, n_total, n_minority, consensus):
+        """Build ReadAlignments where reads 0..n_minority-1 have 'A' at pos 2,
+        and reads n_minority..n_total-1 match the consensus.
+        """
+        variant_seq = consensus[:2] + 'A' + consensus[3:]
+        alignments = []
+        for i in range(n_total):
+            if i < n_minority:
+                alignments.append(ReadAlignment(
+                    read_id=f'read_{i}',
+                    aligned_sequence=variant_seq,
+                    read_length=len(consensus),
+                    edit_distance=1,
+                    num_insertions=0, num_deletions=0, num_substitutions=1,
+                    error_positions=[ErrorPosition(2, 'sub')],
+                    normalized_edit_distance=1,
+                    normalized_error_positions=[ErrorPosition(2, 'sub')],
+                    score_aligned='||X' + '|' * (len(consensus) - 3),
+                ))
+            else:
+                alignments.append(ReadAlignment(
+                    read_id=f'read_{i}',
+                    aligned_sequence=consensus,
+                    read_length=len(consensus),
+                    edit_distance=0,
+                    num_insertions=0, num_deletions=0, num_substitutions=0,
+                    error_positions=[],
+                    normalized_edit_distance=0,
+                    normalized_error_positions=[],
+                    score_aligned='|' * len(consensus),
+                ))
+        return alignments
+
+    def test_sample_detection_finds_position_that_full_misses(self):
+        """Position fails 10% freq on full cluster (5%) but passes on sample (25%)."""
+        from speconsense.core.workers import _detect_variant_positions_standalone
+
+        consensus = "ACGTACGT"
+        msa_to_consensus_pos = {i: i for i in range(8)}
+        alignments = self._build_alignments(n_total=200, n_minority=10, consensus=consensus)
+
+        # Full: 10/200 = 5% — below threshold.
+        full_positions = _detect_variant_positions_standalone(
+            alignments, consensus, msa_to_consensus_pos,
+            min_variant_frequency=0.10, min_variant_count=3,
+            sample_read_ids=None,
+        )
+        assert not any(v['msa_position'] == 2 for v in full_positions), (
+            "Position 2 should be below threshold on full cluster"
+        )
+
+        # Sample = reads 0..39 (top-40 by quality, all minority inside).
+        sample_ids = {f"read_{i}" for i in range(40)}  # 10/40 = 25% — above threshold.
+        merged = _detect_variant_positions_standalone(
+            alignments, consensus, msa_to_consensus_pos,
+            min_variant_frequency=0.10, min_variant_count=3,
+            sample_read_ids=sample_ids,
+        )
+        assert any(v['msa_position'] == 2 for v in merged), (
+            "Sample-based OR should surface position 2 as a phasing candidate"
+        )
+
+    def test_detection_noop_when_sample_equals_full(self):
+        """No strict subset → OR is bypassed → result identical to full-only."""
+        from speconsense.core.workers import _detect_variant_positions_standalone
+
+        consensus = "ACGTACGT"
+        msa_to_consensus_pos = {i: i for i in range(8)}
+        alignments = self._build_alignments(n_total=20, n_minority=5, consensus=consensus)
+        full_ids = {a.read_id for a in alignments}
+
+        res_no_sample = _detect_variant_positions_standalone(
+            alignments, consensus, msa_to_consensus_pos,
+            min_variant_frequency=0.10, min_variant_count=3,
+            sample_read_ids=None,
+        )
+        res_sample_eq_full = _detect_variant_positions_standalone(
+            alignments, consensus, msa_to_consensus_pos,
+            min_variant_frequency=0.10, min_variant_count=3,
+            sample_read_ids=full_ids,
+        )
+        assert [v['msa_position'] for v in res_no_sample] == \
+               [v['msa_position'] for v in res_sample_eq_full]
+
+
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])

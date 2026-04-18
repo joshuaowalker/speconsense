@@ -198,7 +198,7 @@ class SpecimenClusterer:
                  outlier_identity_threshold: Optional[float] = None,
                  enable_secondpass_phasing: bool = True,
                  min_variant_frequency: float = 0.10,
-                 min_variant_count: int = 5,
+                 min_variant_count: int = 3,
                  min_ambiguity_frequency: float = 0.10,
                  min_ambiguity_count: int = 3,
                  enable_iupac_calling: bool = True,
@@ -1148,6 +1148,7 @@ class SpecimenClusterer:
             assumed_error_rate=self.assumed_error_rate,
             significance_level=self.significance_level,
             min_hp_length=self.min_hp_length,
+            max_sample_size=self.max_sample_size,
         )
 
         # Build work packages with per-cluster data
@@ -1330,6 +1331,7 @@ class SpecimenClusterer:
             assumed_error_rate=self.assumed_error_rate,
             significance_level=self.significance_level,
             min_hp_length=self.min_hp_length,
+            max_sample_size=self.max_sample_size,
         )
 
         result = []
@@ -1354,9 +1356,17 @@ class SpecimenClusterer:
                 result.append(cluster_dict)
                 continue
 
+            # Sample = top-N-by-quality. Mirrors the final consensus sample so
+            # a variant crossing threshold only on the sample still surfaces
+            # here instead of silently becoming an IUPAC code later.
+            sample_for_detect = None
+            if config.max_sample_size is not None and len(sorted_ids) > config.max_sample_size:
+                sample_for_detect = set(sorted_ids[:config.max_sample_size])
+
             variant_positions = _detect_variant_positions_standalone(
                 msa_result.alignments, msa_result.consensus, msa_result.msa_to_consensus_pos,
-                config.min_variant_frequency, config.min_variant_count
+                config.min_variant_frequency, config.min_variant_count,
+                sample_read_ids=sample_for_detect,
             )
 
             cluster_label = f"cluster(n={len(read_ids)})"
@@ -2367,6 +2377,7 @@ class SpecimenClusterer:
             assumed_error_rate=self.assumed_error_rate,
             significance_level=self.significance_level,
             min_hp_length=self.min_hp_length,
+            max_sample_size=self.max_sample_size,
         )
 
         # Build qualities dict for consistent SPOA ordering
