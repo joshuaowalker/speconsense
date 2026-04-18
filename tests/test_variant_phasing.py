@@ -412,75 +412,11 @@ def test_iupac_codes_mapping():
 
 
 # ==============================================================================
-# Tests for CER (Critical Error Rate) gating in variant phasing
+# Tests for _find_best_phasing_subset
 # ==============================================================================
 
-class TestCERGating:
-    """Test that CER significance filtering integrates with phasing config."""
-
-    def test_cer_disabled_when_error_rate_zero(self):
-        """assumed_error_rate=0 should disable CER filtering."""
-        from speconsense.core.workers import ClusterProcessingConfig
-        from speconsense.significance import is_variant_significant
-
-        config = ClusterProcessingConfig(
-            outlier_identity_threshold=0.95,
-            enable_secondpass_phasing=True,
-            disable_homopolymer_equivalence=False,
-            min_variant_frequency=0.10,
-            min_variant_count=5,
-            assumed_error_rate=0,
-            significance_level=1e-5
-        )
-        # With error rate 0, all variants should pass
-        assert config.assumed_error_rate == 0
-        is_sig, _ = is_variant_significant(
-            M=1, N=1000, L=700,
-            assumed_error_rate=config.assumed_error_rate
-        )
-        assert is_sig is True
-
-    def test_cer_suppresses_weak_variant(self):
-        """Small M relative to large N should be suppressed by CER."""
-        from speconsense.significance import is_variant_significant
-
-        # 5 reads out of 1000 at 2% assumed error rate
-        is_sig, p_star = is_variant_significant(
-            M=5, N=1000, L=700,
-            assumed_error_rate=0.02, alpha=1e-5
-        )
-        assert is_sig is False
-        assert p_star < 0.02
-
-    def test_cer_passes_well_supported_variant(self):
-        """Large M relative to N should pass CER."""
-        from speconsense.significance import is_variant_significant
-
-        # 100 reads out of 1000 at 2% assumed error rate
-        is_sig, p_star = is_variant_significant(
-            M=100, N=1000, L=700,
-            assumed_error_rate=0.02, alpha=1e-5
-        )
-        assert is_sig is True
-        assert p_star > 0.02
-
-    def test_cer_k2_rescues_weak_k1(self):
-        """K=2 should pass CER where K=1 fails with same M."""
-        from speconsense.significance import is_variant_significant
-
-        M, N, L = 6, 1000, 700
-        # Fails at K=1
-        is_sig_k1, p_k1 = is_variant_significant(
-            M=M, N=N, L=L, assumed_error_rate=0.015, alpha=1e-5, K=1
-        )
-        assert is_sig_k1 is False
-
-        # Passes at K=2
-        is_sig_k2, p_k2 = is_variant_significant(
-            M=M, N=N, L=L, assumed_error_rate=0.015, alpha=1e-5, K=2
-        )
-        assert is_sig_k2 is True
-        assert p_k2 > p_k1
+class TestFindBestPhasingSubset:
+    """Test the unified phasing-position search."""
 
     def test_find_best_phasing_subset_k1(self):
         """K=1 split should work via the unified search."""

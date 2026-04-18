@@ -56,6 +56,7 @@ from .io import (
     load_existing_specimen_outputs,
     build_fastq_lookup_table,
     write_specimen_data_files,
+    write_ns_variant_files,
     write_output_files,
 )
 from .clustering import perform_hac_clustering, select_variants
@@ -130,6 +131,13 @@ def parse_arguments():
                                  help="Minimum sequence length in bp (default: 0 = disabled)")
     filtering_group.add_argument("--max-len", type=int, default=0,
                                  help="Maximum sequence length in bp (default: 0 = disabled)")
+    filtering_group.add_argument("--min-cer-factor", type=float, default=1.0,
+                                 help="Minimum per-position CER factor for a variant to be kept "
+                                      "as a primary output. Variants with cer_factor below this "
+                                      "are routed to __Summary__/variants/ as .ns records. "
+                                      "Variants with cer_factor=None (anchors, clusters without a "
+                                      "valid pairwise comparison) always pass. Set to 0 to disable "
+                                      "CER filtering. (default: 1.0)")
     # Grouping group
     grouping_group = parser.add_argument_group("Grouping")
     grouping_group.add_argument("--group-identity", "--variant-group-identity",
@@ -553,11 +561,12 @@ def main():
     logging.info("Processing each specimen file independently to organize variants within specimens")
 
     # Load consensus sequences (optionally filtered to single specimen)
-    consensus_list = load_consensus_sequences(
+    consensus_list, ns_list = load_consensus_sequences(
         args.source, args.min_ric, args.min_len, args.max_len,
         specimen_id=args.specimen,
+        min_cer_factor=args.min_cer_factor,
     )
-    if not consensus_list:
+    if not consensus_list and not ns_list:
         logging.error("No consensus sequences found")
         _cleanup_log(temp_log_file.name)
         return
@@ -566,6 +575,9 @@ def main():
     file_groups = defaultdict(list)
     for cons in consensus_list:
         file_groups[cons.file_path].append(cons)
+    ns_by_file = defaultdict(list)
+    for cons in ns_list:
+        ns_by_file[cons.file_path].append(cons)
 
     # Create output directories before processing
     os.makedirs(args.summary_dir, exist_ok=True)
@@ -609,6 +621,13 @@ def main():
             original_consensus_lookup,
             fasta_fields
         )
+
+        # Emit ns variants (CER-filtered) for this specimen
+        specimen_ns = ns_by_file.get(file_path, [])
+        if specimen_ns:
+            write_ns_variant_files(
+                specimen_ns, args.summary_dir, fastq_lookup, fasta_fields
+            )
 
         # Accumulate results for summary files
         all_final_consensus.extend(final_consensus)

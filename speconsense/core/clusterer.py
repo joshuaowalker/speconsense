@@ -28,7 +28,6 @@ from speconsense.significance import (
     compute_cer_factor,
     compute_critical_error_rate,
     compute_per_position_qstar,
-    format_cer_details,
     is_cer_reportable,
 )
 from speconsense.scalability import (
@@ -206,7 +205,6 @@ class SpecimenClusterer:
                  max_threads: int = 1,
                  early_filter: bool = False,
                  collect_discards: bool = False,
-                 assumed_error_rate: float = 0.015,
                  significance_level: float = 1e-5,
                  group_identity: float = 0.85,
                  min_hp_length: int = 6,
@@ -242,7 +240,6 @@ class SpecimenClusterer:
         self.max_threads = max_threads
         self.early_filter = early_filter
         self.collect_discards = collect_discards
-        self.assumed_error_rate = assumed_error_rate
         self.significance_level = significance_level
         self.group_identity = group_identity
         # HP run length threshold for MSA variant detection. Runs of length
@@ -251,14 +248,12 @@ class SpecimenClusterer:
         # surface length variants as regular candidates, which the
         # context-aware CER framework scores via q_ctx lookup.
         self.min_hp_length = min_hp_length
-        # Context-aware CER configuration. The factor threshold controls
-        # whether a candidate cluster passes pairwise CER validation:
-        # candidates pass when their per-position CER factor (q*/q_ctx) is
-        # >= cer_factor_threshold. Setting assumed_error_rate <= 0 disables
-        # the gate entirely; this is preserved as the disable sentinel.
+        # Context-aware CER configuration. Every non-anchor candidate is
+        # compared pairwise against the accumulated validated pool and
+        # annotated with its per-position cer_factor. Summarize applies the
+        # user-visible pass/ns decision via --min-cer-factor.
         self.qctx_profile = qctx_profile
         self.qctx_table = load_qctx_table(qctx_profile)
-        self.cer_factor_threshold = 0.0 if assumed_error_rate <= 0 else 1.0
         self.discarded_read_ids: Set[str] = set()  # Track all discarded reads (outliers + filtered)
 
         # Initialize scalability configuration
@@ -328,11 +323,9 @@ class SpecimenClusterer:
                 "scale_threshold": self.scale_threshold,
                 "max_threads": self.max_threads,
                 "orient_mode": self.orient_mode,
-                "assumed_error_rate": self.assumed_error_rate,
                 "significance_level": self.significance_level,
                 "group_identity": self.group_identity,
-                "cer_factor_threshold": self.cer_factor_threshold,
-                "qctx_table": "dorado-v5.0",
+                "qctx_profile": self.qctx_profile,
             },
             "input_file": self.input_file,
             "augment_input": self.augment_input,
@@ -391,7 +384,6 @@ class SpecimenClusterer:
         return {
             'cluster_id': cluster_dict.get('cluster_id'),
             'identity_group': cluster_dict.get('identity_group_id'),
-            'cer_status': cluster_dict.get('cer_status'),
             'M': len(cluster_dict.get('read_ids', [])),
             'N': cluster_dict.get('cer_group_N'),
             'K': details.get('K') if details else None,
@@ -830,8 +822,7 @@ class SpecimenClusterer:
                             sorted_cluster_ids: Optional[List[str]] = None,
                             sorted_sampled_ids: Optional[List[str]] = None,
                             iupac_count: int = 0,
-                            cer_factor: Optional[float] = None,
-                            cer_details: Optional[str] = None) -> None:
+                            cer_factor: Optional[float] = None) -> None:
         """Write cluster files: reads FASTQ, MSA, and consensus FASTA.
 
         Read identity metrics measure internal cluster consistency (not accuracy vs. ground truth):
@@ -862,8 +853,6 @@ class SpecimenClusterer:
                 info_parts.append("cer_factor=inf")
             else:
                 info_parts.append(f"cer_factor={cer_factor:.3f}")
-        if cer_details is not None:
-            info_parts.append(f"cer_details={cer_details}")
         info_str = " ".join(info_parts)
 
         # Write reads FASTQ to debug directory with new naming convention
@@ -1145,7 +1134,6 @@ class SpecimenClusterer:
             disable_homopolymer_equivalence=self.disable_homopolymer_equivalence,
             min_variant_frequency=self.min_variant_frequency,
             min_variant_count=self.min_variant_count,
-            assumed_error_rate=self.assumed_error_rate,
             significance_level=self.significance_level,
             min_hp_length=self.min_hp_length,
             max_sample_size=self.max_sample_size,
@@ -1328,7 +1316,6 @@ class SpecimenClusterer:
             disable_homopolymer_equivalence=self.disable_homopolymer_equivalence,
             min_variant_frequency=self.min_variant_frequency,
             min_variant_count=self.min_variant_count,
-            assumed_error_rate=self.assumed_error_rate,
             significance_level=self.significance_level,
             min_hp_length=self.min_hp_length,
             max_sample_size=self.max_sample_size,
@@ -1749,23 +1736,17 @@ class SpecimenClusterer:
         return subclusters
 
     def _run_cer_validation(self, subclusters: List[Dict]) -> List[Dict]:
-        """Phase 4c: Validate clusters via pairwise CER testing.
+        """Phase 4c: Annotate clusters with pairwise CER factors.
 
         Groups clusters by adjusted identity, then within each group:
-        - The largest cluster (anchor) auto-passes
-        - Each non-anchor is tested pairwise against validated clusters
-        - CER = min(pairwise p*) using K = variant differences
-        - Clusters failing CER (p* < assumed_error_rate) are marked 'ns'
-        - All clusters are kept in output with CER annotations
-
-        Annotates each cluster dict with 'cer_status' and 'cer_value'.
+        - The largest cluster (anchor) carries no pairwise comparison
+        - Each non-anchor is tested pairwise against all larger clusters in
+          the group; the minimum (worst-case) factor is reported
+        - All clusters flow to output with cer_factor / cer_details annotations;
+          summarize applies the user-visible pass/ns decision via --min-cer-factor
         """
-        if self.assumed_error_rate <= 0:
-            return subclusters
-
         if len(subclusters) <= 1:
             if subclusters:
-                subclusters[0]['cer_status'] = 'anchor'
                 subclusters[0]['cer_factor'] = None
                 subclusters[0]['cer_pstar'] = None
                 subclusters[0]['cer_details'] = None
@@ -1792,15 +1773,11 @@ class SpecimenClusterer:
                 subclusters[i]['identity_group_id'] = group_id
                 subclusters[i]['cer_group_N'] = group_N
 
-        # Validate within each group
-        validated_count = 0
-        ns_count = 0
+        annotated = 0
         for group_indices in identity_groups.values():
-            v, n = self._validate_identity_group(subclusters, consensuses, group_indices)
-            validated_count += v
-            ns_count += n
+            annotated += self._validate_identity_group(subclusters, consensuses, group_indices)
 
-        logging.info(f"CER validation: {validated_count} passed, {ns_count} not significant "
+        logging.info(f"CER annotation: {annotated} non-anchor candidates scored "
                      f"({len(identity_groups)} identity group(s))")
 
         return subclusters
@@ -1880,92 +1857,76 @@ class SpecimenClusterer:
 
     def _validate_identity_group(self, subclusters: List[Dict],
                                  consensuses: Dict[int, Optional[str]],
-                                 group_indices: List[int]) -> Tuple[int, int]:
-        """Validate clusters within an identity group via context-aware pairwise CER.
+                                 group_indices: List[int]) -> int:
+        """Annotate clusters within an identity group with pairwise CER factors.
 
-        Each candidate cluster is compared pairwise against all already-validated
-        clusters in the group. Each pairwise comparison classifies the differing
+        Each non-anchor candidate is compared pairwise against every larger
+        cluster in the group. Each pairwise comparison classifies the differing
         positions, looks up empirical q_ctx values, and computes a CER factor
         (per-position multiplicative inflation needed for the variant to be
         plausible artifact). The candidate's reported factor is the *minimum*
         across all pairwise comparisons (the nearest plausible artifact source).
 
-        A candidate passes when its minimum factor meets the configured factor
-        threshold. Setting --assumed-error-rate <= 0 disables the CER gate.
+        Every candidate flows through to downstream phases. Summarize applies
+        the user-visible pass/ns decision via --min-cer-factor.
 
-        Returns (validated_count, ns_count).
+        Returns the number of non-anchor candidates that received annotations.
         """
-        # Sort by size descending
+        # Sort by size descending; the largest cluster is the anchor (no
+        # pairwise comparison). Subsequent candidates are compared against
+        # all earlier ones.
         sorted_indices = sorted(group_indices,
             key=lambda i: len(subclusters[i]['read_ids']), reverse=True)
 
-        # N = total reads in this identity group
         group_N = sum(len(subclusters[i]['read_ids']) for i in sorted_indices)
 
-        # Anchor: largest cluster auto-passes
         anchor_idx = sorted_indices[0]
-        subclusters[anchor_idx]['cer_status'] = 'anchor'
         subclusters[anchor_idx]['cer_factor'] = None
         subclusters[anchor_idx]['cer_pstar'] = None
         subclusters[anchor_idx]['cer_details'] = None
 
         if len(sorted_indices) == 1:
-            return 1, 0
+            return 0
 
-        validated = [anchor_idx]
-        validated_count = 1
-        ns_count = 0
-        factor_threshold = self.cer_factor_threshold
+        reference_pool = [anchor_idx]
+        annotated = 0
 
         for candidate_idx in sorted_indices[1:]:
             candidate_consensus = consensuses.get(candidate_idx)
             candidate_M = len(subclusters[candidate_idx]['read_ids'])
 
             if not candidate_consensus:
-                subclusters[candidate_idx]['cer_status'] = 'ns'
                 subclusters[candidate_idx]['cer_factor'] = 0.0
                 subclusters[candidate_idx]['cer_pstar'] = None
                 subclusters[candidate_idx]['cer_details'] = None
-                ns_count += 1
+                reference_pool.append(candidate_idx)
+                annotated += 1
                 continue
 
             best = self._compare_candidate_against_validated(
                 candidate_consensus=candidate_consensus,
                 candidate_M=candidate_M,
                 group_N=group_N,
-                validated=validated,
+                validated=reference_pool,
                 consensuses=consensuses,
             )
 
             if best is None:
-                # No valid pairwise comparisons (all K=0 or alignment failed
-                # or all positions had unsupported q_ctx). Auto-pass.
-                subclusters[candidate_idx]['cer_status'] = 'pass'
+                # No valid pairwise comparisons (K=0, alignment failed, or no
+                # supported q_ctx). Leave factor unset.
                 subclusters[candidate_idx]['cer_factor'] = None
                 subclusters[candidate_idx]['cer_pstar'] = None
                 subclusters[candidate_idx]['cer_details'] = None
-                validated.append(candidate_idx)
-                validated_count += 1
-                continue
-
-            min_factor, pstar, details = best
-            subclusters[candidate_idx]['cer_factor'] = min_factor
-            subclusters[candidate_idx]['cer_pstar'] = pstar
-            subclusters[candidate_idx]['cer_details'] = details
-
-            if factor_threshold <= 0 or min_factor >= factor_threshold:
-                subclusters[candidate_idx]['cer_status'] = 'pass'
-                validated.append(candidate_idx)
-                validated_count += 1
             else:
-                subclusters[candidate_idx]['cer_status'] = 'ns'
-                ns_count += 1
-                logging.debug(
-                    f"CER ns: cluster with {candidate_M} reads, "
-                    f"factor={min_factor:.3f} < {factor_threshold}"
-                )
+                min_factor, pstar, details = best
+                subclusters[candidate_idx]['cer_factor'] = min_factor
+                subclusters[candidate_idx]['cer_pstar'] = pstar
+                subclusters[candidate_idx]['cer_details'] = details
 
-        return validated_count, ns_count
+            reference_pool.append(candidate_idx)
+            annotated += 1
+
+        return annotated
 
     def _compare_candidate_against_validated(
         self,
@@ -2063,13 +2024,7 @@ class SpecimenClusterer:
 
         # Filter by relative size ratio
         if large_clusters and self.min_cluster_ratio > 0:
-            # Exclude "ns" clusters from ratio denominator
-            validated_sizes = [len(c['read_ids']) for c in large_clusters
-                               if c.get('cer_status') != 'ns']
-            if validated_sizes:
-                largest_size = max(validated_sizes)
-            else:
-                largest_size = max(len(c['read_ids']) for c in large_clusters)
+            largest_size = max(len(c['read_ids']) for c in large_clusters)
             before_ratio_filter = len(large_clusters)
             passing_ratio = [c for c in large_clusters
                             if len(c['read_ids']) / largest_size >= self.min_cluster_ratio]
@@ -2183,11 +2138,6 @@ class SpecimenClusterer:
                     # Look up CER from validation pass
                     cluster_dict = cluster_dicts_by_idx.get(final_idx, {})
                     cluster_cer_factor = cluster_dict.get('cer_factor')
-                    cluster_cer_details_dict = cluster_dict.get('cer_details')
-                    cluster_cer_details = format_cer_details(
-                        cluster_dict.get('cer_pstar'),
-                        cluster_cer_details_dict,
-                    )
 
                     # Write output files
                     self.write_cluster_files(
@@ -2206,7 +2156,6 @@ class SpecimenClusterer:
                         sorted_sampled_ids=result['sorted_sampled_ids'],
                         iupac_count=iupac_count,
                         cer_factor=cluster_cer_factor,
-                        cer_details=cluster_cer_details,
                     )
 
         return clusters_with_ambiguities, total_ambiguity_positions
@@ -2374,7 +2323,6 @@ class SpecimenClusterer:
             disable_homopolymer_equivalence=self.disable_homopolymer_equivalence,
             min_variant_frequency=self.min_variant_frequency,
             min_variant_count=self.min_variant_count,
-            assumed_error_rate=self.assumed_error_rate,
             significance_level=self.significance_level,
             min_hp_length=self.min_hp_length,
             max_sample_size=self.max_sample_size,

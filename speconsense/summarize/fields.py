@@ -131,16 +131,6 @@ class CerFactorField(FastaField):
         return f"cer_factor={consensus.cer_factor:.3f}"
 
 
-class CerDetailsField(FastaField):
-    def __init__(self):
-        super().__init__('cer_details', 'Structured CER context (p*, K, ctx, q)')
-
-    def format_value(self, consensus: ConsensusInfo) -> Optional[str]:
-        if consensus.cer_details is None:
-            return None
-        return f"cer_details={consensus.cer_details}"
-
-
 class GroupField(FastaField):
     def __init__(self):
         super().__init__('group', 'Variant group number')
@@ -179,7 +169,6 @@ FASTA_FIELDS = {
     'rid': RidField(),
     'rid_min': RidMinField(),
     'cer_factor': CerFactorField(),
-    'cer_details': CerDetailsField(),
     'primers': PrimersField(),
     'group': GroupField(),
     'variant': VariantField(),
@@ -189,8 +178,8 @@ FASTA_FIELDS = {
 FASTA_FIELD_PRESETS = {
     'default': ['size', 'ric', 'rawric', 'rawlen', 'snp', 'ambig', 'primers'],
     'minimal': ['size', 'ric'],
-    'qc': ['size', 'ric', 'length', 'rid', 'ambig', 'cer_factor', 'cer_details'],
-    'full': ['size', 'ric', 'length', 'rawric', 'rawlen', 'snp', 'ambig', 'rid', 'cer_factor', 'cer_details', 'primers'],
+    'qc': ['size', 'ric', 'length', 'rid', 'ambig', 'cer_factor'],
+    'full': ['size', 'ric', 'length', 'rawric', 'rawlen', 'snp', 'ambig', 'rid', 'cer_factor', 'primers'],
     'id-only': [],
 }
 

@@ -24,7 +24,6 @@ class ConsensusInfo(NamedTuple):
     rid_min: Optional[float] = None  # Minimum read identity (worst-case read)
     merge_indel_count: Optional[int] = None  # Number of indels consumed by merging (for cumulative tracking)
     cer_factor: Optional[float] = None  # Per-position CER factor (q*/q_ctx, K-th rooted)
-    cer_details: Optional[str] = None  # Structured details: p*=...;ctx=...;q=...[;K=...]
 
 
 class OverlapMergeInfo(NamedTuple):

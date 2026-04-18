@@ -37,7 +37,7 @@ class ClusterProcessingConfig:
     """
     __slots__ = ['outlier_identity_threshold', 'enable_secondpass_phasing',
                  'disable_homopolymer_equivalence', 'min_variant_frequency', 'min_variant_count',
-                 'assumed_error_rate', 'significance_level', 'min_hp_length',
+                 'significance_level', 'min_hp_length',
                  'max_sample_size']
 
     def __init__(self, outlier_identity_threshold: Optional[float],
@@ -45,7 +45,6 @@ class ClusterProcessingConfig:
                  disable_homopolymer_equivalence: bool,
                  min_variant_frequency: float,
                  min_variant_count: int,
-                 assumed_error_rate: float = 0.015,
                  significance_level: float = 1e-5,
                  min_hp_length: int = 6,
                  max_sample_size: Optional[int] = None):
@@ -54,7 +53,6 @@ class ClusterProcessingConfig:
         self.disable_homopolymer_equivalence = disable_homopolymer_equivalence
         self.min_variant_frequency = min_variant_frequency
         self.min_variant_count = min_variant_count
-        self.assumed_error_rate = assumed_error_rate
         self.significance_level = significance_level
         self.min_hp_length = min_hp_length
         self.max_sample_size = max_sample_size

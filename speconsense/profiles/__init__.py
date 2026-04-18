@@ -67,7 +67,6 @@ VALID_SPECONSENSE_KEYS = {
     "min-variant-frequency",
     "min-variant-count",
     "disable-position-phasing",
-    "assumed-error-rate",
     "significance-level",
     # Ambiguity calling
     "min-ambiguity-frequency",
@@ -90,6 +89,7 @@ VALID_SUMMARIZE_KEYS = {
     "min-ric",
     "min-len",
     "max-len",
+    "min-cer-factor",
     # Grouping
     "group-identity",
     # Merging

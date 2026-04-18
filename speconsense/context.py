@@ -62,7 +62,7 @@ class ContextTag:
     direction: Optional[int] = None
 
     def to_string(self) -> str:
-        """Compact string form used in FASTA cer_details and JSON metadata."""
+        """Compact string form used in JSON metadata CER reproduction records."""
         if self.cls == ContextClass.NON_HP_SUB:
             return "non-hp-sub"
         if self.cls == ContextClass.NON_HP_INDEL:

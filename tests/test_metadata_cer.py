@@ -31,7 +31,6 @@ def test_build_variant_record_anchor_no_cer_details():
     cluster_dict = {
         'cluster_id': 'c1',
         'identity_group_id': 'g0',
-        'cer_status': 'anchor',
         'cer_group_N': 950,
         'read_ids': set(range(900)),
         'cer_factor': None,
@@ -42,7 +41,6 @@ def test_build_variant_record_anchor_no_cer_details():
     assert record == {
         'cluster_id': 'c1',
         'identity_group': 'g0',
-        'cer_status': 'anchor',
         'M': 900,
         'N': 950,
         'K': None,
@@ -54,11 +52,10 @@ def test_build_variant_record_anchor_no_cer_details():
     }
 
 
-def test_build_variant_record_pass_with_cer_details():
+def test_build_variant_record_with_cer_details():
     cluster_dict = {
         'cluster_id': 'c2',
         'identity_group_id': 'g0',
-        'cer_status': 'pass',
         'cer_group_N': 950,
         'read_ids': set(range(40)),
         'cer_factor': 4.2,
@@ -74,7 +71,6 @@ def test_build_variant_record_pass_with_cer_details():
     assert record == {
         'cluster_id': 'c2',
         'identity_group': 'g0',
-        'cer_status': 'pass',
         'M': 40,
         'N': 950,
         'K': 2,
@@ -86,11 +82,10 @@ def test_build_variant_record_pass_with_cer_details():
     }
 
 
-def test_build_variant_record_ns_with_cer_details():
+def test_build_variant_record_low_factor_with_cer_details():
     cluster_dict = {
         'cluster_id': 'c3',
         'identity_group_id': 'g0',
-        'cer_status': 'ns',
         'cer_group_N': 950,
         'read_ids': set(range(5)),
         'cer_factor': 0.34,
@@ -103,6 +98,5 @@ def test_build_variant_record_ns_with_cer_details():
         },
     }
     record = SpecimenClusterer._build_variant_record(cluster_dict)
-    assert record['cer_status'] == 'ns'
     assert record['cer_factor'] == 0.34
     assert record['M'] == 5
