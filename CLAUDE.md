@@ -163,6 +163,12 @@ Phasing uses a three-stage architecture: phase indiscriminately, group by identi
 
 **No gating in core.** Every non-anchor candidate is pairwise-compared against all larger peers in its identity group, annotated with a `cer_factor` (per-position multiplicative inflation; worst-case across peers), and flows through to the FASTA output. The reference pool accumulates all processed clusters regardless of factor — `min_factor` is inherently conservative for artifact-vs-artifact cases. **Summarize applies the user-visible pass/ns decision** via `--min-cer-factor` (default `1.0`; `0` disables). Records below the threshold are routed to `__Summary__/variants/{name}.ns-RiC{ric}.fasta` with matching FASTQ, mirroring the `.raw` layout. Records with `cer_factor=None` (anchors, failed pairwise comparison) always pass. The FASTA header carries only `cer_factor=`; full per-position detail (p*, K, context tags, q_ctx values, reference idx) lives in the metadata JSON via `_build_variant_record`.
 
+### Cluster Homogeneity (err_factor)
+
+Complementary to CER, `err_factor` is a cluster-wide observed-vs-q_ctx-expected disagreement ratio: for each non-gap consensus column, the fraction of reads disagreeing with the consensus divided by the q_ctx rate predicted for that column's context (HP run length or non-HP). Values near 1.0 indicate reads consistent with basecaller noise; values ≫ 1.0 indicate internal heterogeneity beyond what sequencing noise would produce. Unlike `cer_factor`, `err_factor` is peer-independent — it distinguishes novel-but-real sequences (low) from noise combinations (high).
+
+Computed in `msa.compute_cluster_err_factor(msa_string, qctx_table)` during final consensus generation; emitted as `err_factor=` in the FASTA header and stored with raw `obs_sum`/`exp_sum`/`cols` in metadata JSON for reproducibility. **Summarize filters on it** via `--max-err-factor` (default `0` disables; `2.0` is a well-calibrated threshold). Records above threshold route to `__Summary__/variants/{name}.lq-RiC{ric}.fasta`; `.lq` takes precedence over `.ns` when both fire.
+
 ### Algorithm Selection
 
 **Graph-based MCL (default)**:
@@ -196,6 +202,7 @@ Parameters are controlled via CLI arguments, optionally pre-set via YAML profile
 - Variant phasing (`--disable-position-phasing`, `--min-variant-frequency`, `--significance-level`)
 - q_ctx table selection (`--qctx-profile`, `--hp-min-length`)
 - Summarize CER filter (`--min-cer-factor`, default `1.0`, `0` disables)
+- Summarize err_factor filter (`--max-err-factor`, default `0` disabled; `2.0` well-calibrated threshold)
 
 ## Integration with specimux-suite
 

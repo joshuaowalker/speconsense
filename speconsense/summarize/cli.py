@@ -57,6 +57,7 @@ from .io import (
     build_fastq_lookup_table,
     write_specimen_data_files,
     write_ns_variant_files,
+    write_lq_variant_files,
     write_output_files,
 )
 from .clustering import perform_hac_clustering, select_variants
@@ -138,6 +139,12 @@ def parse_arguments():
                                       "Variants with cer_factor=None (anchors, clusters without a "
                                       "valid pairwise comparison) always pass. Set to 0 to disable "
                                       "CER filtering. (default: 1.0)")
+    filtering_group.add_argument("--max-err-factor", type=float, default=0.0,
+                                 help="Maximum cluster err_factor (observed/q_ctx-expected "
+                                      "disagreement ratio). Clusters above this threshold are "
+                                      "routed to __Summary__/variants/ as .lq records. Variants "
+                                      "with err_factor=None (legacy output) always pass. Set to 0 "
+                                      "to disable err_factor filtering (default: 0).")
     # Grouping group
     grouping_group = parser.add_argument_group("Grouping")
     grouping_group.add_argument("--group-identity", "--variant-group-identity",
@@ -561,12 +568,13 @@ def main():
     logging.info("Processing each specimen file independently to organize variants within specimens")
 
     # Load consensus sequences (optionally filtered to single specimen)
-    consensus_list, ns_list = load_consensus_sequences(
+    consensus_list, ns_list, lq_list = load_consensus_sequences(
         args.source, args.min_ric, args.min_len, args.max_len,
         specimen_id=args.specimen,
         min_cer_factor=args.min_cer_factor,
+        max_err_factor=args.max_err_factor,
     )
-    if not consensus_list and not ns_list:
+    if not consensus_list and not ns_list and not lq_list:
         logging.error("No consensus sequences found")
         _cleanup_log(temp_log_file.name)
         return
@@ -578,6 +586,9 @@ def main():
     ns_by_file = defaultdict(list)
     for cons in ns_list:
         ns_by_file[cons.file_path].append(cons)
+    lq_by_file = defaultdict(list)
+    for cons in lq_list:
+        lq_by_file[cons.file_path].append(cons)
 
     # Create output directories before processing
     os.makedirs(args.summary_dir, exist_ok=True)
@@ -627,6 +638,13 @@ def main():
         if specimen_ns:
             write_ns_variant_files(
                 specimen_ns, args.summary_dir, fastq_lookup, fasta_fields
+            )
+
+        # Emit lq variants (err_factor-filtered) for this specimen
+        specimen_lq = lq_by_file.get(file_path, [])
+        if specimen_lq:
+            write_lq_variant_files(
+                specimen_lq, args.summary_dir, fastq_lookup, fasta_fields
             )
 
         # Accumulate results for summary files

@@ -49,6 +49,10 @@ def test_build_variant_record_anchor_no_cer_details():
         'compared_against_idx': None,
         'cer_factor': None,
         'cer_pstar': None,
+        'err_factor': None,
+        'err_factor_obs_sum': None,
+        'err_factor_exp_sum': None,
+        'err_factor_cols': None,
     }
 
 
@@ -79,6 +83,10 @@ def test_build_variant_record_with_cer_details():
         'compared_against_idx': 0,
         'cer_factor': 4.2,
         'cer_pstar': 0.0248,
+        'err_factor': None,
+        'err_factor_obs_sum': None,
+        'err_factor_exp_sum': None,
+        'err_factor_cols': None,
     }
 
 

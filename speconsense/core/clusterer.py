@@ -20,7 +20,7 @@ try:
 except ImportError:
     __version__ = "dev"
 
-from speconsense.msa import ReadAlignment, analyze_positional_variation, has_no_majority, call_iupac_ambiguities
+from speconsense.msa import ReadAlignment, analyze_positional_variation, has_no_majority, call_iupac_ambiguities, compute_cluster_err_factor
 from speconsense.context import classify_pairwise_differences
 from speconsense.distances import count_variant_differences
 from speconsense.qctx import DORADO_V5_0, get_qctx, load_table as load_qctx_table
@@ -381,6 +381,7 @@ class SpecimenClusterer:
     def _build_variant_record(cluster_dict: Dict) -> Dict:
         """Serialize one cluster's CER reproduction data."""
         details = cluster_dict.get('cer_details') or {}
+        ef_details = cluster_dict.get('err_factor_details') or {}
         return {
             'cluster_id': cluster_dict.get('cluster_id'),
             'identity_group': cluster_dict.get('identity_group_id'),
@@ -392,6 +393,10 @@ class SpecimenClusterer:
             'compared_against_idx': details.get('ref_idx') if details else None,
             'cer_factor': cluster_dict.get('cer_factor'),
             'cer_pstar': cluster_dict.get('cer_pstar'),
+            'err_factor': cluster_dict.get('err_factor'),
+            'err_factor_obs_sum': ef_details.get('obs_sum'),
+            'err_factor_exp_sum': ef_details.get('exp_sum'),
+            'err_factor_cols': ef_details.get('cols'),
         }
 
     def write_phasing_stats(self, initial_clusters_count: int, after_prephasing_merge_count: int,
@@ -822,7 +827,8 @@ class SpecimenClusterer:
                             sorted_cluster_ids: Optional[List[str]] = None,
                             sorted_sampled_ids: Optional[List[str]] = None,
                             iupac_count: int = 0,
-                            cer_factor: Optional[float] = None) -> None:
+                            cer_factor: Optional[float] = None,
+                            err_factor: Optional[float] = None) -> None:
         """Write cluster files: reads FASTQ, MSA, and consensus FASTA.
 
         Read identity metrics measure internal cluster consistency (not accuracy vs. ground truth):
@@ -853,6 +859,8 @@ class SpecimenClusterer:
                 info_parts.append("cer_factor=inf")
             else:
                 info_parts.append(f"cer_factor={cer_factor:.3f}")
+        if err_factor is not None:
+            info_parts.append(f"err_factor={err_factor:.3f}")
         info_str = " ".join(info_parts)
 
         # Write reads FASTQ to debug directory with new naming convention
@@ -2139,6 +2147,21 @@ class SpecimenClusterer:
                     cluster_dict = cluster_dicts_by_idx.get(final_idx, {})
                     cluster_cer_factor = cluster_dict.get('cer_factor')
 
+                    # Compute err_factor from MSA + q_ctx (cluster-wide homogeneity).
+                    err_factor = None
+                    msa_string = result.get('msa')
+                    if msa_string:
+                        ef, obs_sum, exp_sum, ef_cols = compute_cluster_err_factor(
+                            msa_string, self.qctx_table
+                        )
+                        err_factor = ef
+                        cluster_dict['err_factor'] = ef
+                        cluster_dict['err_factor_details'] = {
+                            'obs_sum': obs_sum,
+                            'exp_sum': exp_sum,
+                            'cols': ef_cols,
+                        }
+
                     # Write output files
                     self.write_cluster_files(
                         cluster_num=final_idx,
@@ -2156,6 +2179,7 @@ class SpecimenClusterer:
                         sorted_sampled_ids=result['sorted_sampled_ids'],
                         iupac_count=iupac_count,
                         cer_factor=cluster_cer_factor,
+                        err_factor=err_factor,
                     )
 
         return clusters_with_ambiguities, total_ambiguity_positions

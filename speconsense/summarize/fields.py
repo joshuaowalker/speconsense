@@ -131,6 +131,16 @@ class CerFactorField(FastaField):
         return f"cer_factor={consensus.cer_factor:.3f}"
 
 
+class ErrFactorField(FastaField):
+    def __init__(self):
+        super().__init__('err_factor', 'Cluster-wide observed/q_ctx-expected disagreement ratio')
+
+    def format_value(self, consensus: ConsensusInfo) -> Optional[str]:
+        if consensus.err_factor is None:
+            return None
+        return f"err_factor={consensus.err_factor:.3f}"
+
+
 class GroupField(FastaField):
     def __init__(self):
         super().__init__('group', 'Variant group number')
@@ -169,6 +179,7 @@ FASTA_FIELDS = {
     'rid': RidField(),
     'rid_min': RidMinField(),
     'cer_factor': CerFactorField(),
+    'err_factor': ErrFactorField(),
     'primers': PrimersField(),
     'group': GroupField(),
     'variant': VariantField(),
@@ -178,8 +189,8 @@ FASTA_FIELDS = {
 FASTA_FIELD_PRESETS = {
     'default': ['size', 'ric', 'rawric', 'rawlen', 'snp', 'ambig', 'primers'],
     'minimal': ['size', 'ric'],
-    'qc': ['size', 'ric', 'length', 'rid', 'ambig', 'cer_factor'],
-    'full': ['size', 'ric', 'length', 'rawric', 'rawlen', 'snp', 'ambig', 'rid', 'cer_factor', 'primers'],
+    'qc': ['size', 'ric', 'length', 'rid', 'ambig', 'cer_factor', 'err_factor'],
+    'full': ['size', 'ric', 'length', 'rawric', 'rawlen', 'snp', 'ambig', 'rid', 'cer_factor', 'err_factor', 'primers'],
     'id-only': [],
 }
 

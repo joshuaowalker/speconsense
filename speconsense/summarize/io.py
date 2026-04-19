@@ -26,21 +26,22 @@ from .clustering import select_variants
 def parse_consensus_header(header: str) -> Tuple[Optional[str], Optional[int], Optional[int],
                                                    Optional[List[str]], Optional[float], Optional[float],
                                                    Optional[List[int]], Optional[List[int]], Optional[int],
-                                                   Optional[float]]:
+                                                   Optional[float], Optional[float]]:
     """
     Extract information from Speconsense consensus FASTA header.
 
-    Parses read identity metrics, merge metadata, and the ``cer_factor`` CER
-    decision metric. Full per-position CER detail (p*, K, context tags,
-    q_ctx values) lives only in the metadata JSON.
+    Parses read identity metrics, merge metadata, and the quality metrics
+    (``cer_factor`` CER decision metric and ``err_factor`` cluster-homogeneity
+    metric). Full per-position CER detail (p*, K, context tags, q_ctx values)
+    lives only in the metadata JSON.
 
     Returns:
         Tuple of (sample_name, ric, size, primers, rid, rid_min, raw_ric,
-        raw_len, snp_count, cer_factor).
+        raw_len, snp_count, cer_factor, err_factor).
     """
     sample_match = re.match(r'>([^ ]+) (.+)', header)
     if not sample_match:
-        return None, None, None, None, None, None, None, None, None, None
+        return None, None, None, None, None, None, None, None, None, None, None
 
     sample_name = sample_match.group(1)
     info_string = sample_match.group(2)
@@ -82,8 +83,11 @@ def parse_consensus_header(header: str) -> Tuple[Optional[str], Optional[int], O
     else:
         cer_factor = None
 
+    err_factor_match = re.search(r'\berr_factor=([\d.]+)', info_string)
+    err_factor = float(err_factor_match.group(1)) if err_factor_match else None
+
     return (sample_name, ric, size, primers, rid, rid_min,
-            raw_ric, raw_len, snp_count, cer_factor)
+            raw_ric, raw_len, snp_count, cer_factor, err_factor)
 
 
 def load_consensus_sequences(
@@ -93,7 +97,8 @@ def load_consensus_sequences(
     max_len: int = 0,
     specimen_id: str = None,
     min_cer_factor: float = 1.0,
-) -> Tuple[List[ConsensusInfo], List[ConsensusInfo]]:
+    max_err_factor: float = 0.0,
+) -> Tuple[List[ConsensusInfo], List[ConsensusInfo], List[ConsensusInfo]]:
     """Load consensus sequences from speconsense output files.
 
     Args:
@@ -107,18 +112,25 @@ def load_consensus_sequences(
             separately as ns records. Variants with cer_factor=None (anchors,
             no valid pairwise comparison, or legacy pre-CER output) always
             pass. Set to 0 to disable CER filtering.
+        max_err_factor: Maximum cluster err_factor (observed/q_ctx-expected
+            disagreement ratio). Variants above this threshold are returned
+            separately as lq (low-quality) records. Variants with
+            err_factor=None (legacy output missing the field) always pass.
+            Set to 0 to disable err_factor filtering. When both filters fire
+            on the same record, lq takes precedence over ns.
 
     Returns:
-        Tuple of (passing, ns) lists of ConsensusInfo. Both lists have already
-        passed the RiC and length filters; the ns list contains records whose
-        cer_factor was below min_cer_factor.
+        Tuple of (passing, ns, lq) lists of ConsensusInfo. All lists have
+        already passed the RiC and length filters.
     """
     consensus_list: List[ConsensusInfo] = []
     ns_list: List[ConsensusInfo] = []
+    lq_list: List[ConsensusInfo] = []
     filtered_by_ric = 0
     filtered_by_len = 0
 
     cer_filter_enabled = min_cer_factor > 0
+    err_filter_enabled = max_err_factor > 0
 
     # Find consensus FASTA files — narrow to single specimen if requested
     if specimen_id:
@@ -133,7 +145,7 @@ def load_consensus_sequences(
         with open(fasta_file, 'r') as f:
             for record in SeqIO.parse(f, "fasta"):
                 (sample_name, ric, size, primers, rid, rid_min,
-                 _, _, _, cer_factor) = \
+                 _, _, _, cer_factor, err_factor) = \
                     parse_consensus_header(f">{record.description}")
 
                 if not sample_name:
@@ -172,12 +184,16 @@ def load_consensus_sequences(
                     rid=rid,  # Mean read identity if available
                     rid_min=rid_min,  # Minimum read identity if available
                     cer_factor=cer_factor,
+                    err_factor=err_factor,
                 )
 
-                # CER routing: records with cer_factor below the threshold
-                # are returned as ns records instead of primary output.
-                # cer_factor=None always passes (anchors, no comparison).
-                if (cer_filter_enabled and cer_factor is not None
+                # Routing priority: lq (low quality) takes precedence over ns
+                # (CER not significant). A cluster whose reads are internally
+                # incoherent isn't worth evaluating for peer-artifact status.
+                if (err_filter_enabled and err_factor is not None
+                        and err_factor > max_err_factor):
+                    lq_list.append(consensus_info)
+                elif (cer_filter_enabled and cer_factor is not None
                         and cer_factor < min_cer_factor):
                     ns_list.append(consensus_info)
                 else:
@@ -185,6 +201,8 @@ def load_consensus_sequences(
 
     # Log loading summary
     filter_parts = [f"Loaded {len(consensus_list)} consensus sequences from {len(fasta_files)} files"]
+    if lq_list:
+        filter_parts.append(f"routed {len(lq_list)} to lq (err_factor > {max_err_factor})")
     if ns_list:
         filter_parts.append(f"routed {len(ns_list)} to ns (CER factor < {min_cer_factor})")
     if filtered_by_ric > 0:
@@ -193,7 +211,7 @@ def load_consensus_sequences(
         filter_parts.append(f"filtered {filtered_by_len} by length")
     logging.info(", ".join(filter_parts))
 
-    return consensus_list, ns_list
+    return consensus_list, ns_list, lq_list
 
 
 def load_metadata_from_json(source_folder: str, sample_name: str) -> Optional[Dict]:
@@ -507,30 +525,31 @@ def write_specimen_data_files(specimen_consensus: List[ConsensusInfo],
     return raw_file_consensuses
 
 
-def write_ns_variant_files(ns_consensuses: List[ConsensusInfo],
-                           summary_folder: str,
-                           fastq_lookup: Dict[str, List[str]],
-                           fasta_fields: List[FastaField]) -> None:
-    """Emit CER-filtered (ns) variants to variants/ using the raw-variant layout.
+def _write_filtered_variant_files(
+    consensuses: List[ConsensusInfo],
+    summary_folder: str,
+    fastq_lookup: Dict[str, List[str]],
+    fasta_fields: List[FastaField],
+    marker: str,
+) -> None:
+    """Emit filtered variants to ``variants/`` using the raw-variant layout.
 
-    Writes one FASTA per ns record to ``variants/{sample_name}.ns-RiC{ric}.fasta``
-    and a matching FASTQ to ``variants/FASTQ Files/{sample_name}.ns-RiC{ric}.fastq``
+    Writes one FASTA per record to
+    ``variants/{sample_name}.{marker}-RiC{ric}.fasta`` and a matching FASTQ
     when the source cluster's debug FASTQ is available.
     """
-    for consensus in ns_consensuses:
-        ns_name = f"{consensus.sample_name}.ns"
-        ns_info = consensus._replace(sample_name=ns_name)
+    for consensus in consensuses:
+        tagged_name = f"{consensus.sample_name}.{marker}"
+        tagged_info = consensus._replace(sample_name=tagged_name)
 
         output_file = os.path.join(
-            summary_folder, 'variants', f"{ns_name}-RiC{consensus.ric}.fasta"
+            summary_folder, 'variants', f"{tagged_name}-RiC{consensus.ric}.fasta"
         )
         with open(output_file, 'w') as f:
-            header = format_fasta_header(ns_info, fasta_fields)
+            header = format_fasta_header(tagged_info, fasta_fields)
             f.write(f">{header}\n")
             f.write(f"{consensus.sequence}\n")
 
-        # Attempt FASTQ emission: find the source cluster's reads via fastq_lookup.
-        # The original sample_name is of the form '{specimen}-c{N}' for ns records.
         original_cluster_name = consensus.sample_name
         if '-c' not in original_cluster_name:
             continue
@@ -543,7 +562,7 @@ def write_ns_variant_files(ns_consensuses: List[ConsensusInfo],
 
         fastq_output_path = os.path.join(
             summary_folder, 'variants', 'FASTQ Files',
-            f"{ns_name}-RiC{consensus.ric}.fastq"
+            f"{tagged_name}-RiC{consensus.ric}.fastq"
         )
         try:
             with open(fastq_output_path, 'wb') as outf:
@@ -551,9 +570,29 @@ def write_ns_variant_files(ns_consensuses: List[ConsensusInfo],
                     if os.path.exists(input_file) and os.path.getsize(input_file) > 0:
                         with open(input_file, 'rb') as inf:
                             shutil.copyfileobj(inf, outf)
-            logging.debug(f"Wrote ns FASTQ: {os.path.basename(fastq_output_path)}")
+            logging.debug(f"Wrote {marker} FASTQ: {os.path.basename(fastq_output_path)}")
         except Exception as e:
-            logging.debug(f"Could not write ns FASTQ for {ns_name}: {e}")
+            logging.debug(f"Could not write {marker} FASTQ for {tagged_name}: {e}")
+
+
+def write_ns_variant_files(ns_consensuses: List[ConsensusInfo],
+                           summary_folder: str,
+                           fastq_lookup: Dict[str, List[str]],
+                           fasta_fields: List[FastaField]) -> None:
+    """Emit CER-filtered (ns) variants to variants/ using the raw-variant layout."""
+    _write_filtered_variant_files(
+        ns_consensuses, summary_folder, fastq_lookup, fasta_fields, marker='ns'
+    )
+
+
+def write_lq_variant_files(lq_consensuses: List[ConsensusInfo],
+                           summary_folder: str,
+                           fastq_lookup: Dict[str, List[str]],
+                           fasta_fields: List[FastaField]) -> None:
+    """Emit err_factor-filtered (lq) variants to variants/ using the raw-variant layout."""
+    _write_filtered_variant_files(
+        lq_consensuses, summary_folder, fastq_lookup, fasta_fields, marker='lq'
+    )
 
 
 def build_fastq_lookup_table(source_dir: str = ".") -> Dict[str, List[str]]:
@@ -783,7 +822,7 @@ def load_existing_specimen_outputs(summary_dir: str) -> List[ConsensusInfo]:
         with open(fasta_file, 'r') as f:
             for record in SeqIO.parse(f, "fasta"):
                 (sample_name, ric, size, primers, rid, rid_min,
-                 raw_ric, raw_len, snp_count, cer_factor) = \
+                 raw_ric, raw_len, snp_count, cer_factor, err_factor) = \
                     parse_consensus_header(f">{record.description}")
 
                 if not sample_name:
@@ -806,6 +845,7 @@ def load_existing_specimen_outputs(summary_dir: str) -> List[ConsensusInfo]:
                     rid=rid,
                     rid_min=rid_min,
                     cer_factor=cer_factor,
+                    err_factor=err_factor,
                 )
                 consensus_list.append(consensus_info)
 

@@ -318,7 +318,7 @@ class TestFieldRegistry:
         expected = {
             'size', 'ric', 'length', 'rawric', 'rawlen',
             'snp', 'ambig', 'rid', 'rid_min', 'cer_factor',
-            'primers', 'group', 'variant'
+            'err_factor', 'primers', 'group', 'variant'
         }
         assert set(FASTA_FIELDS.keys()) == expected
 

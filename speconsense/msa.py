@@ -825,6 +825,82 @@ def call_iupac_ambiguities(
     return modified_consensus, len(iupac_positions), iupac_positions
 
 
+def compute_cluster_err_factor(
+    msa_string: str,
+    qctx_table: Dict[str, float],
+) -> Tuple[Optional[float], float, float, int]:
+    """Aggregate observed vs q_ctx-expected per-column disagreement for a cluster.
+
+    For each non-gap consensus column, computes the observed fraction of reads
+    disagreeing with the consensus base and the q_ctx-predicted disagreement
+    rate for the column's context (HP run length or non-HP). The ratio of the
+    two sums is the cluster's ``err_factor``: values near 1.0 indicate reads
+    consistent with the basecaller noise model, values >> 1.0 indicate
+    heterogeneity beyond what sequencing noise alone would explain.
+
+    Args:
+        msa_string: SPOA MSA in FASTA format, including a ``Consensus`` record.
+        qctx_table: Loaded q_ctx table (see ``speconsense.qctx.load_table``).
+
+    Returns:
+        Tuple of (err_factor, obs_sum, exp_sum, cols_counted). err_factor is
+        None when it cannot be computed (no consensus, no reads, or zero
+        expected error).
+    """
+    from io import StringIO
+    from speconsense.context import build_hp_runs
+
+    read_seqs: List[str] = []
+    consensus: Optional[str] = None
+    for record in SeqIO.parse(StringIO(msa_string), 'fasta'):
+        name = record.id or record.description
+        seq = str(record.seq)
+        if 'Consensus' in name:
+            consensus = seq
+        else:
+            read_seqs.append(seq)
+
+    if consensus is None or not read_seqs:
+        return None, 0.0, 0.0, 0
+
+    hp_runs = build_hp_runs(consensus, min_length=2)
+    n_reads = len(read_seqs)
+
+    q_sub = qctx_table.get('non-hp-sub', 0.006)
+    q_ind = qctx_table.get('non-hp-indel', 0.011)
+    non_hp_rate = q_sub + q_ind
+    hp_l5_rate = qctx_table.get('hp-l5', 0.011)
+
+    obs_sum = 0.0
+    exp_sum = 0.0
+    cols = 0
+    for col, base in enumerate(consensus):
+        if base == '-':
+            continue
+        base_u = base.upper()
+        mismatches = 0
+        for rseq in read_seqs:
+            if rseq[col].upper() != base_u:
+                mismatches += 1
+        obs_sum += mismatches / n_reads
+
+        run = hp_runs[col]
+        if run is None:
+            exp_sum += non_hp_rate
+        else:
+            run_len = run.length
+            if run_len <= 5:
+                exp_sum += qctx_table.get(f'hp-l{run_len}', hp_l5_rate)
+            else:
+                # Beyond table; scale hp-l5 as a rough upper bound.
+                exp_sum += hp_l5_rate * 1.5
+        cols += 1
+
+    if exp_sum <= 0 or cols == 0:
+        return None, obs_sum, exp_sum, cols
+    return obs_sum / exp_sum, obs_sum, exp_sum, cols
+
+
 def calculate_within_cluster_error(
     haplotype_groups: Dict[str, Set[str]],
     read_alleles: Dict[str, Dict[int, str]],
