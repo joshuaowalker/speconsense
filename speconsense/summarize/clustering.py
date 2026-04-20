@@ -175,6 +175,120 @@ def _run_hac_on_component(
     return list(cluster_map.values())
 
 
+def merge_groups_by_anchor_overlap(
+    groups: Dict[int, List[ConsensusInfo]],
+    min_overlap_bp: int,
+    group_identity: float,
+    max_iterations: int = 10,
+) -> Dict[int, List[ConsensusInfo]]:
+    """Merge cross-primer core-assigned groups whose members overlap well.
+
+    Core groups clusters within a specimen at the `--group-identity` threshold
+    via complete linkage. Sequences from different primer pools (e.g., full
+    ITS vs ITS2) naturally fall into distinct core groups because length
+    mismatch tanks global identity. This function conflates such groups in
+    summarize by comparing representative members via the overlap-aware
+    distance and merging when any cross-primer pair passes threshold.
+
+    Rules:
+    - Only *cross-primer* member pairs are considered (same-primer pairs were
+      already evaluated by core). A single cross-primer pair passing the
+      overlap threshold triggers a group merge (single linkage over groups),
+      which is what enables prefix → full → suffix chains to collapse.
+    - The larger-anchor group absorbs the smaller. Absorbed-group members
+      append to the survivor's member list; downstream positional renumbering
+      handles re-ranking by size.
+    - Iterates until no more merges fire.
+    """
+    if len(groups) < 2 or min_overlap_bp <= 0:
+        return groups
+
+    threshold = 1.0 - group_identity
+    for _ in range(max_iterations):
+        ranks = sorted(groups, key=lambda g: max(v.size for v in groups[g]),
+                       reverse=True)
+        merged_this_round = False
+        for outer_idx, i in enumerate(ranks):
+            for j in ranks[outer_idx + 1:]:
+                if i not in groups or j not in groups:
+                    continue
+                merge_pair_dist = _best_cross_primer_overlap(
+                    groups[i], groups[j], min_overlap_bp)
+                if merge_pair_dist is None or merge_pair_dist >= threshold:
+                    continue
+                anchor_i = max(groups[i], key=lambda v: v.size)
+                anchor_j = max(groups[j], key=lambda v: v.size)
+                if anchor_i.size >= anchor_j.size:
+                    survivor, absorbed = i, j
+                else:
+                    survivor, absorbed = j, i
+                groups[survivor].extend(groups[absorbed])
+                del groups[absorbed]
+                merged_this_round = True
+                logging.info(
+                    f"Cross-primer merge: group {absorbed} absorbed into "
+                    f"group {survivor} (best cross-primer distance="
+                    f"{merge_pair_dist:.4f})"
+                )
+                break
+            if merged_this_round:
+                break
+        if not merged_this_round:
+            break
+    return groups
+
+
+def _best_cross_primer_overlap(
+    group_a: List[ConsensusInfo],
+    group_b: List[ConsensusInfo],
+    min_overlap_bp: int,
+) -> Optional[float]:
+    """Return the minimum overlap-aware distance across cross-primer pairs.
+
+    Only pairs with different primer sets contribute. Returns ``None`` when
+    every pair has identical primers (no cross-primer comparison possible).
+    """
+    best: Optional[float] = None
+    for a in group_a:
+        for b in group_b:
+            if primers_are_same(a.primers, b.primers):
+                continue
+            dist = calculate_overlap_aware_distance(
+                a.sequence, b.sequence, min_overlap_bp)
+            if best is None or dist < best:
+                best = dist
+    return best
+
+
+def group_by_core_identity(
+    consensus_list: List[ConsensusInfo],
+) -> Dict[int, List[ConsensusInfo]]:
+    """Bucket consensuses by core-assigned ``group_rank`` (gid=) from headers.
+
+    Core is authoritative for within-specimen identity grouping. Every member
+    must have ``group_rank`` populated; if any lack it (e.g., FASTA emitted by
+    an older core version), raise ``ValueError`` pointing the user to rerun.
+    Cross-primer overlap conflation is handled separately downstream.
+    """
+    if not consensus_list:
+        return {}
+
+    missing = [c.sample_name for c in consensus_list if c.group_rank is None]
+    if missing:
+        example = missing[0]
+        raise ValueError(
+            f"Input FASTA is missing the gid= header field required by the "
+            f"current summarize pipeline (first example: {example!r}). "
+            f"Regenerate the consensus with the current version of "
+            f"speconsense core, which emits gid=/vid= identity ranks."
+        )
+
+    groups: Dict[int, List[ConsensusInfo]] = defaultdict(list)
+    for consensus in consensus_list:
+        groups[consensus.group_rank].append(consensus)
+    return dict(groups)
+
+
 def perform_hac_clustering(consensus_list: List[ConsensusInfo],
                           variant_group_identity: float,
                           min_overlap_bp: int = 0,

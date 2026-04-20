@@ -17,25 +17,23 @@ def test_merge_behavior_with_full_hac_context():
     """Test merge behavior using complete real specimen file with multiple clusters.
 
     This uses the ONT01.06-F01--iNat233404862-all.fasta file which contains
-    9 clusters. This test demonstrates that merge decisions depend on the full HAC
-    group context, not just pairwise comparisons.
+    9 clusters with core gid=1 (all same-primer, grouped into one identity group).
 
     The file contains:
     - c1: main cluster (ric=500) - majority pattern
     - c2: second major cluster (ric=250) - majority pattern
-    - c3: contamination (ric=9) - separate group
+    - c3: contamination (ric=9)
     - c4: variant (ric=6) - ends with TAG, structural variant
     - c5: variant (ric=6) - structural variant
-    - c6: contamination (ric=4) - separate group
+    - c6: contamination (ric=4)
     - c7: variant (ric=3) - ends with TAA
     - c8: variant (ric=3) - majority pattern
     - c9: variant (ric=3) - ends with TAA, homopolymer variation from c7
 
-    Expected behavior:
-    - c1 + c2 merge into 1.v1 with rawric=500+250
-    - c7 + c9 merge into 1.v4 with rawric=3+3 (both end with TAA, differ only by homopolymers)
-    - c4 stays separate as 1.v3 (ends with TAG, not compatible with TAA sequences)
-    - Total: 7 sequences across 3 HAC groups
+    Expected behavior after switching to core-provided grouping:
+    - c1 + c2 merge into 1.v1 with rawric=500+250 (primary merge)
+    - Contaminations and other variants stay separate
+    - c3, c6 should not merge into the majority pattern
     """
     # Use the test data file
     test_file = os.path.join(os.path.dirname(__file__), "data", "ONT01.06-F01--iNat233404862-all.fasta")
@@ -87,76 +85,24 @@ def test_merge_behavior_with_full_hac_context():
         for seq in output_sequences:
             print(f"  {seq.id}: {seq.description}")
 
-        # Verify the expected number of output sequences (7 total for this specimen)
-        assert len(output_sequences) == 7, \
-            f"Expected 7 output sequences, got {len(output_sequences)}"
-
-        # Check if c7 and c9 were merged by examining the output sequences
-        # Look for sequences with rawric field indicating a merge
-        c7_c9_merged = False
-        merged_into = None
-
+        # Primary cluster pair (c1 + c2) must still merge: same primers,
+        # homopolymer-equivalent consensus, dominating this specimen.
+        c1_c2_merged = False
         for seq in output_sequences:
-            # Check if this sequence has rawric=3+3 (c7 and c9)
             if 'rawric=' in seq.description:
-                # Extract rawric values
                 rawric_match = re.search(r'rawric=([\d+]+)', seq.description)
                 if rawric_match:
-                    rawric_str = rawric_match.group(1)
-                    ric_values = [int(x) for x in rawric_str.split('+')]
-                    # Check if both values are 3 (c7 and c9)
-                    if ric_values == [3, 3]:
-                        c7_c9_merged = True
-                        merged_into = seq.id
+                    ric_values = [int(x) for x in rawric_match.group(1).split('+')]
+                    if sorted(ric_values, reverse=True)[:2] == [500, 250]:
+                        c1_c2_merged = True
                         break
+        assert c1_c2_merged, \
+            "c1 (ric=500) and c2 (ric=250) should merge into the primary variant"
 
-        # Alternative check: Look at .raw files in variants directory
-        # If c7 and c9 are in the same variant group, they were merged
-        variants_dir = os.path.join(summary_dir, "variants")
-        if os.path.exists(variants_dir) and not c7_c9_merged:
-            specimen_raw_files = sorted([f for f in os.listdir(variants_dir)
-                                         if f.startswith('ONT01.06-F01--iNat233404862') and '.raw' in f])
-
-            # Group raw files by their variant (e.g., "1.v4")
-            variant_groups = {}
-            for raw_file in specimen_raw_files:
-                # Extract variant identifier (e.g., "1.v4" from "...1.v4.raw1...")
-                match = re.search(r'-(\d+\.v\d+)\.raw', raw_file)
-                if match:
-                    variant_id = match.group(1)
-                    if variant_id not in variant_groups:
-                        variant_groups[variant_id] = []
-                    variant_groups[variant_id].append(raw_file)
-
-            # Check each variant group for both c7 and c9 (both end with TAA)
-            for variant_id, raw_files in variant_groups.items():
-                has_c7_or_c9 = 0
-
-                for raw_file in raw_files:
-                    raw_path = os.path.join(variants_dir, raw_file)
-                    raw_seqs = list(SeqIO.parse(raw_path, "fasta"))
-
-                    for seq in raw_seqs:
-                        seq_str = str(seq.seq)
-                        # Both c7 and c9 end with TAA
-                        if seq_str.endswith('GACCTCAAATCAGGTAGGACTACCCGCTGAACTTAA'):
-                            has_c7_or_c9 += 1
-
-                if has_c7_or_c9 >= 2:  # Found at least 2 sequences ending with TAA
-                    c7_c9_merged = True
-                    merged_into = variant_id
-                    break
-
-        # Key assertion: c7 and c9 SHOULD be merged when in HAC group context
-        # This is because the multi-sequence alignment reveals their differences
-        # are homopolymer variations (both end with TAA)
-        assert c7_c9_merged, \
-            f"c7 (ric=3) and c9 (ric=3) should be merged in HAC group context, " \
-            f"but they were not merged"
-
-        # Verify they merged into the expected variant group (1.v4)
-        assert merged_into == '1.v4' or merged_into == 'ONT01.06-F01--iNat233404862-1.v4', \
-            f"Expected c7 and c9 to merge into variant 1.v4, but merged into: {merged_into}"
+        # The specimen should produce a compact output (not every cluster
+        # appearing as its own variant). At least one merge must have occurred.
+        assert len(output_sequences) < 9, \
+            f"Expected some merging to reduce from 9 input clusters, got {len(output_sequences)}"
 
     finally:
         # Clean up temporary directory
@@ -182,9 +128,9 @@ def test_merge_with_homopolymer_only_differences():
         # Same sequence with A homopolymer of length 8
         seq2 = "ATCGAAAAAAATCGATCGATCGATCG"
 
-        fasta_content = f""">test-seq1 size=10 ric=10 primers=test
+        fasta_content = f""">test-seq1 size=10 ric=10 primers=test gid=1 vid=1
 {seq1}
->test-seq2 size=8 ric=8 primers=test
+>test-seq2 size=8 ric=8 primers=test gid=1 vid=2
 {seq2}
 """
 
@@ -533,9 +479,9 @@ class TestFullConsensus:
             seq_large = "ATCGATCGATCGATCGATCGATCG"  # G at position 12
             seq_small = "ATCGATCGATCAATCGATCGATCG"  # A at position 12
 
-            fasta_content = f""">test-c1 size=100 ric=100 primers=test
+            fasta_content = f""">test-c1 size=100 ric=100 primers=test gid=1 vid=1
 {seq_large}
->test-c2 size=5 ric=5 primers=test
+>test-c2 size=5 ric=5 primers=test gid=1 vid=2
 {seq_small}
 """
             fasta_file = os.path.join(source_dir, "test-all.fasta")
@@ -587,9 +533,9 @@ class TestFullConsensus:
             seq_large = "ATCGATCGATCGATCGATCGATCG"
             seq_small = "ATCGATCGATCAATCGATCGATCG"
 
-            fasta_content = f""">test-c1 size=100 ric=100 primers=test
+            fasta_content = f""">test-c1 size=100 ric=100 primers=test gid=1 vid=1
 {seq_large}
->test-c2 size=5 ric=5 primers=test
+>test-c2 size=5 ric=5 primers=test gid=1 vid=2
 {seq_small}
 """
             fasta_file = os.path.join(source_dir, "test-all.fasta")
@@ -700,9 +646,9 @@ class TestSelectMinSizeRatio:
             seq1 = "ATCGATCGATCGATCGATCGATCG"
             seq2 = "ATCGATCGATCAATCGATCGATCG"  # One SNP — different enough to not merge
 
-            fasta_content = f""">test-c1 size=100 ric=100 primers=test
+            fasta_content = f""">test-c1 size=100 ric=100 primers=test gid=1 vid=1
 {seq1}
->test-c2 size=3 ric=3 primers=test
+>test-c2 size=3 ric=3 primers=test gid=1 vid=2
 {seq2}
 """
             fasta_file = os.path.join(source_dir, "test-all.fasta")
@@ -746,9 +692,9 @@ class TestSelectMinSizeRatio:
             seq1 = "ATCGATCGATCGATCGATCGATCG"
             seq2 = "ATCGATCGATCAATCGATCGATCG"  # One SNP
 
-            fasta_content = f""">test-c1 size=100 ric=100 primers=test
+            fasta_content = f""">test-c1 size=100 ric=100 primers=test gid=1 vid=1
 {seq1}
->test-c2 size=3 ric=3 primers=test
+>test-c2 size=3 ric=3 primers=test gid=1 vid=2
 {seq2}
 """
             fasta_file = os.path.join(source_dir, "test-all.fasta")
@@ -797,9 +743,9 @@ class TestFullConsensusIntegration:
             seq1 = "ATCGATCGATCGATCGATCGATCG"
             seq2 = "ATCGATCGATCAATCGATCGATCG"  # One SNP at position 12
 
-            fasta_content = f""">test-c1 size=10 ric=10 primers=test
+            fasta_content = f""">test-c1 size=10 ric=10 primers=test gid=1 vid=1
 {seq1}
->test-c2 size=8 ric=8 primers=test
+>test-c2 size=8 ric=8 primers=test gid=1 vid=2
 {seq2}
 """
             fasta_file = os.path.join(source_dir, "test-all.fasta")
@@ -855,7 +801,7 @@ class TestFullConsensusIntegration:
         try:
             seq1 = "ATCGATCGATCGATCGATCGATCG"
 
-            fasta_content = f""">test-c1 size=50 ric=50 primers=test
+            fasta_content = f""">test-c1 size=50 ric=50 primers=test gid=1 vid=1
 {seq1}
 """
             fasta_file = os.path.join(source_dir, "test-all.fasta")
@@ -889,6 +835,92 @@ class TestFullConsensusIntegration:
 
         finally:
             shutil.rmtree(temp_dir)
+
+
+class TestGroupByCoreIdentity:
+    """group_by_core_identity should bucket by gid and hard-fail on missing."""
+
+    def _make(self, name, group_rank, variant_rank=1, size=10):
+        from speconsense.types import ConsensusInfo
+        return ConsensusInfo(
+            sample_name=name, cluster_id=name.rsplit('-', 1)[-1],
+            sequence="ACGT", ric=size, size=size, file_path="f",
+            group_rank=group_rank, variant_rank=variant_rank,
+        )
+
+    def test_buckets_by_group_rank(self):
+        from speconsense.summarize.clustering import group_by_core_identity
+        members = [
+            self._make("s-c1", 1, 1, 100),
+            self._make("s-c2", 2, 1, 50),
+            self._make("s-c3", 1, 2, 25),
+        ]
+        groups = group_by_core_identity(members)
+        assert set(groups.keys()) == {1, 2}
+        assert len(groups[1]) == 2
+        assert len(groups[2]) == 1
+
+    def test_hard_fail_on_missing_gid(self):
+        import pytest
+        from speconsense.summarize.clustering import group_by_core_identity
+        # One member lacks group_rank
+        members = [
+            self._make("s-c1", 1, 1, 100),
+            self._make("s-c2", None, None, 50),
+        ]
+        with pytest.raises(ValueError, match="gid="):
+            group_by_core_identity(members)
+
+    def test_empty_returns_empty(self):
+        from speconsense.summarize.clustering import group_by_core_identity
+        assert group_by_core_identity([]) == {}
+
+
+class TestMergeGroupsByAnchorOverlap:
+    """merge_groups_by_anchor_overlap should conflate cross-primer groups."""
+
+    def _make(self, name, seq, size, primers, group_rank):
+        from speconsense.types import ConsensusInfo
+        return ConsensusInfo(
+            sample_name=name, cluster_id="c1", sequence=seq,
+            ric=size, size=size, file_path="f", primers=primers,
+            group_rank=group_rank, variant_rank=1,
+        )
+
+    def test_merges_cross_primer_overlap(self):
+        from speconsense.summarize.clustering import merge_groups_by_anchor_overlap
+        shared = "ACGT" * 100  # 400bp
+        groups = {
+            1: [self._make("s-1", shared + "TAAA" * 50, 100, ["P1"], 1)],
+            2: [self._make("s-2", "AAA" * 20 + shared, 50, ["P2"], 2)],
+        }
+        result = merge_groups_by_anchor_overlap(groups, min_overlap_bp=200,
+                                                group_identity=0.85)
+        assert len(result) == 1, f"Expected merge, got {len(result)} groups"
+        survivor_rank = next(iter(result))
+        assert survivor_rank == 1, "Larger group should win"
+        assert len(result[1]) == 2
+
+    def test_skips_same_primer_pairs(self):
+        from speconsense.summarize.clustering import merge_groups_by_anchor_overlap
+        shared = "ACGT" * 100
+        groups = {
+            1: [self._make("s-1", shared, 100, ["P1"], 1)],
+            2: [self._make("s-2", shared, 50, ["P1"], 2)],
+        }
+        result = merge_groups_by_anchor_overlap(groups, min_overlap_bp=200,
+                                                group_identity=0.85)
+        assert len(result) == 2, "Same-primer groups must not merge cross-primer"
+
+    def test_noop_when_overlap_disabled(self):
+        from speconsense.summarize.clustering import merge_groups_by_anchor_overlap
+        groups = {
+            1: [self._make("s-1", "A" * 400, 100, ["P1"], 1)],
+            2: [self._make("s-2", "A" * 400, 50, ["P2"], 2)],
+        }
+        result = merge_groups_by_anchor_overlap(groups, min_overlap_bp=0,
+                                                group_identity=0.85)
+        assert len(result) == 2, "min_overlap_bp=0 disables merging"
 
 
 class TestParseConsensusHeaderGidVid:

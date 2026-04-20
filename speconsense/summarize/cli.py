@@ -60,7 +60,11 @@ from .io import (
     write_lq_variant_files,
     write_output_files,
 )
-from .clustering import perform_hac_clustering, select_variants
+from .clustering import (
+    group_by_core_identity,
+    merge_groups_by_anchor_overlap,
+    select_variants,
+)
 from .merging import merge_group_with_msa, create_full_consensus_from_msa
 from .analysis import run_spoa_msa, MAX_MSA_MERGE_VARIANTS, MIN_MERGE_BATCH, MAX_MERGE_BATCH
 
@@ -148,8 +152,10 @@ def parse_arguments():
     # Grouping group
     grouping_group = parser.add_argument_group("Grouping")
     grouping_group.add_argument("--group-identity", "--variant-group-identity",
-                                dest="group_identity", type=float, default=0.9,
-                                help="Identity threshold for variant grouping using HAC (default: 0.9)")
+                                dest="group_identity", type=float, default=0.85,
+                                help="Anchor-to-anchor identity threshold for cross-primer overlap "
+                                     "merging between core-assigned groups. Matches core's "
+                                     "--group-identity default. (default: 0.85)")
 
     # Merging group
     merging_group = parser.add_argument_group("Merging")
@@ -329,22 +335,23 @@ def process_single_specimen(file_consensuses: List[ConsensusInfo],
     file_name = os.path.basename(file_consensuses[0].file_path)
     logging.info(f"Processing specimen from file: {file_name}")
 
-    # Phase 1: HAC clustering to separate variant groups (moved before merging!)
-    scale_threshold = getattr(args, 'scale_threshold', 1001)
-    threads_arg = getattr(args, 'threads', 0)
-    max_threads = threads_arg if threads_arg > 0 else os.cpu_count()
-    scalability_config = None
-    if scale_threshold > 0:
-        scalability_config = ScalabilityConfig(
-            enabled=True,
-            activation_threshold=scale_threshold,
-            max_threads=max_threads
-        )
+    # Phase 1: honor core-assigned group_rank (gid=) to form variant groups.
+    # Core runs complete-linkage identity grouping on the clusters directly and
+    # emits the resulting rank as gid=/vid= header fields. Summarize no longer
+    # re-runs HAC inside a specimen; cross-primer overlap conflation is applied
+    # as a separate step below.
+    variant_groups = group_by_core_identity(file_consensuses)
 
-    variant_groups = perform_hac_clustering(
-        file_consensuses, args.group_identity, min_overlap_bp=args.min_merge_overlap,
-        scalability_config=scalability_config, output_dir=getattr(args, 'source', '.')
-    )
+    # Phase 1b: Cross-primer overlap conflation between core groups.
+    # Core places ITS vs ITS2 (and other cross-locus pairs) into distinct
+    # identity groups because global identity fails on length mismatch.
+    # Summarize conflates them here via anchor-to-anchor overlap-aware distance
+    # so the subsequent MSA-based merge sees them as one group. Supports the
+    # primer-pool use case (multiple primers amplifying overlapping loci in
+    # one tissue sample).
+    if args.min_merge_overlap > 0 and len(variant_groups) > 1:
+        variant_groups = merge_groups_by_anchor_overlap(
+            variant_groups, args.min_merge_overlap, args.group_identity)
 
     # Filter to max groups if specified
     if args.select_max_groups > 0 and len(variant_groups) > args.select_max_groups:

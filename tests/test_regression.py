@@ -468,11 +468,11 @@ class TestLengthFilters:
         medium_seq = "ACGT" * 125  # 500bp
         long_seq = "ACGT" * 250  # 1000bp
 
-        fasta_content = f""">short-c1 size=10 ric=10
+        fasta_content = f""">short-c1 size=10 ric=10 gid=1 vid=1
 {short_seq}
->medium-c1 size=20 ric=20
+>medium-c1 size=20 ric=20 gid=2 vid=1
 {medium_seq}
->long-c1 size=30 ric=30
+>long-c1 size=30 ric=30 gid=3 vid=1
 {long_seq}
 """
         fasta_file = os.path.join(source_dir, 'test-all.fasta')
