@@ -26,22 +26,25 @@ from .clustering import select_variants
 def parse_consensus_header(header: str) -> Tuple[Optional[str], Optional[int], Optional[int],
                                                    Optional[List[str]], Optional[float], Optional[float],
                                                    Optional[List[int]], Optional[List[int]], Optional[int],
-                                                   Optional[float], Optional[float]]:
+                                                   Optional[float], Optional[float],
+                                                   Optional[int], Optional[int]]:
     """
     Extract information from Speconsense consensus FASTA header.
 
-    Parses read identity metrics, merge metadata, and the quality metrics
+    Parses read identity metrics, merge metadata, quality metrics
     (``cer_factor`` CER decision metric and ``err_factor`` cluster-homogeneity
-    metric). Full per-position CER detail (p*, K, context tags, q_ctx values)
-    lives only in the metadata JSON.
+    metric), and the core-assigned identity ranks (``group_rank`` / ``variant_rank``
+    emitted as ``gid=`` / ``vid=``). Full per-position CER detail (p*, K, context
+    tags, q_ctx values) lives only in the metadata JSON.
 
     Returns:
         Tuple of (sample_name, ric, size, primers, rid, rid_min, raw_ric,
-        raw_len, snp_count, cer_factor, err_factor).
+        raw_len, snp_count, cer_factor, err_factor, group_rank, variant_rank).
     """
     sample_match = re.match(r'>([^ ]+) (.+)', header)
     if not sample_match:
-        return None, None, None, None, None, None, None, None, None, None, None
+        return (None, None, None, None, None, None, None, None, None,
+                None, None, None, None)
 
     sample_name = sample_match.group(1)
     info_string = sample_match.group(2)
@@ -86,8 +89,15 @@ def parse_consensus_header(header: str) -> Tuple[Optional[str], Optional[int], O
     err_factor_match = re.search(r'\berr_factor=([\d.]+)', info_string)
     err_factor = float(err_factor_match.group(1)) if err_factor_match else None
 
+    gid_match = re.search(r'\bgid=(\d+)', info_string)
+    group_rank = int(gid_match.group(1)) if gid_match else None
+
+    vid_match = re.search(r'\bvid=(\d+)', info_string)
+    variant_rank = int(vid_match.group(1)) if vid_match else None
+
     return (sample_name, ric, size, primers, rid, rid_min,
-            raw_ric, raw_len, snp_count, cer_factor, err_factor)
+            raw_ric, raw_len, snp_count, cer_factor, err_factor,
+            group_rank, variant_rank)
 
 
 def load_consensus_sequences(
@@ -145,7 +155,8 @@ def load_consensus_sequences(
         with open(fasta_file, 'r') as f:
             for record in SeqIO.parse(f, "fasta"):
                 (sample_name, ric, size, primers, rid, rid_min,
-                 _, _, _, cer_factor, err_factor) = \
+                 _, _, _, cer_factor, err_factor,
+                 group_rank, variant_rank) = \
                     parse_consensus_header(f">{record.description}")
 
                 if not sample_name:
@@ -185,6 +196,8 @@ def load_consensus_sequences(
                     rid_min=rid_min,  # Minimum read identity if available
                     cer_factor=cer_factor,
                     err_factor=err_factor,
+                    group_rank=group_rank,
+                    variant_rank=variant_rank,
                 )
 
                 # Routing priority: lq (low quality) takes precedence over ns
@@ -822,7 +835,8 @@ def load_existing_specimen_outputs(summary_dir: str) -> List[ConsensusInfo]:
         with open(fasta_file, 'r') as f:
             for record in SeqIO.parse(f, "fasta"):
                 (sample_name, ric, size, primers, rid, rid_min,
-                 raw_ric, raw_len, snp_count, cer_factor, err_factor) = \
+                 raw_ric, raw_len, snp_count, cer_factor, err_factor,
+                 group_rank, variant_rank) = \
                     parse_consensus_header(f">{record.description}")
 
                 if not sample_name:
@@ -846,6 +860,8 @@ def load_existing_specimen_outputs(summary_dir: str) -> List[ConsensusInfo]:
                     rid_min=rid_min,
                     cer_factor=cer_factor,
                     err_factor=err_factor,
+                    group_rank=group_rank,
+                    variant_rank=variant_rank,
                 )
                 consensus_list.append(consensus_info)
 

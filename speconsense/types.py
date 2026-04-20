@@ -25,6 +25,8 @@ class ConsensusInfo(NamedTuple):
     merge_indel_count: Optional[int] = None  # Number of indels consumed by merging (for cumulative tracking)
     cer_factor: Optional[float] = None  # Per-position CER factor (q*/q_ctx, K-th rooted)
     err_factor: Optional[float] = None  # Cluster-wide observed/q_ctx-expected disagreement ratio
+    group_rank: Optional[int] = None  # Core-assigned identity group rank (gid=N in header)
+    variant_rank: Optional[int] = None  # Core-assigned variant rank within group (vid=N in header)
 
 
 class OverlapMergeInfo(NamedTuple):

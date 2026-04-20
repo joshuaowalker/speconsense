@@ -889,3 +889,40 @@ class TestFullConsensusIntegration:
 
         finally:
             shutil.rmtree(temp_dir)
+
+
+class TestParseConsensusHeaderGidVid:
+    """parse_consensus_header should extract the core-emitted gid/vid tokens."""
+
+    def test_gid_vid_present(self):
+        from speconsense.summarize.io import parse_consensus_header
+        header = ">specimen-c1 size=100 ric=50 gid=2 vid=1"
+        result = parse_consensus_header(header)
+        assert len(result) == 13
+        group_rank = result[11]
+        variant_rank = result[12]
+        assert group_rank == 2
+        assert variant_rank == 1
+
+    def test_gid_vid_absent_returns_none(self):
+        from speconsense.summarize.io import parse_consensus_header
+        header = ">specimen-c1 size=100 ric=50"
+        result = parse_consensus_header(header)
+        assert result[11] is None
+        assert result[12] is None
+
+    def test_gid_vid_coexist_with_cer_and_err(self):
+        from speconsense.summarize.io import parse_consensus_header
+        header = (">specimen-c1 size=100 ric=50 cer_factor=3.200 "
+                  "err_factor=1.100 gid=3 vid=2")
+        result = parse_consensus_header(header)
+        sample_name = result[0]
+        cer_factor = result[9]
+        err_factor = result[10]
+        group_rank = result[11]
+        variant_rank = result[12]
+        assert sample_name == "specimen-c1"
+        assert cer_factor == 3.2
+        assert err_factor == 1.1
+        assert group_rank == 3
+        assert variant_rank == 2
