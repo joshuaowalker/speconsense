@@ -8,7 +8,6 @@ description: "Simulate older bioinformatics"
 speconsense:
   algorithm: greedy
   min-identity: 0.85
-  outlier-identity: 0.85
   disable-position-phasing: True
   disable-ambiguity-calling: True
   min-cluster-ratio: 0.2

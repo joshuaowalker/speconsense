@@ -431,7 +431,7 @@ class TestFindBestPhasingSubset:
             read_to_position_alleles[rid] = {50: 'G' if i < 40 else 'A'}
 
         config = ClusterProcessingConfig(
-            outlier_identity_threshold=0.95,
+            
             enable_secondpass_phasing=True,
             disable_homopolymer_equivalence=False,
             min_variant_frequency=0.05,
@@ -465,7 +465,7 @@ class TestFindBestPhasingSubset:
                 read_to_position_alleles[rid] = {50: 'A', 150: 'A'}
 
         config = ClusterProcessingConfig(
-            outlier_identity_threshold=0.95,
+            
             enable_secondpass_phasing=True,
             disable_homopolymer_equivalence=False,
             min_variant_frequency=0.05,
@@ -502,7 +502,7 @@ class TestFindBestPhasingSubset:
             read_to_position_alleles[rid] = {90: allele_90, 698: allele_698, 727: allele_727}
 
         config = ClusterProcessingConfig(
-            outlier_identity_threshold=0.95,
+            
             enable_secondpass_phasing=True,
             disable_homopolymer_equivalence=False,
             min_variant_frequency=0.05,
@@ -525,7 +525,7 @@ class TestFindBestPhasingSubset:
         from speconsense.core.workers import _find_best_phasing_subset, ClusterProcessingConfig
 
         config = ClusterProcessingConfig(
-            outlier_identity_threshold=0.95,
+            
             enable_secondpass_phasing=True,
             disable_homopolymer_equivalence=False,
             min_variant_frequency=0.10,
@@ -550,7 +550,7 @@ class TestFindBestPhasingSubset:
             read_to_position_alleles[rid] = {50: 'G' if i < 10 else 'A'}
 
         config = ClusterProcessingConfig(
-            outlier_identity_threshold=0.95,
+            
             enable_secondpass_phasing=True,
             disable_homopolymer_equivalence=False,
             min_variant_frequency=0.10,
@@ -607,7 +607,7 @@ class TestFindBestPhasingSubset:
             idx += 1
 
         config = ClusterProcessingConfig(
-            outlier_identity_threshold=0.95,
+            
             enable_secondpass_phasing=True,
             disable_homopolymer_equivalence=False,
             min_variant_frequency=0.03,
@@ -654,7 +654,7 @@ class TestFindBestPhasingSubset:
             idx += 1
 
         config = ClusterProcessingConfig(
-            outlier_identity_threshold=0.95,
+            
             enable_secondpass_phasing=True,
             disable_homopolymer_equivalence=False,
             min_variant_frequency=0.05,
@@ -710,7 +710,7 @@ class TestORWithSampleQualification:
 
         # Thresholds: 10% frequency, count 3. Fails on full (15/200=7.5%), passes on sample.
         config = ClusterProcessingConfig(
-            outlier_identity_threshold=0.95, enable_secondpass_phasing=True,
+            enable_secondpass_phasing=True,
             disable_homopolymer_equivalence=False,
             min_variant_frequency=0.10, min_variant_count=3,
         )
@@ -747,7 +747,7 @@ class TestORWithSampleQualification:
         all_read_ids, r2p = self._build_single_position_alleles(total_reads, minority)
 
         config = ClusterProcessingConfig(
-            outlier_identity_threshold=0.95, enable_secondpass_phasing=True,
+            enable_secondpass_phasing=True,
             disable_homopolymer_equivalence=False,
             min_variant_frequency=0.10, min_variant_count=3,
         )
@@ -778,7 +778,7 @@ class TestORWithSampleQualification:
         full_as_sample = set(all_read_ids)
 
         config = ClusterProcessingConfig(
-            outlier_identity_threshold=0.95, enable_secondpass_phasing=True,
+            enable_secondpass_phasing=True,
             disable_homopolymer_equivalence=False,
             min_variant_frequency=0.10, min_variant_count=3,
         )
@@ -811,7 +811,7 @@ class TestORWithSampleQualification:
         all_read_ids, r2p = self._build_single_position_alleles(total_reads, minority)
 
         config = ClusterProcessingConfig(
-            outlier_identity_threshold=0.95, enable_secondpass_phasing=True,
+            enable_secondpass_phasing=True,
             disable_homopolymer_equivalence=False,
             min_variant_frequency=0.10, min_variant_count=3,
         )
@@ -831,7 +831,7 @@ class TestORWithSampleQualification:
         all_read_ids, r2p = self._build_single_position_alleles(total_reads, minority)
 
         config = ClusterProcessingConfig(
-            outlier_identity_threshold=0.95, enable_secondpass_phasing=True,
+            enable_secondpass_phasing=True,
             disable_homopolymer_equivalence=False,
             min_variant_frequency=0.10, min_variant_count=3,
         )

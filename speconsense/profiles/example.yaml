@@ -35,7 +35,6 @@ speconsense:
   # --- Cluster Filtering ---
   # min-size: 5                   # Minimum reads per cluster (0 to disable)
   # min-cluster-ratio: 0.01       # Minimum cluster size as ratio of total reads
-  # outlier-identity: 0.85        # Identity threshold for outlier detection
 
   # --- Read Sampling ---
   # presample: 1000               # Initial random sampling of input reads

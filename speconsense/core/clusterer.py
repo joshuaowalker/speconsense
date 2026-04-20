@@ -194,7 +194,6 @@ class SpecimenClusterer:
                  disable_homopolymer_equivalence: bool = False,
                  disable_cluster_merging: bool = False,
                  output_dir: str = "clusters",
-                 outlier_identity_threshold: Optional[float] = None,
                  enable_secondpass_phasing: bool = True,
                  min_variant_frequency: float = 0.10,
                  min_variant_count: int = 3,
@@ -220,15 +219,6 @@ class SpecimenClusterer:
         self.disable_homopolymer_equivalence = disable_homopolymer_equivalence
         self.disable_cluster_merging = disable_cluster_merging
         self.output_dir = output_dir
-
-        # Auto-calculate outlier identity threshold if not provided
-        # Logic: min_identity accounts for 2×error (read-to-read comparison)
-        # outlier_identity_threshold accounts for 1×error (read-to-consensus)
-        # Therefore: outlier_identity_threshold = (1 + min_identity) / 2
-        if outlier_identity_threshold is None:
-            self.outlier_identity_threshold = (1.0 + min_identity) / 2.0
-        else:
-            self.outlier_identity_threshold = outlier_identity_threshold
 
         self.enable_secondpass_phasing = enable_secondpass_phasing
         self.min_variant_frequency = min_variant_frequency
@@ -313,7 +303,6 @@ class SpecimenClusterer:
                 "k_nearest_neighbors": self.k_nearest_neighbors,
                 "disable_homopolymer_equivalence": self.disable_homopolymer_equivalence,
                 "disable_cluster_merging": self.disable_cluster_merging,
-                "outlier_identity_threshold": self.outlier_identity_threshold,
                 "enable_secondpass_phasing": self.enable_secondpass_phasing,
                 "min_variant_frequency": self.min_variant_frequency,
                 "min_variant_count": self.min_variant_count,
@@ -1137,7 +1126,6 @@ class SpecimenClusterer:
 
         # Create config object for workers (used by both parallel and sequential paths)
         config = ClusterProcessingConfig(
-            outlier_identity_threshold=self.outlier_identity_threshold,
             enable_secondpass_phasing=self.enable_secondpass_phasing,
             disable_homopolymer_equivalence=self.disable_homopolymer_equivalence,
             min_variant_frequency=self.min_variant_frequency,
@@ -1319,7 +1307,6 @@ class SpecimenClusterer:
         just variant detection and phasing.
         """
         config = ClusterProcessingConfig(
-            outlier_identity_threshold=self.outlier_identity_threshold,
             enable_secondpass_phasing=self.enable_secondpass_phasing,
             disable_homopolymer_equivalence=self.disable_homopolymer_equivalence,
             min_variant_frequency=self.min_variant_frequency,
@@ -2130,6 +2117,27 @@ class SpecimenClusterer:
                 cluster = result['cluster']
                 actual_size = result['actual_size']
 
+                # Route any MAD-flagged outlier reads (and the full sampled set
+                # if the cluster fell below min-reads after removal) to the
+                # specimen-level discard pool. These reads will appear in the
+                # {specimen}-discards.fastq and are not reassigned (Phase 4b
+                # reassignment has already completed).
+                mad_outlier_ids = result.get('mad_outlier_ids') or set()
+                if mad_outlier_ids:
+                    self.discarded_read_ids.update(mad_outlier_ids)
+                    if result.get('dropped_by_min_reads'):
+                        logging.info(
+                            f"Cluster {final_idx}: dropped after MAD outlier "
+                            f"removal left <3 reads ({len(mad_outlier_ids)} "
+                            f"reads moved to discards)"
+                        )
+                    else:
+                        logging.debug(
+                            f"Cluster {final_idx}: removed "
+                            f"{len(mad_outlier_ids)} outlier read(s) before "
+                            f"final consensus"
+                        )
+
                 # Log sampling info for large clusters
                 if len(cluster) > self.max_sample_size:
                     logging.debug(f"Cluster {final_idx}: Sampling {self.max_sample_size} from {len(cluster)} reads for final consensus")
@@ -2342,7 +2350,6 @@ class SpecimenClusterer:
             return [(None, cluster_read_ids)]
 
         config = ClusterProcessingConfig(
-            outlier_identity_threshold=self.outlier_identity_threshold,
             enable_secondpass_phasing=self.enable_secondpass_phasing,
             disable_homopolymer_equivalence=self.disable_homopolymer_equivalence,
             min_variant_frequency=self.min_variant_frequency,

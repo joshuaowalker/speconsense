@@ -53,13 +53,6 @@ def main():
                                  help="Minimum size ratio between a cluster and the largest cluster (default: 0, 0 to disable)")
     filtering_group.add_argument("--max-sample-size", type=int, default=100,
                                  help="Maximum cluster size for consensus (default: 100)")
-    filtering_group.add_argument("--outlier-identity", type=float, default=None,
-                                 help="Minimum read-to-consensus identity to keep a read (default: auto). "
-                                      "Reads below this threshold are removed as outliers before final "
-                                      "consensus generation. Auto-calculated as (1 + min_identity) / 2. "
-                                      "This threshold is typically higher than --min-identity because "
-                                      "the consensus is error-corrected through averaging.")
-
     # Variant Phasing group
     phasing_group = parser.add_argument_group("Variant Phasing")
     phasing_group.add_argument("--disable-position-phasing", action="store_true",
@@ -221,7 +214,6 @@ def main():
         disable_homopolymer_equivalence=args.disable_homopolymer_equivalence,
         disable_cluster_merging=args.disable_cluster_merging,
         output_dir=args.output_dir,
-        outlier_identity_threshold=args.outlier_identity,
         enable_secondpass_phasing=not args.disable_position_phasing,
         min_variant_frequency=args.min_variant_frequency,
         min_variant_count=args.min_variant_count,
@@ -239,13 +231,6 @@ def main():
     )
 
     # Log configuration
-    if args.outlier_identity is not None:
-        logging.info(f"Outlier removal enabled: outlier_identity={args.outlier_identity*100:.1f}% (user-specified)")
-    else:
-        # Auto-calculated threshold
-        auto_threshold = (1.0 + args.min_identity) / 2.0
-        logging.info(f"Outlier removal enabled: outlier_identity={auto_threshold*100:.1f}% (auto-calculated from min_identity={args.min_identity*100:.1f}%)")
-
     if not args.disable_position_phasing:
         logging.info(f"Position-based variant phasing enabled: min_freq={args.min_variant_frequency:.0%}, "
                     f"min_count={args.min_variant_count}")

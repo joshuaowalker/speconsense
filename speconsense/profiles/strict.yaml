@@ -14,7 +14,6 @@ description: "High-precision settings for confident results"
 
 speconsense:
   min-identity: 0.95           # High initial clustering identity
-  outlier-identity: 0.98       # Discard reads with high mismatch
   min-cluster-ratio: 0.05      # Filter more aggressively (5% minimum)
   min-size: 10                 # Require strong cluster support
   min-variant-frequency: 0.25  # Less sensitive to variants (25%)

@@ -80,6 +80,12 @@ def identify_outliers(final_consensus: List, all_raw_consensuses: List, source_f
     don't significantly impact consensus quality. Positional analysis better captures
     systematic issues like mixed clusters or variants.
 
+    TODO: harmonize with the core MAD-based detector
+    (``speconsense.outliers.detect_rid_outliers``) as part of a broader quality
+    report revamp. Per-read metrics computed in core (err_factor, MAD outlier
+    counts) are authoritative and should drive summarize's quality reporting
+    rather than being recomputed with a different statistic here.
+
     Args:
         final_consensus: List of final consensus sequences
         all_raw_consensuses: List of all raw consensus sequences (unused, kept for API compatibility)

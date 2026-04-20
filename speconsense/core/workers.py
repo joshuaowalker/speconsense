@@ -35,12 +35,12 @@ class ClusterProcessingConfig:
 
     Passed to worker processes to avoid needing to pickle the entire SpecimenClusterer.
     """
-    __slots__ = ['outlier_identity_threshold', 'enable_secondpass_phasing',
+    __slots__ = ['enable_secondpass_phasing',
                  'disable_homopolymer_equivalence', 'min_variant_frequency', 'min_variant_count',
                  'significance_level', 'min_hp_length',
                  'max_sample_size']
 
-    def __init__(self, outlier_identity_threshold: Optional[float],
+    def __init__(self,
                  enable_secondpass_phasing: bool,
                  disable_homopolymer_equivalence: bool,
                  min_variant_frequency: float,
@@ -48,7 +48,6 @@ class ClusterProcessingConfig:
                  significance_level: float = 1e-5,
                  min_hp_length: int = 6,
                  max_sample_size: Optional[int] = None):
-        self.outlier_identity_threshold = outlier_identity_threshold
         self.enable_secondpass_phasing = enable_secondpass_phasing
         self.disable_homopolymer_equivalence = disable_homopolymer_equivalence
         self.min_variant_frequency = min_variant_frequency
@@ -183,30 +182,32 @@ def _run_spoa_for_cluster_worker(sequences: Dict[str, str],
         return None
 
 
-def _identify_outlier_reads_standalone(alignments: List[ReadAlignment], consensus_seq: str,
-                                        sampled_ids: Set[str], threshold: float) -> Tuple[Set[str], Set[str]]:
-    """Identify outlier reads below identity threshold. Standalone version for workers."""
+def _identify_mad_outlier_reads_standalone(
+    alignments: List[ReadAlignment], consensus_seq: str
+) -> Set[str]:
+    """Identify low-rid outlier reads using MAD-based detection.
+
+    Computes per-read identity against the consensus, then applies the shared
+    ``detect_rid_outliers`` helper (MAD modified Z-score + gap rule). Returns
+    the set of read IDs flagged as outliers.
+    """
+    from speconsense.outliers import detect_rid_outliers
+
     if not alignments or not consensus_seq:
-        return sampled_ids, set()
+        return set()
+    consensus_length = len(consensus_seq)
+    if consensus_length == 0:
+        return set()
 
-    try:
-        keep_ids = set()
-        outlier_ids = set()
-        consensus_length = len(consensus_seq)
-        if consensus_length == 0:
-            return sampled_ids, set()
+    read_ids = []
+    rids = []
+    for alignment in alignments:
+        error_rate = alignment.normalized_edit_distance / consensus_length
+        read_ids.append(alignment.read_id)
+        rids.append(1.0 - error_rate)
 
-        for alignment in alignments:
-            error_rate = alignment.normalized_edit_distance / consensus_length
-            identity = 1.0 - error_rate
-            if identity >= threshold:
-                keep_ids.add(alignment.read_id)
-            else:
-                outlier_ids.add(alignment.read_id)
-
-        return keep_ids, outlier_ids
-    except Exception:
-        return sampled_ids, set()
+    outlier_indices = detect_rid_outliers(rids)
+    return {read_ids[i] for i in outlier_indices}
 
 
 def _calculate_read_identity_standalone(alignments: List[ReadAlignment],
@@ -630,40 +631,15 @@ def _process_cluster_worker(args) -> Tuple[List[Dict], Set[str]]:
 
     cluster = set(cluster_ids)
 
-    # Outlier removal
-    if config.outlier_identity_threshold is not None:
-        keep_ids, outlier_ids = _identify_outlier_reads_standalone(
-            alignments, consensus, cluster, config.outlier_identity_threshold
-        )
-
-        if outlier_ids:
-            if len(cluster) == 2 and len(outlier_ids) == 1:
-                logging.debug(f"Initial cluster {initial_idx}: Split 2-read cluster due to 1 outlier")
-                for read_id in cluster:
-                    subclusters.append({
-                        'read_ids': {read_id},
-                        'initial_cluster_num': initial_idx,
-                        'allele_combo': 'single-read-split'
-                    })
-                return subclusters, discarded_ids
-
-            logging.debug(f"Initial cluster {initial_idx}: Removing {len(outlier_ids)}/{len(cluster)} outlier reads, "
-                         f"regenerating consensus")
-
-            discarded_ids.update(outlier_ids)
-            cluster = cluster - outlier_ids
-
-            # Regenerate consensus
-            sorted_ids_filtered = sorted(cluster, key=lambda x: (-qualities.get(x, 0), x))
-            cluster_seqs = {seq_id: sequences[seq_id] for seq_id in sorted_ids_filtered}
-            result = _run_spoa_for_cluster_worker(cluster_seqs, config.disable_homopolymer_equivalence)
-
-            if result is not None:
-                consensus = result.consensus
-                msa = result.msa_string
-                alignments = result.alignments
-                msa_to_consensus_pos = result.msa_to_consensus_pos
-                _calculate_read_identity_standalone(alignments, consensus)
+    # Note: a first-pass absolute-identity outlier filter used to run here
+    # (see ``--outlier-identity``, removed). Outlier screening is now done
+    # via MAD-based detection at final consensus generation
+    # (_generate_cluster_consensus_worker), which is sensitive to cluster-
+    # relative spread rather than an absolute threshold. Contaminant reads
+    # from a different organism are handled by cross-cluster reassignment
+    # (Phase 4b); low-quality reads from the correct organism are handled
+    # by MAD at final consensus. If initial-consensus quality turns out to
+    # degrade phasing meaningfully, revisit adding a MAD pass here too.
 
     # Detect variants (OR across full cluster and quality-biased sample).
     # The sample mirrors what the final IUPAC ambiguity pass will see; without
@@ -783,7 +759,7 @@ def _generate_cluster_consensus_worker(args) -> Dict:
     """
     final_idx, cluster_read_ids, sequences, qualities, config = args
 
-    cluster = cluster_read_ids
+    cluster = set(cluster_read_ids)
     actual_size = len(cluster)
 
     # Sort all cluster reads by quality for consistent output ordering
@@ -797,12 +773,43 @@ def _generate_cluster_consensus_worker(args) -> Dict:
         sorted_sampled_ids = sorted_cluster_ids[:config.max_sample_size]
         sampled_ids = set(sorted_sampled_ids)
     else:
-        sorted_sampled_ids = sorted_cluster_ids
-        sampled_ids = cluster
+        sorted_sampled_ids = list(sorted_cluster_ids)
+        sampled_ids = set(cluster)
 
     # Generate final consensus and MSA
     sampled_seqs = {seq_id: sequences[seq_id] for seq_id in sorted_sampled_ids}
     result = _run_spoa_for_cluster_worker(sampled_seqs, config.disable_homopolymer_equivalence)
+
+    # MAD-based outlier detection: remove reads whose rid is anomalously low
+    # vs. their clustermates, then re-run SPOA on the remaining reads. Bounded
+    # to one iteration to cap SPOA cost. Flagged reads are reported back so the
+    # caller can add them to the specimen-level discard pool.
+    mad_outlier_ids: Set[str] = set()
+    dropped_by_min_reads = False
+    if result is not None and result.consensus:
+        flagged = _identify_mad_outlier_reads_standalone(
+            result.alignments, result.consensus
+        )
+        if flagged:
+            remaining_ids = [rid for rid in sorted_sampled_ids if rid not in flagged]
+            if len(remaining_ids) < 3:
+                # Hard floor: cluster cannot produce a reliable consensus. Drop
+                # it entirely; all original sampled reads go to discards.
+                dropped_by_min_reads = True
+                mad_outlier_ids = set(sorted_sampled_ids)
+                result = None
+            else:
+                mad_outlier_ids = flagged
+                sorted_sampled_ids = remaining_ids
+                sampled_ids = set(remaining_ids)
+                cluster = cluster - flagged
+                actual_size = len(cluster)
+                sorted_cluster_ids = [c for c in sorted_cluster_ids if c not in flagged]
+                # Regenerate consensus on outlier-free sample
+                sampled_seqs = {sid: sequences[sid] for sid in sorted_sampled_ids}
+                result = _run_spoa_for_cluster_worker(
+                    sampled_seqs, config.disable_homopolymer_equivalence
+                )
 
     # Calculate final identity metrics
     rid, rid_min = None, None
@@ -846,5 +853,7 @@ def _generate_cluster_consensus_worker(args) -> Dict:
         'sampled_ids': sampled_ids,
         'sorted_cluster_ids': sorted_cluster_ids,
         'sorted_sampled_ids': sorted_sampled_ids,
+        'mad_outlier_ids': mad_outlier_ids,
+        'dropped_by_min_reads': dropped_by_min_reads,
         'iupac_count': iupac_count
     }
