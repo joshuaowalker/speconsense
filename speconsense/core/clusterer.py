@@ -843,7 +843,7 @@ class SpecimenClusterer:
             merged_to[i] = self._find_root(merged_to, merged_to[i])
         return merged_to[i]
 
-    def write_cluster_files(self, cluster_num: int, cluster: Set[str],
+    def write_cluster_files(self, cluster_name: str, cluster: Set[str],
                             consensus: str, trimmed_consensus: Optional[str] = None,
                             found_primers: Optional[List[str]] = None,
                             rid: Optional[float] = None,
@@ -860,6 +860,10 @@ class SpecimenClusterer:
                             identity_group_rank: Optional[int] = None,
                             identity_variant_rank: Optional[int] = None) -> None:
         """Write cluster files: reads FASTQ, MSA, and consensus FASTA.
+
+        ``cluster_name`` is the group.variant suffix used in filenames and the
+        FASTA header (e.g., ``"1.v2"``). It matches the core-assigned identity
+        group/variant rank so summarize can honor the same naming end-to-end.
 
         Read identity metrics measure internal cluster consistency (not accuracy vs. ground truth):
         - rid: Mean read identity - measures average agreement between reads and consensus
@@ -899,7 +903,7 @@ class SpecimenClusterer:
 
         # Write reads FASTQ to debug directory with new naming convention
         # Use sorted order (by quality descending) if available, matching MSA order
-        reads_file = os.path.join(self.debug_dir, f"{self.sample_name}-c{cluster_num}-RiC{ric_size}-reads.fastq")
+        reads_file = os.path.join(self.debug_dir, f"{self.sample_name}-{cluster_name}-RiC{ric_size}-reads.fastq")
         with open(reads_file, 'w') as f:
             read_ids_to_write = sorted_cluster_ids if sorted_cluster_ids is not None else cluster
             for seq_id in read_ids_to_write:
@@ -908,7 +912,7 @@ class SpecimenClusterer:
         # Write sampled reads FASTQ (only sequences used for consensus generation)
         # Use sorted order (by quality descending) if available, matching MSA order
         if sampled_ids is not None or sorted_sampled_ids is not None:
-            sampled_file = os.path.join(self.debug_dir, f"{self.sample_name}-c{cluster_num}-RiC{ric_size}-sampled.fastq")
+            sampled_file = os.path.join(self.debug_dir, f"{self.sample_name}-{cluster_name}-RiC{ric_size}-sampled.fastq")
             with open(sampled_file, 'w') as f:
                 sampled_to_write = sorted_sampled_ids if sorted_sampled_ids is not None else sampled_ids
                 for seq_id in sampled_to_write:
@@ -916,20 +920,20 @@ class SpecimenClusterer:
 
         # Write MSA (multiple sequence alignment) to debug directory
         if msa is not None:
-            msa_file = os.path.join(self.debug_dir, f"{self.sample_name}-c{cluster_num}-RiC{ric_size}-msa.fasta")
+            msa_file = os.path.join(self.debug_dir, f"{self.sample_name}-{cluster_name}-RiC{ric_size}-msa.fasta")
             with open(msa_file, 'w') as f:
                 f.write(msa)
 
         # Write untrimmed consensus to debug directory
-        with open(os.path.join(self.debug_dir, f"{self.sample_name}-c{cluster_num}-RiC{ric_size}-untrimmed.fasta"),
+        with open(os.path.join(self.debug_dir, f"{self.sample_name}-{cluster_name}-RiC{ric_size}-untrimmed.fasta"),
                   'w') as f:
-            f.write(f">{self.sample_name}-c{cluster_num} {info_str}\n")
+            f.write(f">{self.sample_name}-{cluster_name} {info_str}\n")
             f.write(consensus + "\n")
 
         # Write consensus to main output file if handle is provided
         if consensus_fasta_handle:
             final_consensus = trimmed_consensus if trimmed_consensus else consensus
-            consensus_fasta_handle.write(f">{self.sample_name}-c{cluster_num} {info_str}\n")
+            consensus_fasta_handle.write(f">{self.sample_name}-{cluster_name} {info_str}\n")
             consensus_fasta_handle.write(final_consensus + "\n")
 
     def run_mcl_clustering(self, temp_dir: str) -> List[Set[str]]:
@@ -2132,12 +2136,21 @@ class SpecimenClusterer:
         # giving summarize a stable end-to-end identity for each cluster.
         self._assign_identity_ranks(clusters)
 
-        # Build work packages for each cluster
+        # Build work packages for each cluster. cluster_id is the core-assigned
+        # group.variant designator (e.g., "1.v2"), matching the filename suffix
+        # and summarize's output naming.
         work_packages = []
         cluster_dicts_by_idx = {}
         for final_idx, cluster_dict in enumerate(clusters, 1):
             cluster = cluster_dict['read_ids']
-            cluster_dict['cluster_id'] = f"c{final_idx}"
+            group_rank = cluster_dict.get('identity_group_rank')
+            variant_rank = cluster_dict.get('identity_variant_rank')
+            if group_rank is not None and variant_rank is not None:
+                cluster_id = f"{group_rank}.v{variant_rank}"
+            else:
+                # Defensive fallback for pipelines that bypass CER validation.
+                cluster_id = f"c{final_idx}"
+            cluster_dict['cluster_id'] = cluster_id
             cluster_dicts_by_idx[final_idx] = cluster_dict
             # Pre-compute quality means for each read
             qualities = {}
@@ -2231,7 +2244,7 @@ class SpecimenClusterer:
 
                     # Write output files
                     self.write_cluster_files(
-                        cluster_num=final_idx,
+                        cluster_name=cluster_dict['cluster_id'],
                         cluster=cluster,
                         consensus=consensus,
                         trimmed_consensus=result['trimmed_consensus'],

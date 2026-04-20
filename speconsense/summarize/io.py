@@ -23,6 +23,22 @@ from .fields import FastaField, format_fasta_header
 from .clustering import select_variants
 
 
+_CLUSTER_SUFFIX_RE = re.compile(r'-\d+\.(?:v\d+(?:\.raw\d+)?|full)$')
+
+
+def strip_cluster_suffix(sample_name: str) -> str:
+    """Return ``sample_name`` with the core/summarize cluster suffix removed.
+
+    Handles the end-to-end gid.vid naming conventions:
+    - ``specimen-1.v2`` → ``specimen``
+    - ``specimen-1.v2.raw3`` → ``specimen``
+    - ``specimen-1.full`` → ``specimen``
+
+    Returns the input unchanged when no suffix is present.
+    """
+    return _CLUSTER_SUFFIX_RE.sub('', sample_name)
+
+
 def parse_consensus_header(header: str) -> Tuple[Optional[str], Optional[int], Optional[int],
                                                    Optional[List[str]], Optional[float], Optional[float],
                                                    Optional[List[int]], Optional[List[int]], Optional[int],
@@ -178,9 +194,11 @@ def load_consensus_sequences(
                     filtered_by_len += 1
                     continue
 
-                # Extract cluster ID from sample name (e.g., "sample-c1" -> "c1")
-                cluster_match = re.search(r'-c(\d+)$', sample_name)
-                cluster_id = cluster_match.group(0) if cluster_match else sample_name
+                # Extract cluster ID from sample name (e.g., "sample-1.v2" -> "1.v2").
+                # Core emits the gid.vid designator directly; preserve it verbatim
+                # so summarize can round-trip the identifier.
+                cluster_match = re.search(r'-(\d+\.v\d+)$', sample_name)
+                cluster_id = cluster_match.group(1) if cluster_match else sample_name
 
                 consensus_info = ConsensusInfo(
                     sample_name=sample_name,
@@ -284,8 +302,7 @@ def create_output_structure(groups: Dict[int, List[ConsensusInfo]],
 
         for variant_idx, variant in enumerate(selected_variants):
             # All variants get .v suffix (primary is .v1, additional are .v2, .v3, etc.)
-            # Use rsplit to split on the LAST '-c' (specimen names may contain '-c')
-            specimen_base = variant.sample_name.rsplit('-c', 1)[0]
+            specimen_base = strip_cluster_suffix(variant.sample_name)
             new_name = f"{specimen_base}-{group_idx}.v{variant_idx + 1}"
 
             # Use _replace to preserve all fields while updating sample_name
@@ -330,9 +347,11 @@ def write_consensus_fastq(consensus: ConsensusInfo,
     cluster_files = []
 
     for cluster_name in original_clusters:
-        # Look for specimen name from cluster name (e.g., "sample-c1" -> "sample")
-        if '-c' in cluster_name:
-            specimen_name = cluster_name.rsplit('-c', 1)[0]
+        # Extract specimen name from cluster name. Core emits the gid.vid suffix
+        # format (e.g., "sample-1.v2"), so trim on the last "-{digits}.v{digits}".
+        specimen_match = re.match(r'^(.+)-\d+\.v\d+$', cluster_name)
+        if specimen_match:
+            specimen_name = specimen_match.group(1)
             debug_files = fastq_lookup.get(specimen_name, [])
 
             # Get the original RiC value for this cluster
@@ -342,8 +361,9 @@ def write_consensus_fastq(consensus: ConsensusInfo,
                 continue
 
             # Filter files that match this specific cluster with exact RiC value
-            # Match the full pattern: {specimen}-c{cluster}-RiC{exact_ric}-{stage}.fastq
-            # This prevents matching multiple RiC values for the same cluster
+            # Match: {specimen}-{gid}.v{vid}-RiC{exact_ric}-{stage}.fastq.
+            # The exact RiC filter prevents matching multiple RiC values for the
+            # same cluster id.
             cluster_ric_pattern = f"{cluster_name}-RiC{original_ric.ric}-"
             matching_files = [f for f in debug_files if cluster_ric_pattern in f]
 
@@ -514,8 +534,8 @@ def write_specimen_data_files(specimen_consensus: List[ConsensusInfo],
 
         # Write FASTQ file by finding the original cluster's FASTQ
         # Look for specimen name from original cluster name
-        if '-c' in original_cluster_name:
-            specimen_name = original_cluster_name.rsplit('-c', 1)[0]
+        specimen_name = strip_cluster_suffix(original_cluster_name)
+        if specimen_name != original_cluster_name:
             debug_files = fastq_lookup.get(specimen_name, []) if fastq_lookup else []
 
             # Filter files that match this specific cluster with exact RiC value
@@ -564,9 +584,9 @@ def _write_filtered_variant_files(
             f.write(f"{consensus.sequence}\n")
 
         original_cluster_name = consensus.sample_name
-        if '-c' not in original_cluster_name:
+        specimen_name = strip_cluster_suffix(original_cluster_name)
+        if specimen_name == original_cluster_name:
             continue
-        specimen_name = original_cluster_name.rsplit('-c', 1)[0]
         debug_files = fastq_lookup.get(specimen_name, []) if fastq_lookup else []
         cluster_ric_pattern = f"{original_cluster_name}-RiC{consensus.ric}-"
         matching_files = [f for f in debug_files if cluster_ric_pattern in f]
@@ -639,9 +659,9 @@ def build_fastq_lookup_table(source_dir: str = ".") -> Dict[str, List[str]]:
             selected_stage = "unknown"
 
         # Use regex to robustly parse the filename pattern
-        # Pattern: {specimen}-c{cluster}-RiC{size}-{stage}.fastq
+        # Pattern: {specimen}-{gid}.v{vid}-RiC{size}-{stage}.fastq
         # Where stage can be: sampled, reads, untrimmed, or other variants
-        pattern = re.compile(r'^(.+)-c(\d+)-RiC(\d+)-([a-z]+)\.fastq$')
+        pattern = re.compile(r'^(.+)-(\d+\.v\d+)-RiC(\d+)-([a-z]+)\.fastq$')
 
         for fastq_path in debug_files:
             filename = os.path.basename(fastq_path)
@@ -842,8 +862,8 @@ def load_existing_specimen_outputs(summary_dir: str) -> List[ConsensusInfo]:
                 if not sample_name:
                     continue
 
-                cluster_match = re.search(r'-c(\d+)$', sample_name)
-                cluster_id = cluster_match.group(0) if cluster_match else sample_name
+                cluster_match = re.search(r'-(\d+\.v\d+)$', sample_name)
+                cluster_id = cluster_match.group(1) if cluster_match else sample_name
 
                 consensus_info = ConsensusInfo(
                     sample_name=sample_name,

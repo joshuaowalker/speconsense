@@ -59,6 +59,7 @@ from .io import (
     write_ns_variant_files,
     write_lq_variant_files,
     write_output_files,
+    strip_cluster_suffix,
 )
 from .clustering import (
     group_by_core_identity,
@@ -416,8 +417,7 @@ def process_single_specimen(file_consensuses: List[ConsensusInfo],
 
         for variant_idx, variant in enumerate(selected_variants):
             # All variants get .v suffix (primary is .v1, additional are .v2, .v3, etc.)
-            # Use rsplit to split on the LAST '-c' (specimen names may contain '-c')
-            specimen_base = variant.sample_name.rsplit('-c', 1)[0]
+            specimen_base = strip_cluster_suffix(variant.sample_name)
             new_name = f"{specimen_base}-{group_idx + 1}.v{variant_idx + 1}"
 
             # Use _replace to preserve all fields while updating sample_name
@@ -440,7 +440,7 @@ def process_single_specimen(file_consensuses: List[ConsensusInfo],
             pre_merge_variants = [v for v in variant_groups[group_id]
                                   if v.sample_name in surviving_originals]
 
-            specimen_base = selected_variants[0].sample_name.rsplit('-c', 1)[0]
+            specimen_base = strip_cluster_suffix(selected_variants[0].sample_name)
             full_name = f"{specimen_base}-{group_idx + 1}.full"
 
             if len(pre_merge_variants) == 1:

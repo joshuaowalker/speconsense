@@ -578,8 +578,9 @@ def merge_group_with_msa(variants: List[ConsensusInfo], args) -> Tuple[List[Cons
 
                     # Track overlap merge for quality reporting
                     if use_overlap_mode and len(subset_indices) > 1:
-                        # Extract specimen name (remove cluster suffix like -c1)
-                        specimen = merged_consensus.sample_name.rsplit('-c', 1)[0] if '-c' in merged_consensus.sample_name else merged_consensus.sample_name
+                        # Extract specimen name by stripping the gid.vid suffix
+                        from .io import strip_cluster_suffix
+                        specimen = strip_cluster_suffix(merged_consensus.sample_name)
                         overlap_merges.append(OverlapMergeInfo(
                             specimen=specimen,
                             iteration=iteration,

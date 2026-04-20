@@ -128,9 +128,9 @@ def test_merge_with_homopolymer_only_differences():
         # Same sequence with A homopolymer of length 8
         seq2 = "ATCGAAAAAAATCGATCGATCGATCG"
 
-        fasta_content = f""">test-seq1 size=10 ric=10 primers=test gid=1 vid=1
+        fasta_content = f""">test-seq-1.v1 size=10 ric=10 primers=test gid=1 vid=1
 {seq1}
->test-seq2 size=8 ric=8 primers=test gid=1 vid=2
+>test-seq-1.v2 size=8 ric=8 primers=test gid=1 vid=2
 {seq2}
 """
 
@@ -479,9 +479,9 @@ class TestFullConsensus:
             seq_large = "ATCGATCGATCGATCGATCGATCG"  # G at position 12
             seq_small = "ATCGATCGATCAATCGATCGATCG"  # A at position 12
 
-            fasta_content = f""">test-c1 size=100 ric=100 primers=test gid=1 vid=1
+            fasta_content = f""">test-1.v1 size=100 ric=100 primers=test gid=1 vid=1
 {seq_large}
->test-c2 size=5 ric=5 primers=test gid=1 vid=2
+>test-1.v2 size=5 ric=5 primers=test gid=1 vid=2
 {seq_small}
 """
             fasta_file = os.path.join(source_dir, "test-all.fasta")
@@ -533,9 +533,9 @@ class TestFullConsensus:
             seq_large = "ATCGATCGATCGATCGATCGATCG"
             seq_small = "ATCGATCGATCAATCGATCGATCG"
 
-            fasta_content = f""">test-c1 size=100 ric=100 primers=test gid=1 vid=1
+            fasta_content = f""">test-1.v1 size=100 ric=100 primers=test gid=1 vid=1
 {seq_large}
->test-c2 size=5 ric=5 primers=test gid=1 vid=2
+>test-1.v2 size=5 ric=5 primers=test gid=1 vid=2
 {seq_small}
 """
             fasta_file = os.path.join(source_dir, "test-all.fasta")
@@ -646,9 +646,9 @@ class TestSelectMinSizeRatio:
             seq1 = "ATCGATCGATCGATCGATCGATCG"
             seq2 = "ATCGATCGATCAATCGATCGATCG"  # One SNP — different enough to not merge
 
-            fasta_content = f""">test-c1 size=100 ric=100 primers=test gid=1 vid=1
+            fasta_content = f""">test-1.v1 size=100 ric=100 primers=test gid=1 vid=1
 {seq1}
->test-c2 size=3 ric=3 primers=test gid=1 vid=2
+>test-1.v2 size=3 ric=3 primers=test gid=1 vid=2
 {seq2}
 """
             fasta_file = os.path.join(source_dir, "test-all.fasta")
@@ -692,9 +692,9 @@ class TestSelectMinSizeRatio:
             seq1 = "ATCGATCGATCGATCGATCGATCG"
             seq2 = "ATCGATCGATCAATCGATCGATCG"  # One SNP
 
-            fasta_content = f""">test-c1 size=100 ric=100 primers=test gid=1 vid=1
+            fasta_content = f""">test-1.v1 size=100 ric=100 primers=test gid=1 vid=1
 {seq1}
->test-c2 size=3 ric=3 primers=test gid=1 vid=2
+>test-1.v2 size=3 ric=3 primers=test gid=1 vid=2
 {seq2}
 """
             fasta_file = os.path.join(source_dir, "test-all.fasta")
@@ -743,9 +743,9 @@ class TestFullConsensusIntegration:
             seq1 = "ATCGATCGATCGATCGATCGATCG"
             seq2 = "ATCGATCGATCAATCGATCGATCG"  # One SNP at position 12
 
-            fasta_content = f""">test-c1 size=10 ric=10 primers=test gid=1 vid=1
+            fasta_content = f""">test-1.v1 size=10 ric=10 primers=test gid=1 vid=1
 {seq1}
->test-c2 size=8 ric=8 primers=test gid=1 vid=2
+>test-1.v2 size=8 ric=8 primers=test gid=1 vid=2
 {seq2}
 """
             fasta_file = os.path.join(source_dir, "test-all.fasta")
@@ -801,7 +801,7 @@ class TestFullConsensusIntegration:
         try:
             seq1 = "ATCGATCGATCGATCGATCGATCG"
 
-            fasta_content = f""">test-c1 size=50 ric=50 primers=test gid=1 vid=1
+            fasta_content = f""">test-1.v1 size=50 ric=50 primers=test gid=1 vid=1
 {seq1}
 """
             fasta_file = os.path.join(source_dir, "test-all.fasta")
@@ -928,7 +928,7 @@ class TestParseConsensusHeaderGidVid:
 
     def test_gid_vid_present(self):
         from speconsense.summarize.io import parse_consensus_header
-        header = ">specimen-c1 size=100 ric=50 gid=2 vid=1"
+        header = ">specimen-2.v1 size=100 ric=50 gid=2 vid=1"
         result = parse_consensus_header(header)
         assert len(result) == 13
         group_rank = result[11]
