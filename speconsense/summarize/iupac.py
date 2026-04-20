@@ -136,7 +136,8 @@ def calculate_overlap_aware_distance(seq1: str, seq2: str, min_overlap_bp: int) 
 
     Note: This function calculates distance purely based on sequence content.
     Primer-based filtering (to prevent chimera grouping) is applied at the
-    caller level in perform_hac_clustering() using primers_are_same().
+    caller level via ``primers_are_same`` — see
+    ``merge_groups_by_anchor_overlap``.
     """
     if not seq1 or not seq2:
         return 1.0  # Maximum distance

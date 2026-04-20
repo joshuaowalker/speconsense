@@ -54,9 +54,10 @@ from .merging import (
     merge_group_with_msa,
 )
 
-# HAC clustering and variant selection
+# Grouping and variant selection
 from .clustering import (
-    perform_hac_clustering,
+    group_by_core_identity,
+    merge_groups_by_anchor_overlap,
     select_variants,
 )
 
@@ -115,8 +116,9 @@ __all__ = [
     "create_consensus_from_msa",
     "create_overlap_consensus_from_msa",
     "merge_group_with_msa",
-    # Clustering
-    "perform_hac_clustering",
+    # Grouping
+    "group_by_core_identity",
+    "merge_groups_by_anchor_overlap",
     "select_variants",
     # I/O
     "parse_consensus_header",

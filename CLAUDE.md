@@ -64,7 +64,7 @@ pytest -m "not slow"
 - `fields.py`: FASTA header field classes and formatting
 - `analysis.py`: MSA analysis, cluster quality, outlier detection
 - `merging.py`: MSA-based variant merging with IUPAC consensus
-- `clustering.py`: HAC clustering and variant selection
+- `clustering.py`: Bucketing by core-assigned gid, cross-primer anchor merger, variant selection
 - `io.py`: File I/O (loading sequences, writing consensus FASTA/FASTQ/debug outputs)
 
 **Shared top-level modules** (used by both subpackages):
@@ -107,14 +107,15 @@ pytest -m "not slow"
 ### Post-Processing Pipeline (speconsense-summarize)
 
 1. Load sequences with RiC filtering
-2. HAC variant grouping by sequence identity (separates dissimilar sequences)
-3. Homopolymer-aware MSA-based merging within each group (creates IUPAC consensus sequences)
-4. Selection size ratio filtering (`--select-min-size-ratio`) — removes tiny post-merge variants
-5. Variant selection within each group (size-based or diversity-based)
-6. Optional full consensus generation per group (`--enable-full-consensus`) — IUPAC consensus from pre-merge components of surviving post-merge variants, gaps never win; suppressed when group has only one surviving post-merge variant
-7. Output generation with full traceability
+2. Bucket by core-assigned `gid=` (identity group rank) — no re-grouping
+3. Cross-primer overlap conflation (`--min-merge-overlap`) merges different-primer core groups whose members overlap well (primer-pool use case: ITS/ITS1/ITS2)
+4. Homopolymer-aware MSA-based merging within each (possibly-conflated) group
+5. Selection size ratio filtering (`--select-min-size-ratio`) — removes tiny post-merge variants
+6. Variant selection within each group (size-based or diversity-based)
+7. Optional full consensus generation per group (`--enable-full-consensus`) — IUPAC consensus from pre-merge components of surviving post-merge variants, gaps never win; suppressed when group has only one surviving post-merge variant
+8. Output generation with full traceability
 
-Note: HAC grouping occurs BEFORE merging (since 0.4.0) to prevent inappropriate merging of dissimilar sequences (e.g., contaminants with primary targets). Homopolymer-aware merging (since 0.5.0) distinguishes structural indels from homopolymer length differences.
+Note: Identity grouping is performed once, in core, via complete linkage on `--group-identity` (default 0.85). Summarize honors those groups verbatim (hard-fails on inputs lacking `gid=`/`vid=`) and only merges *across* core groups when cross-primer overlap passes threshold.
 
 ### External Dependencies
 
