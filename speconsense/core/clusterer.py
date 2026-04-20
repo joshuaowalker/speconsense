@@ -1821,33 +1821,40 @@ class SpecimenClusterer:
 
     def _form_identity_groups(self, subclusters: List[Dict],
                               consensuses: Dict[int, Optional[str]]) -> Dict[int, List[int]]:
-        """Group clusters by pairwise adjusted identity using union-find."""
+        """Group clusters by pairwise adjusted identity using complete linkage.
+
+        Every pair of clusters in a group must satisfy the identity threshold
+        (complete linkage), preventing transitive chaining that can merge
+        closely related but distinct variants in eDNA-style mixtures.
+        """
+        from scipy.cluster.hierarchy import fcluster, linkage
+        from scipy.spatial.distance import squareform
+
         n = len(subclusters)
-        parent = list(range(n))
-
-        def find(x):
-            while parent[x] != x:
-                parent[x] = parent[parent[x]]
-                x = parent[x]
-            return x
-
-        def union(a, b):
-            ra, rb = find(a), find(b)
-            if ra != rb:
-                parent[ra] = rb
+        if n == 0:
+            return {}
+        if n == 1:
+            return {0: [0]}
 
         threshold = 1.0 - self.group_identity
+        dist_matrix = [[0.0] * n for _ in range(n)]
         for i in range(n):
             for j in range(i + 1, n):
                 ci, cj = consensuses.get(i), consensuses.get(j)
                 if ci and cj:
                     dist, _ = _hp_normalized_pairwise_compare(ci, cj)
-                    if dist <= threshold:
-                        union(i, j)
+                else:
+                    dist = 1.0
+                dist_matrix[i][j] = dist
+                dist_matrix[j][i] = dist
+
+        condensed = squareform(dist_matrix, checks=False)
+        Z = linkage(condensed, method='complete')
+        labels = fcluster(Z, t=threshold, criterion='distance')
 
         groups: Dict[int, List[int]] = defaultdict(list)
-        for i in range(n):
-            groups[find(i)].append(i)
+        for idx, label in enumerate(labels):
+            groups[int(label)].append(idx)
         return dict(groups)
 
     def _validate_identity_group(self, subclusters: List[Dict],

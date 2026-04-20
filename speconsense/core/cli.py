@@ -69,8 +69,9 @@ def main():
     phasing_group.add_argument("--significance-level", type=float, default=1e-5,
                                help="Significance level (alpha) for variant significance testing (default: 1e-5)")
     phasing_group.add_argument("--group-identity", type=float, default=0.85,
-                               help="Minimum pairwise identity to group clusters for CER validation. "
-                                    "Clusters below this threshold are validated independently. (default: 0.85)")
+                               help="Minimum pairwise identity to group clusters for read reassignment, "
+                                    "discard recovery, and CER validation. Grouping uses complete linkage: "
+                                    "every pair within a group must meet this threshold. (default: 0.85)")
     phasing_group.add_argument("--hp-min-length", type=int, default=6,
                                help="Minimum homopolymer run length to treat as HP context in MSA "
                                     "variant detection. Runs of length >= this value have their length "

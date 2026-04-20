@@ -155,7 +155,7 @@ The codebase uses IUPAC nucleotide ambiguity codes throughout:
 
 ### Variant Significance and CER
 
-Phasing uses a three-stage architecture: phase indiscriminately, group by identity, then annotate pairwise via CER. Key pieces:
+Phasing uses a three-stage architecture: phase indiscriminately, group by identity, then annotate pairwise via CER. Identity grouping uses **complete linkage** (every pair in a group must meet `--group-identity`, default `0.85`) via `scipy.cluster.hierarchy`, preventing transitive chains that would otherwise collapse closely related variants in eDNA-style mixtures. The same groups gate Phase 4b read reassignment and Phase 4b3 discard recovery — reads can only move within their identity group. Key pieces:
 - `significance.compute_critical_error_rate(N, M, L, alpha, K)` — p* under uniform model (q=p/3), with combinatorial Bonferroni for `K>1` multi-position variants.
 - `context.classify_variant_context()` produces one `ContextTag` per variant event (substitution or contiguous indel block). HP context comes from the reference consensus — the artifact hypothesis under test is that the candidate's reads are miscalled copies of the reference.
 - `qctx.get_qctx(tag, table)` returns a per-position error rate; HP runs longer than the table's max route to blanket homopolymer normalization.
