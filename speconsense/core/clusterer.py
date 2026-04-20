@@ -350,6 +350,43 @@ class SpecimenClusterer:
         logging.debug(f"Wrote run metadata to {metadata_file}")
 
     @staticmethod
+    def _assign_identity_ranks(cluster_dicts: List[Dict]) -> None:
+        """Stamp identity_group_rank and identity_variant_rank on clusters.
+
+        Groups are ranked by anchor (largest member) size descending. Variants
+        within each group are ranked by size descending. Clusters without an
+        ``identity_group_id`` are skipped (they won't emit gid/vid).
+        """
+        group_anchor_size: Dict[str, int] = {}
+        for cluster_dict in cluster_dicts:
+            gid = cluster_dict.get('identity_group_id')
+            if gid is None:
+                continue
+            size = len(cluster_dict.get('read_ids', []))
+            group_anchor_size[gid] = max(group_anchor_size.get(gid, 0), size)
+
+        group_rank_map = {
+            gid: rank for rank, (gid, _) in enumerate(
+                sorted(group_anchor_size.items(), key=lambda kv: kv[1], reverse=True),
+                start=1,
+            )
+        }
+        for cluster_dict in cluster_dicts:
+            gid = cluster_dict.get('identity_group_id')
+            if gid is not None:
+                cluster_dict['identity_group_rank'] = group_rank_map[gid]
+
+        group_members: Dict[str, List[Dict]] = defaultdict(list)
+        for cluster_dict in cluster_dicts:
+            gid = cluster_dict.get('identity_group_id')
+            if gid is not None:
+                group_members[gid].append(cluster_dict)
+        for members in group_members.values():
+            members.sort(key=lambda c: len(c.get('read_ids', [])), reverse=True)
+            for rank, cluster_dict in enumerate(members, start=1):
+                cluster_dict['identity_variant_rank'] = rank
+
+    @staticmethod
     def _build_identity_group_summary(cluster_dicts: List[Dict]) -> List[Dict]:
         """Aggregate per-cluster identity_group_id tags into group records."""
         groups: Dict[str, Dict] = {}
@@ -374,6 +411,8 @@ class SpecimenClusterer:
         return {
             'cluster_id': cluster_dict.get('cluster_id'),
             'identity_group': cluster_dict.get('identity_group_id'),
+            'group_rank': cluster_dict.get('identity_group_rank'),
+            'variant_rank': cluster_dict.get('identity_variant_rank'),
             'M': len(cluster_dict.get('read_ids', [])),
             'N': cluster_dict.get('cer_group_N'),
             'K': details.get('K') if details else None,
@@ -817,7 +856,9 @@ class SpecimenClusterer:
                             sorted_sampled_ids: Optional[List[str]] = None,
                             iupac_count: int = 0,
                             cer_factor: Optional[float] = None,
-                            err_factor: Optional[float] = None) -> None:
+                            err_factor: Optional[float] = None,
+                            identity_group_rank: Optional[int] = None,
+                            identity_variant_rank: Optional[int] = None) -> None:
         """Write cluster files: reads FASTQ, MSA, and consensus FASTA.
 
         Read identity metrics measure internal cluster consistency (not accuracy vs. ground truth):
@@ -850,6 +891,10 @@ class SpecimenClusterer:
                 info_parts.append(f"cer_factor={cer_factor:.3f}")
         if err_factor is not None:
             info_parts.append(f"err_factor={err_factor:.3f}")
+        if identity_group_rank is not None:
+            info_parts.append(f"gid={identity_group_rank}")
+        if identity_variant_rank is not None:
+            info_parts.append(f"vid={identity_variant_rank}")
         info_str = " ".join(info_parts)
 
         # Write reads FASTQ to debug directory with new naming convention
@@ -2080,6 +2125,13 @@ class SpecimenClusterer:
             primers=primers
         )
 
+        # Compute identity group/variant ranks for the surviving clusters.
+        # Groups are ranked by anchor (largest-member) size desc; variants
+        # within each group are ranked by size desc. These drive gid=/vid=
+        # header emission and the group_rank/variant_rank metadata fields,
+        # giving summarize a stable end-to-end identity for each cluster.
+        self._assign_identity_ranks(clusters)
+
         # Build work packages for each cluster
         work_packages = []
         cluster_dicts_by_idx = {}
@@ -2195,6 +2247,8 @@ class SpecimenClusterer:
                         iupac_count=iupac_count,
                         cer_factor=cluster_cer_factor,
                         err_factor=err_factor,
+                        identity_group_rank=cluster_dict.get('identity_group_rank'),
+                        identity_variant_rank=cluster_dict.get('identity_variant_rank'),
                     )
 
         return clusters_with_ambiguities, total_ambiguity_positions
