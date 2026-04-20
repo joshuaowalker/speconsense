@@ -167,7 +167,7 @@ Phasing uses a three-stage architecture: phase indiscriminately, group by identi
 
 Complementary to CER, `err_factor` is a cluster-wide observed-vs-q_ctx-expected disagreement ratio: for each non-gap consensus column, the fraction of reads disagreeing with the consensus divided by the q_ctx rate predicted for that column's context (HP run length or non-HP). Values near 1.0 indicate reads consistent with basecaller noise; values ≫ 1.0 indicate internal heterogeneity beyond what sequencing noise would produce. Unlike `cer_factor`, `err_factor` is peer-independent — it distinguishes novel-but-real sequences (low) from noise combinations (high).
 
-Computed in `msa.compute_cluster_err_factor(msa_string, qctx_table)` during final consensus generation; emitted as `err_factor=` in the FASTA header and stored with raw `obs_sum`/`exp_sum`/`cols` in metadata JSON for reproducibility. **Summarize filters on it** via `--max-err-factor` (default `0` disables; `2.0` is a well-calibrated threshold). Records above threshold route to `__Summary__/variants/{name}.lq-RiC{ric}.fasta`; `.lq` takes precedence over `.ns` when both fire.
+Computed in `msa.compute_cluster_err_factor(msa_string, qctx_table)` during final consensus generation; emitted as `err_factor=` in the FASTA header and stored with raw `obs_sum`/`exp_sum`/`cols` in metadata JSON for reproducibility. **Summarize filters on it** via `--max-err-factor` (default `1.5`; `0` disables). Records above threshold route to `__Summary__/variants/{name}.lq-RiC{ric}.fasta`; `.lq` takes precedence over `.ns` when both fire. The 1.5 default is safe because MAD outlier removal at final consensus (see ``speconsense.outliers.detect_rid_outliers``) removes single-read outliers that would otherwise inflate err_factor on real clusters.
 
 ### Algorithm Selection
 
@@ -202,7 +202,7 @@ Parameters are controlled via CLI arguments, optionally pre-set via YAML profile
 - Variant phasing (`--disable-position-phasing`, `--min-variant-frequency`, `--significance-level`)
 - q_ctx table selection (`--qctx-profile`, `--hp-min-length`)
 - Summarize CER filter (`--min-cer-factor`, default `1.0`, `0` disables)
-- Summarize err_factor filter (`--max-err-factor`, default `0` disabled; `2.0` well-calibrated threshold)
+- Summarize err_factor filter (`--max-err-factor`, default `1.5`; `0` disables)
 
 ## Integration with specimux-suite
 

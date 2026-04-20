@@ -139,12 +139,12 @@ def parse_arguments():
                                       "Variants with cer_factor=None (anchors, clusters without a "
                                       "valid pairwise comparison) always pass. Set to 0 to disable "
                                       "CER filtering. (default: 1.0)")
-    filtering_group.add_argument("--max-err-factor", type=float, default=0.0,
+    filtering_group.add_argument("--max-err-factor", type=float, default=1.5,
                                  help="Maximum cluster err_factor (observed/q_ctx-expected "
                                       "disagreement ratio). Clusters above this threshold are "
                                       "routed to __Summary__/variants/ as .lq records. Variants "
                                       "with err_factor=None (legacy output) always pass. Set to 0 "
-                                      "to disable err_factor filtering (default: 0).")
+                                      "to disable err_factor filtering. (default: 1.5)")
     # Grouping group
     grouping_group = parser.add_argument_group("Grouping")
     grouping_group.add_argument("--group-identity", "--variant-group-identity",
