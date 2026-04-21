@@ -179,8 +179,11 @@ This is the formulation in~\cite{cer_paper}; appropriate when every position
 is tested independently.
 
 \item[Per-site count with HP aggregation.] $n_\text{sites} = (\text{non-HP positions}) + (\text{HP runs of } L \geq 2)$.
-A length-5 HP run is one site for length-variant testing, not five.
-For ITS amplicons of $\sim$700~bp, this aggregation reduces $n_\text{sites}$
+Equivalently, $n_\text{sites}$ is the length of the \emph{homopolymer-compressed}
+consensus --- the sequence obtained by collapsing each maximal run of identical
+bases to a single base (so \texttt{CAAAGGGG} has three sites: one per distinct
+run). A length-5 HP run is one site for length-variant testing, not five. For
+ITS amplicons of $\sim$700~bp, this aggregation reduces $n_\text{sites}$
 modestly (typically by $\sim$15--25\%) because most HP runs are short.
 
 \item[Per-site count with alternative-base correction.] Each non-HP position
@@ -298,42 +301,40 @@ specificity. Section~\ref{sec:reproducibility} describes how the factor can be
 recomputed at any threshold from stored metadata without re-running the
 pipeline.
 
+In the initial deployment the production default is factor $\geq 1.0$, not
+the factor $\geq 2$ analyzed above. This is a pragmatic interim choice: the
+factor $= 1$ boundary is the straightforward ``observation explainable by the
+empirical rate alone'' cut, easy to reason about while the pipeline accumulates
+validation data. The threshold is expected to be tuned upward (likely toward
+factor $\geq 2$ for deposit-quality calls) once the empirical distribution of
+factor values on real workloads is characterized. Because the factor is recorded
+per-variant in the metadata JSON (Section~\ref{sec:reproducibility}), threshold
+tuning does not require re-running the upstream pipeline.
+
 \subsection{FASTA annotation scheme}
 \label{sec:fasta_annotation}
 
-Two CER fields are emitted per consensus header. The factor is the primary
-decision metric; the details field is a structured string that gives the
-reader enough context to interpret the factor without reproducing the full
-metadata (which lives in the per-specimen JSON,
-Section~\ref{sec:reproducibility}).
+A single CER field is emitted per consensus header; the forensic detail lives
+in the per-specimen metadata JSON (Section~\ref{sec:reproducibility}).
 
 \begin{lstlisting}
->sample-c1 size=200 ric=100 rid=95.2 cer_factor=4.2 cer_details=p*=0.031;ctx=non-hp-sub;q=0.0059
+>sample-1.v2 size=200 ric=100 rid=95.2 cer_factor=4.2
 \end{lstlisting}
 
-For mixed-context $K > 1$ variants, the details field encodes per-position
-context tags and rates joined by \texttt{+}, with the explicit $K$ value:
+The header carries only \texttt{cer\_factor}: a single dimensionless number,
+the primary decision metric; higher means more robust. Per-position detail
+($p^*$, $K$, context tags, $q_\text{ctx}$ values, reference cluster index)
+lives in the metadata JSON.
 
-\begin{lstlisting}
->sample-c2 size=42 ric=42 rid=98.7 cer_factor=246.6 cer_details=p*=0.031;K=2;ctx=non-hp-sub+hp-l3-A-del1;q=0.0059+0.0213
-\end{lstlisting}
-
-The two fields:
-\begin{itemize}
-\item \texttt{cer\_factor}: the headline decision metric, $p^* / q_\text{ctx}$.
-A single dimensionless number; higher means more robust.
-\item \texttt{cer\_details}: a semicolon-separated structured string encoding
-$p^*$, the $K$ value (omitted when $K = 1$), the per-position context tag(s),
-and the per-position empirical error rate(s). Per-position values for $K > 1$
-are joined by \texttt{+} in the order the positions were evaluated. Provides
-enough information to interpret \texttt{cer\_factor} (e.g., distinguish a
-single-position non-HP variant from a multi-position mixed-context variant)
-and to sanity-check the factor's derivation against a remembered platform
-rate. The full per-position breakdown, $\alpha$, $N$, $M$,
-$n_\text{sites}$, identity-group membership, and recomputation inputs live in
-the per-specimen metadata JSON (Section~\ref{sec:reproducibility}); the
-header carries only what a reader needs to triage a variant at a glance.
-\end{itemize}
+An earlier draft of this framework emitted a parallel \texttt{cer\_details}
+field in the header encoding $p^*$, $K$, and context/$q$ pairs joined by
+\texttt{+}. We abandoned this in implementation: at $K > 1$ the field becomes
+a multi-token string that crowds the fixed-width \texttt{-all.fasta} header,
+inflates line length past comfortable terminal display, and duplicates data
+the metadata JSON already carries in structured form. The header is the
+triage surface (\emph{does this variant pass?}); the JSON is the forensic
+surface (\emph{why does this variant pass?}). Splitting by role keeps the
+header scannable and the forensic detail queryable.
 
 \section{Parameterizing $q_\text{ctx}$}
 \label{sec:parameterization}
@@ -360,11 +361,11 @@ analysis~\cite{hp_paper}~\S 4 demonstrates that interface substitutions occur
 at rates indistinguishable from non-HP substitutions; they are assigned the
 non-HP substitution rate.
 
-\item[HP length change at $(b, L, \delta)$.] The variant differs from the
-consensus by a length change in an HP run of base $b$ at length $L$ by amount
-$\delta$ (e.g., $\delta = -1$ for a one-base deletion). Empirical
-$q_\text{ctx}$ is read from the per-(base, length, direction) table
-in~\cite{hp_paper}~\S 3.3.
+\item[HP length change at $L$.] The variant differs from the consensus by a
+length change in an HP run of reference length $L \in \{2, 3, 4, 5\}$.
+Empirical $q_\text{ctx}$ is read from the per-$L$ table
+in~\cite{hp_paper}~\S 3.3, pooled across base and direction
+(Section~\ref{sec:qctx_pooling}).
 
 \item[HP length change at $L \geq 6$.] Suppressed by blanket normalization;
 no $q_\text{ctx}$ assigned and no CER evaluation. This follows the
@@ -376,9 +377,54 @@ the non-HP rate as a placeholder. Indels at non-HP positions are rare in
 amplicon data and do not warrant a separate empirical column at this stage.
 \end{description}
 
-The classifier returns a context tag and a $q_\text{ctx}$ value. For mixed-
-context $K > 1$ variants, the per-position tags are recorded as a list and
-the joint $q_\text{ctx}$ is the product (Equation~\ref{eq:unified_kn}).
+The classifier returns a context tag and a $q_\text{ctx}$ value. The context
+tag records the base and direction of an HP-length event for output
+annotation (e.g., \texttt{hp-l3-A-del1}), even though the $q_\text{ctx}$
+lookup uses only the length. For mixed-context $K > 1$ variants, the
+per-position tags are
+recorded as a list and the joint $q_\text{ctx}$ is the product
+(Equation~\ref{eq:unified_kn}).
+
+\subsubsection{Pooling base and direction in HP $q_\text{ctx}$}
+\label{sec:qctx_pooling}
+
+The HP length-change class could in principle split along three sub-dimensions:
+base $b \in \{A, T, C, G\}$, reference length $L$, and direction/magnitude
+$\delta$ (deletion vs. insertion, one-base vs. multi-base). A fully specified
+table would require $\sim\!4 \times 4 \times \geq\!2 = 32+$ entries for the
+$L \leq 5$ regime alone. The shipped tables collapse $b$ and $\delta$, keeping
+only $L$: five HP entries plus two non-HP entries. This is a deliberate
+simplification driven by empirical signal-to-noise in~\cite{hp_paper}:
+
+\begin{itemize}
+\item \textbf{Base (pooled).} Per-base variation at $L \leq 5$ on Dorado v5.0
+is small: maximum over minimum across bases is $1.14$ at $L = 1$ rising to
+$1.39$ at $L = 5$~\cite{hp_paper}~\S 7.6. The ``worst-case base'' is not
+consistent across lengths (T at $L = 2$--$3$, G at $L = 4$--$5$), so no
+stable A/T-vs-C/G split is supported in this regime.
+
+\item \textbf{Direction (pooled).} The deletion-to-insertion ratio is 3--5:1
+at moderate lengths~\cite{hp_paper}~\S 3.4, but per-cell counts for
+insertions --- especially at $(b, L, \delta = +\!1)$ --- are sparse. Splitting
+would produce unstable rates for the less-populated cells.
+
+\item \textbf{Length (kept).} The per-$L$ effect is the largest and most
+stable: rates rise monotonically from $0.67\%$ at $L = 1$ to $1.13\%$ at
+$L = 5$ on ont98~\cite{hp_paper}~Table~4, a $\sim\!1.7\times$ span resolved
+above cross-run noise.
+\end{itemize}
+
+The larger error-table uncertainty --- $\sim\!0.6\times$ between sequencing
+runs on the same basecaller~\cite{hp_paper}~\S 5.4 --- dominates the
+$\sim\!1.4\times$ per-base and $\sim\!3\text{--}5\times$ direction effects
+only for the insertion direction; for deletions on pooled data the dominant
+axes are length and run-to-run variation, which the current scheme captures.
+Finer segmentation by base and direction is straightforward to add (extend
+the YAML with \texttt{hp-l$\{L\}$-$\{b\}$-$\{\delta\}$} keys; the lookup
+function already accepts arbitrary string keys) if future data shows the
+finer cells stabilizing above the run-to-run noise floor. The output context
+tag records the base and direction regardless, so downstream re-analysis
+against a finer table requires no upstream re-run.
 
 \subsection{Sources of $q_\text{ctx}$ values}
 
@@ -388,11 +434,11 @@ levels of pipeline maturity:
 \begin{description}
 \item[Phase 1 (initial deployment): shipped per-basecaller table.] A static
 $q_\text{ctx}$ table is bundled with speconsense, parameterized by basecaller
-identifier (e.g., \texttt{dorado-v5.0.0}). Values are drawn from the
-empirical analysis in~\cite{hp_paper} for each (base, length, direction)
-combination. The table includes a version stamp recorded in metadata
+identifier (e.g., \texttt{dorado-v5.0}). Values are drawn from the empirical
+analysis in~\cite{hp_paper}, pooled across base and direction as described in
+Section~\ref{sec:qctx_pooling}. The table identifier is recorded in metadata
 (Section~\ref{sec:reproducibility}). Users select their basecaller via a CLI
-flag (\texttt{--qctx-table dorado-v5.0.0}) or accept the default.
+flag (\texttt{--qctx-profile dorado-v5.0}) or accept the default.
 
 \item[Phase 2 (mature deployment): per-run estimation.] $q_\text{ctx}$ is
 estimated from the current run's MSAs at pipeline startup. The estimator
@@ -435,11 +481,13 @@ of these stages.
 \subsection{N denominator choice}
 \label{sec:n_choice}
 
-CER is evaluated only at post-phasing pairwise validation
+CER is computed only at post-phasing pairwise validation
 (Section~\ref{sec:phasing_design}); phasing itself uses local frequency and
-count thresholds without statistical gating. The denominator $N$ in the
-binomial therefore has a single definition at the only point where it enters
-the computation.
+count thresholds without statistical gating, and any pass/fail decision from
+\texttt{cer\_factor} is deferred to summarize
+(Section~\ref{sec:annotation_vs_gating}). The denominator $N$ in the binomial
+therefore has a single definition at the only point where it enters the
+computation.
 
 \paragraph{Identity-group sum.} When validating one cluster against another
 within an identity group, $N$ is the sum of read counts within the group, not
@@ -478,16 +526,29 @@ candidate.
 \subsection{Identity groups}
 \label{sec:identity_groups}
 
-An \emph{identity group} is a connected component of clusters whose pairwise
-HP-normalized identity exceeds a threshold. Groups define the comparison set
-for pairwise CER: a candidate variant is tested against members of its own
-identity group, not against the entire specimen.
+An \emph{identity group} is a set of clusters whose pairwise HP-normalized
+identity exceeds a threshold for \emph{every} pair in the group. Groups define
+the comparison set for pairwise CER: a candidate variant is tested against
+members of its own identity group, not against the entire specimen.
 
-\paragraph{Construction.} Groups are formed by union-find using
-\texttt{\_hp\_normalized\_pairwise\_compare} as the distance function. The
-default threshold is 85\% identity (15\% adjusted-identity distance), tunable
-via \texttt{--group-identity}. Two clusters are joined if their pairwise
-identity exceeds the threshold; transitive closure forms groups.
+\paragraph{Construction.} Groups are formed by complete-linkage hierarchical
+clustering (\texttt{scipy.cluster.hierarchy}) on pairwise HP-normalized
+adjusted-identity distance, cut at $1 - \texttt{group\_identity}$. The default
+threshold is 85\% identity (15\% adjusted-identity distance), tunable via
+\texttt{--group-identity}. Under complete linkage, every pair of members in a
+group satisfies the identity threshold; under single-linkage union-find, only
+a single connecting chain is required.
+
+\paragraph{Why complete linkage over union-find.} We adopted complete linkage
+after observing transitive-chain failures on environmental-DNA specimens. eDNA
+samples commonly contain taxonomically distinct but related sequences (e.g.,
+sibling species amplified together) that would form a single chain under
+union-find at any reasonable threshold, collapsing real organismal diversity
+into one identity group and producing misleading CER comparisons between
+unrelated amplicons. Complete linkage ensures that grouping survives the
+``furthest pair'' test: two clusters whose pairwise identity is below threshold
+cannot end up in the same group via an intermediate. This matches the
+within-specimen identity criterion we want the group to enforce.
 
 \paragraph{Role in CER decisions.} Within each identity group, clusters are
 ordered by size. The largest cluster (the \emph{anchor}) auto-passes CER
@@ -520,9 +581,10 @@ up $q_{\text{ctx},i}$.
 
 \item Compute the joint per-read error probability $\prod_i q_{\text{ctx},i}$.
 
-\item Take $L = \max(|A_\text{cons}|, |B_\text{cons}|)$ as the consensus
-length input to $n_\text{sites}$ (which subtracts HP-aggregated runs as
-described in Section~\ref{sec:nsites}).
+\item Compute $n_\text{sites}$ over the longer of the two consensuses by
+counting maximal base runs (Section~\ref{sec:nsites}): each non-HP position
+contributes one site, and each HP run of length $\geq 2$ also contributes one
+site regardless of run length.
 
 \item Take $N$ as the identity-group sum (Section~\ref{sec:n_choice}) and $M$
 as the candidate cluster's read count.
@@ -536,6 +598,33 @@ comparisons against validated cluster references. This conservative choice
 reflects the worst-case artifact source and ensures that if any nearby
 validated cluster could plausibly explain the candidate as artifact, the
 candidate is suppressed.
+
+\subsection{Annotation in core, gating in summarize}
+\label{sec:annotation_vs_gating}
+
+The speconsense pipeline partitions responsibility across two executables:
+\texttt{speconsense} (core) produces consensus sequences with per-variant CER
+annotations, and \texttt{speconsense-summarize} consumes the annotated output
+and applies user-visible thresholds. CER gating lives exclusively in summarize.
+
+Every non-anchor candidate is pairwise-compared against all larger peers in
+its identity group, annotated with a \texttt{cer\_factor} (per-position
+multiplicative inflation; worst-case across peers), and flows through to the
+FASTA output. Records with \texttt{cer\_factor} below the user-configured
+\texttt{--min-cer-factor} are routed by summarize to a separate \texttt{.ns}
+(non-significant) output file, mirroring the primary output layout; records
+with \texttt{cer\_factor} undefined (anchors, comparisons that failed to
+converge) always pass.
+
+This separation is deliberate. CER gating answers a question with a tunable
+threshold: which variants should a reader \emph{see} as primary calls? That
+threshold depends on the reader's application (reference deposit vs.\
+diversity survey), their platform's current error characterization, and the
+significance level chosen for the run. Baking the gate into core would force
+re-running clustering and consensus generation to retune the threshold.
+Keeping annotation in core and gating in summarize makes threshold retuning a
+seconds-scale rerun of summarize on the same FASTA, and preserves the
+sub-threshold clusters as inspection artifacts rather than destroying them.
 
 \subsection{Phasing without statistical gating}
 \label{sec:phasing_design}
@@ -616,41 +705,73 @@ question it is structurally suited to answer.
 \subsection{HP detection and normalization}
 \label{sec:hp_normalization}
 
-The existing pipeline applies HP-length normalization in two places:
+The pipeline treats HP-length variation at three distinct stages with
+deliberately different normalization defaults. Taken together, these stages
+admit HP length variants at $L \leq 5$ into CER evaluation with an appropriate
+$q_\text{ctx}$ while suppressing the noisier $L \geq 6$ regime, as motivated
+by~\cite{hp_paper}~\S 8.1.
 
-\begin{enumerate}
-\item During clustering identity computation (\texttt{\_hp\_normalized\_pairwise\_compare}),
-HP length differences within runs of length $\geq 6$ contribute zero distance.
-\item During MSA-based variant detection, HP length differences are blanket-
-discarded as ``not real variants'' regardless of length.
-\end{enumerate}
+\paragraph{Stage 1 --- initial clustering identity.} Initial read clustering
+(both the MCL K-NN graph and the greedy algorithm) uses \emph{raw} edlib
+identity, $1 - \mathrm{editDistance}/\max(|s_1|,|s_2|)$, computed in
+\texttt{SpecimenClusterer.calculate\_similarity}. No homopolymer normalization
+is applied at this stage. The threshold \texttt{--min-identity} (default
+$0.90$) filters raw pairs. HP length variants at $L \leq 5$ therefore do not
+drive separation at this stage for the typical amplicon: a single-base HP-
+length disagreement on a $\sim\!700$~bp ITS read contributes $\sim\!0.15\%$ to
+raw distance, well inside the $10\%$ tolerance of the default threshold, so
+reads with HP length polymorphism pool into the same initial cluster in
+practice. This is a threshold-driven outcome, not an explicit HP
+normalization; sequences with accumulated error that crosses the threshold
+can still separate.
 
-The first behavior is preserved: HP normalization in clustering distance is
-a separate concern from variant calling and need not change.
+\paragraph{Stage 2 --- phasing variant detection.} MSA-based variant
+detection (\texttt{is\_variant\_position\_with\_composition} in
+\texttt{speconsense.msa}) subtracts the HP-extension contribution from the
+raw base-composition counts before thresholding, but does so only for HP runs
+whose length meets the \texttt{min\_hp\_length} threshold of the HP-context
+builder (default $6$). At $L \leq 5$ the HP-extension composition is empty,
+so the subtraction is a no-op and HP length variants are surfaced as candidate
+phasing positions. At $L \geq 6$ the subtraction zeros the variant count and
+the position is suppressed. Phasing therefore \emph{does} split an initial
+cluster when its reads disagree at an $L \leq 5$ HP-length column, producing
+separate consensus clusters that flow downstream.
 
-The second behavior changes when the context-aware framework is active. HP
-length variants at $L \leq 5$ become candidate variants subject to CER
-evaluation with the appropriate $q_\text{ctx}$. HP length variants at
-$L \geq 6$ continue to be blanket-discarded, following the recommendation
-of~\cite{hp_paper}~\S 8.1.
+\paragraph{Stage 3 --- post-phasing HP-equivalence merging.} Clusters whose
+consensuses differ only in HP lengths are candidates for merging via
+\texttt{are\_homopolymer\_equivalent}, again with \texttt{min\_hp\_length} of
+$6$. Two clusters differing only at an $L \leq 5$ HP position are not merged
+and are carried forward as distinct variants; differences at $L \geq 6$ are
+treated as HP-equivalent and collapsed.
 
-\paragraph{Pipeline ordering.} The MSA variant detector must be reordered
-so that HP length differences are surfaced as candidate variants (with their
-context tags) rather than dropped. The CER validation phase then evaluates
-these candidates with the same machinery as substitution variants.
-Implementation note: the existing
-\texttt{is\_variant\_position\_with\_composition} function tracks
-\texttt{homopolymer\_composition} separately from raw base counts; this
-information feeds the context classifier directly.
+The three stages together enforce the following regime for HP length
+variation. At $L \leq 5$: Stage 1 pools reads through threshold tolerance
+(raw single-base indels are below the $10\%$ distance budget), Stage 2
+surfaces the column as a phasing candidate, and Stage 3 leaves the resulting
+split intact. At $L \geq 6$: Stage 1 still pools most reads through threshold
+tolerance, Stage 2 suppresses the variant column entirely, and Stage 3
+collapses any residual split via HP-equivalence merging. The
+\texttt{min\_hp\_length} defaults at Stages 2 and 3 are intentionally aligned
+to $6$: lowering it at Stage 2 would let high-error long runs drive spurious
+splits, and lowering it at Stage 3 would erase the short-HP variants that
+Stage 2 just surfaced.
 
-\paragraph{Ambiguity handling.} HP length variants that fail CER (factor $< 2$)
-should be absorbed into the parent cluster's consensus as ambiguity, mirroring
-the behavior for failed substitution variants. Whether to encode HP length
-ambiguity as IUPAC codes, as the modal length, or as a special annotation is
-an open question; the current implementation uses the modal length without
-explicit ambiguity annotation. A revised approach could record HP length
-variation (e.g., \texttt{poly\_A[5..6]} as a header annotation) for downstream
-inspection.
+\paragraph{Downstream handling.} Surviving $L \leq 5$ HP-length variants
+reach pairwise CER evaluation as $K = 1$ candidates whose single differing
+position carries an \texttt{hp-l\{L\}-\{base\}-\{dir\}\{count\}} context tag
+(e.g., \texttt{hp-l3-A-del1}; Section~\ref{sec:parameterization}). The
+context classifier's \texttt{hp\_min\_length} is set to $2$ so that any run
+of two or more bases contributes an HP tag to pairwise comparisons; the
+$L \leq 5$ vs $L \geq 6$ question has already been settled by Stages~2 and
+3, so the classifier does not need to re-enforce it.
+
+\paragraph{Ambiguity handling.} The pipeline does not currently absorb
+sub-threshold HP length variants into the parent consensus as explicit
+HP-ambiguity annotations; variants that fail CER in summarize are routed to
+the \texttt{.ns} output (Section~\ref{sec:annotation_vs_gating}) and the
+primary consensus retains its own modal HP length. Encoding HP length
+variation as a structured header annotation (e.g., \texttt{poly\_A[5..6]})
+for downstream inspection remains an open design question.
 
 \section{Metadata reproducibility}
 \label{sec:reproducibility}
@@ -672,51 +793,76 @@ and primer settings; we extend it with CER reproduction data:
 \begin{lstlisting}
 {
   "schema_version": "2.0",
-  "sample_name": "BCFCQ-25-005",
-  "timestamp": "2026-04-16T12:34:56Z",
+  "version": "0.7.7",
+  "sample_name": "ONT08.75-C10--iNat262724197",
+  "timestamp": "2026-04-20T18:09:14.624236",
   "parameters": {
-    ...existing fields...,
-    "assumed_error_rate": 0.015,
+    "algorithm": "graph",
+    "min_identity": 0.9,
+    "min_size": 3,
     "significance_level": 1e-5,
-    "qctx_table": "dorado-v5.0.0",
-    "qctx_table_version": "20251201",
-    "qctx_source": "shipped"
+    "group_identity": 0.85,
+    "qctx_profile": "dorado-v5.0",
+    ...
   },
-  "specimen": {
-    "total_input_reads": 1000,
-    "consensus_length": 698,
-    "n_sites": 587,
-    "n_sites_breakdown": {
-      "non_hp": 423,
-      "hp_runs": 164
-    }
-  },
+  "total_input_reads": 1000,
   "identity_groups": [
     {
       "group_id": "g1",
-      "group_N": 942,
-      "members": ["c1", "c2", "c3"]
+      "group_N": 974,
+      "members": ["1.v1", "1.v2", "1.v3", ...]
     }
   ],
   "variants": [
     {
-      "cluster_id": "c2",
+      "cluster_id": "1.v1",
       "identity_group": "g1",
-      "anchor": false,
-      "M": 42,
-      "K": 2,
-      "L": 698,
-      "context_tags": ["non-hp-sub", "hp-l3-A-del1"],
-      "q_ctx_per_position": [0.0059, 0.0213],
-      "q_ctx_joint": 1.257e-4,
-      "compared_against": "c1",
-      "cer_pstar": 0.031,
-      "cer_factor": 5.3,
-      "p_value_at_qctx": 2.7e-9
+      "group_rank": 1,
+      "variant_rank": 1,
+      "M": 462, "N": 974,
+      "K": null, "n_sites": null, "context_tags": null,
+      "q_ctx_per_position": null,
+      "compared_against_idx": null,
+      "cer_factor": null, "cer_pstar": null,
+      "err_factor": 0.303,
+      "err_factor_obs_sum": 3.13,
+      "err_factor_exp_sum": 10.33,
+      "err_factor_cols": 781
+    },
+    {
+      "cluster_id": "1.v3",
+      "identity_group": "g1",
+      "group_rank": 1, "variant_rank": 3,
+      "M": 49, "N": 974, "K": 1, "n_sites": 561,
+      "context_tags": ["hp-l3-A-del1"],
+      "q_ctx_per_position": [0.0097],
+      "compared_against_idx": 0,
+      "cer_factor": 2.085,
+      "cer_pstar": 0.0202,
+      "err_factor": 0.453,
+      "err_factor_obs_sum": 4.67,
+      "err_factor_exp_sum": 10.32,
+      "err_factor_cols": 780
     }
   ]
 }
 \end{lstlisting}
+
+Cluster identifiers use the \texttt{\{group\_rank\}.v\{variant\_rank\}} form
+assigned by core (e.g., \texttt{1.v3} is the third-largest variant within the
+largest identity group). The anchor of each identity group is the entry with
+\texttt{compared\_against\_idx = null}; all CER fields for anchors are null by
+construction. Non-anchor variants carry the integer index (into the variant
+list) of the reference cluster against which \texttt{cer\_factor} was computed.
+Fields \texttt{err\_factor}, \texttt{err\_factor\_obs\_sum},
+\texttt{err\_factor\_exp\_sum}, and \texttt{err\_factor\_cols} record the
+cluster homogeneity statistic described in Section~\ref{sec:denoising} along
+with its raw components; downstream tools can recompute the factor under a
+revised $q_\text{ctx}$ table without re-running the pipeline.
+
+Derived scalars that are cheap to recompute from the stored inputs ---
+$q_\text{ctx,joint} = \prod_i q_{\text{ctx},i}$ and the p-value at the stored
+$q_\text{ctx}$ --- are not persisted.
 
 \subsection{Recomputation workflow}
 
@@ -726,18 +872,19 @@ level, recomputation proceeds:
 \begin{enumerate}
 \item For each variant, look up the new $q_{\text{ctx},i}$ values for the
 recorded \texttt{context\_tags}.
-\item Compute the new joint $q_\text{ctx,joint} = \prod_i q_{\text{ctx},i}^\text{new}$.
+\item Compute the new joint $q_\text{ctx,joint}^\text{new} = \prod_i q_{\text{ctx},i}^\text{new}$.
 \item Recompute $p^*$ from $(N, M, n_\text{sites}, K, \alpha^\text{new})$.
-\item The CER factor becomes $p^* / q_\text{ctx,joint}^\text{new}$ where
-$q_\text{ctx,joint}^\text{new}$ is the geometric mean of the new per-position
-rates raised to $1/K$, or equivalently a per-position factor based on the
-arithmetic structure preferred for the application.
-\item P-value is $n_\text{sites} \cdot P(\mathrm{Binom}(N, q_\text{ctx,joint}^\text{new}) \geq M)$.
+\item The CER factor becomes $p^* / q_\text{ctx,joint}^\text{new}$ (or, for
+cross-variant reporting on a per-position scale, $(p^*)^{1/K} / \bar{q}_\text{ctx}^\text{new}$
+where $\bar{q}_\text{ctx}^\text{new}$ is the geometric mean of the new
+per-position rates; the implementation currently reports the joint form).
+\item If a p-value is needed, compute
+$n_\text{sites} \cdot P(\mathrm{Binom}(N, q_\text{ctx,joint}^\text{new}) \geq M)$.
 \end{enumerate}
 
-The original $N$, $M$, and consensus-derived $n_\text{sites}$ are immutable
-properties of the sequencing data; no upstream pipeline run is needed to
-revise the significance metric.
+The original $N$, $M$, $K$, context tags, and consensus-derived
+$n_\text{sites}$ are immutable properties of the sequencing data; no upstream
+pipeline run is needed to revise the significance metric.
 
 \subsection{Schema versioning}
 
@@ -757,19 +904,84 @@ revised assumptions without re-running --- is substantial: as basecaller
 versions evolve and empirical error tables improve, every stored output
 remains scientifically valid without recomputation cost.
 
+\section{Cluster denoising precedes CER}
+\label{sec:denoising}
+
+CER's significance is sharply sensitive to $K$, the number of positions
+distinguishing the candidate from its reference peer. The joint per-read error
+probability is $\prod_i q_{\text{ctx},i}$, so a spurious additional differing
+position reduces $q_\text{ctx,joint}$ by roughly a factor of $q_\text{ctx}$
+($\sim\!1/100$ at non-HP contexts) and inflates \texttt{cer\_factor}
+accordingly. A noisy cluster whose consensus carries a handful of erroneous
+positions will therefore compute a dramatically inflated factor against its
+true peer, obscuring the distinction between real variants and cluster
+artifacts.
+
+This places a specific demand on the upstream pipeline: CER is a meaningful
+discrimination metric only for clusters whose consensus is a faithful
+representation of the reads that compose it. Before CER evaluation, speconsense
+applies several denoising mechanisms whose purpose is to keep $K$ honest:
+
+\begin{itemize}
+\item \textbf{Outlier removal during final consensus generation.} MAD-based
+detection of read-identity outliers excludes single-read noise that would
+otherwise inflate consensus-level disagreement at isolated positions.
+
+\item \textbf{Homopolymer-equivalence merging of near-identical post-phasing
+clusters} (pre-merge step), collapsing splits whose only distinguishing
+feature is HP length variation --- the dominant systematic error mode that
+would inflate $K$ by one or more positions per HP run.
+
+\item \textbf{MSA-based variant merging in summarize with IUPAC consensus},
+further collapsing post-phasing clusters whose remaining differences are
+dominated by positions already classified as ambiguity-compatible under the
+specimen's error profile.
+
+\item \textbf{A cluster-wide homogeneity statistic, \texttt{err\_factor}},
+reported per cluster and filtered in summarize via \texttt{--max-err-factor}
+(default 1.5). \texttt{err\_factor} is the ratio of observed per-column
+disagreement to the $q_\text{ctx}$-predicted disagreement rate, pooled across
+the cluster's MSA (non-gap consensus columns). Values near 1.0 indicate a
+cluster consistent with per-position basecaller noise; values well above 1.0
+indicate internal heterogeneity beyond what the platform's error model
+predicts. Unlike \texttt{cer\_factor}, \texttt{err\_factor} is peer-independent:
+it distinguishes novel-but-real sequences (low \texttt{err\_factor}, potentially
+high \texttt{cer\_factor}) from noise aggregates (high \texttt{err\_factor},
+often also spuriously high \texttt{cer\_factor}). Filtering on
+\texttt{err\_factor} before CER evaluation removes clusters whose $K$
+measurement would be unreliable regardless of the pairwise comparison. The
+raw components (\texttt{err\_factor\_obs\_sum}, \texttt{err\_factor\_exp\_sum},
+\texttt{err\_factor\_cols}) are persisted in the metadata JSON
+(Section~\ref{sec:reproducibility}) so the factor can be recomputed under a
+revised $q_\text{ctx}$ table.
+\end{itemize}
+
+None of these mechanisms replaces CER; they make CER's $K$ input trustworthy.
+The natural place in the pipeline for this preprocessing is between phasing
+and pairwise CER validation, which is where speconsense applies them.
+
 \section{Validation}
 \label{sec:validation}
 
-\textbf{This section is a placeholder. Empirical content will be added once
-Phase 1 implementation generates data.}
+\textbf{This section is a placeholder. Empirical content will be added as
+Phase 1 output accumulates.}
+
+Schema-2.0 metadata is now emitted by the current implementation. A full
+ONT98 run (955 specimens) at \texttt{dorado-v5.0} is available as initial
+input to the validation work below.
 
 The planned validation reproduces the structure of the original CER
 validation~\cite{cer_paper}~\S 8 but with the context-aware framework:
 
 \begin{itemize}
-\item Apply context-aware CER to the ONT98 dataset (837 specimens) and
+\item Apply context-aware CER to the ONT98 dataset (955 specimens) and
 compare per-variant decisions against the existing raw-$p^*$ implementation
 at default settings.
+
+\item Distribution of \texttt{cer\_factor} on the 955-specimen workload,
+partitioned by variant class ($K{=}1$ non-HP, $K{=}1$ HP, $K{>}1$ mixed), to
+empirically motivate the \texttt{--min-cer-factor} default
+(Section~\ref{sec:factor}).
 
 \item Apply to run116 (127 specimens, herbarium type material) and quantify
 the impact of the cross-run $q_\text{ctx}$ scaling factor identified
@@ -887,99 +1099,90 @@ takes full responsibility for the content.
 \section{Metadata JSON schema (full example)}
 \label{app:schema}
 
-A minimal but complete example showing all CER-related fields. Comments
-(prefixed with \texttt{//}) are illustrative and not part of the JSON.
+A representative example of the schema-2.0 metadata emitted by the current
+implementation (condensed for exposition; the \texttt{parameters} block carries
+the full set of CLI arguments in practice). Two identity groups are shown: a
+populated group (\texttt{g1}) with an anchor and two non-anchor variants, and
+a singleton group (\texttt{g2}).
 
 \begin{lstlisting}
 {
   "schema_version": "2.0",
-  "sample_name": "BCFCQ-25-005",
-  "timestamp": "2026-04-16T12:34:56Z",
-  "speconsense_version": "0.7.0",
+  "version": "0.7.7",
+  "sample_name": "ONT08.75-C10--iNat262724197",
+  "timestamp": "2026-04-20T18:09:14.624236",
 
   "parameters": {
-    "algorithm": "mcl",
-    "min_identity": 0.90,
+    "algorithm": "graph",
+    "min_identity": 0.9,
+    "min_size": 3,
+    "max_sample_size": 100,
     "presample_size": 1000,
-    "assumed_error_rate": 0.015,
-    "significance_level": 1e-5,
-    "factor_threshold": 2.0,
-    "qctx_table": "dorado-v5.0.0",
-    "qctx_table_version": "20251201",
-    "qctx_source": "shipped"
+    "min_variant_frequency": 0.1,
+    "min_variant_count": 3,
+    "significance_level": 1e-05,
+    "group_identity": 0.85,
+    "qctx_profile": "dorado-v5.0"
   },
 
-  "input_file": "BCFCQ-25-005.fastq.gz",
-  "specimen": {
-    "total_input_reads": 1000,
-    "consensus_length": 698,
-    "n_sites": 587,
-    "n_sites_breakdown": {
-      "non_hp_positions": 423,
-      "hp_runs_l2_plus": 164
-    }
-  },
+  "input_file": "ONT08.75-C10--iNat262724197.fastq",
+  "total_input_reads": 1000,
 
   "identity_groups": [
     {
       "group_id": "g1",
-      "group_N": 942,
-      "members": ["c1", "c2", "c3"]
+      "group_N": 974,
+      "members": ["1.v1", "1.v2", "1.v3"]
     },
     {
       "group_id": "g2",
-      "group_N": 58,
-      "members": ["c4"]
+      "group_N": 7,
+      "members": ["2.v1"]
     }
   ],
 
   "variants": [
     {
-      "cluster_id": "c1",
+      "cluster_id": "1.v1",
       "identity_group": "g1",
-      "anchor": true,
-      "size": 850,
-      "ric": 100,
-      "M": 850,
-      "cer_pstar": null,
-      "cer_factor": null,
-      "note": "anchor: auto-passes CER"
+      "group_rank": 1, "variant_rank": 1,
+      "M": 462, "N": 974,
+      "K": null, "n_sites": null, "context_tags": null,
+      "q_ctx_per_position": null,
+      "compared_against_idx": null,
+      "cer_factor": null, "cer_pstar": null,
+      "err_factor": 0.303,
+      "err_factor_obs_sum": 3.13,
+      "err_factor_exp_sum": 10.33,
+      "err_factor_cols": 781
     },
     {
-      "cluster_id": "c2",
+      "cluster_id": "1.v2",
       "identity_group": "g1",
-      "anchor": false,
-      "size": 50,
-      "ric": 50,
-      "M": 50,
-      "K": 1,
-      "L": 698,
-      "context_tags": ["non-hp-sub"],
-      "q_ctx_per_position": [0.0059],
-      "q_ctx_joint": 0.0059,
-      "compared_against": "c1",
-      "cer_pstar": 0.087,
-      "cer_factor": 14.7,
-      "p_value_at_qctx": 1.2e-15,
-      "decision": "accept"
+      "group_rank": 1, "variant_rank": 2,
+      "M": 133, "N": 974, "K": 2, "n_sites": 560,
+      "context_tags": ["non-hp-sub", "non-hp-sub"],
+      "q_ctx_per_position": [0.0059, 0.0059],
+      "compared_against_idx": 0,
+      "cer_factor": 46.500, "cer_pstar": 0.274,
+      "err_factor": 0.445,
+      "err_factor_obs_sum": 4.61,
+      "err_factor_exp_sum": 10.35,
+      "err_factor_cols": 781
     },
     {
-      "cluster_id": "c3",
+      "cluster_id": "1.v3",
       "identity_group": "g1",
-      "anchor": false,
-      "size": 42,
-      "ric": 42,
-      "M": 42,
-      "K": 2,
-      "L": 698,
-      "context_tags": ["non-hp-sub", "hp-l3-A-del1"],
-      "q_ctx_per_position": [0.0059, 0.0213],
-      "q_ctx_joint": 1.257e-4,
-      "compared_against": "c1",
-      "cer_pstar": 0.031,
-      "cer_factor": 246.6,
-      "p_value_at_qctx": 4.1e-9,
-      "decision": "accept"
+      "group_rank": 1, "variant_rank": 3,
+      "M": 49, "N": 974, "K": 1, "n_sites": 561,
+      "context_tags": ["hp-l3-A-del1"],
+      "q_ctx_per_position": [0.0097],
+      "compared_against_idx": 0,
+      "cer_factor": 2.085, "cer_pstar": 0.0202,
+      "err_factor": 0.453,
+      "err_factor_obs_sum": 4.67,
+      "err_factor_exp_sum": 10.32,
+      "err_factor_cols": 780
     }
   ]
 }
@@ -988,49 +1191,53 @@ A minimal but complete example showing all CER-related fields. Comments
 \section{Default $q_\text{ctx}$ table for Dorado v5.0}
 \label{app:qctx_table}
 
-Drawn from~\cite{hp_paper} Tables 1, 2, and 4. Values are filtered per-position
+Drawn from~\cite{hp_paper} Tables 4 and 5. Values are filtered per-position
 error rates (after biological-variant filtering) for the ont98 dataset
-(R10.4.1, Dorado SUP v5.0.0). Per-(base, length, direction) values for HP
-length changes are derived from the supplementary distributions; the table
-below shows summary values.
+(R10.4.1, Dorado SUP v5.0.0). Per-base and per-direction sub-dimensions are
+pooled for the reasons given in Section~\ref{sec:qctx_pooling}: the effects
+are smaller than the run-to-run noise floor and cross-cell counts are too
+sparse to resolve the finer segmentation stably.
 
 \begin{table}[htbp]
 \centering
-\caption{Default $q_\text{ctx}$ values for Dorado v5.0 contexts (per-position
-total error rate). Context tag convention: \texttt{hp-l\{L\}-\{base\}} for HP
-length changes; direction-specific subtags (\texttt{-del1}, \texttt{-ins1})
-override the aggregate when available.}
+\caption{Shipped $q_\text{ctx}$ values for Dorado v5.0 (per-position error
+rate). This is the complete contents of \texttt{dorado-v5.0.yaml}; per-base
+and per-direction variation is folded into each entry.}
 \label{tab:default_qctx}
 \small
 \begin{tabular}{lcl}
 \toprule
 Context tag & $q_\text{ctx}$ & Source \\
 \midrule
-\texttt{non-hp-sub}            & 0.0059 & \cite{hp_paper} Table 5 (ont98) \\
-\texttt{non-hp-indel}          & 0.0108 & sum of Del + Ins, \cite{hp_paper} Table 5 \\
-\texttt{hp-interface-sub}      & 0.0059 & treated as non-HP per \cite{hp_paper}~\S 4.3 \\
+\texttt{non-hp-sub}            & 0.0059 & \cite{hp_paper} Table 5 (ont98 substitution) \\
+\texttt{non-hp-indel}          & 0.0108 & \cite{hp_paper} Table 5 (deletion + insertion) \\
 \midrule
-\texttt{hp-l1-A}               & 0.0067 & \cite{hp_paper} Table 4 \\
-\texttt{hp-l1-T}               & 0.0067 & \cite{hp_paper} Table 4 (pooled) \\
-\texttt{hp-l1-C}               & 0.0067 & \cite{hp_paper} Table 4 (pooled) \\
-\texttt{hp-l1-G}               & 0.0067 & \cite{hp_paper} Table 4 (pooled) \\
-\texttt{hp-l2-A}               & 0.0083 & \cite{hp_paper} Table 4 \\
-\texttt{hp-l3-A}               & 0.0097 & \cite{hp_paper} Table 4 \\
-\texttt{hp-l4-A}               & 0.0099 & \cite{hp_paper} Table 4 \\
-\texttt{hp-l5-A}               & 0.0113 & \cite{hp_paper} Table 4 \\
-\texttt{hp-l5-G}               & 0.0140 & per-base, \cite{hp_paper} Table 10 \\
+\texttt{hp-l1}                 & 0.0067 & \cite{hp_paper} Table 4 \\
+\texttt{hp-l2}                 & 0.0083 & \cite{hp_paper} Table 4 \\
+\texttt{hp-l3}                 & 0.0097 & \cite{hp_paper} Table 4 \\
+\texttt{hp-l4}                 & 0.0099 & \cite{hp_paper} Table 4 \\
+\texttt{hp-l5}                 & 0.0113 & \cite{hp_paper} Table 4 \\
 \midrule
-\texttt{hp-l6+}                & N/A & blanket discard, \cite{hp_paper}~\S 8.1 \\
+\texttt{hp-l6+}                & N/A    & blanket discard, \cite{hp_paper}~\S 8.1 \\
 \bottomrule
 \end{tabular}
 \end{table}
 
-The shipped Phase 1 table will include direction-specific subtags
-(\texttt{-del1}, \texttt{-ins1}, \texttt{-del2+}) and per-base values at all
-lengths; Table~\ref{tab:default_qctx} shows summary values for illustration.
-The precise table is generated from the supplementary
-\texttt{hp\_distributions.tsv} files of~\cite{hp_paper} via a build script
-that ships with speconsense.
+\paragraph{Future refinement.} Finer segmentation --- per-base (e.g.,
+\texttt{hp-l5-G = 0.0140} per~\cite{hp_paper}~Table~10) or per-direction
+(\texttt{hp-l3-A-del1} vs \texttt{hp-l3-A-ins1}) --- is straightforward to
+add by extending the YAML with additional keys. The lookup function already
+accepts any string key, and the context tag persisted in the metadata JSON
+records the full $(b, L, \delta)$ triple. Downstream recomputation under a
+finer table therefore requires no upstream re-run. The current simplification
+reflects the data available at publication time: with run-to-run variation
+of $\sim\!0.6\times$~\cite{hp_paper}~\S 5.4, the finer cells would introduce
+false precision rather than discrimination.
+
+HP-interface substitutions inherit the \texttt{non-hp-sub} rate automatically:
+the context classifier reports them as \texttt{NON\_HP\_SUB} tags per the
+finding in~\cite{hp_paper}~\S 4 that interface substitution rates are
+indistinguishable from non-HP. No separate table entry is needed.
 
 \begin{thebibliography}{99}
 
