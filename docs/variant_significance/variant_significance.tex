@@ -98,8 +98,9 @@ positions simultaneously (Section~\ref{sec:multiposition}).
 This determines the multiple testing correction.
 
 \item $K$: Number of variant positions distinguishing a given variant from all
-other variants produced from the same specimen. We use $K = 1$ (single-position
-variants) throughout as the conservative bound (Section~\ref{sec:multiposition}).
+other variants produced from the same specimen. Results below focus on
+$K = 1$ (single-position variants) as the conservative case; the multi-position
+generalization is developed in Section~\ref{sec:multiposition}.
 
 \item $\alpha$: Significance level. We examine $\alpha = 0.05$ (per-variant),
 $\alpha = 10^{-3}$, and $\alpha = 10^{-5}$ (appropriate when correcting for
@@ -204,7 +205,7 @@ $\alpha = 10^{-5}$ for comparison.
 
 Under the conservative model at $\alpha = 0.05$, the critical error rate crosses
 the 5\% reference line at approximately $M = 80$, and $M = 100$ yields
-$p^* = 6.8\%$. Even at the stringent run-corrected $\alpha = 10^{-5}$, $M = 100$
+$p^* = 6.75\%$. Even at the stringent run-corrected $\alpha = 10^{-5}$, $M = 100$
 gives $p^* = 5.5\%$---still well above realistic nanopore error rates. The
 difference between significance levels is modest at high $M$, reflecting the
 exponential sensitivity of the binomial test.
@@ -452,6 +453,11 @@ Dorado basecallers used in our pipeline. With such data, the critical error rate
 analysis developed here could be applied to hp positions using empirical
 per-position error rates parameterized by hp context, enabling recovery of
 biological hp-length variants that the current blanket normalization discards.
+We characterize these rates empirically in a companion report~\cite{hp_paper},
+and integrate the resulting context-aware rates into the CER framework
+in~\cite{cer_practice}, which generalizes the analysis here to context-dependent
+per-position rates $q_\text{ctx}$ and introduces a dimensionless CER factor
+as the practical cross-variant decision metric.
 
 \subsection{Relationship to existing variant calling frameworks}
 
@@ -523,11 +529,13 @@ library presence from bioinformatic hallucination; biological significance of
 detected variants requires downstream validation against reference databases.
 Table~\ref{tab:min_M} provides direct lookup of the minimum read support needed
 at assumed error rates of 1--5\%, enabling practitioners to assess variant
-confidence without computation. An important next step is extending this
-framework to homopolymer positions, where blanket normalization currently
-discards variants that may be biological; this requires empirical
-characterization of hp error rates by base and run length under current
-sequencing chemistry.
+confidence without computation. An important next step---taken up in companion
+reports---is extending this framework to homopolymer positions, where blanket
+normalization currently discards variants that may be biological. The required
+empirical characterization of hp error rates by base and run length is reported
+in~\cite{hp_paper}, and the context-aware CER framework that integrates this
+data into the significance analysis developed here is presented
+in~\cite{cer_practice}.
 
 \subsection*{Acknowledgments}
 
@@ -569,6 +577,17 @@ J.~Walker.
 \newblock Speconsense: High-quality clustering and consensus generation for
 {Oxford Nanopore} amplicon reads.
 \newblock \url{https://github.com/joshuaowalker/speconsense}, 2024.
+
+\bibitem[Walker, 2026a]{hp_paper}
+J.~Walker.
+\newblock Homopolymer error rate analysis for nanopore amplicon sequencing.
+\newblock Technical report, 2026.
+
+\bibitem[Walker, 2026b]{cer_practice}
+J.~Walker.
+\newblock Critical error rate in practice: context-aware variant significance
+for nanopore amplicon pipelines.
+\newblock Technical report, 2026.
 
 \bibitem[Sereika et~al., 2022]{sereika2022}
 M.~Sereika, R.~H. Kirkegaard, S.~M. Karst, T.~Y. Michaelsen, E.~A.
