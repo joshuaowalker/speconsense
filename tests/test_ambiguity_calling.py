@@ -193,7 +193,7 @@ class TestAmbiguityCalling:
                 metadata = json.load(f)
             params = metadata.get('parameters', {})
             assert params.get('significance_level') == 1e-5
-            assert params.get('qctx_profile') == 'dorado-v5.0'
+            assert params.get('error_model') == 'dorado-v5.0'
 
 
 if __name__ == "__main__":

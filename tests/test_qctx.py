@@ -1,14 +1,14 @@
-"""Tests for q_ctx tables and lookup (speconsense.qctx)."""
+"""Tests for error models and q_ctx lookup (speconsense.qctx)."""
 
 import pytest
 
 from speconsense.context import ContextClass, ContextTag
 from speconsense.qctx import (
-    DEFAULT_TABLE_NAME,
+    DEFAULT_MODEL_NAME,
     DORADO_V3_5,
     DORADO_V5_0,
     MAX_HP_LENGTH,
-    TABLES,
+    MODELS,
     get_qctx,
     is_supported,
     qctx_lookup_key,
@@ -99,9 +99,9 @@ def test_is_supported_non_hp():
 # ---------------------------------------------------------------------------
 
 
-def test_default_table_name_resolves():
-    assert DEFAULT_TABLE_NAME in TABLES
-    assert TABLES[DEFAULT_TABLE_NAME] is DORADO_V5_0
+def test_default_model_name_resolves():
+    assert DEFAULT_MODEL_NAME in MODELS
+    assert MODELS[DEFAULT_MODEL_NAME] is DORADO_V5_0
 
 
 def test_v5_0_rates_increase_with_hp_length():
@@ -123,14 +123,14 @@ def test_v5_0_non_hp_sub_matches_paper_expectation():
     assert abs(DORADO_V5_0["non-hp-sub"] - 0.0059) < 1e-9
 
 
-def test_all_tables_have_required_keys():
+def test_all_models_have_required_keys():
     required_keys = (
         ["non-hp-sub", "non-hp-indel"]
         + [f"hp-l{L}" for L in range(1, MAX_HP_LENGTH + 1)]
     )
-    for name, table in TABLES.items():
+    for name, table in MODELS.items():
         missing = [k for k in required_keys if k not in table]
-        assert not missing, f"Table {name} missing keys: {missing}"
+        assert not missing, f"Model {name} missing keys: {missing}"
 
 
 # ---------------------------------------------------------------------------
@@ -138,9 +138,9 @@ def test_all_tables_have_required_keys():
 # ---------------------------------------------------------------------------
 
 
-def test_list_shipped_tables_contains_both_defaults():
-    from speconsense.qctx import list_shipped_tables
-    shipped = list_shipped_tables()
+def test_list_bundled_models_contains_both_defaults():
+    from speconsense.qctx import list_bundled_models
+    shipped = list_bundled_models()
     assert "dorado-v5.0" in shipped
     assert "dorado-v3.5" in shipped
 

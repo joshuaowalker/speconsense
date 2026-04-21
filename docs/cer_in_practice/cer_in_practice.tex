@@ -438,7 +438,7 @@ identifier (e.g., \texttt{dorado-v5.0}). Values are drawn from the empirical
 analysis in~\cite{hp_paper}, pooled across base and direction as described in
 Section~\ref{sec:qctx_pooling}. The table identifier is recorded in metadata
 (Section~\ref{sec:reproducibility}). Users select their basecaller via a CLI
-flag (\texttt{--qctx-profile dorado-v5.0}) or accept the default.
+flag (\texttt{--error-model dorado-v5.0}) or accept the default.
 
 \item[Phase 2 (mature deployment): per-run estimation.] $q_\text{ctx}$ is
 estimated from the current run's MSAs at pipeline startup. The estimator
@@ -802,7 +802,7 @@ and primer settings; we extend it with CER reproduction data:
     "min_size": 3,
     "significance_level": 1e-5,
     "group_identity": 0.85,
-    "qctx_profile": "dorado-v5.0",
+    "error_model": "dorado-v5.0",
     ...
   },
   "total_input_reads": 1000,
@@ -1122,7 +1122,7 @@ a singleton group (\texttt{g2}).
     "min_variant_count": 3,
     "significance_level": 1e-05,
     "group_identity": 0.85,
-    "qctx_profile": "dorado-v5.0"
+    "error_model": "dorado-v5.0"
   },
 
   "input_file": "ONT08.75-C10--iNat262724197.fastq",

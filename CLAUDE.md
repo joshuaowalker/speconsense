@@ -72,7 +72,7 @@ pytest -m "not slow"
 - `msa.py`: SPOA MSA analysis, homopolymer-normalized error detection, IUPAC generation, variant position detection/phasing support. Defines `IUPAC_CODES`.
 - `distances.py`: IUPAC-aware edlib alignment, adjusted-identity distance, variant difference counting. Defines `IUPAC_EQUIV` and `STANDARD_ADJUSTMENT_PARAMS`.
 - `context.py`: Per-position variant context classification (`ContextClass`, `ContextTag`) driving CER q_ctx lookup. HP context comes from the reference consensus.
-- `qctx.py`: Loads context-specific error rate tables from `qctx_tables/*.yaml`. `DEFAULT_TABLE_NAME = "dorado-v5.0"`. HP runs beyond `MAX_HP_LENGTH=5` route to blanket normalization.
+- `qctx.py`: Loads error models (context-specific error-rate tables) from `error_models/*.yaml`. `DEFAULT_MODEL_NAME = "dorado-v5.0"`. HP runs beyond `MAX_HP_LENGTH=5` route to blanket normalization. Resolution order: filesystem path → `~/.config/speconsense/error_models/` → bundled.
 - `significance.py`: Critical error rate (p*) via binomial survival with Bonferroni correction, uniform error model (q=p/3). CER only reported when `p* < SIGNAL_DESTRUCTION_THRESHOLD (0.75)`.
 - `quality_report.py`: Multi-section quality report for `speconsense-summarize`.
 - `cli.py`: Top-level entry-point stub that re-exports `core.main`.
@@ -89,7 +89,7 @@ pytest -m "not slow"
 - Valid keys are strictly validated; profile keys use dashes (e.g., `enable-full-consensus`), argparse attrs use underscores
 - `VALID_SPECONSENSE_KEYS` / `VALID_SUMMARIZE_KEYS` in `profiles/__init__.py` are the source of truth for acceptable keys
 
-**speconsense/qctx_tables/** - Bundled per-basecaller error-rate tables (YAML), loadable by name or path.
+**speconsense/error_models/** - Bundled per-basecaller error models (YAML), loadable by name (`--error-model dorado-v5.0`), from `~/.config/speconsense/error_models/`, or by filesystem path.
 
 **speconsense/synth.py** - Synthetic read generator for testing consensus algorithms.
 
@@ -201,7 +201,7 @@ Parameters are controlled via CLI arguments, optionally pre-set via YAML profile
 - Cluster size filtering (`--min-size`, `--min-cluster-ratio`)
 - Primer handling (`--primers`, `--orient-mode`)
 - Variant phasing (`--disable-position-phasing`, `--min-variant-frequency`, `--significance-level`)
-- q_ctx table selection (`--qctx-profile`, `--hp-min-length`)
+- Error model selection (`--error-model`, `--hp-min-length`)
 - Summarize CER filter (`--min-cer-factor`, default `1.0`, `0` disables)
 - Summarize err_factor filter (`--max-err-factor`, default `1.5`; `0` disables)
 

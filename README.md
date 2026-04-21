@@ -1092,10 +1092,12 @@ usage: speconsense [-h] [-O OUTPUT_DIR] [--primers PRIMERS]
                    [--min-size MIN_SIZE]
                    [--min-cluster-ratio MIN_CLUSTER_RATIO]
                    [--max-sample-size MAX_SAMPLE_SIZE]
-                   [--outlier-identity OUTLIER_IDENTITY]
                    [--disable-position-phasing] [--enable-position-phasing]
                    [--min-variant-frequency MIN_VARIANT_FREQUENCY]
                    [--min-variant-count MIN_VARIANT_COUNT]
+                   [--significance-level SIGNIFICANCE_LEVEL]
+                   [--group-identity GROUP_IDENTITY]
+                   [--hp-min-length HP_MIN_LENGTH] [--error-model ERROR_MODEL]
                    [--disable-ambiguity-calling] [--enable-ambiguity-calling]
                    [--min-ambiguity-frequency MIN_AMBIGUITY_FREQUENCY]
                    [--min-ambiguity-count MIN_AMBIGUITY_COUNT]
@@ -1109,6 +1111,7 @@ usage: speconsense [-h] [-O OUTPUT_DIR] [--primers PRIMERS]
                    [--no-collect-discards]
                    [--log-level {DEBUG,INFO,WARNING,ERROR,CRITICAL}]
                    [--version] [-p NAME] [--list-profiles]
+                   [--list-error-models]
                    input_file
 
 MCL-based clustering of nanopore amplicon reads
@@ -1120,6 +1123,7 @@ options:
                         Load parameter profile (use --list-profiles to see
                         available)
   --list-profiles       List available profiles and exit
+  --list-error-models   List available error models and exit
 
 Input/Output:
   input_file            Input FASTQ file
@@ -1144,20 +1148,12 @@ Clustering:
                         (default: 5)
 
 Filtering:
-  --min-size MIN_SIZE   Minimum cluster size (default: 5, 0 to disable)
+  --min-size MIN_SIZE   Minimum cluster size (default: 3, 0 to disable)
   --min-cluster-ratio MIN_CLUSTER_RATIO
                         Minimum size ratio between a cluster and the largest
-                        cluster (default: 0.01, 0 to disable)
+                        cluster (default: 0, 0 to disable)
   --max-sample-size MAX_SAMPLE_SIZE
                         Maximum cluster size for consensus (default: 100)
-  --outlier-identity OUTLIER_IDENTITY
-                        Minimum read-to-consensus identity to keep a read
-                        (default: auto). Reads below this threshold are
-                        removed as outliers before final consensus generation.
-                        Auto-calculated as (1 + min_identity) / 2. This
-                        threshold is typically higher than --min-identity
-                        because the consensus is error-corrected through
-                        averaging.
 
 Variant Phasing:
   --disable-position-phasing
@@ -1172,7 +1168,30 @@ Variant Phasing:
                         (default: 0.10 for 10%)
   --min-variant-count MIN_VARIANT_COUNT
                         Minimum alternative allele read count to call variant
-                        (default: 5)
+                        (default: 3)
+  --significance-level SIGNIFICANCE_LEVEL
+                        Significance level (alpha) for variant significance
+                        testing (default: 1e-5)
+  --group-identity GROUP_IDENTITY
+                        Minimum pairwise identity to group clusters for read
+                        reassignment, discard recovery, and CER validation.
+                        Grouping uses complete linkage: every pair within a
+                        group must meet this threshold. (default: 0.85)
+  --hp-min-length HP_MIN_LENGTH
+                        Minimum homopolymer run length to treat as HP context
+                        in MSA variant detection. Runs of length >= this value
+                        have their length variants suppressed (blanket
+                        normalization); runs below it are surfaced as
+                        candidates and evaluated by context-aware CER. Default
+                        6 matches the HP paper recommendation of CER-
+                        evaluating L <= 5 HP variants. (default: 6)
+  --error-model ERROR_MODEL
+                        Per-basecaller error model used for context-aware
+                        variant validation. Either a shipped model name (use
+                        --list-error-models to see available), a user model in
+                        ~/.config/speconsense/error_models/, or a filesystem
+                        path to a YAML file with a 'rates' mapping. (default:
+                        dorado-v5.0)
 
 Ambiguity Calling:
   --disable-ambiguity-calling
@@ -1236,9 +1255,12 @@ Debugging:
 
 ```
 usage: speconsense-summarize [-h] [--source SOURCE]
-                             [--summary-dir SUMMARY_DIR]
-                             [--fasta-fields FASTA_FIELDS] [--min-ric MIN_RIC]
-                             [--min-len MIN_LEN] [--max-len MAX_LEN]
+                             [--summary-dir SUMMARY_DIR] [--specimen SPECIMEN]
+                             [--aggregate-only] [--fasta-fields FASTA_FIELDS]
+                             [--min-ric MIN_RIC] [--min-len MIN_LEN]
+                             [--max-len MAX_LEN]
+                             [--min-cer-factor MIN_CER_FACTOR]
+                             [--max-err-factor MAX_ERR_FACTOR]
                              [--group-identity GROUP_IDENTITY]
                              [--disable-merging] [--enable-merging]
                              [--merge-snp | --no-merge-snp]
@@ -1277,6 +1299,10 @@ Input/Output:
   --summary-dir SUMMARY_DIR
                         Output directory for summary files (default:
                         __Summary__)
+  --specimen SPECIMEN   Process only this specimen. Loads only
+                        <specimen>-all.fasta from --source.
+  --aggregate-only      Skip processing. Generate aggregate summary from
+                        existing per-specimen outputs.
   --fasta-fields FASTA_FIELDS
                         FASTA header fields to output. Can be: (1) a preset
                         name (default, minimal, qc, full, id-only), (2) comma-
@@ -1291,11 +1317,27 @@ Filtering:
                         3)
   --min-len MIN_LEN     Minimum sequence length in bp (default: 0 = disabled)
   --max-len MAX_LEN     Maximum sequence length in bp (default: 0 = disabled)
+  --min-cer-factor MIN_CER_FACTOR
+                        Minimum per-position CER factor for a variant to be
+                        kept as a primary output. Variants with cer_factor
+                        below this are routed to __Summary__/variants/ as .ns
+                        records. Variants with cer_factor=None (anchors,
+                        clusters without a valid pairwise comparison) always
+                        pass. Set to 0 to disable CER filtering. (default:
+                        1.0)
+  --max-err-factor MAX_ERR_FACTOR
+                        Maximum cluster err_factor (observed/q_ctx-expected
+                        disagreement ratio). Clusters above this threshold are
+                        routed to __Summary__/variants/ as .lq records.
+                        Variants with err_factor=None (legacy output) always
+                        pass. Set to 0 to disable err_factor filtering.
+                        (default: 1.5)
 
 Grouping:
   --group-identity GROUP_IDENTITY, --variant-group-identity GROUP_IDENTITY
-                        Identity threshold for variant grouping using HAC
-                        (default: 0.9)
+                        Anchor-to-anchor identity threshold for cross-primer
+                        overlap merging between core-assigned groups. Matches
+                        core's --group-identity default. (default: 0.85)
 
 Merging:
   --disable-merging     Disable all variant merging (skip MSA-based merge

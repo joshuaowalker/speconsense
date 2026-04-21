@@ -79,11 +79,12 @@ def main():
                                     "surfaced as candidates and evaluated by context-aware CER. "
                                     "Default 6 matches the HP paper recommendation of CER-evaluating "
                                     "L <= 5 HP variants. (default: 6)")
-    phasing_group.add_argument("--qctx-profile", type=str, default="dorado-v5.0",
-                               help="Context-aware error rate table. Either a shipped profile name "
-                                    "('dorado-v5.0' or 'dorado-v3.5') or a filesystem path to a "
-                                    "YAML file with a 'rates' mapping. Used to look up q_ctx values "
-                                    "when computing CER factors. (default: dorado-v5.0)")
+    phasing_group.add_argument("--error-model", type=str, default="dorado-v5.0",
+                               help="Per-basecaller error model used for context-aware variant "
+                                    "validation. Either a shipped model name (use "
+                                    "--list-error-models to see available), a user model in "
+                                    "~/.config/speconsense/error_models/, or a filesystem path to "
+                                    "a YAML file with a 'rates' mapping. (default: dorado-v5.0)")
 
     # Ambiguity Calling group
     ambiguity_group = parser.add_argument_group("Ambiguity Calling")
@@ -149,10 +150,18 @@ def main():
                         help="Load parameter profile (use --list-profiles to see available)")
     parser.add_argument("--list-profiles", action="store_true",
                         help="List available profiles and exit")
+    parser.add_argument("--list-error-models", action="store_true",
+                        help="List available error models and exit")
 
     # Handle --list-profiles early (before requiring input_file)
     if '--list-profiles' in sys.argv:
         print_profiles_list('speconsense')
+        sys.exit(0)
+
+    # Handle --list-error-models early (before requiring input_file)
+    if '--list-error-models' in sys.argv:
+        from speconsense.qctx import print_models_list
+        print_models_list()
         sys.exit(0)
 
     # First pass: get profile name if specified
@@ -228,7 +237,7 @@ def main():
         significance_level=args.significance_level,
         group_identity=args.group_identity,
         min_hp_length=args.hp_min_length,
-        qctx_profile=args.qctx_profile,
+        error_model=args.error_model,
     )
 
     # Log configuration

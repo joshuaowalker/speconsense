@@ -67,6 +67,9 @@ VALID_SPECONSENSE_KEYS = {
     "min-variant-count",
     "disable-position-phasing",
     "significance-level",
+    "group-identity",
+    "hp-min-length",
+    "error-model",
     # Ambiguity calling
     "min-ambiguity-frequency",
     "min-ambiguity-count",

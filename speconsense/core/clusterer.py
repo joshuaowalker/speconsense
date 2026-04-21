@@ -23,7 +23,7 @@ except ImportError:
 from speconsense.msa import ReadAlignment, analyze_positional_variation, has_no_majority, call_iupac_ambiguities, compute_cluster_err_factor
 from speconsense.context import classify_pairwise_differences
 from speconsense.distances import count_variant_differences
-from speconsense.qctx import DORADO_V5_0, get_qctx, load_table as load_qctx_table
+from speconsense.qctx import DORADO_V5_0, get_qctx, load_table as load_error_model
 from speconsense.significance import (
     compute_cer_factor,
     compute_critical_error_rate,
@@ -225,7 +225,7 @@ class SpecimenClusterer:
                  significance_level: float = 1e-5,
                  group_identity: float = 0.85,
                  min_hp_length: int = 6,
-                 qctx_profile: str = "dorado-v5.0"):
+                 error_model: str = "dorado-v5.0"):
         self.min_identity = min_identity
         self.inflation = inflation
         self.min_size = min_size
@@ -260,8 +260,8 @@ class SpecimenClusterer:
         # compared pairwise against the accumulated validated pool and
         # annotated with its per-position cer_factor. Summarize applies the
         # user-visible pass/ns decision via --min-cer-factor.
-        self.qctx_profile = qctx_profile
-        self.qctx_table = load_qctx_table(qctx_profile)
+        self.error_model = error_model
+        self.qctx_table = load_error_model(error_model)
         self.discarded_read_ids: Set[str] = set()  # Track all discarded reads (outliers + filtered)
 
         # Initialize scalability configuration
@@ -299,7 +299,7 @@ class SpecimenClusterer:
 
         Includes per-cluster CER reproduction data when clustering has
         completed (self.final_cluster_dicts populated). The schema follows the
-        CER-in-practice paper Appendix A: parameters identify the q_ctx table
+        CER-in-practice paper Appendix A: parameters identify the error model
         and CER thresholds, identity_groups describe pairwise comparison
         membership, and variants contain N, M, K, L, context tags, and
         per-position q_ctx values sufficient to recompute cer_factor and
@@ -332,7 +332,7 @@ class SpecimenClusterer:
                 "orient_mode": self.orient_mode,
                 "significance_level": self.significance_level,
                 "group_identity": self.group_identity,
-                "qctx_profile": self.qctx_profile,
+                "error_model": self.error_model,
             },
             "input_file": self.input_file,
             "augment_input": self.augment_input,
