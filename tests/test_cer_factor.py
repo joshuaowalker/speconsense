@@ -8,6 +8,7 @@ from speconsense.significance import (
     compute_cer_factor,
     compute_critical_error_rate,
     compute_joint_critical_q,
+    compute_log_joint_critical_q,
     compute_per_position_qstar,
 )
 
@@ -159,3 +160,75 @@ def test_factor_rescaling_works():
     f2 = compute_cer_factor(N=1000, M=50, n_sites=700,
                             q_ctx_per_position=[base_q * r], alpha=1e-5)
     assert math.isclose(f2, f1 / r, rel_tol=1e-9)
+
+
+# ---------------------------------------------------------------------------
+# High-K regression tests — log-space brentq fix
+#
+# Pre-fix: linear-space brentq with eps=1e-15 returned 0.0 whenever the true
+# q* fell below the lower search bound (typical for K >= ~16). compute_cer_factor
+# then wrote 0.000 to the FASTA header, and --min-cer-factor 1.0 routed the
+# record to .ns. These tests pin the behavior end-to-end for the v21 case
+# observed in /Users/josh/mm/data/ont98/sigtest/0420-v3 (ONT01.01-A01 v21).
+# ---------------------------------------------------------------------------
+
+
+def test_joint_q_high_k_returns_subepsilon_value():
+    # ONT01.01-A01 v21: K=19, M=3, N=970, n_sites=759.
+    # Hand-derived q* via the small-q asymptotic (M·log q ≈ log α − log_corr − log C(N,M))
+    # is ~1.24e-17, well below the old 1e-15 lower bound.
+    q = compute_joint_critical_q(N=970, M=3, n_sites=759, K=19, alpha=1e-5)
+    assert q is not None
+    assert 1e-18 < q < 1e-16
+
+
+def test_log_joint_critical_q_returns_negative_log():
+    # Same v21 case, exposed via the log-space wrapper for callers that need
+    # to avoid exp/log round-trip precision loss.
+    log_q = compute_log_joint_critical_q(N=970, M=3, n_sites=759, K=19, alpha=1e-5)
+    assert log_q is not None
+    # log(1e-18) ≈ -41.4; log(1e-16) ≈ -36.8. v21 sits near -38.9.
+    assert -41.5 < log_q < -36.8
+
+
+def test_cer_factor_high_k_v21_regression():
+    # Exact q_ctx values from v21 metadata: 14 non-hp-sub (0.0059), 2 non-hp-indel
+    # (0.0108), one each of hp-l5-G-del1 (0.0113), hp-l2-T-del2 (0.0083),
+    # hp-l4-T-del1 (0.0099). K=19.
+    q_ctx = ([0.0059] * 14 + [0.0108, 0.0108]
+             + [0.0113, 0.0083, 0.0099])
+    factor = compute_cer_factor(N=970, M=3, n_sites=759,
+                                q_ctx_per_position=q_ctx, alpha=1e-5)
+    assert factor is not None
+    # Hand-derived target ≈ 18.9; allow ±5% for solver tolerance.
+    assert 17.5 < factor < 20.5
+
+
+def test_cer_factor_extreme_k_no_underflow():
+    # K=100, q_ctx=0.008 each — actual_joint = 0.008^100 ≈ 1.6e-210, near the
+    # float64 underflow boundary. Pre-fix the linear-space product was OK at
+    # this K but log-space removes the hazard entirely.
+    q_ctx = [0.008] * 100
+    factor = compute_cer_factor(N=1000, M=3, n_sites=700,
+                                q_ctx_per_position=q_ctx, alpha=1e-5)
+    assert factor is not None
+    assert factor > 1.0   # 100 distinct mutations in 3 reads → highly significant
+
+
+def test_compute_critical_error_rate_high_k_returns_finite():
+    # Parallel fix in the uniform-error variant. Pre-fix this returned 0.0 for
+    # the same reason as the joint solver. We expect a small but positive p*.
+    p_star = compute_critical_error_rate(N=970, M=3, L=759, alpha=1e-5, K=19)
+    assert p_star > 0.0
+    assert p_star < 1.0   # well below the signal destruction threshold
+
+
+def test_factor_rescaling_holds_at_high_k():
+    # The K-th-root scaling property must survive the log-space refactor.
+    base = [0.006] * 19
+    scaled = [q * 1.5 for q in base]
+    f1 = compute_cer_factor(N=970, M=3, n_sites=759,
+                            q_ctx_per_position=base, alpha=1e-5)
+    f2 = compute_cer_factor(N=970, M=3, n_sites=759,
+                            q_ctx_per_position=scaled, alpha=1e-5)
+    assert math.isclose(f2, f1 / 1.5, rel_tol=1e-6)
