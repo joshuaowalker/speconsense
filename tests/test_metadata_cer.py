@@ -46,6 +46,7 @@ def test_build_variant_record_anchor_no_cer_details():
         'M': 900,
         'N': 950,
         'K': None,
+        'n_sites': None,
         'context_tags': None,
         'q_ctx_per_position': None,
         'compared_against_idx': None,
@@ -68,6 +69,7 @@ def test_build_variant_record_with_cer_details():
         'cer_pstar': 0.0248,
         'cer_details': {
             'K': 2,
+            'n_sites': 587,
             'tags': ['non-hp-sub', 'hp-l3-A-del1'],
             'q_ctx': [0.0059, 0.0097],
             'ref_idx': 0,
@@ -82,6 +84,7 @@ def test_build_variant_record_with_cer_details():
         'M': 40,
         'N': 950,
         'K': 2,
+        'n_sites': 587,
         'context_tags': ['non-hp-sub', 'hp-l3-A-del1'],
         'q_ctx_per_position': [0.0059, 0.0097],
         'compared_against_idx': 0,

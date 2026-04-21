@@ -119,6 +119,24 @@ def _extract_bases_at_columns(aln, columns: List[int], spoa_consensus_aligned: s
     return bases
 
 
+def _count_independent_sites(seq: str) -> int:
+    """Bonferroni site count for context-aware CER (cer_in_practice §2.3).
+
+    Each maximal run of identical bases counts as one site regardless of run
+    length: a non-HP position is a length-1 run (1 site), and an HP run of
+    length L>=2 is also 1 site (not L), since an HP-length variant tests one
+    hypothesis per run rather than one per base. Equivalent to counting base
+    transitions plus one.
+    """
+    if not seq:
+        return 0
+    n = 1
+    for i in range(1, len(seq)):
+        if seq[i] != seq[i - 1]:
+            n += 1
+    return n
+
+
 def _hp_normalized_pairwise_compare(seq1: str, seq2: str, min_hp_length: int = 6) -> Tuple[float, bool]:
     """Compare two sequences with HP-normalized global alignment.
 
@@ -416,6 +434,7 @@ class SpecimenClusterer:
             'M': len(cluster_dict.get('read_ids', [])),
             'N': cluster_dict.get('cer_group_N'),
             'K': details.get('K') if details else None,
+            'n_sites': details.get('n_sites') if details else None,
             'context_tags': details.get('tags') if details else None,
             'q_ctx_per_position': details.get('q_ctx') if details else None,
             'compared_against_idx': details.get('ref_idx') if details else None,
@@ -2028,10 +2047,12 @@ class SpecimenClusterer:
                 continue
 
             K = len(qctx_values)
-            L = max(len(candidate_consensus), len(ref_consensus))
+            longer = (ref_consensus if len(ref_consensus) >= len(candidate_consensus)
+                      else candidate_consensus)
+            n_sites = _count_independent_sites(longer)
 
             factor = compute_cer_factor(
-                N=group_N, M=candidate_M, n_sites=L,
+                N=group_N, M=candidate_M, n_sites=n_sites,
                 q_ctx_per_position=qctx_values,
                 alpha=self.significance_level,
             )
@@ -2040,11 +2061,12 @@ class SpecimenClusterer:
 
             if best is None or factor < best[0]:
                 pstar = compute_per_position_qstar(
-                    N=group_N, M=candidate_M, n_sites=L, K=K,
+                    N=group_N, M=candidate_M, n_sites=n_sites, K=K,
                     alpha=self.significance_level,
                 )
                 details = {
                     'K': K,
+                    'n_sites': n_sites,
                     'tags': [t.to_string() for t in kept_tags],
                     'q_ctx': qctx_values,
                     'ref_idx': ref_idx,
@@ -2388,7 +2410,15 @@ class SpecimenClusterer:
             self.rev_id_map[seq_id] = short_id
 
     def calculate_similarity(self, seq1: str, seq2: str) -> float:
-        """Calculate sequence similarity using edlib alignment."""
+        """Raw edlib identity for initial read-to-read clustering.
+
+        No homopolymer normalization: reads that differ only at HP length
+        contribute to distance here and are pooled only by virtue of the
+        loose --min-identity threshold (default 0.90). HP-aware comparisons
+        live elsewhere: _hp_normalized_pairwise_compare for identity-group
+        formation and post-clustering consensus merging, and the adjusted-
+        identity path in speconsense.distances for downstream summarize work.
+        """
         if len(seq1) == 0 or len(seq2) == 0:
             return 0.0
 
