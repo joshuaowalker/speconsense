@@ -1,9 +1,15 @@
 # Context-specific error rate table for Dorado v5.0 / R10.4.1 E8.2 chemistry.
 #
-# Values are filtered post-clustering per-position error rates derived from
-# the ont98 dataset in the HP error rate analysis (Walker 2026b). The filter
-# excludes biological variants via outlier and bimodal distribution detection
-# so the remaining rate reflects sequencing error, not real variation.
+# Values are filtered post-clustering per-position error rates re-estimated
+# under the current speconsense pipeline (0.7.7) on the ont98 dataset; see
+# Walker 2026b §8 (Re-estimation under updated pipeline). The filter excludes
+# biological variants via outlier and bimodal distribution detection so the
+# remaining rate reflects sequencing error, not real variation.
+#
+# HP rates use the v2_ef primary-anchor values (approach 1), where mode-based
+# ground truth is most reliable. Non-HP rates use the all-cluster pooled
+# values (approach 2), which match the operational distribution CER evaluates
+# against in production.
 #
 # Rates are pooled across bases at each HP length; per-base variation is at
 # most ~1.4x in this regime and per-base refinement can be added by expanding
@@ -19,14 +25,14 @@
 name: dorado-v5.0
 chemistry: R10.4.1
 basecaller: Dorado SUP v5.0.0
-source: Walker 2026b (HP error rate analysis)
+source: Walker 2026b (HP error rate analysis, §8 re-estimation)
 dataset: ont98
 
 rates:
-  non-hp-sub:  0.0059   # Walker 2026b Table 5 (ont98 substitution)
-  non-hp-indel: 0.0108   # ont98 deletion + insertion
-  hp-l1: 0.0067          # Walker 2026b Table 4 (filtered)
-  hp-l2: 0.0083
-  hp-l3: 0.0097
-  hp-l4: 0.0099
-  hp-l5: 0.0113
+  non-hp-sub:  0.0039    # Walker 2026b Table 16 (approach 2 pooled, ont98)
+  non-hp-indel: 0.0074   # approach 2 pooled (del + ins), ont98
+  hp-l1: 0.0047          # Walker 2026b Table 16 (v2_ef primary, ont98)
+  hp-l2: 0.0062
+  hp-l3: 0.0076
+  hp-l4: 0.0081
+  hp-l5: 0.0087

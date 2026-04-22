@@ -78,7 +78,9 @@ context:
 
 \begin{itemize}
 \item HP length error rate increases monotonically from $\sim$0.7\% per position
-at $L = 1$ to $\sim$1.5\% at $L = 5$, and steeply thereafter~\cite{hp_paper}.
+at $L = 1$ to $\sim$1.5\% at $L = 5$, and steeply thereafter~\cite{hp_paper}
+(raw filtered measurement; shipped Phase-1 values under the re-estimated
+table are $\sim$0.47--0.87\% across the same range, Appendix~\ref{app:qctx_table}).
 \item G/C homopolymers consistently produce higher error rates than A/T at
 matched length, with the gap widening at longer lengths.
 \item Deletion-biased errors dominate insertion-biased errors at a $3$--$5\!:\!1$
@@ -277,7 +279,9 @@ uncertainty about the true error rate at any given site.
 $q_\text{ctx}$ table revises the rate at a context by a factor $r$, stored
 factors at that context can be rescaled by $1/r$ without recomputing from raw
 $N$ and $M$. P-values must be recomputed from raw inputs; raw $p^*$ does not
-require rescaling but loses cross-context comparability.
+require rescaling but loses cross-context comparability. A worked example of a
+full-table refresh and its downstream effects is given in
+Section~\ref{sec:qctx_refresh}.
 
 \item \textbf{The robustness interpretation survives.} A factor of 4 is
 ``quadruple the empirical floor would be needed to explain this as artifact''
@@ -448,10 +452,12 @@ of~\cite{hp_paper}~\S 5.3. The estimated $q_\text{ctx}$ is recorded in
 metadata so that downstream interpretation can use the run-specific values
 or fall back to the shipped defaults.
 
-\item[Override: user-supplied table.] A flag (\texttt{--qctx-table-file PATH})
-accepts a TSV with columns \texttt{(context\_tag, q\_ctx)}. Useful for
-research applications that need to characterize variant calls under
-synthetic or extreme error assumptions.
+\item[Override: user-supplied model.] The \texttt{--error-model} flag accepts
+either a shipped model name, a user model in
+\texttt{\textasciitilde/.config/speconsense/error\_models/}, or a filesystem
+path to a YAML file with a \texttt{rates} mapping. Useful for research
+applications that need to characterize variant calls under synthetic or
+extreme error assumptions.
 \end{description}
 
 The first deployment supports Phase 1 only. Phase 2 is a substantial
@@ -960,6 +966,43 @@ None of these mechanisms replaces CER; they make CER's $K$ input trustworthy.
 The natural place in the pipeline for this preprocessing is between phasing
 and pairwise CER validation, which is where speconsense applies them.
 
+\subsection{Filter behavior under $q_\text{ctx}$ refresh}
+\label{sec:qctx_refresh}
+
+Both \texttt{cer\_factor} and \texttt{err\_factor} are ratios with
+$q_\text{ctx}$ (or a product of $q_\text{ctx}$ values) in the denominator. A
+scalar revision of the $q_\text{ctx}$ table by factor $k$ therefore rescales
+both metrics by $1/k$: stored \texttt{cer\_factor} values move as
+$p^*/q_\text{ctx}^\text{new}$, and stored \texttt{err\_factor} values move as
+$\mathrm{obs}/\mathrm{exp}^\text{new}$. Because the two filters operate against
+different thresholds (\texttt{--min-cer-factor}, default 1.0;
+\texttt{--max-err-factor}, default 1.5) and \texttt{.lq} takes precedence over
+\texttt{.ns} when both filters fire, a $q_\text{ctx}$ \emph{decrease} (new
+values lower than old) produces a characteristic flow: records previously in
+\texttt{.ns} whose \texttt{err\_factor} now crosses 1.5 migrate to
+\texttt{.lq}, and a small tail of primary anchors whose \texttt{err\_factor}
+crosses 1.5 migrate into \texttt{.lq} as well. The symmetric case (a
+$q_\text{ctx}$ increase) produces the reverse flow.
+
+A concrete example: refreshing the Dorado v5.0 table (Appendix~\ref{app:qctx_table})
+from its initial values to the re-estimated values in~\cite{hp_paper}~\S 8.6 is
+a $\sim\!0.66\times$ rate change at non-HP substitution (and similar at other
+contexts). Re-running \texttt{speconsense-summarize} on a 849-specimen ont98
+benchmark moved exactly 711 variants from \texttt{.ns} to \texttt{.lq} with
+zero movement in the reverse direction, and concurrently lost 43 variants
+(32 organisms) from the primary output. The 711-record flow is the expected
+conservation signature --- same records, different classification. The
+43-variant primary loss is the user-visible effect, concentrated in
+sole-variant anchors (\texttt{cer\_factor} is \texttt{null} for anchors, so
+the user-visible filter for anchors is \texttt{--max-err-factor} alone)
+whose \texttt{err\_factor} crossed the 1.5 threshold. One specimen was lost
+entirely (0.12\%).
+
+The metadata reproducibility design (Section~\ref{sec:reproducibility}) makes
+this recomputation cheap: stored $N$, $M$, $K$, context tags, and
+\texttt{err\_factor} raw components recompute both ratios under the new
+table without re-running upstream core.
+
 \section{Validation}
 \label{sec:validation}
 
@@ -1191,12 +1234,17 @@ a singleton group (\texttt{g2}).
 \section{Default $q_\text{ctx}$ table for Dorado v5.0}
 \label{app:qctx_table}
 
-Drawn from~\cite{hp_paper} Tables 4 and 5. Values are filtered per-position
-error rates (after biological-variant filtering) for the ont98 dataset
-(R10.4.1, Dorado SUP v5.0.0). Per-base and per-direction sub-dimensions are
-pooled for the reasons given in Section~\ref{sec:qctx_pooling}: the effects
-are smaller than the run-to-run noise floor and cross-cell counts are too
-sparse to resolve the finer segmentation stably.
+Drawn from~\cite{hp_paper}~\S 8.6 Table 16 (re-estimation under the current
+speconsense pipeline, 0.7.7). Values are filtered per-position error rates
+(after biological-variant filtering) for the ont98 dataset (R10.4.1, Dorado
+SUP v5.0.0). HP rates use the \texttt{v2\_ef} primary-anchor values
+(approach 1), where mode-based ground truth is most reliable; non-HP rates
+use the all-cluster pooled values (approach 2), which match the operational
+distribution CER evaluates against in production. Per-base and per-direction
+sub-dimensions are pooled for the reasons given in
+Section~\ref{sec:qctx_pooling}: the effects are smaller than the run-to-run
+noise floor and cross-cell counts are too sparse to resolve the finer
+segmentation stably.
 
 \begin{table}[htbp]
 \centering
@@ -1209,30 +1257,33 @@ and per-direction variation is folded into each entry.}
 \toprule
 Context tag & $q_\text{ctx}$ & Source \\
 \midrule
-\texttt{non-hp-sub}            & 0.0059 & \cite{hp_paper} Table 5 (ont98 substitution) \\
-\texttt{non-hp-indel}          & 0.0108 & \cite{hp_paper} Table 5 (deletion + insertion) \\
+\texttt{non-hp-sub}            & 0.0039 & \cite{hp_paper}~\S 8.6 Table 16 (approach 2, ont98) \\
+\texttt{non-hp-indel}          & 0.0074 & \cite{hp_paper}~\S 8.6 Table 16 (approach 2, ont98) \\
 \midrule
-\texttt{hp-l1}                 & 0.0067 & \cite{hp_paper} Table 4 \\
-\texttt{hp-l2}                 & 0.0083 & \cite{hp_paper} Table 4 \\
-\texttt{hp-l3}                 & 0.0097 & \cite{hp_paper} Table 4 \\
-\texttt{hp-l4}                 & 0.0099 & \cite{hp_paper} Table 4 \\
-\texttt{hp-l5}                 & 0.0113 & \cite{hp_paper} Table 4 \\
+\texttt{hp-l1}                 & 0.0047 & \cite{hp_paper}~\S 8.6 Table 16 (v2\_ef, ont98) \\
+\texttt{hp-l2}                 & 0.0062 & \cite{hp_paper}~\S 8.6 Table 16 (v2\_ef, ont98) \\
+\texttt{hp-l3}                 & 0.0076 & \cite{hp_paper}~\S 8.6 Table 16 (v2\_ef, ont98) \\
+\texttt{hp-l4}                 & 0.0081 & \cite{hp_paper}~\S 8.6 Table 16 (v2\_ef, ont98) \\
+\texttt{hp-l5}                 & 0.0087 & \cite{hp_paper}~\S 8.6 Table 16 (v2\_ef, ont98) \\
 \midrule
 \texttt{hp-l6+}                & N/A    & blanket discard, \cite{hp_paper}~\S 8.1 \\
 \bottomrule
 \end{tabular}
 \end{table}
 
-\paragraph{Future refinement.} Finer segmentation --- per-base (e.g.,
-\texttt{hp-l5-G = 0.0140} per~\cite{hp_paper}~Table~10) or per-direction
-(\texttt{hp-l3-A-del1} vs \texttt{hp-l3-A-ins1}) --- is straightforward to
-add by extending the YAML with additional keys. The lookup function already
-accepts any string key, and the context tag persisted in the metadata JSON
-records the full $(b, L, \delta)$ triple. Downstream recomputation under a
-finer table therefore requires no upstream re-run. The current simplification
-reflects the data available at publication time: with run-to-run variation
-of $\sim\!0.6\times$~\cite{hp_paper}~\S 5.4, the finer cells would introduce
-false precision rather than discrimination.
+\paragraph{Future refinement.} Finer segmentation --- per-base
+(\texttt{hp-l5-G} vs \texttt{hp-l5-A}, per~\cite{hp_paper}~\S 7.6) or
+per-direction (\texttt{hp-l3-A-del1} vs \texttt{hp-l3-A-ins1}) --- is
+straightforward to add by extending the YAML with additional keys. The
+lookup function already accepts any string key, and the context tag persisted
+in the metadata JSON records the full $(b, L, \delta)$ triple. Downstream
+recomputation under a finer table therefore requires no upstream re-run. The
+current simplification reflects the data available at publication time: with
+run-to-run variation of $\sim\!0.6\times$~\cite{hp_paper}~\S 5.4, the finer
+cells would introduce false precision rather than discrimination. Per-base
+and per-direction re-estimation under the current pipeline has not been
+performed; the shipped pooled values in Table~\ref{tab:default_qctx} are the
+authoritative production defaults.
 
 HP-interface substitutions inherit the \texttt{non-hp-sub} rate automatically:
 the context classifier reports them as \texttt{NON\_HP\_SUB} tags per the
