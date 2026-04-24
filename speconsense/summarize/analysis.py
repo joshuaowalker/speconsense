@@ -378,15 +378,72 @@ def identify_indel_events(aligned_seqs: List, alignment_length: int) -> List[Tup
     return events
 
 
-def is_homopolymer_event(aligned_seqs: List, start_col: int, end_col: int) -> bool:
+def _aligned_hp_run_length(seq_str: str, start_col: int, end_col: int, base: str) -> int:
+    """Measure the full HP run of ``base`` in an aligned sequence that touches
+    the column span [start_col, end_col] (inclusive).
+
+    Walks left from ``start_col-1``, across the span, and right from
+    ``end_col+1``. Gap columns are skipped; non-gap columns matching ``base``
+    are counted; any other non-gap base ends the walk on that side.
+
+    Mirrors the measurement used by adjusted-identity's ``_hp_run_length``
+    so that MSA-side HP classification uses the same MIN-of-runs semantics
+    as the distance-side.
+    """
+    base_upper = base.upper()
+    n = len(seq_str)
+    count = 0
+
+    # Walk left from just before start_col
+    pos = start_col - 1
+    while pos >= 0:
+        c = seq_str[pos]
+        if c == '-':
+            pos -= 1
+            continue
+        if c.upper() == base_upper:
+            count += 1
+            pos -= 1
+        else:
+            break
+
+    # Count base occurrences inside the span (gaps skipped)
+    for pos in range(start_col, end_col + 1):
+        c = seq_str[pos]
+        if c == '-':
+            continue
+        if c.upper() == base_upper:
+            count += 1
+
+    # Walk right from just after end_col
+    pos = end_col + 1
+    while pos < n:
+        c = seq_str[pos]
+        if c == '-':
+            pos += 1
+            continue
+        if c.upper() == base_upper:
+            count += 1
+            pos += 1
+        else:
+            break
+
+    return count
+
+
+def is_homopolymer_event(aligned_seqs: List, start_col: int, end_col: int,
+                         min_hp_length: int = 1) -> bool:
     """
     Classify a complete indel event as homopolymer or structural.
 
     An event is homopolymer if:
     1. All bases in the event region (across all sequences, all columns) are identical
     2. At least one flanking solid column has all sequences showing the same base
+    3. The shortest aligned HP run (min across sequences) is >= ``min_hp_length``.
 
-    This matches adjusted-identity semantics where AAA ~ AAAA.
+    Default ``min_hp_length=1`` preserves the original binary classification.
+    Higher thresholds demote short-HP length diffs back to structural indels,
+    matching adjusted-identity's ``hp_normalize_min_length`` semantics.
 
     Examples:
         Homopolymer:  ATAAA--GC vs ATAAAAGC  (event has all A's, flanked by A)
@@ -397,6 +454,9 @@ def is_homopolymer_event(aligned_seqs: List, start_col: int, end_col: int) -> bo
         aligned_seqs: List of aligned sequences from SPOA
         start_col: First column of the indel event (inclusive)
         end_col: Last column of the indel event (inclusive)
+        min_hp_length: Minimum HP run length (per-sequence, MIN across sequences)
+            required to keep the event classified as homopolymer. 1 disables
+            the check.
 
     Returns:
         True if homopolymer event, False if structural
@@ -418,6 +478,7 @@ def is_homopolymer_event(aligned_seqs: List, start_col: int, end_col: int) -> bo
     # A valid flanking column must:
     # 1. Not be an indel column (all sequences have bases, no gaps)
     # 2. All bases match the event base
+    has_matching_flank = False
 
     # Check left flank
     if start_col > 0:
@@ -427,23 +488,35 @@ def is_homopolymer_event(aligned_seqs: List, start_col: int, end_col: int) -> bo
         left_has_gap = '-' in left_column
 
         if not left_has_gap and left_bases == {event_base}:
-            return True
+            has_matching_flank = True
 
     # Check right flank
-    if end_col < alignment_length - 1:
+    if not has_matching_flank and end_col < alignment_length - 1:
         right_col = end_col + 1
         right_column = [str(seq.seq[right_col]) for seq in aligned_seqs]
         right_bases = set(c for c in right_column if c != '-')
         right_has_gap = '-' in right_column
 
         if not right_has_gap and right_bases == {event_base}:
-            return True
+            has_matching_flank = True
 
-    # No valid homopolymer flanking found
-    return False
+    if not has_matching_flank:
+        return False
+
+    # Short-HP demotion: if the shortest per-sequence HP run is below the
+    # threshold, the length diff carries short-HP signal — treat as structural.
+    if min_hp_length > 1:
+        run_lengths = [
+            _aligned_hp_run_length(str(seq.seq), start_col, end_col, event_base)
+            for seq in aligned_seqs
+        ]
+        if run_lengths and min(run_lengths) < min_hp_length:
+            return False
+
+    return True
 
 
-def analyze_msa_columns(aligned_seqs: List) -> dict:
+def analyze_msa_columns(aligned_seqs: List, min_hp_length: int = 1) -> dict:
     """
     Analyze aligned sequences to count SNPs and indels.
 
@@ -455,6 +528,13 @@ def analyze_msa_columns(aligned_seqs: List) -> dict:
 
     Important: All gaps (including terminal gaps) count as variant positions
     since variants within a group share the same primers.
+
+    Args:
+        aligned_seqs: SPOA MSA sequences
+        min_hp_length: Minimum HP run length to classify an event as
+            homopolymer. Events whose shortest per-sequence run is below this
+            threshold are demoted to structural. Default 1 disables the check
+            and preserves pre-threshold behavior.
 
     Returns dict with:
         'snp_count': number of positions with >1 non-gap base
@@ -487,7 +567,7 @@ def analyze_msa_columns(aligned_seqs: List) -> dict:
     homopolymer_events = []
 
     for start_col, end_col in indel_events:
-        if is_homopolymer_event(aligned_seqs, start_col, end_col):
+        if is_homopolymer_event(aligned_seqs, start_col, end_col, min_hp_length=min_hp_length):
             homopolymer_events.append((start_col, end_col))
         else:
             structural_events.append((start_col, end_col))
@@ -517,7 +597,8 @@ def analyze_msa_columns(aligned_seqs: List) -> dict:
 
 
 def analyze_msa_columns_overlap_aware(aligned_seqs: List, min_overlap_bp: int,
-                                       original_lengths: List[int]) -> dict:
+                                       original_lengths: List[int],
+                                       min_hp_length: int = 1) -> dict:
     """
     Analyze MSA columns, distinguishing terminal gaps from structural indels.
 
@@ -626,7 +707,7 @@ def analyze_msa_columns_overlap_aware(aligned_seqs: List, min_overlap_bp: int,
         if is_terminal and overlap_bp >= effective_threshold:
             # Terminal gap from length difference - don't count as structural
             terminal_gap_columns += (end_col - start_col + 1)
-        elif is_homopolymer_event(aligned_seqs, start_col, end_col):
+        elif is_homopolymer_event(aligned_seqs, start_col, end_col, min_hp_length=min_hp_length):
             homopolymer_events.append((start_col, end_col))
         else:
             # Only count as structural if within overlap region

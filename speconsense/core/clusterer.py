@@ -1910,7 +1910,7 @@ class SpecimenClusterer:
             for j in range(i + 1, n):
                 ci, cj = consensuses.get(i), consensuses.get(j)
                 if ci and cj:
-                    dist, _ = _hp_normalized_pairwise_compare(ci, cj)
+                    dist, _ = _hp_normalized_pairwise_compare(ci, cj, self.min_hp_length)
                 else:
                     dist = 1.0
                 dist_matrix[i][j] = dist
@@ -2675,14 +2675,14 @@ class SpecimenClusterer:
         """Check if two sequences differ only in HP run lengths.
 
         Uses edlib global alignment with consensus-derived HP context.
-        Only HP runs of length >= min_hp_length (default 6) are normalized.
+        Only HP runs of length >= self.min_hp_length are normalized.
         Any non-HP difference (substitution, non-HP indel, terminal overhang)
         means the sequences are NOT equivalent.
         """
         if not seq1 or not seq2:
             return seq1 == seq2
 
-        _, is_equiv = _hp_normalized_pairwise_compare(seq1, seq2)
+        _, is_equiv = _hp_normalized_pairwise_compare(seq1, seq2, self.min_hp_length)
         return is_equiv
 
     def parse_mcl_output(self, mcl_output_file: str) -> List[Set[str]]:

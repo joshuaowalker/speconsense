@@ -12,6 +12,7 @@ from .cli import main, parse_arguments, setup_logging, process_single_specimen
 from .iupac import (
     IUPAC_EQUIV,
     STANDARD_ADJUSTMENT_PARAMS,
+    build_adjustment_params,
     bases_match_with_iupac,
     expand_iupac_code,
     merge_bases_to_iupac,
@@ -85,6 +86,7 @@ __all__ = [
     # IUPAC
     "IUPAC_EQUIV",
     "STANDARD_ADJUSTMENT_PARAMS",
+    "build_adjustment_params",
     "bases_match_with_iupac",
     "expand_iupac_code",
     "merge_bases_to_iupac",

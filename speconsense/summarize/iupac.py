@@ -17,6 +17,7 @@ from speconsense.distances import (  # noqa: F401
     STANDARD_ADJUSTMENT_PARAMS,
     MIN_COVERAGE_THRESHOLD,
     MAX_ADJUSTMENT_RATIO,
+    build_adjustment_params,
     expand_iupac_code,
     bases_match_with_iupac,
     _count_alignment_differences,
@@ -116,7 +117,8 @@ def create_variant_summary(primary_seq: str, variant_seq: str) -> str:
         return f"comparison failed: {str(e)}"
 
 
-def calculate_overlap_aware_distance(seq1: str, seq2: str, min_overlap_bp: int) -> float:
+def calculate_overlap_aware_distance(seq1: str, seq2: str, min_overlap_bp: int,
+                                      hp_normalization_length: int = 1) -> float:
     """
     Calculate distance that accounts for partial overlaps between sequences.
 
@@ -129,6 +131,9 @@ def calculate_overlap_aware_distance(seq1: str, seq2: str, min_overlap_bp: int) 
     Args:
         seq1, seq2: DNA sequences (may have different lengths)
         min_overlap_bp: Minimum overlap required in base pairs
+        hp_normalization_length: Minimum HP run length at/above which HP length
+            differences are normalized. Default 1 normalizes every HP length
+            diff (legacy behavior).
 
     Returns:
         Distance (0.0 to 1.0) based on overlap region if sufficient,
@@ -145,8 +150,13 @@ def calculate_overlap_aware_distance(seq1: str, seq2: str, min_overlap_bp: int) 
     if seq1 == seq2:
         return 0.0
 
+    # Build params honoring the requested HP threshold
+    params = (STANDARD_ADJUSTMENT_PARAMS
+              if hp_normalization_length == 1
+              else build_adjustment_params(hp_normalization_length))
+
     # Use align_and_score which handles bidirectional alignment internally
-    result = align_and_score(seq1, seq2, STANDARD_ADJUSTMENT_PARAMS)
+    result = align_and_score(seq1, seq2, params)
 
     # Calculate overlap in base pairs
     # Coverage is fraction of each sequence used in alignment
@@ -166,4 +176,4 @@ def calculate_overlap_aware_distance(seq1: str, seq2: str, min_overlap_bp: int) 
     else:
         # Insufficient overlap - fall back to global distance
         # This will typically be high due to terminal gaps
-        return calculate_adjusted_identity_distance(seq1, seq2)
+        return calculate_adjusted_identity_distance(seq1, seq2, hp_normalization_length)

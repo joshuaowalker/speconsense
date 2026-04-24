@@ -68,7 +68,7 @@ VALID_SPECONSENSE_KEYS = {
     "disable-position-phasing",
     "significance-level",
     "group-identity",
-    "hp-min-length",
+    "hp-normalization-length",
     "error-model",
     # Ambiguity calling
     "min-ambiguity-frequency",
@@ -104,6 +104,7 @@ VALID_SUMMARIZE_KEYS = {
     "merge-min-size-ratio",
     "min-merge-overlap",
     "disable-homopolymer-equivalence",
+    "hp-normalization-length",
     # Selection
     "select-max-groups",
     "select-max-variants",

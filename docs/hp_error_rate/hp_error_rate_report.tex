@@ -876,7 +876,7 @@ that matches the original analysis:
 \texttt{-{}-presample~0 -{}-max-sample-size~10000 -{}-collect-discards
 -{}-error-model~dorado-v5.0}. All other parameters took current defaults
 (\texttt{-{}-min-identity~0.9}, \texttt{-{}-group-identity~0.85},
-\texttt{-{}-hp-min-length~6}, \texttt{-{}-min-variant-count~3},
+\texttt{-{}-hp-normalization-length~6}, \texttt{-{}-min-variant-count~3},
 \texttt{-{}-significance-level~1e-5}). The pipeline also uses a linear
 SPOA scoring scheme (match~$+1$, mismatch~$-1$, gap~open~$-1$,
 gap~extend~$-1$) in place of SPOA's defaults, which bias toward
@@ -1014,7 +1014,7 @@ A natural concern is that the more aggressive HP phasing at $L \leq 5$ in
 the current pipeline could produce \emph{artifactual} splits---cutting noise
 from signal and leaving a cleaner-than-reality primary cluster, thereby
 biasing apparent rates downward. To test this, we re-ran ont98 with
-\texttt{-{}-hp-min-length~0}, which reverts to the old behavior of blanket-
+\texttt{-{}-hp-normalization-length~0}, which reverts to the old behavior of blanket-
 normalizing all HP variants (no HP-driven splits).
 
 Table~\ref{tab:test_a} compares HP rates between the current-pipeline run
@@ -1026,7 +1026,7 @@ only 2--11\%.
 
 \begin{table}[h]
 \centering
-\caption{Effect of disabling HP phasing (\texttt{-{}-hp-min-length~0}) on
+\caption{Effect of disabling HP phasing (\texttt{-{}-hp-normalization-length~0}) on
 measured HP rates. Gap recovery is the fraction of the v2\_ef$\to$original
 gap closed by Test~A.}
 \label{tab:test_a}

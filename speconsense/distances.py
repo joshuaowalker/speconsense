@@ -25,14 +25,37 @@ IUPAC_EQUIV = [("Y", "C"), ("Y", "T"), ("R", "A"), ("R", "G"),
                ("V", "A"), ("V", "C"), ("V", "G"), ]
 
 # Standard adjustment parameters for consistent sequence comparison
-# Used by both substitution distance calculation and adjusted identity distance
+# Used by both substitution distance calculation and adjusted identity distance.
+# Default hp_normalize_min_length=1 preserves legacy behavior (all HP lengths
+# normalized); summarize callers that want short-HP signal preserved construct
+# a variant via build_adjustment_params().
 STANDARD_ADJUSTMENT_PARAMS = AdjustmentParams(
     normalize_homopolymers=True,    # Enable homopolymer normalization
     handle_iupac_overlap=False,     # Disable IUPAC overlap - use standard IUPAC semantics (Y!=M)
     normalize_indels=False,         # Disable indel normalization
     end_skip_distance=0,            # No end trimming - sequences must match end-to-end
-    max_repeat_motif_length=1       # Single-base repeats for homopolymer normalization
+    max_repeat_motif_length=1,      # Single-base repeats for homopolymer normalization
+    hp_normalize_min_length=1,      # Normalize all HP length diffs (legacy default)
 )
+
+
+def build_adjustment_params(hp_normalization_length: int = 1) -> AdjustmentParams:
+    """Build AdjustmentParams that shares STANDARD_ADJUSTMENT_PARAMS' configuration
+    except for the HP length threshold.
+
+    Summarize uses this to plumb the user-facing --hp-normalization-length
+    through to adjusted-identity's hp_normalize_min_length. Short HP length
+    differences (min(L1, L2) < threshold) are counted as edits instead of
+    being normalized away.
+    """
+    return AdjustmentParams(
+        normalize_homopolymers=True,
+        handle_iupac_overlap=False,
+        normalize_indels=False,
+        end_skip_distance=0,
+        max_repeat_motif_length=1,
+        hp_normalize_min_length=hp_normalization_length,
+    )
 
 # Safeguards for unreliable adjusted identity on length-mismatched sequences.
 # When terminal gap exclusion inflates identity, fall back to raw edlib identity.
@@ -161,11 +184,19 @@ def count_variant_differences(seq1: str, seq2: str) -> int:
         return -1
 
 
-def calculate_adjusted_identity_distance(seq1: str, seq2: str) -> float:
+def calculate_adjusted_identity_distance(seq1: str, seq2: str,
+                                          hp_normalization_length: int = 1) -> float:
     """Calculate adjusted identity distance between two sequences.
 
     Uses homopolymer-normalized adjusted identity with safeguards against
     unreliable results from length-mismatched sequences.
+
+    Args:
+        seq1, seq2: Sequences to compare.
+        hp_normalization_length: Minimum HP run length at/above which HP
+            length differences are normalized. Default 1 normalizes every HP
+            length diff (legacy behavior). Higher values preserve short-HP
+            signal by counting short-run length diffs as edits.
 
     Returns distance from 0.0 (identical) to 1.0 (maximally different).
     """
@@ -188,11 +219,14 @@ def calculate_adjusted_identity_distance(seq1: str, seq2: str) -> float:
     if not alignment or not alignment.get('query_aligned') or not alignment.get('target_aligned'):
         return 1.0
 
-    # Calculate adjusted identity using standard parameters
+    # Calculate adjusted identity, honoring the requested HP threshold
+    params = (STANDARD_ADJUSTMENT_PARAMS
+              if hp_normalization_length == 1
+              else build_adjustment_params(hp_normalization_length))
     score_result = score_alignment(
         alignment['query_aligned'],
         alignment['target_aligned'],
-        adjustment_params=STANDARD_ADJUSTMENT_PARAMS
+        adjustment_params=params
     )
     adjusted_identity = score_result.identity
 

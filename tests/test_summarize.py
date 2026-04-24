@@ -110,10 +110,12 @@ def test_merge_behavior_with_full_hac_context():
 
 
 def test_merge_with_homopolymer_only_differences():
-    """Test that sequences differing only in homopolymer lengths DO merge.
+    """Test that sequences differing only in LONG homopolymer lengths DO merge.
 
-    This test verifies that sequences with identical structure but different
-    homopolymer lengths will merge with the homopolymer-aware algorithm.
+    Under the default --hp-normalization-length=6, only HP runs whose shortest
+    side is >= 6 are blanket-normalized. Short-HP length diffs now count as
+    real edits. This test exercises the long-HP regime where merging still
+    collapses length variation.
     """
     # Create temporary directory structure
     temp_dir = tempfile.mkdtemp()
@@ -122,11 +124,10 @@ def test_merge_with_homopolymer_only_differences():
     os.makedirs(source_dir)
 
     try:
-        # Create two sequences that differ only in homopolymer length
-        # Base sequence with A homopolymer of length 5
-        seq1 = "ATCGAAAAATCGATCGATCGATCG"
-        # Same sequence with A homopolymer of length 8
-        seq2 = "ATCGAAAAAAATCGATCGATCGATCG"
+        # Create two sequences that differ only in homopolymer length.
+        # Both runs are >= 6 so min(L1,L2)=8 passes the default threshold.
+        seq1 = "ATCGAAAAAAAATCGATCGATCGATCG"        # 8 A's
+        seq2 = "ATCGAAAAAAAAAATCGATCGATCGATCG"      # 10 A's
 
         fasta_content = f""">test-seq-1.v1 size=10 ric=10 primers=test gid=1 vid=1
 {seq1}

@@ -119,8 +119,9 @@ def test_v3_5_rates_higher_than_v5_0_at_short_lengths():
 
 
 def test_v5_0_non_hp_sub_matches_paper_expectation():
-    # The HP paper §3.2 reports 0.59% post-clustering substitution rate.
-    assert abs(DORADO_V5_0["non-hp-sub"] - 0.0059) < 1e-9
+    # HP paper §8.6 Table 16 (approach-2 all-cluster pooled, re-estimated
+    # under the current pipeline on ont98).
+    assert abs(DORADO_V5_0["non-hp-sub"] - 0.0039) < 1e-9
 
 
 def test_all_models_have_required_keys():
@@ -150,7 +151,7 @@ def test_load_table_by_name():
     t = load_table("dorado-v5.0")
     assert isinstance(t, dict)
     assert "non-hp-sub" in t
-    assert t["non-hp-sub"] == pytest.approx(0.0059)
+    assert t["non-hp-sub"] == pytest.approx(0.0039)
 
 
 def test_load_table_unknown_name_raises():

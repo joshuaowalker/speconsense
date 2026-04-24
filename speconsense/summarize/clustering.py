@@ -32,6 +32,7 @@ def merge_groups_by_anchor_overlap(
     min_overlap_bp: int,
     group_identity: float,
     max_iterations: int = 10,
+    hp_normalization_length: int = 1,
 ) -> Dict[int, List[ConsensusInfo]]:
     """Merge cross-primer core-assigned groups whose members overlap well.
 
@@ -65,7 +66,7 @@ def merge_groups_by_anchor_overlap(
                 if i not in groups or j not in groups:
                     continue
                 merge_pair_dist = _best_cross_primer_overlap(
-                    groups[i], groups[j], min_overlap_bp)
+                    groups[i], groups[j], min_overlap_bp, hp_normalization_length)
                 if merge_pair_dist is None or merge_pair_dist >= threshold:
                     continue
                 anchor_i = max(groups[i], key=lambda v: v.size)
@@ -94,6 +95,7 @@ def _best_cross_primer_overlap(
     group_a: List[ConsensusInfo],
     group_b: List[ConsensusInfo],
     min_overlap_bp: int,
+    hp_normalization_length: int = 1,
 ) -> Optional[float]:
     """Return the minimum overlap-aware distance across cross-primer pairs.
 
@@ -106,7 +108,7 @@ def _best_cross_primer_overlap(
             if primers_are_same(a.primers, b.primers):
                 continue
             dist = calculate_overlap_aware_distance(
-                a.sequence, b.sequence, min_overlap_bp)
+                a.sequence, b.sequence, min_overlap_bp, hp_normalization_length)
             if best is None or dist < best:
                 best = dist
     return best
@@ -144,7 +146,8 @@ def group_by_core_identity(
 def select_variants(group: List[ConsensusInfo],
                    max_variants: int,
                    variant_selection: str,
-                   group_number: int = None) -> List[ConsensusInfo]:
+                   group_number: int = None,
+                   hp_normalization_length: int = 1) -> List[ConsensusInfo]:
     """
     Select variants from a group based on the specified strategy.
     Always includes the largest variant first.
@@ -158,6 +161,8 @@ def select_variants(group: List[ConsensusInfo],
         max_variants: Maximum total variants per group (0 or -1 for no limit)
         variant_selection: Selection strategy ("size" or "diversity")
         group_number: Group number for logging prefix (optional)
+        hp_normalization_length: HP threshold forwarded to distance calc
+            (diversity strategy only).
     """
     # Sort by size, largest first
     sorted_group = sorted(group, key=lambda x: x.size, reverse=True)
@@ -197,7 +202,8 @@ def select_variants(group: List[ConsensusInfo],
                 for candidate in candidates:
                     # Calculate minimum distance to all selected variants
                     min_distance = min(
-                        calculate_adjusted_identity_distance(candidate.sequence, sel.sequence)
+                        calculate_adjusted_identity_distance(
+                            candidate.sequence, sel.sequence, hp_normalization_length)
                         for sel in selected
                     )
 

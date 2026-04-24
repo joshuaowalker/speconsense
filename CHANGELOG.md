@@ -5,6 +5,19 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Changed
+- **`--hp-min-length` renamed to `--hp-normalization-length`** (core) — The previous name was opaque about what the threshold controls. Same semantics (HP runs of length >= threshold are blanket-normalized; shorter runs surface for CER evaluation), same default (6). Profile key `hp-min-length` likewise renamed
+- **Internal cluster-merging and identity-grouping HP threshold honored** (core) — `are_homopolymer_equivalent` and `_classify_subcluster_groups` were silently using a hardcoded 6 instead of `self.min_hp_length`; now respect the user-configured value
+
+### Added
+- **`--hp-normalization-length` parameter** (summarize) — Plumbs the same HP threshold through summarize's distance calculations (HAC cross-primer conflation, diversity selection, overlap-aware distance) and MSA-based variant merging (`is_homopolymer_event`). Default 6 matches core. Set to 1 for legacy blanket-normalize-all behavior. Backed by `adjusted-identity>=0.2.7` `hp_normalize_min_length` (MIN-of-runs semantics)
+- **`build_adjustment_params(hp_normalization_length=N)` factory** (`speconsense.distances`) — Returns an `AdjustmentParams` variant with the requested HP threshold, sharing all other STANDARD settings
+
+### Dependencies
+- `adjusted-identity` requirement bumped to `>=0.2.7` for the `hp_normalize_min_length` `AdjustmentParams` field
+
 ## [0.7.7] - 2026-03-17
 
 ### Added

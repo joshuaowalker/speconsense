@@ -183,6 +183,12 @@ def parse_arguments():
                                help="Merging effort level: fast (8), balanced (10), thorough (12), "
                                     "or numeric 6-14. Higher values allow larger batch sizes for "
                                     "exhaustive subset search. Default: balanced")
+    merging_group.add_argument("--hp-normalization-length", type=int, default=6,
+                               help="Minimum homopolymer run length at/above which HP length "
+                                    "differences are blanket-normalized (treated as noise). Runs "
+                                    "shorter than this are surfaced as real edits in both distance "
+                                    "calculations and MSA merging. Matches core's "
+                                    "--hp-normalization-length default. (default: 6)")
 
     # Backward compatibility: support old --snp-merge-limit parameter
     parser.add_argument("--snp-merge-limit", type=int, dest="_snp_merge_limit_deprecated",
@@ -352,7 +358,8 @@ def process_single_specimen(file_consensuses: List[ConsensusInfo],
     # one tissue sample).
     if args.min_merge_overlap > 0 and len(variant_groups) > 1:
         variant_groups = merge_groups_by_anchor_overlap(
-            variant_groups, args.min_merge_overlap, args.group_identity)
+            variant_groups, args.min_merge_overlap, args.group_identity,
+            hp_normalization_length=args.hp_normalization_length)
 
     # Filter to max groups if specified
     if args.select_max_groups > 0 and len(variant_groups) > args.select_max_groups:
@@ -410,7 +417,10 @@ def process_single_specimen(file_consensuses: List[ConsensusInfo],
                 group_members = filtered
 
         # Select variants for this group
-        selected_variants = select_variants(group_members, args.select_max_variants, args.select_strategy, group_number=final_group_name)
+        selected_variants = select_variants(
+            group_members, args.select_max_variants, args.select_strategy,
+            group_number=final_group_name,
+            hp_normalization_length=args.hp_normalization_length)
 
         # Create naming for this group within this specimen
         group_naming = []
@@ -542,6 +552,7 @@ def main():
     logging.info(f"  --disable-homopolymer-equivalence: {args.disable_homopolymer_equivalence}")
     logging.info(f"  --min-merge-overlap: {args.min_merge_overlap}")
     logging.info(f"  --merge-effort: {args.merge_effort} ({args.merge_effort_value})")
+    logging.info(f"  --hp-normalization-length: {args.hp_normalization_length}")
     logging.info(f"  --group-identity: {args.group_identity}")
     logging.info(f"  --select-max-variants: {args.select_max_variants}")
     logging.info(f"  --select-max-groups: {args.select_max_groups}")

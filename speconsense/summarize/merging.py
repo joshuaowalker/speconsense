@@ -478,11 +478,13 @@ def merge_group_with_msa(variants: List[ConsensusInfo], args) -> Tuple[List[Cons
                 subset_aligned = [aligned_seqs[i] for i in subset_indices]
 
                 # Analyze MSA for this subset
+                hp_min = getattr(args, 'hp_normalization_length', 1)
                 if use_overlap_mode:
                     # Use overlap-aware analysis for primer pool scenarios
                     original_lengths = [len(v.sequence) for v in subset_variants]
                     variant_stats = analyze_msa_columns_overlap_aware(
-                        subset_aligned, args.min_merge_overlap, original_lengths
+                        subset_aligned, args.min_merge_overlap, original_lengths,
+                        min_hp_length=hp_min,
                     )
 
                     # Check overlap requirement
@@ -493,7 +495,7 @@ def merge_group_with_msa(variants: List[ConsensusInfo], args) -> Tuple[List[Cons
                         continue
                 else:
                     # Use standard analysis
-                    variant_stats = analyze_msa_columns(subset_aligned)
+                    variant_stats = analyze_msa_columns(subset_aligned, min_hp_length=hp_min)
 
                 # Calculate cumulative positions from input sequences (for iterative merging)
                 # Each sequence may carry positions from prior merges

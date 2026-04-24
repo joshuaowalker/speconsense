@@ -34,7 +34,7 @@ Parameters for the main clustering and consensus tool.
 | `min-variant-count` | Min read count for minor allele to trigger phasing | 3 | — | — | — | — | — |
 | `significance-level` | Alpha for variant significance (CER) testing | 1e-5 | — | — | — | — | — |
 | `group-identity` | Complete-linkage identity for read reassignment/CER grouping | 0.85 | — | — | — | — | — |
-| `hp-min-length` | HP run length at/above which length variants are suppressed (blanket HP normalization) | 6 | — | — | — | — | — |
+| `hp-normalization-length` | HP run length at/above which length variants are suppressed (blanket HP normalization) | 6 | — | — | — | — | — |
 | `error-model` | Per-basecaller error model (name, user file, or path); see `--list-error-models` | dorado-v5.0 | — | — | — | — | — |
 | `disable-ambiguity-calling` | Disable IUPAC codes for unphased variants | false | — | — | — | true | true |
 | `min-ambiguity-frequency` | Min minor allele frequency for IUPAC calling | 0.10 | 0.20 | — | — | — | — |

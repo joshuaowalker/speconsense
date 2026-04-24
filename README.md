@@ -1097,7 +1097,8 @@ usage: speconsense [-h] [-O OUTPUT_DIR] [--primers PRIMERS]
                    [--min-variant-count MIN_VARIANT_COUNT]
                    [--significance-level SIGNIFICANCE_LEVEL]
                    [--group-identity GROUP_IDENTITY]
-                   [--hp-min-length HP_MIN_LENGTH] [--error-model ERROR_MODEL]
+                   [--hp-normalization-length HP_NORMALIZATION_LENGTH]
+                   [--error-model ERROR_MODEL]
                    [--disable-ambiguity-calling] [--enable-ambiguity-calling]
                    [--min-ambiguity-frequency MIN_AMBIGUITY_FREQUENCY]
                    [--min-ambiguity-count MIN_AMBIGUITY_COUNT]
@@ -1177,14 +1178,15 @@ Variant Phasing:
                         reassignment, discard recovery, and CER validation.
                         Grouping uses complete linkage: every pair within a
                         group must meet this threshold. (default: 0.85)
-  --hp-min-length HP_MIN_LENGTH
-                        Minimum homopolymer run length to treat as HP context
-                        in MSA variant detection. Runs of length >= this value
-                        have their length variants suppressed (blanket
-                        normalization); runs below it are surfaced as
-                        candidates and evaluated by context-aware CER. Default
-                        6 matches the HP paper recommendation of CER-
-                        evaluating L <= 5 HP variants. (default: 6)
+  --hp-normalization-length HP_NORMALIZATION_LENGTH
+                        Minimum homopolymer run length at/above which HP
+                        length variants are blanket-normalized (treated as
+                        noise). Runs of length >= this value have their
+                        length variants suppressed in MSA variant detection;
+                        runs shorter than this surface as candidates and are
+                        evaluated by context-aware CER. Default 6 matches
+                        the HP paper recommendation of CER-evaluating
+                        L <= 5 HP variants. (default: 6)
   --error-model ERROR_MODEL
                         Per-basecaller error model used for context-aware
                         variant validation. Either a shipped model name (use
@@ -1271,6 +1273,7 @@ usage: speconsense-summarize [-h] [--source SOURCE]
                              [--disable-homopolymer-equivalence]
                              [--enable-homopolymer-equivalence]
                              [--merge-effort LEVEL]
+                             [--hp-normalization-length HP_NORMALIZATION_LENGTH]
                              [--select-max-groups SELECT_MAX_GROUPS]
                              [--select-max-variants SELECT_MAX_VARIANTS]
                              [--select-strategy {size,diversity}]
@@ -1368,6 +1371,13 @@ Merging:
                         thorough (12), or numeric 6-14. Higher values allow
                         larger batch sizes for exhaustive subset search.
                         Default: balanced
+  --hp-normalization-length HP_NORMALIZATION_LENGTH
+                        Minimum homopolymer run length at/above which HP
+                        length differences are blanket-normalized (treated as
+                        noise). Runs shorter than this are surfaced as real
+                        edits in both distance calculations and MSA merging.
+                        Matches core's --hp-normalization-length default.
+                        (default: 6)
 
 Selection:
   --select-max-groups SELECT_MAX_GROUPS, --max-groups SELECT_MAX_GROUPS

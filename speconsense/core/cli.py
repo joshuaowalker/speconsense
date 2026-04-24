@@ -72,13 +72,13 @@ def main():
                                help="Minimum pairwise identity to group clusters for read reassignment, "
                                     "discard recovery, and CER validation. Grouping uses complete linkage: "
                                     "every pair within a group must meet this threshold. (default: 0.85)")
-    phasing_group.add_argument("--hp-min-length", type=int, default=6,
-                               help="Minimum homopolymer run length to treat as HP context in MSA "
-                                    "variant detection. Runs of length >= this value have their length "
-                                    "variants suppressed (blanket normalization); runs below it are "
-                                    "surfaced as candidates and evaluated by context-aware CER. "
-                                    "Default 6 matches the HP paper recommendation of CER-evaluating "
-                                    "L <= 5 HP variants. (default: 6)")
+    phasing_group.add_argument("--hp-normalization-length", type=int, default=6,
+                               help="Minimum homopolymer run length at/above which HP length variants "
+                                    "are blanket-normalized (treated as noise). Runs of length >= this "
+                                    "value have their length variants suppressed in MSA variant "
+                                    "detection; runs shorter than this surface as candidates and are "
+                                    "evaluated by context-aware CER. Default 6 matches the HP paper "
+                                    "recommendation of CER-evaluating L <= 5 HP variants. (default: 6)")
     phasing_group.add_argument("--error-model", type=str, default="dorado-v5.0",
                                help="Per-basecaller error model used for context-aware variant "
                                     "validation. Either a shipped model name (use "
@@ -236,7 +236,7 @@ def main():
         collect_discards=args.collect_discards,
         significance_level=args.significance_level,
         group_identity=args.group_identity,
-        min_hp_length=args.hp_min_length,
+        min_hp_length=args.hp_normalization_length,
         error_model=args.error_model,
     )
 
