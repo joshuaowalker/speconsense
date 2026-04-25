@@ -58,7 +58,7 @@ class TestEmptyInputHandling:
 
         # Should exit gracefully (code 0) with warning, not crash
         assert result.returncode == 0, f"Should exit gracefully, got: {result.stderr}"
-        assert "No sequences found" in result.stderr, "Should warn about empty input"
+        assert "No reads found" in result.stderr, "Should warn about empty input"
 
     def test_fastq_with_only_whitespace_errors_gracefully(self, temp_dir, core_module):
         """Verify graceful error on FASTQ with only whitespace (malformed input).

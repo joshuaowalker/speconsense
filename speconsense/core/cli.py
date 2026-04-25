@@ -242,8 +242,8 @@ def main():
 
     # Log configuration
     if not args.disable_position_phasing:
-        logging.info(f"Position-based variant phasing enabled: min_freq={args.min_variant_frequency:.0%}, "
-                    f"min_count={args.min_variant_count}")
+        logging.debug(f"Position-based variant phasing enabled: min_freq={args.min_variant_frequency:.0%}, "
+                     f"min_count={args.min_variant_count}")
 
     # Set additional attributes for metadata
     clusterer.input_file = os.path.abspath(args.input_file)
@@ -255,10 +255,10 @@ def main():
     logging.info(f"Reading sequences from {args.input_file}")
     format = "fasta" if args.input_file.endswith(".fasta") else "fastq"
     records = list(SeqIO.parse(args.input_file, format))
-    logging.info(f"Loaded {len(records)} primary sequences")
+    logging.info(f"Loaded {len(records)} primary reads")
 
     if len(records) == 0:
-        logging.warning("No sequences found in input file. Nothing to cluster.")
+        logging.warning("No reads found in input file. Nothing to cluster.")
         sys.exit(0)
 
     # Load augmented sequences if specified
@@ -269,17 +269,17 @@ def main():
             logging.error(f"Augment input file not found: {args.augment_input}")
             sys.exit(1)
 
-        logging.info(f"Reading augmented sequences from {args.augment_input}")
+        logging.info(f"Reading augmented reads from {args.augment_input}")
 
         # Auto-detect format like main input
         augment_format = "fasta" if args.augment_input.endswith(".fasta") else "fastq"
 
         try:
             augment_records = list(SeqIO.parse(args.augment_input, augment_format))
-            logging.info(f"Loaded {len(augment_records)} augmented sequences")
+            logging.info(f"Loaded {len(augment_records)} augmented reads")
 
             if len(augment_records) == 0:
-                logging.warning(f"No sequences found in augment input file: {args.augment_input}")
+                logging.warning(f"No reads found in augment input file: {args.augment_input}")
 
             # Add dummy quality scores to FASTA sequences so they can be written as FASTQ later
             if augment_format == "fasta":
@@ -319,7 +319,7 @@ def main():
 
             # Filter failed sequences if requested
             if args.orient_mode == "filter-failed" and failed_sequences:
-                logging.info(f"Filtering out {len(failed_sequences)} sequences with failed orientation")
+                logging.info(f"Filtering out {len(failed_sequences)} reads with failed orientation")
 
                 # Track as discarded and remove from clustering (but keep records for discards file)
                 clusterer.discarded_read_ids.update(failed_sequences)
@@ -328,7 +328,7 @@ def main():
                     # Keep records so they can be written to discards file
 
                 remaining = len(clusterer.sequences)
-                logging.info(f"Continuing with {remaining} successfully oriented sequences")
+                logging.info(f"Continuing with {remaining} successfully oriented reads")
         else:
             logging.warning(f"--orient-mode={args.orient_mode} specified but no primers with position information loaded")
 

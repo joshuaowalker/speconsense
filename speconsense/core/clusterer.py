@@ -294,6 +294,29 @@ class SpecimenClusterer:
         self.orient_mode = None
         self.primers_file = None
 
+    def _log_stage(self, description: str, clusters,
+                   reads_in_clusters: Optional[int] = None) -> None:
+        """Emit one INFO line: fixed-width running cluster/read totals (left) + stage description (right).
+
+        Accepts either a list of cluster dicts (with 'read_ids') or a list of
+        read-id collections (sets/lists).
+        """
+        n_clusters = len(clusters)
+        if reads_in_clusters is None:
+            n_reads = sum(
+                len(c['read_ids']) if isinstance(c, dict) else len(c)
+                for c in clusters
+            )
+        else:
+            n_reads = reads_in_clusters
+        total = getattr(self, 'total_input_reads', 0) or 0
+        pct = 100.0 * n_reads / total if total > 0 else 0.0
+        width = max(len(str(total)), 1)
+        logging.info(
+            f"[{n_clusters:>3} clusters, {n_reads:>{width}}/{total} reads, "
+            f"{pct:>5.1f}%]  {description}"
+        )
+
     def write_metadata(self) -> None:
         """Write run metadata to JSON file for use by post-processing tools.
 
@@ -499,7 +522,7 @@ class SpecimenClusterer:
             all_records.extend(augment_records)
 
         if self.presample_size and len(all_records) > self.presample_size:
-            logging.info(f"Presampling {self.presample_size} sequences from {len(all_records)} total "
+            logging.info(f"Presampling {self.presample_size} reads from {len(all_records)} total "
                          f"({primary_count} primary, {augment_count} augmented)")
 
             # First, sort primary sequences by quality and take as many as possible
@@ -521,7 +544,7 @@ class SpecimenClusterer:
                 )
                 presampled.extend(augment_sorted[:remaining_slots])
 
-            logging.info(f"Presampled {len(presampled)} sequences "
+            logging.info(f"Presampled {len(presampled)} reads "
                          f"({primary_to_include} primary, {len(presampled) - primary_to_include} augmented)")
             all_records = presampled
 
@@ -533,7 +556,7 @@ class SpecimenClusterer:
         # Log scalability mode status for large datasets
         if len(self.sequences) >= self.scale_threshold and self.scale_threshold > 0:
             if self._candidate_finder is not None:
-                logging.info(f"Scalability mode active for {len(self.sequences)} sequences (threshold: {self.scale_threshold})")
+                logging.info(f"Scalability mode active for {len(self.sequences)} reads (threshold: {self.scale_threshold})")
             else:
                 logging.warning(f"Dataset has {len(self.sequences)} sequences (>= threshold {self.scale_threshold}) "
                                "but vsearch not found. Using brute-force.")
@@ -849,10 +872,12 @@ class SpecimenClusterer:
                 merged.append(cluster_dict)
 
         if len(merged) < len(clusters):
-            logging.info(f"{phase_name} merge: Combined {len(clusters)} clusters into {len(merged)} "
-                        f"({len(clusters) - len(merged)} merged due to {merge_type} consensus)")
+            self._log_stage(
+                f"{phase_name}: combined {len(clusters)}→{len(merged)} ({len(clusters) - len(merged)} {merge_type})",
+                merged,
+            )
         else:
-            logging.info(f"{phase_name} merge: No clusters merged (no {merge_type} consensus found)")
+            logging.debug(f"{phase_name}: no merges ({merge_type} not found)")
 
         return merged
 
@@ -969,7 +994,7 @@ class SpecimenClusterer:
 
         self.write_mcl_input(mcl_input)
 
-        logging.info(f"Running MCL algorithm with inflation {self.inflation}...")
+        logging.debug(f"Running MCL algorithm with inflation {self.inflation}...")
         self.run_mcl(mcl_input, mcl_output)
         return self.parse_mcl_output(mcl_output)
 
@@ -985,7 +1010,7 @@ class SpecimenClusterer:
         Returns:
             List of clusters, where each cluster is a set of sequence IDs
         """
-        logging.info("Running greedy clustering algorithm...")
+        logging.debug("Running greedy clustering algorithm...")
 
         # Build similarity matrix if not already built
         if not hasattr(self, 'alignments'):
@@ -1009,7 +1034,7 @@ class SpecimenClusterer:
 
     def build_similarity_matrix(self) -> None:
         """Calculate all pairwise similarities between sequences."""
-        logging.info("Calculating pairwise sequence similarities...")
+        logging.debug("Calculating pairwise sequence similarities...")
 
         # Sort for deterministic order
         seq_ids = sorted(self.sequences.keys())
@@ -1089,8 +1114,7 @@ class SpecimenClusterer:
         # Sort initial clusters by size (largest first)
         initial_clusters.sort(key=lambda c: len(c), reverse=True)
         clustered_count = sum(len(c) for c in initial_clusters)
-        logging.info(f"Initial clustering produced {len(initial_clusters)} clusters "
-                     f"covering {clustered_count}/{self.total_input_reads} reads")
+        self._log_stage("Initial clustering", initial_clusters, reads_in_clusters=clustered_count)
         return initial_clusters
 
     def _run_prephasing_merge(self, initial_clusters: List[Set[str]]) -> List[Set[str]]:
@@ -1105,7 +1129,7 @@ class SpecimenClusterer:
             List of merged clusters (sets of read IDs)
         """
         if self.disable_cluster_merging:
-            logging.info("Cluster merging disabled, skipping pre-phasing merge")
+            logging.debug("Cluster merging disabled, skipping cluster equivalence merge")
             return initial_clusters
 
         # Convert initial clusters to dict format for merge_similar_clusters
@@ -1113,7 +1137,7 @@ class SpecimenClusterer:
             {'read_ids': cluster, 'initial_cluster_num': i, 'allele_combo': None}
             for i, cluster in enumerate(initial_clusters, 1)
         ]
-        merged_dicts = self.merge_similar_clusters(initial_cluster_dicts, phase_name="Pre-phasing")
+        merged_dicts = self.merge_similar_clusters(initial_cluster_dicts, phase_name="Cluster equivalence merge")
         # Extract back to sets for Phase 3
         return [d['read_ids'] for d in merged_dicts]
 
@@ -1163,8 +1187,10 @@ class SpecimenClusterer:
                 self.discarded_read_ids.update(cluster)
                 discarded_count += len(cluster)
 
-            logging.info(f"Early filter: {len(filtered_clusters)} clusters ({discarded_count} reads) "
-                        f"below threshold, {len(keep_clusters)} clusters proceeding to phasing")
+            self._log_stage(
+                f"Early filter: dropped {len(filtered_clusters)} cluster(s) (-{discarded_count} reads)",
+                keep_clusters,
+            )
 
         return keep_clusters, filtered_clusters
 
@@ -1243,8 +1269,13 @@ class SpecimenClusterer:
         # Update shared state after all processing complete
         self.discarded_read_ids.update(all_discarded)
 
-        split_info = f" ({split_count} split)" if split_count > 0 else ""
-        logging.info(f"After phasing, created {len(all_subclusters)} sub-clusters from {len(merged_clusters)} merged clusters{split_info}")
+        if split_count > 0 or len(all_subclusters) != len(merged_clusters):
+            self._log_stage(
+                f"Variant phasing: split {split_count} cluster(s) → {len(all_subclusters)} sub-clusters",
+                all_subclusters,
+            )
+        else:
+            logging.debug("Variant phasing: no splits")
         return all_subclusters
 
     def _run_postphasing_merge(self, subclusters: List[Dict]) -> List[Dict]:
@@ -1257,10 +1288,10 @@ class SpecimenClusterer:
             List of merged subclusters
         """
         if self.disable_cluster_merging:
-            logging.info("Cluster merging disabled, skipping post-phasing merge")
+            logging.debug("Cluster merging disabled, skipping cluster equivalence merge (round 2)")
             return subclusters
 
-        return self.merge_similar_clusters(subclusters, phase_name="Post-phasing")
+        return self.merge_similar_clusters(subclusters, phase_name="Cluster equivalence merge (round 2)")
 
     def _filter_noisy_clusters(self, subclusters: List[Dict]) -> List[Dict]:
         """Phase 4a: Remove unreliable small clusters with no-majority positions.
@@ -1327,8 +1358,12 @@ class SpecimenClusterer:
                 result.append(cluster_dict)
 
         if total_disbanded > 0:
-            logging.info(f"Noise filter: disbanded {total_disbanded} unreliable clusters "
-                        f"({disbanded_reads} reads moved to discards)")
+            self._log_stage(
+                f"Noise filter: disbanded {total_disbanded} cluster(s) (-{disbanded_reads} reads)",
+                result,
+            )
+        else:
+            logging.debug("Noise filter: no clusters disbanded")
 
         return result
 
@@ -1359,11 +1394,14 @@ class SpecimenClusterer:
             total_reassigned += reassigned
 
         if total_reassigned > 0:
-            logging.info(f"Read reassignment: moved {total_reassigned} reads")
             # Remove empty clusters
             subclusters = [c for c in subclusters if c['read_ids']]
+            self._log_stage(
+                f"Read reassignment: moved {total_reassigned} read(s)",
+                subclusters,
+            )
         else:
-            logging.info("Read reassignment: no reads moved")
+            logging.debug("Read reassignment: no reads moved")
 
         return subclusters
 
@@ -1453,12 +1491,14 @@ class SpecimenClusterer:
                 self.discarded_read_ids.update(lost)
 
         if split_count > 0:
-            logging.info(f"Second phasing pass: {split_count} clusters split, "
-                        f"{len(result)} sub-clusters from {len(subclusters)}")
             # Remove empty clusters
             result = [c for c in result if c['read_ids']]
+            self._log_stage(
+                f"Variant phasing (round 2): split {split_count} cluster(s) → {len(result)} sub-clusters",
+                result,
+            )
         else:
-            logging.info("Second phasing pass: no clusters split")
+            logging.debug("Variant phasing (round 2): no splits")
 
         return result
 
@@ -1664,7 +1704,7 @@ class SpecimenClusterer:
 
         total_candidates = sum(len(v) for v in group_candidates.values())
         if total_candidates == 0:
-            logging.info(f"Discard reassignment: no candidates (all {rejected} reads below threshold)")
+            logging.debug(f"Discard recovery: no candidates (all {rejected} reads below threshold)")
             return subclusters
 
         def reassign_read(rid, target_idx):
@@ -1790,11 +1830,15 @@ class SpecimenClusterer:
                 total_assigned += 1
 
         if total_assigned > 0:
-            logging.info(f"Discard reassignment: recovered {total_assigned} of "
-                        f"{total_candidates} candidates ({rejected} reads below threshold)")
+            self._log_stage(
+                f"Discard recovery: recovered {total_assigned} of {total_candidates} candidate(s)",
+                subclusters,
+            )
         else:
-            logging.info(f"Discard reassignment: no reads recovered "
-                        f"({total_candidates} candidates, {rejected} below threshold)")
+            logging.debug(
+                f"Discard recovery: no reads recovered "
+                f"({total_candidates} candidates, {rejected} below threshold)"
+            )
 
         return subclusters
 
@@ -1840,8 +1884,10 @@ class SpecimenClusterer:
         for group_indices in identity_groups.values():
             annotated += self._validate_identity_group(subclusters, consensuses, group_indices)
 
-        logging.info(f"CER annotation: {annotated} non-anchor candidates scored "
-                     f"({len(identity_groups)} identity group(s))")
+        self._log_stage(
+            f"Significance testing: {annotated} candidate(s), {len(identity_groups)} identity group(s)",
+            subclusters,
+        )
 
         return subclusters
 
@@ -2090,15 +2136,17 @@ class SpecimenClusterer:
 
         if small_clusters:
             filtered_count = len(small_clusters)
-            logging.info(f"Filtered {filtered_count} clusters below minimum size ({self.min_size})")
             # Track discarded reads from size-filtered clusters
             for cluster in small_clusters:
                 self.discarded_read_ids.update(cluster['read_ids'])
+            self._log_stage(
+                f"Min-size filter: dropped {filtered_count} cluster(s) below {self.min_size}",
+                large_clusters,
+            )
 
         # Filter by relative size ratio
         if large_clusters and self.min_cluster_ratio > 0:
             largest_size = max(len(c['read_ids']) for c in large_clusters)
-            before_ratio_filter = len(large_clusters)
             passing_ratio = [c for c in large_clusters
                             if len(c['read_ids']) / largest_size >= self.min_cluster_ratio]
             failing_ratio = [c for c in large_clusters
@@ -2106,24 +2154,18 @@ class SpecimenClusterer:
 
             if failing_ratio:
                 filtered_count = len(failing_ratio)
-                logging.info(f"Filtered {filtered_count} clusters below minimum ratio ({self.min_cluster_ratio})")
                 # Track discarded reads from ratio-filtered clusters
                 for cluster in failing_ratio:
                     self.discarded_read_ids.update(cluster['read_ids'])
+                self._log_stage(
+                    f"Min-ratio filter: dropped {filtered_count} cluster(s) below {self.min_cluster_ratio}",
+                    passing_ratio,
+                )
 
             large_clusters = passing_ratio
 
         # Sort by size and renumber as c1, c2, c3...
         large_clusters.sort(key=lambda c: len(c['read_ids']), reverse=True)
-
-        total_sequences = self.total_input_reads
-        sequences_covered = sum(len(c['read_ids']) for c in large_clusters)
-
-        if total_sequences > 0:
-            logging.info(f"Final: {len(large_clusters)} clusters covering {sequences_covered} sequences "
-                        f"({sequences_covered / total_sequences:.1%} of total)")
-        else:
-            logging.info(f"Final: {len(large_clusters)} clusters (no sequences to cluster)")
 
         return large_clusters
 
@@ -2204,6 +2246,11 @@ class SpecimenClusterer:
         # Sort results by final_idx to ensure correct order
         results.sort(key=lambda r: r['final_idx'])
 
+        # Aggregate counters for a single Outlier filter summary line at INFO
+        outlier_dropped_clusters = 0
+        outlier_trimmed_clusters = 0
+        outlier_reads_moved = 0
+
         # Write output files sequentially (I/O bound, must preserve order)
         with open(output_file, 'w') as consensus_fasta_handle:
             for result in results:
@@ -2219,13 +2266,16 @@ class SpecimenClusterer:
                 mad_outlier_ids = result.get('mad_outlier_ids') or set()
                 if mad_outlier_ids:
                     self.discarded_read_ids.update(mad_outlier_ids)
+                    outlier_reads_moved += len(mad_outlier_ids)
                     if result.get('dropped_by_min_reads'):
-                        logging.info(
+                        outlier_dropped_clusters += 1
+                        logging.debug(
                             f"Cluster {final_idx}: dropped after MAD outlier "
                             f"removal left <3 reads ({len(mad_outlier_ids)} "
                             f"reads moved to discards)"
                         )
                     else:
+                        outlier_trimmed_clusters += 1
                         logging.debug(
                             f"Cluster {final_idx}: removed "
                             f"{len(mad_outlier_ids)} outlier read(s) before "
@@ -2286,6 +2336,36 @@ class SpecimenClusterer:
                         identity_variant_rank=cluster_dict.get('identity_variant_rank'),
                     )
 
+        # Build the surviving cluster list for end-of-pipeline summary lines.
+        # A cluster survived if MAD didn't drop it; its post-outlier read count
+        # is the assigned read_ids minus any MAD-flagged outliers.
+        surviving_clusters = []
+        surviving_reads = 0
+        for result in results:
+            if result.get('dropped_by_min_reads'):
+                continue
+            cluster_dict = cluster_dicts_by_idx.get(result['final_idx'], {})
+            mad_outlier_ids = result.get('mad_outlier_ids') or set()
+            surviving_clusters.append(cluster_dict)
+            surviving_reads += len(cluster_dict.get('read_ids') or ()) - len(mad_outlier_ids)
+
+        if outlier_dropped_clusters > 0 or outlier_trimmed_clusters > 0:
+            parts = []
+            if outlier_dropped_clusters:
+                parts.append(f"dropped {outlier_dropped_clusters} cluster(s)")
+            if outlier_trimmed_clusters:
+                parts.append(f"trimmed {outlier_trimmed_clusters} cluster(s)")
+            detail = ", ".join(parts)
+            self._log_stage(
+                f"Outlier filter: {detail} (-{outlier_reads_moved} reads)",
+                surviving_clusters,
+                reads_in_clusters=surviving_reads,
+            )
+        else:
+            logging.debug("Outlier filter: no outliers removed")
+
+        self._log_stage("Final", surviving_clusters, reads_in_clusters=surviving_reads)
+
         return clusters_with_ambiguities, total_ambiguity_positions
 
     def _write_discarded_reads(self) -> None:
@@ -2342,11 +2422,14 @@ class SpecimenClusterer:
             min_consensus_reads = 3
             small = [c for c in initial_clusters if len(c) < min_consensus_reads]
             if small:
+                small_reads = sum(len(c) for c in small)
                 for c in small:
                     self.discarded_read_ids.update(c)
                 initial_clusters = [c for c in initial_clusters if len(c) >= min_consensus_reads]
-                logging.info(f"Dropped {len(small)} clusters with < {min_consensus_reads} reads "
-                            f"({sum(len(c) for c in small)} reads)")
+                self._log_stage(
+                    f"Hard-floor filter: dropped {len(small)} cluster(s) below {min_consensus_reads} reads (-{small_reads} reads)",
+                    initial_clusters,
+                )
 
             # Phase 2: Pre-phasing merge
             merged_clusters = self._run_prephasing_merge(initial_clusters)

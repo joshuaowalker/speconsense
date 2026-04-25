@@ -104,8 +104,8 @@ class TestAugmentInput:
         ], capture_output=True, text=True)
         
         assert result.returncode == 0, f"Speconsense should succeed: {result.stderr}"
-        assert "Loaded 1 augmented sequences" in result.stderr, "Should load augmented sequences"
-        assert "Loaded 4 primary sequences" in result.stderr, "Should load primary sequences"
+        assert "Loaded 1 augmented reads" in result.stderr, "Should load augmented sequences"
+        assert "Loaded 4 primary reads" in result.stderr, "Should load primary sequences"
     
     def test_output_files_created(self, temp_dir, core_module, test_data):
         """Test that output files are created correctly."""
@@ -235,7 +235,7 @@ class TestAugmentInput:
         ], capture_output=True, text=True)
 
         # Should warn about empty augment file
-        assert "No sequences found in augment input file" in result.stderr
+        assert "No reads found in augment input file" in result.stderr
 
 
 if __name__ == "__main__":
