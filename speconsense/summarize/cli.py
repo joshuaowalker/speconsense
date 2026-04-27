@@ -630,9 +630,16 @@ def main():
     all_overlap_merges = []  # Collect overlap merge info for quality reporting
     total_limited_merges = 0
 
-    sorted_file_paths = sorted(file_groups.keys())
+    # Iterate the union of file paths from all three lists so specimens whose
+    # variants are entirely routed to .ns/.lq still get their filtered-variant
+    # files written. process_single_specimen and write_specimen_data_files
+    # both no-op cleanly on an empty consensus list.
+    all_file_paths = (
+        set(file_groups.keys()) | set(ns_by_file.keys()) | set(lq_by_file.keys())
+    )
+    sorted_file_paths = sorted(all_file_paths)
     for file_path in tqdm(sorted_file_paths, desc="Processing specimens", unit="specimen"):
-        file_consensuses = file_groups[file_path]
+        file_consensuses = file_groups.get(file_path, [])
 
         # Process specimen
         final_consensus, merge_traceability, naming_info, limited_count, overlap_merges = process_single_specimen(
@@ -707,7 +714,9 @@ def main():
         fasta_fields
     )
 
-    # Write quality report (deferred import to avoid circular dependency)
+    # Write quality report (deferred import to avoid circular dependency).
+    # Pass pre-merge consensus_list (with full per-cluster err/cer metrics)
+    # and the routed ns/lq lists so the report can surface filter decisions.
     from speconsense import quality_report
     quality_report.write_quality_report(
         all_final_consensus,
@@ -715,7 +724,12 @@ def main():
         args.summary_dir,
         args.source,
         all_overlap_merges,
-        args.min_merge_overlap
+        args.min_merge_overlap,
+        consensus_list=consensus_list,
+        ns_list=ns_list,
+        lq_list=lq_list,
+        min_cer_factor=args.min_cer_factor,
+        max_err_factor=args.max_err_factor,
     )
 
     logging.info(f"Enhanced summarization completed successfully")

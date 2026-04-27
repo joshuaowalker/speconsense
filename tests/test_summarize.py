@@ -176,6 +176,57 @@ def test_merge_with_homopolymer_only_differences():
         shutil.rmtree(temp_dir)
 
 
+def test_lq_emitted_when_specimen_has_no_passing_variants():
+    """Regression: specimens whose every variant is routed to .ns/.lq must
+    still get their filtered-variant files written.
+
+    Earlier the per-specimen processing loop iterated only over file paths
+    present in the passing list, so an all-filtered specimen was skipped
+    entirely and its .ns/.lq output was lost.
+    """
+    temp_dir = tempfile.mkdtemp()
+    source_dir = os.path.join(temp_dir, "clusters")
+    summary_dir = os.path.join(temp_dir, "__Summary__")
+    os.makedirs(source_dir)
+
+    try:
+        # One cluster, err_factor above the default 1.5 threshold → routed to .lq.
+        # No other variants in this specimen, so file_groups is empty for it.
+        fasta_content = (
+            ">single-cluster-1.v1 size=3 ric=3 primers=test "
+            "err_factor=1.675 gid=1 vid=1\n"
+            "ACGTACGTACGTACGTACGTACGTACGTACGT\n"
+        )
+        fasta_file = os.path.join(source_dir, "single-cluster-all.fasta")
+        with open(fasta_file, 'w') as f:
+            f.write(fasta_content)
+
+        result = subprocess.run(
+            [
+                "speconsense-summarize",
+                "--source", source_dir,
+                "--summary-dir", summary_dir,
+                "--min-ric", "3",
+            ],
+            capture_output=True,
+            text=True,
+        )
+        assert result.returncode == 0, f"speconsense-summarize failed: {result.stderr}"
+
+        # The .lq file must exist for this specimen even though no variants passed.
+        lq_files = [
+            f for f in os.listdir(os.path.join(summary_dir, "variants"))
+            if f.startswith("single-cluster-1.v1.lq-RiC")
+        ]
+        assert lq_files, (
+            "Expected single-cluster-1.v1.lq-RiC*.fasta in variants/, "
+            f"but found: {os.listdir(os.path.join(summary_dir, 'variants'))}"
+        )
+
+    finally:
+        shutil.rmtree(temp_dir)
+
+
 def test_merge_bases_to_iupac_expands_existing_codes():
     """Test that merge_bases_to_iupac correctly expands existing IUPAC codes.
 
