@@ -76,7 +76,10 @@ class _Specimen:
 
     @property
     def reads_in_passed(self) -> int:
-        return sum(c.ric for c in self.clusters if c.state == "passed")
+        # Use size (actual cluster size), not ric (capped at --max-sample-size).
+        # Yield should reflect how much of the raw input survived clustering,
+        # not how many reads were sampled for the consensus.
+        return sum(c.info.size or 0 for c in self.clusters if c.state == "passed")
 
     @property
     def yield_pct(self) -> Optional[float]:
