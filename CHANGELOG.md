@@ -15,8 +15,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 - **Specimens with all variants filtered now emit `.ns`/`.lq` files** (summarize) — The per-specimen processing loop previously iterated only over file paths in the passing list. Specimens whose every variant was routed to `.ns` or `.lq` were skipped entirely and their filter outputs were lost. The loop now iterates the union of file paths across passing/`.ns`/`.lq` lists
+- **Merged variants now retain `gid`/`vid`** (summarize) — `merge_variants_with_msa` was constructing the merged `ConsensusInfo` without copying `group_rank` / `variant_rank` from the largest input variant, leaving them unset on every post-merge record. Now propagated
 
 ### Added
+- **Per-specimen variant tree** (summarize) — `__Summary__/trees/{specimen}.txt` now renders an ASCII hierarchy of every variant in a specimen (passed, `.ns`, and `.lq` together), grouped by core identity group. Each non-anchor variant branches from the larger-size peer with the highest pairwise identity, with a one-line edit summary versus that parent (substitutions, single-nt indels, short ≤3 nt indels, long indels). Filtered variants carry the on-disk status marker (`-1.v4.ns`, `-1.v8.lq`) so they're visually distinct from any passed variant that may share the same vid after summarize's renaming
 - **`--hp-normalization-length` parameter** (summarize) — Plumbs the same HP threshold through summarize's distance calculations (HAC cross-primer conflation, diversity selection, overlap-aware distance) and MSA-based variant merging (`is_homopolymer_event`). Default 6 matches core. Set to 1 for legacy blanket-normalize-all behavior. Backed by `adjusted-identity>=0.2.7` `hp_normalize_min_length` (MIN-of-runs semantics)
 - **`build_adjustment_params(hp_normalization_length=N)` factory** (`speconsense.distances`) — Returns an `AdjustmentParams` variant with the requested HP threshold, sharing all other STANDARD settings
 

@@ -160,6 +160,8 @@ def _build_merged_consensus_info(
         raw_len=raw_len_values,
         rid=largest_variant.rid,
         rid_min=largest_variant.rid_min,
+        group_rank=largest_variant.group_rank,
+        variant_rank=largest_variant.variant_rank,
     )
 
 

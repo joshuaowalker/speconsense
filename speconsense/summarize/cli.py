@@ -68,6 +68,7 @@ from .clustering import (
 )
 from .merging import merge_group_with_msa, create_full_consensus_from_msa
 from .analysis import run_spoa_msa, MAX_MSA_MERGE_VARIANTS, MIN_MERGE_BATCH, MAX_MERGE_BATCH
+from .tree import write_specimen_variant_tree
 
 
 # Merge effort configuration
@@ -485,6 +486,7 @@ def _clean_specimen_output(summary_dir: str, specimen_id: str) -> None:
         os.path.join(summary_dir, 'FASTQ Files'),
         os.path.join(summary_dir, 'variants'),
         os.path.join(summary_dir, 'variants', 'FASTQ Files'),
+        os.path.join(summary_dir, 'trees'),
     ]
     removed = 0
     for d in dirs_to_clean:
@@ -671,6 +673,19 @@ def main():
             write_lq_variant_files(
                 specimen_lq, args.summary_dir, fastq_lookup, fasta_fields
             )
+
+        # Emit per-specimen variant tree (passed + ns + lq, grouped by core gid)
+        specimen_id = os.path.basename(file_path)
+        if specimen_id.endswith('-all.fasta'):
+            specimen_id = specimen_id[:-len('-all.fasta')]
+        write_specimen_variant_tree(
+            specimen_id=specimen_id,
+            passed=final_consensus,
+            ns=specimen_ns,
+            lq=specimen_lq,
+            output_dir=os.path.join(args.summary_dir, 'trees'),
+            hp_normalization_length=args.hp_normalization_length,
+        )
 
         # Accumulate results for summary files
         all_final_consensus.extend(final_consensus)
