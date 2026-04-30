@@ -64,6 +64,14 @@ class TestCoreComplementFlags:
         parser.add_argument("--enable-position-phasing", action="store_false",
                             dest="disable_position_phasing")
 
+        parser.add_argument("--disable-read-reassignment", action="store_true")
+        parser.add_argument("--enable-read-reassignment", action="store_false",
+                            dest="disable_read_reassignment")
+
+        parser.add_argument("--disable-discard-recovery", action="store_true")
+        parser.add_argument("--enable-discard-recovery", action="store_false",
+                            dest="disable_discard_recovery")
+
         parser.add_argument("--disable-ambiguity-calling", action="store_true")
         parser.add_argument("--enable-ambiguity-calling", action="store_false",
                             dest="disable_ambiguity_calling")
@@ -89,6 +97,8 @@ class TestCoreComplementFlags:
     def test_defaults_all_false(self):
         args = self.parser.parse_args([])
         assert args.disable_position_phasing is False
+        assert args.disable_read_reassignment is False
+        assert args.disable_discard_recovery is False
         assert args.disable_ambiguity_calling is False
         assert args.disable_cluster_merging is False
         assert args.disable_homopolymer_equivalence is False
@@ -98,6 +108,8 @@ class TestCoreComplementFlags:
     def test_primary_flags_set_true(self):
         args = self.parser.parse_args([
             '--disable-position-phasing',
+            '--disable-read-reassignment',
+            '--disable-discard-recovery',
             '--disable-ambiguity-calling',
             '--disable-cluster-merging',
             '--disable-homopolymer-equivalence',
@@ -105,6 +117,8 @@ class TestCoreComplementFlags:
             '--collect-discards',
         ])
         assert args.disable_position_phasing is True
+        assert args.disable_read_reassignment is True
+        assert args.disable_discard_recovery is True
         assert args.disable_ambiguity_calling is True
         assert args.disable_cluster_merging is True
         assert args.disable_homopolymer_equivalence is True
@@ -114,6 +128,8 @@ class TestCoreComplementFlags:
     def test_complement_flags_set_false(self):
         args = self.parser.parse_args([
             '--enable-position-phasing',
+            '--enable-read-reassignment',
+            '--enable-discard-recovery',
             '--enable-ambiguity-calling',
             '--enable-cluster-merging',
             '--enable-homopolymer-equivalence',
@@ -121,6 +137,8 @@ class TestCoreComplementFlags:
             '--no-collect-discards',
         ])
         assert args.disable_position_phasing is False
+        assert args.disable_read_reassignment is False
+        assert args.disable_discard_recovery is False
         assert args.disable_ambiguity_calling is False
         assert args.disable_cluster_merging is False
         assert args.disable_homopolymer_equivalence is False
@@ -159,3 +177,29 @@ class TestCoreComplementFlags:
             '--disable-position-phasing',
         ])
         assert args.disable_position_phasing is True
+
+
+class TestReassignmentAttrs:
+    """Verify the new reassignment/recovery flags propagate into SpecimenClusterer attrs."""
+
+    def _make(self, **overrides):
+        import tempfile
+        from speconsense.core.clusterer import SpecimenClusterer
+        kwargs = dict(output_dir=tempfile.mkdtemp(prefix='speconsense_attrs_'))
+        kwargs.update(overrides)
+        return SpecimenClusterer(**kwargs)
+
+    def test_defaults_enabled(self):
+        clusterer = self._make()
+        assert clusterer.enable_read_reassignment is True
+        assert clusterer.enable_discard_recovery is True
+
+    def test_disable_read_reassignment(self):
+        clusterer = self._make(enable_read_reassignment=False)
+        assert clusterer.enable_read_reassignment is False
+        assert clusterer.enable_discard_recovery is True  # independent attr
+
+    def test_disable_discard_recovery(self):
+        clusterer = self._make(enable_discard_recovery=False)
+        assert clusterer.enable_read_reassignment is True
+        assert clusterer.enable_discard_recovery is False

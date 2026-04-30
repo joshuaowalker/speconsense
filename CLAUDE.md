@@ -199,6 +199,7 @@ Parameters are controlled via CLI arguments, optionally pre-set via YAML profile
 - Cluster size filtering (`--min-size`, `--min-cluster-ratio`)
 - Primer handling (`--primers`, `--orient-mode`)
 - Variant phasing (`--disable-position-phasing`, `--min-variant-frequency`, `--significance-level`)
+- Post-phasing refinement: `--disable-read-reassignment` (Phase 4b), `--disable-discard-recovery` (Phase 4b2; auto-skipped if 4b disabled). Phase 4b3 (second phasing pass) is gated by `--disable-position-phasing` AND `--disable-read-reassignment` — disabling either skips it.
 - Error model selection (`--error-model`, `--hp-normalization-length`)
 - Summarize CER filter (`--min-cer-factor`, default `1.0`, `0` disables)
 - Summarize err_factor filter (`--max-err-factor`, default `1.5`; `0` disables)

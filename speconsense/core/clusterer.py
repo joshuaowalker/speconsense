@@ -213,6 +213,8 @@ class SpecimenClusterer:
                  disable_cluster_merging: bool = False,
                  output_dir: str = "clusters",
                  enable_secondpass_phasing: bool = True,
+                 enable_read_reassignment: bool = True,
+                 enable_discard_recovery: bool = True,
                  min_variant_frequency: float = 0.10,
                  min_variant_count: int = 3,
                  min_ambiguity_frequency: float = 0.10,
@@ -239,6 +241,8 @@ class SpecimenClusterer:
         self.output_dir = output_dir
 
         self.enable_secondpass_phasing = enable_secondpass_phasing
+        self.enable_read_reassignment = enable_read_reassignment
+        self.enable_discard_recovery = enable_discard_recovery
         self.min_variant_frequency = min_variant_frequency
         self.min_variant_count = min_variant_count
         self.min_ambiguity_frequency = min_ambiguity_frequency
@@ -345,6 +349,8 @@ class SpecimenClusterer:
                 "disable_homopolymer_equivalence": self.disable_homopolymer_equivalence,
                 "disable_cluster_merging": self.disable_cluster_merging,
                 "enable_secondpass_phasing": self.enable_secondpass_phasing,
+                "enable_read_reassignment": self.enable_read_reassignment,
+                "enable_discard_recovery": self.enable_discard_recovery,
                 "min_variant_frequency": self.min_variant_frequency,
                 "min_variant_count": self.min_variant_count,
                 "min_ambiguity_frequency": self.min_ambiguity_frequency,
@@ -1406,7 +1412,7 @@ class SpecimenClusterer:
         return subclusters
 
     def _run_second_phasing_pass(self, subclusters: List[Dict]) -> List[Dict]:
-        """Phase 4b2: Re-phase subclusters after read reassignment.
+        """Phase 4b3: Re-phase subclusters after read reassignment / discard recovery.
 
         Reassignment can move reads into clusters where they create detectable
         variants. This pass splits any such clusters. No outlier removal —
@@ -1644,7 +1650,7 @@ class SpecimenClusterer:
         return total_reassigned
 
     def _run_discard_reassignment(self, subclusters: List[Dict]) -> List[Dict]:
-        """Phase 4b3: Reassign discarded reads to existing clusters.
+        """Phase 4b2: Reassign discarded reads to existing clusters.
 
         For each discarded read:
         1. Find best-matching cluster consensus via edlib (group selection)
@@ -2399,7 +2405,10 @@ class SpecimenClusterer:
             2b. Early filtering (optional, skip small clusters before expensive phasing)
             3. Variant detection + phasing (split clusters by haplotype)
             4. Post-phasing merge (combine HP-equivalent subclusters)
-            4b. Read reassignment (concordance-based, within identity groups)
+            4a. Filter noisy small clusters (no-majority columns)
+            4b. Read reassignment (concordance-based, within identity groups; optional)
+            4b2. Discard recovery (re-admit dropped reads to clusters; optional, coupled to 4b)
+            4b3. Second phasing pass (split variants introduced by 4b/4b2; coupled to phasing+4b)
             4c. CER validation (pairwise significance testing within identity groups)
             5. Filtering (size and ratio thresholds)
             6. Output generation
@@ -2446,14 +2455,32 @@ class SpecimenClusterer:
             # Phase 4a: Filter noisy small clusters
             cleaned_subclusters = self._filter_noisy_clusters(merged_subclusters)
 
-            # Phase 4b: Read reassignment
-            reassigned_subclusters = self._run_read_reassignment(cleaned_subclusters)
+            # Phase 4b: Read reassignment (optional)
+            if self.enable_read_reassignment:
+                reassigned_subclusters = self._run_read_reassignment(cleaned_subclusters)
+            else:
+                reassigned_subclusters = cleaned_subclusters
 
-            # Phase 4b2: Discard reassignment (recover reads dropped earlier)
-            discard_reassigned = self._run_discard_reassignment(reassigned_subclusters)
+            # Phase 4b2: Discard reassignment (optional, requires 4b enabled)
+            # Discard recovery uses the same identity-group concordance logic
+            # as read reassignment; running it without 4b would silently inject
+            # previously-discarded reads into clusters whose membership the
+            # user asked to keep frozen. So 4b2 is gated on 4b being enabled.
+            if self.enable_discard_recovery and self.enable_read_reassignment:
+                discard_reassigned = self._run_discard_reassignment(reassigned_subclusters)
+            else:
+                if self.enable_discard_recovery and not self.enable_read_reassignment:
+                    logging.info("Discard recovery skipped: requires --enable-read-reassignment")
+                discard_reassigned = reassigned_subclusters
 
-            # Phase 4b3: Second phasing pass (split variants introduced by reassignment/recovery)
-            rephased_subclusters = self._run_second_phasing_pass(discard_reassigned)
+            # Phase 4b3: Second phasing pass. Gated on the phasing flag AND on
+            # 4b having run — 4b2 is coupled to 4b, so if 4b didn't run nothing
+            # has changed since Phase 3 phasing and there is no new work for
+            # 4b3 to do.
+            if self.enable_secondpass_phasing and self.enable_read_reassignment:
+                rephased_subclusters = self._run_second_phasing_pass(discard_reassigned)
+            else:
+                rephased_subclusters = discard_reassigned
 
             # Phase 4c: CER validation
             validated_subclusters = self._run_cer_validation(rephased_subclusters)

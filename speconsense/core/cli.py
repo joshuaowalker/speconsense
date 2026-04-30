@@ -62,6 +62,20 @@ def main():
     phasing_group.add_argument("--enable-position-phasing", action="store_false",
                                dest="disable_position_phasing",
                                help="Override --disable-position-phasing or profile setting")
+    phasing_group.add_argument("--disable-read-reassignment", action="store_true",
+                               help="Disable post-phasing read reassignment within identity groups. "
+                                    "Reassignment moves reads between clusters based on consensus "
+                                    "concordance; disable to preserve original phasing-time membership.")
+    phasing_group.add_argument("--enable-read-reassignment", action="store_false",
+                               dest="disable_read_reassignment",
+                               help="Override --disable-read-reassignment or profile setting")
+    phasing_group.add_argument("--disable-discard-recovery", action="store_true",
+                               help="Disable recovery of previously discarded reads into existing "
+                                    "clusters. Has no effect if --disable-read-reassignment is also "
+                                    "set (recovery requires reassignment).")
+    phasing_group.add_argument("--enable-discard-recovery", action="store_false",
+                               dest="disable_discard_recovery",
+                               help="Override --disable-discard-recovery or profile setting")
     phasing_group.add_argument("--min-variant-frequency", type=float, default=0.10,
                                help="Minimum alternative allele frequency to call variant (default: 0.10 for 10%%)")
     phasing_group.add_argument("--min-variant-count", type=int, default=3,
@@ -225,6 +239,8 @@ def main():
         disable_cluster_merging=args.disable_cluster_merging,
         output_dir=args.output_dir,
         enable_secondpass_phasing=not args.disable_position_phasing,
+        enable_read_reassignment=not args.disable_read_reassignment,
+        enable_discard_recovery=not args.disable_discard_recovery,
         min_variant_frequency=args.min_variant_frequency,
         min_variant_count=args.min_variant_count,
         min_ambiguity_frequency=args.min_ambiguity_frequency,

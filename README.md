@@ -545,7 +545,9 @@ By default, Speconsense automatically detects and separates biological variants 
 **Key parameters for variant phasing:**
 - `--min-variant-frequency` - Minimum minor allele frequency to trigger cluster splitting (default: 0.10 = 10%)
 - `--min-variant-count` - Minimum read count for minor allele to trigger splitting (default: 5)
-- `--disable-position-phasing` - Disable variant phasing entirely
+- `--disable-position-phasing` - Disable variant phasing entirely (also skips the second phasing pass)
+- `--disable-read-reassignment` - Disable concordance-based reassignment of reads between clusters within an identity group
+- `--disable-discard-recovery` - Disable re-admission of previously discarded reads to surviving clusters (requires `--enable-read-reassignment`)
 
 **Key parameters for IUPAC ambiguity calling:**
 - `--min-ambiguity-frequency` - Minimum minor allele frequency for IUPAC codes (default: 0.10 = 10%)
@@ -1077,6 +1079,8 @@ usage: speconsense [-h] [-O OUTPUT_DIR] [--primers PRIMERS]
                    [--min-cluster-ratio MIN_CLUSTER_RATIO]
                    [--max-sample-size MAX_SAMPLE_SIZE]
                    [--disable-position-phasing] [--enable-position-phasing]
+                   [--disable-read-reassignment] [--enable-read-reassignment]
+                   [--disable-discard-recovery] [--enable-discard-recovery]
                    [--min-variant-frequency MIN_VARIANT_FREQUENCY]
                    [--min-variant-count MIN_VARIANT_COUNT]
                    [--significance-level SIGNIFICANCE_LEVEL]
@@ -1148,6 +1152,22 @@ Variant Phasing:
                         phase remaining variants.
   --enable-position-phasing
                         Override --disable-position-phasing or profile setting
+  --disable-read-reassignment
+                        Disable post-phasing read reassignment within identity
+                        groups. Reassignment moves reads between clusters
+                        based on consensus concordance; disable to preserve
+                        original phasing-time membership.
+  --enable-read-reassignment
+                        Override --disable-read-reassignment or profile
+                        setting
+  --disable-discard-recovery
+                        Disable recovery of previously discarded reads into
+                        existing clusters. Has no effect if
+                        --disable-read-reassignment is also set (recovery
+                        requires reassignment).
+  --enable-discard-recovery
+                        Override --disable-discard-recovery or profile
+                        setting
   --min-variant-frequency MIN_VARIANT_FREQUENCY
                         Minimum alternative allele frequency to call variant
                         (default: 0.10 for 10%)

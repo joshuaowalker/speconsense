@@ -66,6 +66,8 @@ VALID_SPECONSENSE_KEYS = {
     "min-variant-frequency",
     "min-variant-count",
     "disable-position-phasing",
+    "disable-read-reassignment",
+    "disable-discard-recovery",
     "significance-level",
     "group-identity",
     "hp-normalization-length",
