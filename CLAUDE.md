@@ -78,9 +78,10 @@ pytest -m "not slow"
 - `cli.py`: Top-level entry-point stub that re-exports `core.main`.
 
 **speconsense/scalability/** - Optional acceleration for O(n²) pairwise work:
-- `base.py`: `CandidateFinder` protocol, `ScalablePairwiseOperation` (K-NN construction for MCL)
+- `base.py`: `CandidateFinder` protocol, `ScalablePairwiseOperation` (top-K neighbors for MCL, sparse distance matrix for identity grouping, equivalence groups for cluster merging)
 - `vsearch.py`: vsearch-backed candidate finder
 - `config.py`: `ScalabilityConfig`
+- Activates when `len(seqs) >= scale_threshold` AND vsearch is on PATH. Active uses: Phase 1 K-NN (MCL graph), Phase 2/4 cluster merging (HP-equivalence union-find), Phase 4b/4b2/4c identity grouping (`_form_identity_groups` sparse distance matrix), Phase 4b2 discard screening (top-K cluster matches per discard). Phase 4a noise-filter SPOA is parallelized via `ProcessPoolExecutor` when `--threads N>1` (no vsearch dependency).
 
 **speconsense/profiles/** - Profile system for parameter presets:
 - YAML profiles (`compressed`, `herbarium`, `largedata`, `nostalgia`, `strict`, `example`) bundled in the package

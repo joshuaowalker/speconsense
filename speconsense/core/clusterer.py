@@ -39,6 +39,7 @@ from speconsense.scalability import (
 from .workers import (
     ClusterProcessingConfig,
     ConsensusGenerationConfig,
+    MSAResult,
     _run_spoa_worker,
     _run_spoa_for_cluster_worker,
     _process_cluster_worker,
@@ -569,13 +570,22 @@ class SpecimenClusterer:
 
         self.total_input_reads = len(self.sequences)
 
-    def _get_scalable_operation(self) -> ScalablePairwiseOperation:
-        """Get a ScalablePairwiseOperation for pairwise comparisons."""
-        # Wrap calculate_similarity to match expected signature (seq1, seq2, id1, id2)
-        # IDs are unused in core.py - only needed for primer-aware scoring in summarize.py
+    def _get_scalable_operation(self, scoring_function=None) -> ScalablePairwiseOperation:
+        """Get a ScalablePairwiseOperation for pairwise comparisons.
+
+        Args:
+            scoring_function: Optional override for the (seq1, seq2, id1, id2)
+                -> similarity scoring callable. Defaults to
+                self.calculate_similarity (the K-NN / equivalence-grouping
+                metric). Pass an alternative when the call site needs a
+                different distance semantics (e.g. HP-normalized identity
+                grouping).
+        """
+        if scoring_function is None:
+            scoring_function = lambda seq1, seq2, id1, id2: self.calculate_similarity(seq1, seq2)
         return ScalablePairwiseOperation(
             candidate_finder=self._candidate_finder,
-            scoring_function=lambda seq1, seq2, id1, id2: self.calculate_similarity(seq1, seq2),
+            scoring_function=scoring_function,
             config=self.scalability_config
         )
 
@@ -1305,20 +1315,28 @@ class SpecimenClusterer:
         Only applies to clusters below the phasing floor (< min_variant_count * 2),
         since larger clusters have enough reads for reliable consensus. Disbanded
         reads go to discards for recovery by the global discard reassignment pass.
+
+        SPOA dispatch parallels via ProcessPoolExecutor when max_threads > 1 and
+        more than 10 small clusters are queued; otherwise the same worker is
+        invoked sequentially (deterministic-equivalent fallback).
         """
         phasing_floor = self.min_variant_count * 2
-        result = []
+        result: List[Optional[Dict]] = []
         total_disbanded = 0
         disbanded_reads = 0
 
+        # Pass 1: partition. Large clusters pass through; small ones queue for SPOA.
+        # `result` carries None placeholders at small-cluster slots so we can
+        # stitch SPOA outcomes back in input order.
+        small_queue: List[Tuple[int, Dict[str, str]]] = []
+        small_meta: List[Tuple[int, Dict, Set[str]]] = []  # (result_idx, cluster_dict, read_ids)
+
         for cluster_dict in subclusters:
             read_ids = cluster_dict['read_ids']
-
             if len(read_ids) >= phasing_floor:
                 result.append(cluster_dict)
                 continue
 
-            # Generate MSA for this small cluster
             qualities = {
                 sid: statistics.mean(self.records[sid].letter_annotations["phred_quality"])
                 for sid in read_ids
@@ -1326,8 +1344,37 @@ class SpecimenClusterer:
             sorted_ids = sorted(read_ids, key=lambda x: (-qualities.get(x, 0), x))
             cluster_seqs = {sid: self.sequences[sid] for sid in sorted_ids}
 
-            msa_result = _run_spoa_for_cluster_worker(
-                cluster_seqs, self.disable_homopolymer_equivalence, self.min_hp_length)
+            placeholder_idx = len(result)
+            result.append(None)
+            queue_idx = len(small_queue)
+            small_queue.append((queue_idx, cluster_seqs))
+            small_meta.append((placeholder_idx, cluster_dict, read_ids))
+
+        # Pass 2: dispatch SPOA in parallel when worthwhile.
+        msa_results: Dict[int, Optional[MSAResult]] = {}
+        if small_queue:
+            work_packages = [
+                (queue_idx, seqs, self.disable_homopolymer_equivalence, self.min_hp_length)
+                for queue_idx, seqs in small_queue
+            ]
+            if self.max_threads > 1 and len(work_packages) > 10:
+                from concurrent.futures import ProcessPoolExecutor
+                with ProcessPoolExecutor(max_workers=self.max_threads) as executor:
+                    spoa_results = list(tqdm(
+                        executor.map(_run_spoa_worker, work_packages),
+                        total=len(work_packages),
+                        desc="Noise filter SPOA",
+                    ))
+            else:
+                spoa_results = [_run_spoa_worker(pkg) for pkg in work_packages]
+
+            for queue_idx, msa_result in spoa_results:
+                msa_results[queue_idx] = msa_result
+
+        # Pass 3: stitch results in input order. Positional analysis runs on the
+        # parent process; only SPOA itself is parallel.
+        for queue_idx, (placeholder_idx, cluster_dict, read_ids) in enumerate(small_meta):
+            msa_result = msa_results.get(queue_idx)
 
             if msa_result is None:
                 self.discarded_read_ids.update(read_ids)
@@ -1335,7 +1382,6 @@ class SpecimenClusterer:
                 disbanded_reads += len(read_ids)
                 continue
 
-            # Build consensus_aligned for positional analysis
             msa_length = max(msa_result.msa_to_consensus_pos.keys()) + 1
             consensus_aligned = []
             for pos in range(msa_length):
@@ -1361,7 +1407,10 @@ class SpecimenClusterer:
                 logging.debug(f"Noise filter: disbanded cluster(n={len(read_ids)}) "
                              f"with {no_majority_count} no-majority positions")
             else:
-                result.append(cluster_dict)
+                result[placeholder_idx] = cluster_dict
+
+        # Drop None placeholders left by disbanded clusters.
+        result = [c for c in result if c is not None]
 
         if total_disbanded > 0:
             self._log_stage(
@@ -1687,26 +1736,93 @@ class SpecimenClusterer:
         # Use relaxed threshold: group_identity (0.85) since we just need group membership
         max_distance = 1.0 - self.group_identity
 
-        for rid in sorted(self.discarded_read_ids):
-            read_seq = self.sequences.get(rid)
-            if not read_seq:
-                continue
+        # Decide screening strategy. For large discard pools the dense
+        # discards × clusters edlib scan dominates; replace it with a
+        # vsearch top-K query, refined by edlib on the candidate slice
+        # (same metric as the dense path).
+        use_scalable_screen = (
+            self.scalability_config.enabled
+            and self._candidate_finder is not None
+            and self._candidate_finder.is_available
+            and len(self.discarded_read_ids) >= self.scalability_config.activation_threshold
+        )
 
-            best_idx = None
-            best_dist = float('inf')
-            for idx, cons in valid_consensuses.items():
-                dist = edlib.align(read_seq, cons)['editDistance']
-                norm_dist = dist / max(len(read_seq), len(cons))
-                if norm_dist < best_dist:
-                    best_dist = norm_dist
-                    best_idx = idx
+        if use_scalable_screen:
+            # Index over cluster consensuses; query with discards.
+            consensus_input = {f"__c_{i}__": c for i, c in valid_consensuses.items()}
+            self._candidate_finder.build_index(consensus_input, self.output_dir)
+            try:
+                discard_seqs = {
+                    rid: self.sequences[rid]
+                    for rid in sorted(self.discarded_read_ids)
+                    if rid in self.sequences
+                }
+                query_ids = list(discard_seqs.keys())
+                relaxed_threshold = self.group_identity * self.scalability_config.relaxed_identity_factor
+                top_k = 10
+                vsearch_candidates = self._candidate_finder.find_candidates(
+                    query_ids=query_ids,
+                    sequences=discard_seqs,
+                    min_identity=relaxed_threshold,
+                    max_candidates=top_k,
+                )
 
-            if best_idx is None or best_dist > max_distance:
-                rejected += 1
-                continue
+                logging.debug(
+                    f"Discard screening (scalable): {len(query_ids)} discards, "
+                    f"{len(valid_consensuses)} cluster consensuses, top_k={top_k}, "
+                    f"dense edlib calls avoided={len(query_ids) * len(valid_consensuses)}"
+                )
 
-            group_id = cluster_to_group[best_idx]
-            group_candidates[group_id].append((rid, read_seq))
+                cons_prefix_len = len("__c_")
+                cons_suffix_len = len("__")
+                for rid in query_ids:
+                    seq = discard_seqs[rid]
+                    cand_strs = vsearch_candidates.get(rid, [])
+                    if not cand_strs:
+                        rejected += 1
+                        continue
+
+                    best_idx = None
+                    best_dist = float('inf')
+                    for cand_str in cand_strs:
+                        # Recover cluster index from "__c_<i>__" namespace.
+                        i = int(cand_str[cons_prefix_len:-cons_suffix_len])
+                        cons = valid_consensuses[i]
+                        dist = edlib.align(seq, cons)['editDistance']
+                        norm_dist = dist / max(len(seq), len(cons))
+                        if norm_dist < best_dist:
+                            best_dist = norm_dist
+                            best_idx = i
+
+                    if best_idx is None or best_dist > max_distance:
+                        rejected += 1
+                        continue
+
+                    group_id = cluster_to_group[best_idx]
+                    group_candidates[group_id].append((rid, seq))
+            finally:
+                self._candidate_finder.cleanup()
+        else:
+            for rid in sorted(self.discarded_read_ids):
+                read_seq = self.sequences.get(rid)
+                if not read_seq:
+                    continue
+
+                best_idx = None
+                best_dist = float('inf')
+                for idx, cons in valid_consensuses.items():
+                    dist = edlib.align(read_seq, cons)['editDistance']
+                    norm_dist = dist / max(len(read_seq), len(cons))
+                    if norm_dist < best_dist:
+                        best_dist = norm_dist
+                        best_idx = idx
+
+                if best_idx is None or best_dist > max_distance:
+                    rejected += 1
+                    continue
+
+                group_id = cluster_to_group[best_idx]
+                group_candidates[group_id].append((rid, read_seq))
 
         total_candidates = sum(len(v) for v in group_candidates.values())
         if total_candidates == 0:
@@ -1946,6 +2062,14 @@ class SpecimenClusterer:
         Every pair of clusters in a group must satisfy the identity threshold
         (complete linkage), preventing transitive chaining that can merge
         closely related but distinct variants in eDNA-style mixtures.
+
+        For large cluster counts, the dense O(n²) distance matrix is replaced
+        with a vsearch-derived sparse matrix: candidate pairs (those above the
+        relaxed identity threshold) are scored under the same HP-normalized
+        metric as the dense path; missing pairs default to 1.0 (max distance),
+        which under complete linkage forces the corresponding clusters into
+        separate groups — the desired semantics, since an absent pair is below
+        the relaxed threshold and therefore below the user threshold.
         """
         from scipy.cluster.hierarchy import fcluster, linkage
         from scipy.spatial.distance import squareform
@@ -1958,15 +2082,51 @@ class SpecimenClusterer:
 
         threshold = 1.0 - self.group_identity
         dist_matrix = [[0.0] * n for _ in range(n)]
-        for i in range(n):
-            for j in range(i + 1, n):
-                ci, cj = consensuses.get(i), consensuses.get(j)
-                if ci and cj:
-                    dist, _ = _hp_normalized_pairwise_compare(ci, cj, self.min_hp_length)
-                else:
-                    dist = 1.0
-                dist_matrix[i][j] = dist
-                dist_matrix[j][i] = dist
+
+        use_scalable = (
+            self.scalability_config.enabled
+            and self._candidate_finder is not None
+            and self._candidate_finder.is_available
+            and n > 50
+            and n >= self.scalability_config.activation_threshold
+        )
+
+        if use_scalable:
+            # Score function uses the SAME HP-normalized metric as the dense
+            # path; vsearch identity is only used for candidate filtering.
+            def hp_similarity(seq1, seq2, id1, id2):
+                dist, _ = _hp_normalized_pairwise_compare(seq1, seq2, self.min_hp_length)
+                return 1.0 - dist
+
+            seq_dict = {str(i): c for i, c in consensuses.items() if c}
+            op = self._get_scalable_operation(scoring_function=hp_similarity)
+            sparse_distances = op.compute_distance_matrix(
+                seq_dict, self.output_dir, min_identity=self.group_identity)
+
+            logging.debug(
+                f"Identity grouping (scalable): n={n}, candidate pairs={len(sparse_distances) // 2}, "
+                f"dense pairs avoided={n * (n - 1) // 2}"
+            )
+
+            for i in range(n):
+                for j in range(i + 1, n):
+                    si, sj = str(i), str(j)
+                    if si in seq_dict and sj in seq_dict:
+                        d = sparse_distances.get((si, sj), 1.0)
+                    else:
+                        d = 1.0  # one or both consensuses None
+                    dist_matrix[i][j] = d
+                    dist_matrix[j][i] = d
+        else:
+            for i in range(n):
+                for j in range(i + 1, n):
+                    ci, cj = consensuses.get(i), consensuses.get(j)
+                    if ci and cj:
+                        dist, _ = _hp_normalized_pairwise_compare(ci, cj, self.min_hp_length)
+                    else:
+                        dist = 1.0
+                    dist_matrix[i][j] = dist
+                    dist_matrix[j][i] = dist
 
         condensed = squareform(dist_matrix, checks=False)
         Z = linkage(condensed, method='complete')
