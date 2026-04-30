@@ -260,14 +260,12 @@ When using `speconsense-summarize` for post-processing, creates `__Summary__/` d
 |---------------|-------------|------------|-------------|
 | **Original** | Source `cluster_debug/` | `-c1`, `-c2`, `-c3` | Preserves speconsense clustering results |
 | **Summarization** | `__Summary__/`, `FASTQ Files/`, `variants/` | `-1.v1`, `-1.v2`, `-2.v1`, `.raw1` | Post-processing groups and variants |
-| **Full consensus** | `__Summary__/` | `-1.full` | IUPAC consensus from pre-merge components of surviving variants |
 
 ### Example Directory Structure
 ```
 __Summary__/
 ├── sample-1.v1-RiC45.fasta                  # Primary variant (group 1, merged)
 ├── sample-1.v2-RiC23.fasta                  # Additional variant (not merged)
-├── sample-1.full-RiC68.fasta                # Full IUPAC consensus for group 1 (surviving variants' components)
 ├── sample-2.v1-RiC30.fasta                  # Second organism group, primary variant
 ├── summary.fasta                            # All final consensus sequences (excludes .raw)
 ├── summary.txt                              # Statistics
@@ -790,19 +788,6 @@ For high-throughput workflows (e.g., 100K sequences/year), this prioritization e
 
 ### Additional Summarize Options
 
-**Full Consensus:**
-```bash
-speconsense-summarize --enable-full-consensus
-```
-- Generates a full IUPAC consensus sequence per variant group from pre-merge variants that contributed to surviving post-merge variants
-- Output named `{specimen}-{group}.full-RiC{reads}.fasta` in the `__Summary__/` directory
-- Uses majority voting across all variants in the group; **gaps never win** — at each alignment column, the most common non-gap base is chosen, with IUPAC codes for ties among bases
-- Useful when you want a single representative sequence that captures all variation within a group as IUPAC ambiguity codes
-- **Suppressed for single-variant groups** — when only one post-merge variant survives in a group, `.full` is omitted (it would be redundant). Still generated when multiple post-merge variants exist, even if `--select-max-variants` limits output
-- Included in `summary.fasta` (but excluded from total RiC to avoid double-counting)
-- Enabled by default in the `compressed` profile
-- Use `--disable-full-consensus` to override when set by a profile
-
 **Quality Filtering:**
 ```bash
 speconsense-summarize --min-ric 5
@@ -1039,8 +1024,7 @@ The complete speconsense-summarize workflow operates in this order:
 4. **Homopolymer-aware MSA-based variant merging** within each group, including **overlap merging** for different-length sequences (`--disable-merging`, `--merge-effort`, `--merge-position-count`, `--merge-indel-length`, `--min-merge-overlap`, `--merge-snp`, `--merge-min-size-ratio`, `--disable-homopolymer-equivalence`)
 5. **Selection size ratio filtering** to remove tiny post-merge variants (`--select-min-size-ratio`)
 6. **Variant selection** within each group (`--select-max-variants`, `--select-strategy`)
-7. **Full consensus generation** (optional) — IUPAC consensus from pre-merge components of surviving post-merge variants (`--enable-full-consensus`)
-8. **Output generation** with customizable header fields (`--fasta-fields`) and full traceability
+7. **Output generation** with customizable header fields (`--fasta-fields`) and full traceability
 
 **Key architectural features**:
 - HAC grouping occurs BEFORE merging to prevent inappropriate merging of dissimilar sequences (e.g., contaminants with primary targets)
@@ -1278,8 +1262,6 @@ usage: speconsense-summarize [-h] [--source SOURCE]
                              [--select-max-variants SELECT_MAX_VARIANTS]
                              [--select-strategy {size,diversity}]
                              [--select-min-size-ratio SELECT_MIN_SIZE_RATIO]
-                             [--enable-full-consensus]
-                             [--disable-full-consensus]
                              [--scale-threshold SCALE_THRESHOLD] [--threads N]
                              [--log-level {DEBUG,INFO,WARNING,ERROR,CRITICAL}]
                              [--version] [-p NAME] [--list-profiles]
@@ -1393,12 +1375,6 @@ Selection:
                         Minimum size ratio (variant/largest) to include in
                         output (default: 0 = disabled, e.g. 0.2 for 20%
                         cutoff)
-  --enable-full-consensus
-                        Generate a full consensus per variant group
-                        representing all variation from pre-merge variants
-                        (gaps never win)
-  --disable-full-consensus
-                        Override --enable-full-consensus or profile setting
 
 Performance:
   --scale-threshold SCALE_THRESHOLD

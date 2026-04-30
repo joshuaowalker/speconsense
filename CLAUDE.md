@@ -86,7 +86,7 @@ pytest -m "not slow"
 - YAML profiles (`compressed`, `herbarium`, `largedata`, `nostalgia`, `strict`, `example`) bundled in the package
 - User profiles in `~/.config/speconsense/profiles/` take precedence over bundled
 - Override order: defaults → profile → explicit CLI arguments
-- Valid keys are strictly validated; profile keys use dashes (e.g., `enable-full-consensus`), argparse attrs use underscores
+- Valid keys are strictly validated; profile keys use dashes (e.g., `disable-merging`), argparse attrs use underscores
 - `VALID_SPECONSENSE_KEYS` / `VALID_SUMMARIZE_KEYS` in `profiles/__init__.py` are the source of truth for acceptable keys
 
 **speconsense/error_models/** - Bundled per-basecaller error models (YAML), loadable by name (`--error-model dorado-v5.0`), from `~/.config/speconsense/error_models/`, or by filesystem path.
@@ -112,8 +112,7 @@ pytest -m "not slow"
 4. Homopolymer-aware MSA-based merging within each (possibly-conflated) group
 5. Selection size ratio filtering (`--select-min-size-ratio`) — removes tiny post-merge variants
 6. Variant selection within each group (size-based or diversity-based)
-7. Optional full consensus generation per group (`--enable-full-consensus`) — IUPAC consensus from pre-merge components of surviving post-merge variants, gaps never win; suppressed when group has only one surviving post-merge variant
-8. Output generation with full traceability
+7. Output generation with full traceability
 
 Note: Identity grouping is performed once, in core, via complete linkage on `--group-identity` (default 0.85). Summarize honors those groups verbatim (hard-fails on inputs lacking `gid=`/`vid=`) and only merges *across* core groups when cross-primer overlap passes threshold.
 
@@ -140,7 +139,6 @@ Note: Identity grouping is performed once, in core, via complete linkage on `--g
 - Dual namespace system:
   - Original clustering: `-c1`, `-c2`, `-c3` format
   - Summarization: `-1.v1`, `-1.v2`, `-2.v1` format for groups and variants
-  - Full consensus: `-1.full` format (one per group, when `--enable-full-consensus` is used)
 
 ### IUPAC Ambiguity Code Handling
 

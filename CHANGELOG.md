@@ -22,6 +22,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **`--hp-normalization-length` parameter** (summarize) — Plumbs the same HP threshold through summarize's distance calculations (HAC cross-primer conflation, diversity selection, overlap-aware distance) and MSA-based variant merging (`is_homopolymer_event`). Default 6 matches core. Set to 1 for legacy blanket-normalize-all behavior. Backed by `adjusted-identity>=0.2.7` `hp_normalize_min_length` (MIN-of-runs semantics)
 - **`build_adjustment_params(hp_normalization_length=N)` factory** (`speconsense.distances`) — Returns an `AdjustmentParams` variant with the requested HP threshold, sharing all other STANDARD settings
 
+### Removed
+- **`--enable-full-consensus` removed** (summarize) — The all-indel IUPAC consensus output (`.full`) is dominated on every metric tested in the blast_query analysis: no measurable benefit under adjusted identity, severe regression under raw BLAST (~58 pp at ≥99%) because no real haplotype contains all the unioned indels at once. The companion SNP-merging path (`--merge-indel-length`, `--merge-position-count`) is the recommended query output and is unchanged. The `compressed` profile no longer sets `enable-full-consensus: true`. User profiles still setting `enable-full-consensus:` will now fail validation — drop the line. Existing `.full` records in pre-existing `__Summary__/` directories are no longer recognized by `--aggregate-only`; regenerate by re-running summarize
+
 ### Dependencies
 - `adjusted-identity` requirement bumped to `>=0.2.7` for the `hp_normalize_min_length` `AdjustmentParams` field
 

@@ -39,30 +39,11 @@ class TestSummarizeComplementFlags:
         args = self._parse(['--enable-homopolymer-equivalence'])
         assert args.disable_homopolymer_equivalence is False
 
-    def test_enable_full_consensus_default(self):
-        args = self._parse([])
-        assert args.enable_full_consensus is False
-
-    def test_enable_full_consensus_flag(self):
-        args = self._parse(['--enable-full-consensus'])
-        assert args.enable_full_consensus is True
-
-    def test_disable_full_consensus_complement(self):
-        args = self._parse(['--disable-full-consensus'])
-        assert args.enable_full_consensus is False
-
     def test_complement_overrides_profile_disable_merging(self):
         """--enable-merging should override profile that sets disable-merging: true."""
         args = self._parse(['-p', 'nostalgia', '--enable-merging'])
         # Regardless of what nostalgia sets, the explicit complement should win
         assert args.disable_merging is False
-
-    def test_complement_overrides_profile_enable_full_consensus(self):
-        """--disable-full-consensus should override profile that sets enable-full-consensus: true."""
-        # Use a profile that sets enable-full-consensus: true
-        # We test the mechanism: even if profile sets it, CLI complement wins
-        args = self._parse(['-p', 'herbarium', '--disable-full-consensus'])
-        assert args.enable_full_consensus is False
 
 
 class TestCoreComplementFlags:

@@ -5,7 +5,6 @@ Covers:
 - Anchor (largest) is the root.
 - Status mix (passed + .ns + .lq) renders together, grouped by core gid.
 - Singleton groups produce just an anchor line.
-- .full pseudo-consensus entries are excluded.
 - File contents include the expected sections, tree glyphs, and diff lines.
 """
 
@@ -112,25 +111,6 @@ def test_write_specimen_variant_tree_renders_passed_ns_lq_together():
     assert "├─" in contents or "└─" in contents
     # Diff line format
     assert "vs " in contents and "id) —" in contents
-
-
-def test_full_pseudo_consensus_excluded():
-    base = "ACGT" * 80
-    passed = [
-        _ci("SP-1.v1", base, size=100, gid=1),
-        _ci("SP-1.full", base, size=100, gid=1),  # pseudo, must be skipped
-    ]
-    with tempfile.TemporaryDirectory() as tmp:
-        write_specimen_variant_tree(
-            specimen_id="SP",
-            passed=passed,
-            ns=[], lq=[],
-            output_dir=tmp,
-        )
-        contents = open(os.path.join(tmp, "SP.txt")).read()
-
-    assert "1.full" not in contents
-    assert "1 variant total" in contents
 
 
 def test_groups_separated_by_gid():

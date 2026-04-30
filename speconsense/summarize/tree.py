@@ -58,9 +58,6 @@ def _tag_status(passed: List[ConsensusInfo],
                 lq: List[ConsensusInfo]) -> List[Tuple[ConsensusInfo, str]]:
     out: List[Tuple[ConsensusInfo, str]] = []
     for c in passed:
-        # Skip .full pseudo-consensus entries — derived per-group, not a real cluster.
-        if c.sample_name.endswith('.full'):
-            continue
         out.append((c, 'passed'))
     for c in ns:
         out.append((c, 'ns'))
@@ -218,8 +215,7 @@ def write_specimen_variant_tree(
 ) -> None:
     """Write a tree-view text file for one specimen at output_dir/{specimen_id}.txt.
 
-    No-ops when there are no eligible variants (no group_rank populated, or all
-    are .full pseudo-consensus entries).
+    No-ops when there are no eligible variants (no group_rank populated).
     """
     items = _tag_status(passed, ns, lq)
     if not items:

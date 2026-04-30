@@ -318,48 +318,6 @@ def create_overlap_consensus_from_msa(aligned_seqs: List, variants: List[Consens
     return _build_merged_consensus_info(consensus_seq, snp_count, variants)
 
 
-def create_full_consensus_from_msa(aligned_seqs: List, variants: List[ConsensusInfo]) -> ConsensusInfo:
-    """
-    Generate full consensus from MSA where any non-gap base means inclusion.
-
-    Unlike create_consensus_from_msa where gaps can win by majority vote,
-    the full consensus includes a position if ANY variant has a base there.
-    This captures all variation from all contributing variants.
-
-    Args:
-        aligned_seqs: MSA sequences with gaps as '-'
-        variants: Original ConsensusInfo objects (for metadata)
-
-    Returns:
-        ConsensusInfo with full consensus sequence
-    """
-    consensus_seq = []
-    snp_count = 0
-    alignment_length = len(aligned_seqs[0].seq)
-
-    for col_idx in range(alignment_length):
-        column = [str(seq.seq[col_idx]) for seq in aligned_seqs]
-
-        # Collect non-gap bases
-        base_votes = defaultdict(int)
-        for i, base in enumerate(column):
-            upper_base = base.upper()
-            if upper_base != '-':
-                base_votes[upper_base] += variants[i].size
-
-        # Include position if ANY variant has a base (gaps never win)
-        if base_votes:
-            if len(base_votes) == 1:
-                consensus_seq.append(list(base_votes.keys())[0])
-            else:
-                represented_bases = set(base_votes.keys())
-                iupac_code = merge_bases_to_iupac(represented_bases)
-                consensus_seq.append(iupac_code)
-                snp_count += 1
-
-    return _build_merged_consensus_info(consensus_seq, snp_count, variants)
-
-
 def merge_group_with_msa(variants: List[ConsensusInfo], args) -> Tuple[List[ConsensusInfo], Dict, int, List[OverlapMergeInfo]]:
     """
     Find largest mergeable subset of variants using MSA-based evaluation with exhaustive search.

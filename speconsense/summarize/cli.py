@@ -66,8 +66,8 @@ from .clustering import (
     merge_groups_by_anchor_overlap,
     select_variants,
 )
-from .merging import merge_group_with_msa, create_full_consensus_from_msa
-from .analysis import run_spoa_msa, MAX_MSA_MERGE_VARIANTS, MIN_MERGE_BATCH, MAX_MERGE_BATCH
+from .merging import merge_group_with_msa
+from .analysis import MAX_MSA_MERGE_VARIANTS, MIN_MERGE_BATCH, MAX_MERGE_BATCH
 from .tree import write_specimen_variant_tree
 
 
@@ -209,12 +209,6 @@ def parse_arguments():
     selection_group.add_argument("--select-min-size-ratio", type=float, default=0,
                                  help="Minimum size ratio (variant/largest) to include in output "
                                       "(default: 0 = disabled, e.g. 0.2 for 20%% cutoff)")
-    selection_group.add_argument("--enable-full-consensus", action="store_true",
-                                 help="Generate a full consensus per variant group representing all variation "
-                                      "from pre-merge variants (gaps never win)")
-    selection_group.add_argument("--disable-full-consensus", action="store_false",
-                                 dest="enable_full_consensus",
-                                 help="Override --enable-full-consensus or profile setting")
 
     # Performance group
     perf_group = parser.add_argument_group("Performance")
@@ -437,37 +431,6 @@ def process_single_specimen(file_consensuses: List[ConsensusInfo],
             final_consensus.append(renamed_variant)
             group_naming.append((variant.sample_name, new_name))
 
-        # Generate full consensus from PRE-MERGE variants that contributed
-        # to surviving post-merge variants (after select-min-size-ratio)
-        if getattr(args, 'enable_full_consensus', False) and len(group_members) > 1:
-            # Collect original cluster names from surviving post-merge variants
-            surviving_originals = set()
-            for v in group_members:
-                if v.sample_name in all_merge_traceability:
-                    surviving_originals.update(all_merge_traceability[v.sample_name])
-                else:
-                    surviving_originals.add(v.sample_name)
-
-            pre_merge_variants = [v for v in variant_groups[group_id]
-                                  if v.sample_name in surviving_originals]
-
-            specimen_base = strip_cluster_suffix(selected_variants[0].sample_name)
-            full_name = f"{specimen_base}-{group_idx + 1}.full"
-
-            if len(pre_merge_variants) == 1:
-                # Single variant — copy directly
-                full_consensus = pre_merge_variants[0]._replace(sample_name=full_name)
-            else:
-                # MSA on pre-merge variants, full consensus logic
-                sequences = [v.sequence for v in pre_merge_variants]
-                aligned_seqs = run_spoa_msa(sequences, alignment_mode=1)
-                full_consensus = create_full_consensus_from_msa(aligned_seqs, pre_merge_variants)
-                full_consensus = full_consensus._replace(sample_name=full_name)
-
-            final_consensus.append(full_consensus)
-        elif getattr(args, 'enable_full_consensus', False):
-            logging.debug(f"Group {group_idx + 1}: skipping .full consensus (single variant in group)")
-
         naming_info[group_idx + 1] = group_naming
 
     logging.info(f"Processed {file_name}: {len(final_consensus)} final variants across {len(merged_groups)} groups")
@@ -560,7 +523,6 @@ def main():
     logging.info(f"  --select-max-groups: {args.select_max_groups}")
     logging.info(f"  --select-strategy: {args.select_strategy}")
     logging.info(f"  --select-min-size-ratio: {args.select_min_size_ratio}")
-    logging.info(f"  --enable-full-consensus: {args.enable_full_consensus}")
     logging.info(f"  --log-level: {args.log_level}")
     logging.info("")
 
