@@ -10,12 +10,16 @@ speconsense:
   min-identity: 0.85
   disable-position-phasing: True
   disable-ambiguity-calling: True
+  disable-read-reassignment: True   # Old pipelines didn't reassign reads
+  disable-discard-recovery: True    # Defensive; auto-skipped when reassignment off
   min-cluster-ratio: 0.2
-  min-size: 5 
-  max-sample-size: 500       
+  min-size: 5
+  max-sample-size: 500
   presample: 500
 
 # Parameters for speconsense-summarize (post-processing)
 speconsense-summarize:
   min-ric: 5
   disable-merging: true        # Skip merging entirely
+  min-cer-factor: 0            # Old pipelines had no CER concept
+  max-err-factor: 0            # Old pipelines had no err_factor concept

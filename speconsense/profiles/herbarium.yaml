@@ -22,3 +22,5 @@ speconsense:
 
 speconsense-summarize:
   min-ric: 3                    # Accept lower-support consensus
+  min-cer-factor: 0             # Disable CER filter; keep all variants for review
+  max-err-factor: 0             # Disable err_factor filter; degraded DNA inflates it

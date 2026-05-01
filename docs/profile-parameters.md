@@ -26,16 +26,16 @@ Parameters for the main clustering and consensus tool.
 | `inflation` | MCL inflation parameter (higher = more clusters) | 4.0 | — | — | — | — | — |
 | `k-nearest-neighbors` | Number of nearest neighbors for graph construction | 5 | — | — | — | — | — |
 | `min-size` | Minimum cluster size to output (0 = disabled) | 3 | — | 3 | — | 5 | 10 |
-| `min-cluster-ratio` | Minimum size relative to largest cluster (0 = disabled) | 0 | — | 0 | 0 | 0.2 | 0.05 |
+| `min-cluster-ratio` | Minimum size relative to largest cluster (0 = disabled) | 0 | — | 0 | 0 | 0.2 | — |
 | `max-sample-size` | Maximum reads sampled for consensus generation | 100 | — | 100 | — | 500 | 100 |
 | `presample` | Presample size for initial reads (0 = use all) | 1000 | — | 0 | 0 | 500 | 0 |
 | `disable-position-phasing` | Disable variant phasing within clusters (also disables the second phasing pass) | false | — | — | — | true | — |
-| `disable-read-reassignment` | Disable post-phasing concordance-based read reassignment within identity groups | false | — | — | — | — | — |
-| `disable-discard-recovery` | Disable recovery of discarded reads into surviving clusters (requires read reassignment enabled) | false | — | — | — | — | — |
+| `disable-read-reassignment` | Disable post-phasing concordance-based read reassignment within identity groups | false | — | — | — | true | — |
+| `disable-discard-recovery` | Disable recovery of discarded reads into surviving clusters (requires read reassignment enabled) | false | — | — | — | true | — |
 | `min-variant-frequency` | Min minor allele frequency for variant phasing | 0.10 | 0.20 | 0.05 | — | — | 0.25 |
 | `min-variant-count` | Min read count for minor allele to trigger phasing | 3 | — | — | — | — | — |
 | `significance-level` | Alpha for variant significance (CER) testing | 1e-5 | — | — | — | — | — |
-| `group-identity` | Complete-linkage identity for read reassignment/CER grouping | 0.85 | — | — | — | — | — |
+| `group-identity` | Complete-linkage identity for read reassignment/CER grouping | 0.85 | — | — | 0.95 | — | — |
 | `hp-normalization-length` | HP run length at/above which length variants are suppressed (blanket HP normalization) | 6 | — | — | — | — | — |
 | `error-model` | Per-basecaller error model (name, user file, or path); see `--list-error-models` | dorado-v5.0 | — | — | — | — | — |
 | `disable-ambiguity-calling` | Disable IUPAC codes for unphased variants | false | — | — | — | true | true |
@@ -63,8 +63,8 @@ Parameters for the post-processing and summarization tool.
 | `min-ric` | Minimum Reads in Consensus threshold | 3 | — | 3 | — | 5 | 5 |
 | `min-len` | Minimum sequence length in bp (0 = disabled) | 0 | — | — | — | — | — |
 | `max-len` | Maximum sequence length in bp (0 = disabled) | 0 | — | — | — | — | — |
-| `min-cer-factor` | Min per-position CER factor to keep a variant as primary (routes to `variants/*.ns-…` otherwise; 0 disables) | 1.0 | — | — | — | — | — |
-| `max-err-factor` | Max cluster err_factor (observed/expected disagreement); routes to `variants/*.lq-…` above (0 disables) | 1.5 | — | — | — | — | — |
+| `min-cer-factor` | Min per-position CER factor to keep a variant as primary (routes to `variants/*.ns-…` otherwise; 0 disables) | 1.0 | — | 0 | — | 0 | — |
+| `max-err-factor` | Max cluster err_factor (observed/expected disagreement); routes to `variants/*.lq-…` above (0 disables) | 1.5 | — | 0 | — | 0 | — |
 | `group-identity` | Anchor identity for cross-primer overlap conflation between core groups | 0.85 | — | — | 0.95 | — | — |
 | `disable-merging` | Skip MSA-based merge evaluation entirely | false | — | — | — | true | true |
 | `merge-effort` | Merge thoroughness: `fast`, `balanced`, `thorough`, or 6-14 | balanced | — | — | fast | — | — |
@@ -77,7 +77,7 @@ Parameters for the post-processing and summarization tool.
 | `select-max-groups` | Max groups to output per specimen (-1 = all) | -1 | — | — | — | — | — |
 | `select-max-variants` | Max variants per group (-1 = no limit) | -1 | — | — | — | — | — |
 | `select-strategy` | Variant selection: `size` or `diversity` | size | — | — | — | — | — |
-| `select-min-size-ratio` | Min size ratio (variant/largest) to include in output (0 = disabled) | 0 | 0.2 | — | — | — | — |
+| `select-min-size-ratio` | Min size ratio (variant/largest) to include in output (0 = disabled) | 0 | 0.2 | — | — | — | 0.05 |
 | `fasta-fields` | Header fields: preset or comma-separated list | default | — | — | — | — | — |
 | `scale-threshold` | Sequence count to enable vsearch acceleration (0 = disabled) | 1001 | — | — | — | — | — |
 | `threads` | Max threads for internal parallelism (0 = auto) | 0 | — | — | — | — | — |
