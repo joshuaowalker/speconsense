@@ -223,7 +223,6 @@ class SpecimenClusterer:
                  enable_iupac_calling: bool = True,
                  scale_threshold: int = 1001,
                  max_threads: int = 1,
-                 early_filter: bool = False,
                  collect_discards: bool = False,
                  significance_level: float = 1e-5,
                  group_identity: float = 0.85,
@@ -251,7 +250,6 @@ class SpecimenClusterer:
         self.enable_iupac_calling = enable_iupac_calling
         self.scale_threshold = scale_threshold
         self.max_threads = max_threads
-        self.early_filter = early_filter
         self.collect_discards = collect_discards
         self.significance_level = significance_level
         self.group_identity = group_identity
@@ -1134,7 +1132,7 @@ class SpecimenClusterer:
         return initial_clusters
 
     def _run_prephasing_merge(self, initial_clusters: List[Set[str]]) -> List[Set[str]]:
-        """Phase 2: Merge initial clusters with HP-equivalent consensus.
+        """Phase 2: Pre-phasing merge — combine HP-equivalent initial clusters.
 
         Maximizes read depth for variant detection in the phasing phase.
 
@@ -1156,59 +1154,6 @@ class SpecimenClusterer:
         merged_dicts = self.merge_similar_clusters(initial_cluster_dicts, phase_name="Cluster equivalence merge")
         # Extract back to sets for Phase 3
         return [d['read_ids'] for d in merged_dicts]
-
-    def _apply_early_filter(self, clusters: List[Set[str]]) -> Tuple[List[Set[str]], List[Set[str]]]:
-        """Apply early size filtering after pre-phasing merge.
-
-        Uses the same logic as _run_size_filtering() but operates before
-        variant phasing to avoid expensive processing of small clusters.
-
-        Args:
-            clusters: List of merged clusters from Phase 2
-
-        Returns:
-            Tuple of (clusters_to_process, filtered_clusters)
-        """
-        if not self.early_filter:
-            return clusters, []
-
-        # Get size of each cluster for filtering
-        cluster_sizes = [(c, len(c)) for c in clusters]
-
-        # Find largest cluster size for ratio filtering
-        if not cluster_sizes:
-            return [], []
-        largest_size = max(size for _, size in cluster_sizes)
-
-        keep_clusters = []
-        filtered_clusters = []
-
-        for cluster, size in cluster_sizes:
-            # Apply min_size filter
-            if size < self.min_size:
-                filtered_clusters.append(cluster)
-                continue
-
-            # Apply min_cluster_ratio filter
-            if self.min_cluster_ratio > 0 and size / largest_size < self.min_cluster_ratio:
-                filtered_clusters.append(cluster)
-                continue
-
-            keep_clusters.append(cluster)
-
-        if filtered_clusters:
-            # Collect discarded read IDs
-            discarded_count = 0
-            for cluster in filtered_clusters:
-                self.discarded_read_ids.update(cluster)
-                discarded_count += len(cluster)
-
-            self._log_stage(
-                f"Early filter: dropped {len(filtered_clusters)} cluster(s) (-{discarded_count} reads)",
-                keep_clusters,
-            )
-
-        return keep_clusters, filtered_clusters
 
     def _run_variant_phasing(self, merged_clusters: List[Set[str]]) -> List[Dict]:
         """Phase 3: Detect variants and phase reads into haplotypes.
@@ -1295,7 +1240,7 @@ class SpecimenClusterer:
         return all_subclusters
 
     def _run_postphasing_merge(self, subclusters: List[Dict]) -> List[Dict]:
-        """Phase 4: Merge subclusters with HP-equivalent consensus.
+        """Phase 4: Post-phasing merge — combine HP-equivalent subclusters.
 
         Args:
             subclusters: List of subclusters from Phase 3
@@ -1310,7 +1255,7 @@ class SpecimenClusterer:
         return self.merge_similar_clusters(subclusters, phase_name="Cluster equivalence merge (round 2)")
 
     def _filter_noisy_clusters(self, subclusters: List[Dict]) -> List[Dict]:
-        """Phase 4a: Remove unreliable small clusters with no-majority positions.
+        """Phase 5: Noise filter — remove unreliable small clusters with no-majority positions.
 
         Only applies to clusters below the phasing floor (< min_variant_count * 2),
         since larger clusters have enough reads for reliable consensus. Disbanded
@@ -1423,7 +1368,7 @@ class SpecimenClusterer:
         return result
 
     def _run_read_reassignment(self, subclusters: List[Dict]) -> List[Dict]:
-        """Phase 4b: Reassign reads to best-matching clusters within identity groups.
+        """Phase 6: Read reassignment — move reads to best-matching clusters within identity groups.
 
         Uses a shared MSA per identity group to identify variant positions between
         cluster consensuses, then moves reads to the cluster they best match at
@@ -1461,7 +1406,7 @@ class SpecimenClusterer:
         return subclusters
 
     def _run_second_phasing_pass(self, subclusters: List[Dict]) -> List[Dict]:
-        """Phase 4b3: Re-phase subclusters after read reassignment / discard recovery.
+        """Phase 8: Second phasing pass — re-phase subclusters after read reassignment / discard recovery.
 
         Reassignment can move reads into clusters where they create detectable
         variants. This pass splits any such clusters. No outlier removal —
@@ -1699,7 +1644,7 @@ class SpecimenClusterer:
         return total_reassigned
 
     def _run_discard_reassignment(self, subclusters: List[Dict]) -> List[Dict]:
-        """Phase 4b2: Reassign discarded reads to existing clusters.
+        """Phase 7: Discard recovery — reassign previously-discarded reads to existing clusters.
 
         For each discarded read:
         1. Find best-matching cluster consensus via edlib (group selection)
@@ -1965,7 +1910,7 @@ class SpecimenClusterer:
         return subclusters
 
     def _run_cer_validation(self, subclusters: List[Dict]) -> List[Dict]:
-        """Phase 4c: Annotate clusters with pairwise CER factors.
+        """Phase 9: CER validation — annotate clusters with pairwise CER factors.
 
         Groups clusters by adjusted identity, then within each group:
         - The largest cluster (anchor) carries no pairwise comparison
@@ -2369,10 +2314,10 @@ class SpecimenClusterer:
         return best
 
     def _run_size_filtering(self, subclusters: List[Dict]) -> List[Dict]:
-        """Phase 5: Filter clusters by size and ratio thresholds.
+        """Phase 10: Size filtering — drop clusters by size and ratio thresholds.
 
         Args:
-            subclusters: List of subclusters from Phase 4
+            subclusters: List of subclusters from Phase 9
 
         Returns:
             List of filtered clusters, sorted by size (largest first)
@@ -2417,10 +2362,10 @@ class SpecimenClusterer:
         return large_clusters
 
     def _write_cluster_outputs(self, clusters: List[Dict], output_file: str) -> Tuple[int, int]:
-        """Phase 6: Generate final consensus and write output files.
+        """Phase 11: Output generation — generate final consensus and write output files.
 
         Args:
-            clusters: List of filtered clusters from Phase 5
+            clusters: List of filtered clusters from Phase 10
             output_file: Path to the output FASTA file
 
         Returns:
@@ -2508,7 +2453,7 @@ class SpecimenClusterer:
                 # Route any MAD-flagged outlier reads (and the full sampled set
                 # if the cluster fell below min-reads after removal) to the
                 # specimen-level discard pool. These reads will appear in the
-                # {specimen}-discards.fastq and are not reassigned (Phase 4b
+                # {specimen}-discards.fastq and are not reassigned (Phase 6
                 # reassignment has already completed).
                 mad_outlier_ids = result.get('mad_outlier_ids') or set()
                 if mad_outlier_ids:
@@ -2616,12 +2561,12 @@ class SpecimenClusterer:
         return clusters_with_ambiguities, total_ambiguity_positions
 
     def _write_discarded_reads(self) -> None:
-        """Write discarded reads to a FASTQ file for inspection.
+        """Phase 12: Write discarded reads to a FASTQ file for inspection.
 
         Discards include:
         - Outlier reads removed during variant phasing
-        - Reads from clusters filtered out by early filtering (Phase 2b)
-        - Reads from clusters filtered out by size/ratio thresholds (Phase 5)
+        - Reads from clusters dropped by the hard-floor filter or noise filter
+        - Reads from clusters filtered out by size/ratio thresholds (Phase 10)
         - Reads filtered during orientation (when --orient-mode filter-failed)
 
         Output: cluster_debug/{sample_name}-discards.fastq
@@ -2641,19 +2586,18 @@ class SpecimenClusterer:
         """Perform complete clustering process with variant phasing and write output files.
 
         Pipeline:
-            1. Initial clustering (MCL or greedy)
-            2. Pre-phasing merge (combine HP-equivalent initial clusters)
-            2b. Early filtering (optional, skip small clusters before expensive phasing)
-            3. Variant detection + phasing (split clusters by haplotype)
-            4. Post-phasing merge (combine HP-equivalent subclusters)
-            4a. Filter noisy small clusters (no-majority columns)
-            4b. Read reassignment (concordance-based, within identity groups; optional)
-            4b2. Discard recovery (re-admit dropped reads to clusters; optional, coupled to 4b)
-            4b3. Second phasing pass (split variants introduced by 4b/4b2; coupled to phasing+4b)
-            4c. CER validation (pairwise significance testing within identity groups)
-            5. Filtering (size and ratio thresholds)
-            6. Output generation
-            7. Write discarded reads (optional)
+             1. Initial clustering (MCL or greedy)
+             2. Pre-phasing merge (combine HP-equivalent initial clusters)
+             3. Variant detection + phasing (split clusters by haplotype)
+             4. Post-phasing merge (combine HP-equivalent subclusters)
+             5. Noise filter (drop small clusters with no-majority columns)
+             6. Read reassignment (concordance-based, within identity groups; optional)
+             7. Discard recovery (re-admit dropped reads to clusters; optional, coupled to 6)
+             8. Second phasing pass (split variants introduced by 6/7; coupled to phasing+6)
+             9. CER validation (pairwise significance testing within identity groups)
+            10. Size filtering (min size and cluster-ratio thresholds)
+            11. Output generation (final consensus, FASTA writing)
+            12. Write discarded reads (optional)
 
         Args:
             algorithm: Clustering algorithm to use ('graph' for MCL or 'greedy')
@@ -2684,29 +2628,26 @@ class SpecimenClusterer:
             # Phase 2: Pre-phasing merge
             merged_clusters = self._run_prephasing_merge(initial_clusters)
 
-            # Phase 2b: Early filtering (optional)
-            clusters_to_phase, early_filtered = self._apply_early_filter(merged_clusters)
-
             # Phase 3: Variant detection + phasing
-            all_subclusters = self._run_variant_phasing(clusters_to_phase)
+            all_subclusters = self._run_variant_phasing(merged_clusters)
 
             # Phase 4: Post-phasing merge
             merged_subclusters = self._run_postphasing_merge(all_subclusters)
 
-            # Phase 4a: Filter noisy small clusters
+            # Phase 5: Noise filter (drop small clusters with no-majority columns)
             cleaned_subclusters = self._filter_noisy_clusters(merged_subclusters)
 
-            # Phase 4b: Read reassignment (optional)
+            # Phase 6: Read reassignment (optional)
             if self.enable_read_reassignment:
                 reassigned_subclusters = self._run_read_reassignment(cleaned_subclusters)
             else:
                 reassigned_subclusters = cleaned_subclusters
 
-            # Phase 4b2: Discard reassignment (optional, requires 4b enabled)
+            # Phase 7: Discard recovery (optional, requires Phase 6 enabled).
             # Discard recovery uses the same identity-group concordance logic
-            # as read reassignment; running it without 4b would silently inject
-            # previously-discarded reads into clusters whose membership the
-            # user asked to keep frozen. So 4b2 is gated on 4b being enabled.
+            # as read reassignment; running it without Phase 6 would silently
+            # inject previously-discarded reads into clusters whose membership
+            # the user asked to keep frozen. So Phase 7 is gated on Phase 6.
             if self.enable_discard_recovery and self.enable_read_reassignment:
                 discard_reassigned = self._run_discard_reassignment(reassigned_subclusters)
             else:
@@ -2714,31 +2655,31 @@ class SpecimenClusterer:
                     logging.info("Discard recovery skipped: requires --enable-read-reassignment")
                 discard_reassigned = reassigned_subclusters
 
-            # Phase 4b3: Second phasing pass. Gated on the phasing flag AND on
-            # 4b having run — 4b2 is coupled to 4b, so if 4b didn't run nothing
-            # has changed since Phase 3 phasing and there is no new work for
-            # 4b3 to do.
+            # Phase 8: Second phasing pass. Gated on the phasing flag AND on
+            # Phase 6 having run — Phase 7 is coupled to Phase 6, so if 6 did
+            # not run nothing has changed since Phase 3 and there is no new
+            # work for Phase 8 to do.
             if self.enable_secondpass_phasing and self.enable_read_reassignment:
                 rephased_subclusters = self._run_second_phasing_pass(discard_reassigned)
             else:
                 rephased_subclusters = discard_reassigned
 
-            # Phase 4c: CER validation
+            # Phase 9: CER validation
             validated_subclusters = self._run_cer_validation(rephased_subclusters)
 
-            # Phase 5: Size filtering
+            # Phase 10: Size filtering
             filtered_clusters = self._run_size_filtering(validated_subclusters)
 
             # Capture for metadata serialization (write_metadata reads this).
             self.final_cluster_dicts = filtered_clusters
 
-            # Phase 6: Output generation
+            # Phase 11: Output generation
             consensus_output_file = os.path.join(self.output_dir, f"{self.sample_name}-all.fasta")
             clusters_with_ambiguities, total_ambiguity_positions = self._write_cluster_outputs(
                 filtered_clusters, consensus_output_file
             )
 
-            # Phase 7: Write discarded reads (optional)
+            # Phase 12: Write discarded reads (optional)
             if self.collect_discards and self.discarded_read_ids:
                 self._write_discarded_reads()
 

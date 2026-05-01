@@ -60,7 +60,6 @@ speconsense:
   # --- Processing ---
   # threads: 0                    # Max threads (0 = auto-detect)
   # scale-threshold: 500          # Read count threshold for scaled processing
-  # enable-early-filter: false    # Enable early filtering optimization
   # collect-discards: false       # Write discarded reads to separate file
 
 # =============================================================================

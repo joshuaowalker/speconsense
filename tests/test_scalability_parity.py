@@ -84,10 +84,10 @@ def _run_form_identity_groups(consensuses: List[str], scale_threshold: int) -> D
     return {min(idxs): frozenset(idxs) for idxs in raw_groups.values()}
 
 
-# ---------- Phase 4a parallelization parity ----------
+# ---------- Noise filter parallelization parity ----------
 
 def test_filter_noisy_clusters_parallel_matches_sequential():
-    """Phase 4a: ProcessPoolExecutor path produces same disband decisions as
+    """Noise filter: ProcessPoolExecutor path produces same disband decisions as
     the sequential path for the same input."""
     from speconsense.core import SpecimenClusterer
 

@@ -29,9 +29,9 @@ Parameters for the main clustering and consensus tool.
 | `min-cluster-ratio` | Minimum size relative to largest cluster (0 = disabled) | 0 | — | 0 | 0 | 0.2 | 0.05 |
 | `max-sample-size` | Maximum reads sampled for consensus generation | 100 | — | 100 | — | 500 | 100 |
 | `presample` | Presample size for initial reads (0 = use all) | 1000 | — | 0 | 0 | 500 | 0 |
-| `disable-position-phasing` | Disable variant phasing within clusters (also disables Phase 4b3 second phasing pass) | false | — | — | — | true | — |
-| `disable-read-reassignment` | Disable post-phasing read reassignment within identity groups (Phase 4b) | false | — | — | — | — | — |
-| `disable-discard-recovery` | Disable recovery of discarded reads (Phase 4b2; requires read reassignment enabled) | false | — | — | — | — | — |
+| `disable-position-phasing` | Disable variant phasing within clusters (also disables the second phasing pass) | false | — | — | — | true | — |
+| `disable-read-reassignment` | Disable post-phasing concordance-based read reassignment within identity groups | false | — | — | — | — | — |
+| `disable-discard-recovery` | Disable recovery of discarded reads into surviving clusters (requires read reassignment enabled) | false | — | — | — | — | — |
 | `min-variant-frequency` | Min minor allele frequency for variant phasing | 0.10 | 0.20 | 0.05 | — | — | 0.25 |
 | `min-variant-count` | Min read count for minor allele to trigger phasing | 3 | — | — | — | — | — |
 | `significance-level` | Alpha for variant significance (CER) testing | 1e-5 | — | — | — | — | — |

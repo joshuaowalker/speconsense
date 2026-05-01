@@ -84,7 +84,6 @@ VALID_SPECONSENSE_KEYS = {
     # Processing
     "scale-threshold",
     "threads",
-    "enable-early-filter",
     "collect-discards",
 }
 

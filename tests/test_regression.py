@@ -667,56 +667,6 @@ class TestCollectDiscards:
         assert not os.path.exists(discards_file), \
             "Discards file should not be created without --collect-discards"
 
-    def test_collect_discards_with_early_filter(self, temp_dir, core_module):
-        """--collect-discards should capture reads filtered by early filtering."""
-        # Create sequences that will result in small clusters being filtered
-        records = []
-        # Main cluster: 10 identical sequences
-        main_seq = "ACGTACGTACGTACGTACGTACGTACGTACGTACGTACGT"
-        for i in range(10):
-            records.append(
-                SeqRecord(
-                    Seq(main_seq),
-                    id=f"main_{i:02d}",
-                    letter_annotations={'phred_quality': [30] * len(main_seq)}
-                )
-            )
-        # Small cluster: 2 different sequences (will be filtered with --min-size 5)
-        small_seq = "GGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGG"
-        for i in range(2):
-            records.append(
-                SeqRecord(
-                    Seq(small_seq),
-                    id=f"small_{i:02d}",
-                    letter_annotations={'phred_quality': [30] * len(small_seq)}
-                )
-            )
-
-        fastq_path = os.path.join(temp_dir, 'mixed_clusters.fastq')
-        with open(fastq_path, 'w') as f:
-            SeqIO.write(records, f, 'fastq')
-
-        result = subprocess.run([
-            sys.executable, '-m', core_module,
-            fastq_path,
-            '--min-size', '5',  # Filter out clusters with < 5 reads
-            '--algorithm', 'greedy',
-            '--collect-discards',
-            '--enable-early-filter'
-        ], capture_output=True, text=True)
-
-        assert result.returncode == 0, f"Command failed: {result.stderr}"
-
-        # Check for discards file - should contain the small cluster reads
-        discards_file = os.path.join('clusters', 'cluster_debug', 'mixed_clusters-discards.fastq')
-
-        if os.path.exists(discards_file):
-            records = list(SeqIO.parse(discards_file, 'fastq'))
-            # Should have at least the 2 small cluster reads
-            small_ids = [r.id for r in records if r.id.startswith('small_')]
-            # Note: early filter may or may not catch these depending on clustering
-            assert len(records) >= 0, "Should have valid discards"
-
     def test_discards_contains_correct_reads(self, temp_dir, core_module):
         """Discards file should contain the actual discarded read sequences."""
         # Create a mix of sequences where some will definitely be discarded

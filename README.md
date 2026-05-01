@@ -398,24 +398,9 @@ speconsense large_dataset.fastq --threads 0
 speconsense-summarize --source clusters/
 ```
 
-## Early Filtering
+## Discard Inspection
 
-Speconsense can optionally apply size filtering early in the pipeline (after pre-phasing merge) to skip expensive variant phasing on small clusters that will ultimately be filtered out. This can significantly improve performance for large datasets.
-
-### Options
-
-- `--enable-early-filter`: Apply min-size and min-cluster-ratio filtering after pre-phasing merge. Small clusters skip variant phasing, improving performance.
-- `--collect-discards`: Write all discarded reads (outliers + filtered clusters) to `cluster_debug/{sample}-discards.fastq` for inspection.
-
-### Performance Optimization
-
-For large datasets where performance is critical:
-
-```bash
-speconsense input.fastq --enable-early-filter
-```
-
-This skips variant phasing for clusters that will be filtered out anyway, while still using scalability optimizations for O(n²) comparisons.
+`--collect-discards` writes all discarded reads (unclustered, MAD outliers, hard-floor or noise-filter dropouts, size-filtered clusters) to `cluster_debug/{sample}-discards.fastq` for inspection. Useful when investigating why a specimen lost reads.
 
 ## Algorithm Details
 
@@ -1095,8 +1080,7 @@ usage: speconsense [-h] [-O OUTPUT_DIR] [--primers PRIMERS]
                    [--enable-homopolymer-equivalence]
                    [--orient-mode {skip,keep-all,filter-failed}]
                    [--presample PRESAMPLE] [--scale-threshold SCALE_THRESHOLD]
-                   [--threads N] [--enable-early-filter]
-                   [--disable-early-filter] [--collect-discards]
+                   [--threads N] [--collect-discards]
                    [--no-collect-discards]
                    [--log-level {DEBUG,INFO,WARNING,ERROR,CRITICAL}]
                    [--version] [-p NAME] [--list-profiles]
@@ -1242,12 +1226,6 @@ Performance:
   --threads N           Max threads for internal parallelism (vsearch, SPOA).
                         0=auto-detect, default=1 (safe for parallel
                         workflows).
-  --enable-early-filter
-                        Enable early filtering to skip small clusters before
-                        variant phasing (improves performance for large
-                        datasets)
-  --disable-early-filter
-                        Override --enable-early-filter or profile setting
 
 Debugging:
   --collect-discards    Write discarded reads (outliers and filtered clusters)

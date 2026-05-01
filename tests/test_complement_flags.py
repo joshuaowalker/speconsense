@@ -84,10 +84,6 @@ class TestCoreComplementFlags:
         parser.add_argument("--enable-homopolymer-equivalence", action="store_false",
                             dest="disable_homopolymer_equivalence")
 
-        parser.add_argument("--enable-early-filter", action="store_true")
-        parser.add_argument("--disable-early-filter", action="store_false",
-                            dest="enable_early_filter")
-
         parser.add_argument("--collect-discards", action="store_true")
         parser.add_argument("--no-collect-discards", action="store_false",
                             dest="collect_discards")
@@ -102,7 +98,6 @@ class TestCoreComplementFlags:
         assert args.disable_ambiguity_calling is False
         assert args.disable_cluster_merging is False
         assert args.disable_homopolymer_equivalence is False
-        assert args.enable_early_filter is False
         assert args.collect_discards is False
 
     def test_primary_flags_set_true(self):
@@ -113,7 +108,6 @@ class TestCoreComplementFlags:
             '--disable-ambiguity-calling',
             '--disable-cluster-merging',
             '--disable-homopolymer-equivalence',
-            '--enable-early-filter',
             '--collect-discards',
         ])
         assert args.disable_position_phasing is True
@@ -122,7 +116,6 @@ class TestCoreComplementFlags:
         assert args.disable_ambiguity_calling is True
         assert args.disable_cluster_merging is True
         assert args.disable_homopolymer_equivalence is True
-        assert args.enable_early_filter is True
         assert args.collect_discards is True
 
     def test_complement_flags_set_false(self):
@@ -133,7 +126,6 @@ class TestCoreComplementFlags:
             '--enable-ambiguity-calling',
             '--enable-cluster-merging',
             '--enable-homopolymer-equivalence',
-            '--disable-early-filter',
             '--no-collect-discards',
         ])
         assert args.disable_position_phasing is False
@@ -142,7 +134,6 @@ class TestCoreComplementFlags:
         assert args.disable_ambiguity_calling is False
         assert args.disable_cluster_merging is False
         assert args.disable_homopolymer_equivalence is False
-        assert args.enable_early_filter is False
         assert args.collect_discards is False
 
     def test_complement_overrides_profile_default(self):
@@ -151,12 +142,6 @@ class TestCoreComplementFlags:
         self.parser.set_defaults(disable_position_phasing=True)
         args = self.parser.parse_args(['--enable-position-phasing'])
         assert args.disable_position_phasing is False
-
-    def test_complement_overrides_profile_enable_early_filter(self):
-        """--disable-early-filter should override profile that sets enable_early_filter=True."""
-        self.parser.set_defaults(enable_early_filter=True)
-        args = self.parser.parse_args(['--disable-early-filter'])
-        assert args.enable_early_filter is False
 
     def test_complement_overrides_profile_collect_discards(self):
         """--no-collect-discards should override profile that sets collect_discards=True."""

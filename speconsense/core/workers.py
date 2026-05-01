@@ -637,7 +637,7 @@ def _process_cluster_worker(args) -> Tuple[List[Dict], Set[str]]:
     # (_generate_cluster_consensus_worker), which is sensitive to cluster-
     # relative spread rather than an absolute threshold. Contaminant reads
     # from a different organism are handled by cross-cluster reassignment
-    # (Phase 4b); low-quality reads from the correct organism are handled
+    # (Phase 6); low-quality reads from the correct organism are handled
     # by MAD at final consensus. If initial-consensus quality turns out to
     # degrade phasing meaningfully, revisit adding a MAD pass here too.
 

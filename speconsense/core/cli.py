@@ -140,11 +140,6 @@ def main():
     perf_group.add_argument("--threads", type=int, default=1, metavar="N",
                             help="Max threads for internal parallelism (vsearch, SPOA). "
                                  "0=auto-detect, default=1 (safe for parallel workflows).")
-    perf_group.add_argument("--enable-early-filter", action="store_true",
-                            help="Enable early filtering to skip small clusters before variant phasing (improves performance for large datasets)")
-    perf_group.add_argument("--disable-early-filter", action="store_false",
-                            dest="enable_early_filter",
-                            help="Override --enable-early-filter or profile setting")
 
     # Debugging group
     debug_group = parser.add_argument_group("Debugging")
@@ -248,7 +243,6 @@ def main():
         enable_iupac_calling=not args.disable_ambiguity_calling,
         scale_threshold=args.scale_threshold,
         max_threads=threads,
-        early_filter=args.enable_early_filter,
         collect_discards=args.collect_discards,
         significance_level=args.significance_level,
         group_identity=args.group_identity,

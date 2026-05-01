@@ -81,7 +81,7 @@ pytest -m "not slow"
 - `base.py`: `CandidateFinder` protocol, `ScalablePairwiseOperation` (top-K neighbors for MCL, sparse distance matrix for identity grouping, equivalence groups for cluster merging)
 - `vsearch.py`: vsearch-backed candidate finder
 - `config.py`: `ScalabilityConfig`
-- Activates when `len(seqs) >= scale_threshold` AND vsearch is on PATH. Active uses: Phase 1 K-NN (MCL graph), Phase 2/4 cluster merging (HP-equivalence union-find), Phase 4b/4b2/4c identity grouping (`_form_identity_groups` sparse distance matrix), Phase 4b2 discard screening (top-K cluster matches per discard). Phase 4a noise-filter SPOA is parallelized via `ProcessPoolExecutor` when `--threads N>1` (no vsearch dependency).
+- Activates when `len(seqs) >= scale_threshold` AND vsearch is on PATH. Active uses: initial-clustering K-NN (MCL graph), cluster-equivalence merging (HP-equivalence union-find), identity grouping (`_form_identity_groups` sparse distance matrix, used by read reassignment, discard recovery, and CER validation), discard screening (top-K cluster matches per discard), CER validation within-group top-K (per-group most-similar peers when group exceeds 50). Noise-filter SPOA is parallelized via `ProcessPoolExecutor` when `--threads N>1` (no vsearch dependency).
 
 **speconsense/profiles/** - Profile system for parameter presets:
 - YAML profiles (`compressed`, `herbarium`, `largedata`, `nostalgia`, `strict`, `example`) bundled in the package
@@ -96,14 +96,22 @@ pytest -m "not slow"
 
 ### Key Processing Pipeline
 
-1. **Input processing**: Read FASTQ files, optional presampling and augmentation
-2. **Orientation (optional)**: Detect and correct sequence orientation based on primers
-3. **Clustering**: Either MCL graph-based or greedy algorithm
-4. **Consensus generation**: Uses SPOA for multiple sequence alignment
-5. **Cluster merging**: Combines clusters with identical/homopolymer-equivalent consensus sequences
-6. **Primer trimming**: Optional primer removal using provided FASTA
-7. **Stability assessment**: Evaluates consensus reliability through subsampling
-8. **Output generation**: FASTA files with detailed headers including stability metrics
+Read in `SpecimenClusterer.cluster()` (`speconsense/core/clusterer.py`); 12 sequential phases:
+
+1. **Initial clustering** — MCL graph-based or greedy
+2. **Pre-phasing merge** — combine HP-equivalent initial clusters
+3. **Variant phasing** — split clusters by haplotype via MSA position analysis
+4. **Post-phasing merge** — combine HP-equivalent subclusters
+5. **Noise filter** — drop small clusters with no-majority columns
+6. **Read reassignment** (optional) — concordance-based moves within identity groups
+7. **Discard recovery** (optional, coupled to 6) — re-admit previously-dropped reads
+8. **Second phasing pass** — re-phase any clusters that gained reads via 6/7
+9. **CER validation** — annotate each non-anchor candidate with its `cer_factor`
+10. **Size filtering** — drop clusters below `--min-size` and `--min-cluster-ratio`
+11. **Output generation** — final consensus, MAD outlier removal, FASTA writing
+12. **Discard reads written** (optional, `--collect-discards`)
+
+Orientation (when `--orient-mode` ≠ skip) and primer trimming run during input processing and final consensus respectively, outside the numbered phases. Reads that fail clustering or are dropped by any filter accumulate in `self.discarded_read_ids`; phase 7 attempts to recover concordant ones.
 
 ### Post-Processing Pipeline (speconsense-summarize)
 
@@ -155,7 +163,7 @@ The codebase uses IUPAC nucleotide ambiguity codes throughout:
 
 ### Variant Significance and CER
 
-Phasing uses a three-stage architecture: phase indiscriminately, group by identity, then annotate pairwise via CER. Identity grouping uses **complete linkage** (every pair in a group must meet `--group-identity`, default `0.85`) via `scipy.cluster.hierarchy`, preventing transitive chains that would otherwise collapse closely related variants in eDNA-style mixtures. The same groups gate Phase 4b read reassignment and Phase 4b3 discard recovery — reads can only move within their identity group. Key pieces:
+Phasing uses a three-stage architecture: phase indiscriminately, group by identity, then annotate pairwise via CER. Identity grouping uses **complete linkage** (every pair in a group must meet `--group-identity`, default `0.85`) via `scipy.cluster.hierarchy`, preventing transitive chains that would otherwise collapse closely related variants in eDNA-style mixtures. The same groups gate read reassignment and discard recovery — reads can only move within their identity group. Key pieces:
 - `significance.compute_critical_error_rate(N, M, L, alpha, K)` — p* under uniform model (q=p/3), with combinatorial Bonferroni for `K>1` multi-position variants.
 - `context.classify_variant_context()` produces one `ContextTag` per variant event (substitution or contiguous indel block). HP context comes from the reference consensus — the artifact hypothesis under test is that the candidate's reads are miscalled copies of the reference.
 - `qctx.get_qctx(tag, table)` returns a per-position error rate; HP runs longer than the table's max route to blanket homopolymer normalization.
@@ -200,7 +208,7 @@ Parameters are controlled via CLI arguments, optionally pre-set via YAML profile
 - Cluster size filtering (`--min-size`, `--min-cluster-ratio`)
 - Primer handling (`--primers`, `--orient-mode`)
 - Variant phasing (`--disable-position-phasing`, `--min-variant-frequency`, `--significance-level`)
-- Post-phasing refinement: `--disable-read-reassignment` (Phase 4b), `--disable-discard-recovery` (Phase 4b2; auto-skipped if 4b disabled). Phase 4b3 (second phasing pass) is gated by `--disable-position-phasing` AND `--disable-read-reassignment` — disabling either skips it.
+- Post-phasing refinement: `--disable-read-reassignment` (concordance-based reassignment within identity groups), `--disable-discard-recovery` (re-admit dropped reads; auto-skipped if read reassignment is disabled). The second phasing pass is gated by `--disable-position-phasing` AND `--disable-read-reassignment` — disabling either skips it.
 - Error model selection (`--error-model`, `--hp-normalization-length`)
 - Summarize CER filter (`--min-cer-factor`, default `1.0`, `0` disables)
 - Summarize err_factor filter (`--max-err-factor`, default `1.5`; `0` disables)
