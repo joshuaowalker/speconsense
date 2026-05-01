@@ -1,7 +1,7 @@
 # Speconsense Profile to simulate results of older bioinformatics pipelines.
 # Included for comparison only - not recommended for production usage
 
-speconsense-version: "0.7.*"
+speconsense-version: "0.8.*"
 description: "Simulate older bioinformatics"
 
 # Parameters for speconsense (clustering and consensus)

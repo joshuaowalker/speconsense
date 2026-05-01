@@ -149,8 +149,8 @@ speconsense input.fastq -p herbarium --min-size 10  # Uses herbarium but overrid
 
 ## Version Compatibility
 
-Profiles specify a `speconsense-version` field (e.g., `"0.7.*"`) indicating compatible versions. Profiles will warn if used with incompatible versions.
+Profiles specify a `speconsense-version` field (e.g., `"0.8.*"`) indicating compatible versions. Profiles will warn if used with incompatible versions.
 
 ---
 
-*Document generated for speconsense 0.7.7*
+*Document generated for speconsense 0.8.0*

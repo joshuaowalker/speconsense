@@ -1,6 +1,6 @@
 # Speconsense profile for a single large input file
 
-speconsense-version: "0.7.*"
+speconsense-version: "0.8.*"
 description: "Large Input (experimental)"
 
 # =============================================================================

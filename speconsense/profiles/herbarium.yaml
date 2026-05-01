@@ -9,7 +9,7 @@
 # The settings prioritize keeping all potential biological signal for
 # manual review, at the cost of more output variants.
 
-speconsense-version: "0.7.*"
+speconsense-version: "0.8.*"
 description: "High-recall settings for herbarium specimens with degraded DNA"
 
 speconsense:

@@ -89,7 +89,8 @@ class TestProfileLoading:
         assert "not found" in str(exc_info.value)
 
     def test_load_with_version_check(self):
-        # Bundled profiles require 0.7.*, which should match current version
+        # Bundled profiles' speconsense-version field tracks the current major
+        # version line, so the version check should pass for the running build.
         profile = Profile.load("herbarium", check_version=True)
         assert profile.name == "herbarium"
 

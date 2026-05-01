@@ -9,8 +9,11 @@ Speconsense is a specialized tool for generating high-quality consensus sequence
 The key features of Speconsense include:
 - Robust clustering of amplicon reads using either Markov Clustering (MCL) graph-based or greedy algorithms
 - **Automatic variant phasing**: Detects variant positions within clusters and splits reads into separate haplotypes
-- Automatic merging of clusters with identical or similar consensus sequences
-- High-quality consensus generation using SPOA
+- **Post-phasing refinement**: Reads can move between clusters within an identity group, and previously-discarded reads can be re-admitted, when consensus concordance supports it
+- **Statistical variant validation (CER)**: Each cluster is annotated with a context-aware Critical Error Rate factor measuring how implausible it is as basecaller-noise replicates of a larger peer
+- **Cluster homogeneity (err_factor)**: A peer-independent metric for whether a cluster's reads are internally consistent with the assumed sequencing-noise profile
+- Automatic merging of clusters with identical or homopolymer-equivalent consensus sequences
+- High-quality consensus generation using SPOA, with MAD-based outlier removal at final consensus
 - Primer trimming for clean consensus sequences
 - Read identity metrics for quality assessment
 - IUPAC ambiguity codes for unphased heterozygous positions
@@ -136,11 +139,11 @@ speconsense input.fastq -p herbarium --min-size 10
 ```
 
 **Bundled profiles:**
-- `compressed` — Compress variants into minimal IUPAC consensus sequences (aggressive merging with indels, 20% thresholds, full consensus, 20% selection size ratio)
-- `herbarium` — High-recall for degraded DNA/type specimens
-- `largedata` — Experimental settings for large input files
-- `nostalgia` — Simulate older bioinformatics pipelines
-- `strict` — High-precision for confident results
+- `compressed` — Compress variants into minimal IUPAC consensus sequences (aggressive merging with indels, 20% thresholds, 20% selection size ratio)
+- `herbarium` — High-recall for degraded DNA/type specimens (CER and err_factor filters disabled to surface weak-signal variants for review)
+- `largedata` — Experimental settings for large input files (tighter `group-identity` to keep identity groups small)
+- `nostalgia` — Simulate older bioinformatics pipelines (disables read reassignment, discard recovery, CER and err_factor filters)
+- `strict` — High-precision for confident results (per-group `select-min-size-ratio`)
 
 On first use, an `example.yaml` template is created in `~/.config/speconsense/profiles/` — copy and edit it to create custom profiles.
 
@@ -175,9 +178,10 @@ speconsense-summarize --source /path/to/speconsense/output --summary-dir MyResul
 
 **Variant Detection and Haplotype Phasing:**
 
-Speconsense can detect and isolate sequence variants within specimens (aka "haplotype phasing"). The graph-based clustering algorithm excels at discriminating between variants, and `speconsense-summarize` provides sophisticated tools for managing multiple variants per specimen, including:
-- MSA-based variant merging with IUPAC ambiguity codes and size-weighted consensus
-- Hierarchical variant grouping to separate contaminants from primary targets
+Speconsense can detect and isolate sequence variants within specimens (aka "haplotype phasing"). The graph-based clustering algorithm excels at discriminating between variants, and a multi-phase post-processing pipeline (read reassignment, discard recovery, second phasing pass, CER validation) refines the result. Core groups every variant into a complete-linkage **identity group** (gid) and assigns each variant a within-group rank (vid); these labels travel through to summarize via FASTA-header fields. `speconsense-summarize` honors that grouping rather than re-clustering, and provides:
+- MSA-based variant merging with IUPAC ambiguity codes and size-weighted consensus, applied within each identity group
+- Cross-primer overlap merging across identity groups (for primer-pool workflows)
+- CER and err_factor filtering to route low-confidence variants to a separate `.ns`/`.lq` track
 - Size-based or diversity-based variant selection strategies
 
 For detailed information on variant handling options, see the [Advanced Post-Processing](#advanced-post-processing) section below.
@@ -222,65 +226,90 @@ This will create a `__Summary__/` directory with:
 
 ### Speconsense Core Output
 
+Filenames use the identity group rank (`gid`) and within-group variant rank (`vid`) end-to-end: `{sample_name}-{gid}.v{vid}-RiC{size}`. There is no separate "original" namespace.
+
 For each specimen, Speconsense generates:
 
 1. **Main consensus FASTA**: `{sample_name}-all.fasta`
-   - Contains all consensus sequences for the specimen (one per cluster)
-   - Uses original cluster numbering: `{sample_name}-c{cluster_num}-RiC{size}`
+   - Contains all consensus sequences for the specimen (one per cluster), tagged with `gid=`/`vid=` and `cer_factor=`/`err_factor=` headers
 
 2. **Debug directory** (`cluster_debug/`):
-   - `{sample_name}-c{cluster_num}-RiC{size}-reads.fastq`: Original reads in each cluster
-   - `{sample_name}-c{cluster_num}-RiC{size}-sampled.fastq`: Sampled reads used for consensus generation
-   - `{sample_name}-c{cluster_num}-RiC{size}-untrimmed.fasta`: Untrimmed consensus sequences
+   - `{sample_name}-{gid}.v{vid}-RiC{size}-reads.fastq`: Original reads in each cluster
+   - `{sample_name}-{gid}.v{vid}-RiC{size}-sampled.fastq`: Sampled reads used for consensus generation
+   - `{sample_name}-{gid}.v{vid}-RiC{size}-untrimmed.fasta`: Untrimmed consensus sequences
+   - `{sample_name}-discards.fastq`: Reads discarded across the pipeline (only when `--collect-discards` is set)
+
+3. **Metadata directory** (`metadata/`):
+   - `{sample_name}_metadata.json`: Full per-cluster diagnostics including pipeline phase counts, MAD outlier drops, per-cluster `cer_details` (peer id, K, p*, joint q, per-position context tags and q_ctx values, reference idx) for replaying CER decisions offline, and raw `obs_sum`/`exp_sum`/`cols` for `err_factor` reproduction
 
 ### Speconsense-Summarize Output
 
-When using `speconsense-summarize` for post-processing, creates `__Summary__/` directory with:
+`speconsense-summarize` honors core's identity groups (parsed from `gid=`/`vid=` headers) and applies cross-primer overlap merging, MSA-based variant merging within each group, CER and err_factor filtering, and variant selection. It refuses to process FASTA inputs that lack `gid=`/`vid=` headers — re-run `speconsense` if upgrading from a pre-0.8 output directory.
 
-#### **Main Output Files** (summarization numbering: `-1.v1`, `-1.v2`, `-2.v1`):
-- **Individual FASTA files**: `{sample_name}-{group}.v{variant}-RiC{reads}.fasta` (all final consensus variants)
-- **Combined file**: `summary.fasta` - all final consensus sequences (merged variants only, excludes .raw files)
-- **Statistics**: `summary.txt` - sequence counts and metrics
-- **Quality report**: `quality_report.txt` - highlights sequences with potential quality concerns
-- **Log file**: `summarize_log.txt` - complete processing log
+Creates the `__Summary__/` directory with:
 
-#### **FASTQ Files/** (aggregated reads for final consensus):
-- `{sample_name}-{group}.v{variant}-RiC{reads}.fastq` - all reads contributing to final variant consensus
+#### **Main Output Files** (passing variants):
+- **Individual FASTA files**: `{sample_name}-{gid}.v{vid}-RiC{reads}.fasta` (one per passing variant)
+- **Combined file**: `summary.fasta` — all passing final consensus sequences (excludes `.raw`, `.ns`, and `.lq` files)
+- **Statistics**: `summary.txt` — sequence counts and metrics
+- **Quality report**: `quality_report.txt` — inspection-oriented report (executive summary, passed variants worth inspecting, possible rescues, overlap merge details, run-wide parameter signals, pipeline activity)
+- **Log file**: `summarize_log.txt` — complete processing log
 
-#### **variants/** (pre-merge variant files for traceability):
-- `{sample_name}-{group}.v{variant}.raw{N}-RiC{reads}.fasta` - FASTA for pre-merge variant N (when variants were merged)
-- **FASTQ Files/**:
-  - `{sample_name}-{group}.v{variant}.raw{N}-RiC{reads}.fastq` - reads for pre-merge variant N
+#### **FASTQ Files/** (reads for passing consensus):
+- `{sample_name}-{gid}.v{vid}-RiC{reads}.fastq`
 
-### Naming Convention Summary
+#### **variants/** (filtered + pre-merge variants for traceability):
+- `{sample_name}-{gid}.v{vid}.raw{N}-RiC{reads}.fasta` — FASTA for pre-merge variant N (when variants were merged)
+- `{sample_name}-{gid}.v{vid}.ns-RiC{reads}.fasta` — variants routed off the primary track because their `cer_factor` fell below `--min-cer-factor` (default `1.0`)
+- `{sample_name}-{gid}.v{vid}.lq-RiC{reads}.fasta` — variants routed off the primary track because their `err_factor` exceeded `--max-err-factor` (default `1.5`); `.lq` takes precedence over `.ns` when both fire
+- **FASTQ Files/** (matching FASTQs for `.raw`, `.ns`, `.lq` records)
 
-**Two distinct namespaces maintain traceability:**
+#### **trees/** (per-specimen variant tree):
+- `{specimen}.txt` — ASCII hierarchy of every variant in a specimen (passing, `.ns`, `.lq` together), grouped by core identity group. Each non-anchor variant branches from the larger-size peer with the highest pairwise identity, with a one-line edit summary (substitutions, single-nt indels, short ≤3 nt indels, long indels) versus that parent. Filtered variants carry the on-disk status marker (`-1.v4.ns`, `-1.v8.lq`)
 
-| **Namespace** | **Used In** | **Format** | **Purpose** |
-|---------------|-------------|------------|-------------|
-| **Original** | Source `cluster_debug/` | `-c1`, `-c2`, `-c3` | Preserves speconsense clustering results |
-| **Summarization** | `__Summary__/`, `FASTQ Files/`, `variants/` | `-1.v1`, `-1.v2`, `-2.v1`, `.raw1` | Post-processing groups and variants |
+### Naming Convention
+
+The same `-{gid}.v{vid}` schema is used everywhere. There is no separate "original" namespace:
+
+| **Field** | **Meaning** | **Source** |
+|-----------|-------------|------------|
+| `gid` | Identity group rank within the specimen (1 = largest) | Core (`scipy.cluster.hierarchy.fcluster` complete linkage at `--group-identity`) |
+| `vid` | Variant rank within the identity group (1 = anchor / largest) | Core (size-ordered) |
+| `.raw{N}` | Pre-merge component of a merged variant | Summarize |
+| `.ns` | Variant routed off the primary track by `--min-cer-factor` | Summarize |
+| `.lq` | Variant routed off the primary track by `--max-err-factor` | Summarize |
 
 ### Example Directory Structure
 ```
+clusters/
+├── sample-all.fasta                         # All consensus sequences
+├── cluster_debug/
+│   ├── sample-1.v1-RiC120-reads.fastq
+│   ├── sample-1.v1-RiC120-sampled.fastq
+│   └── sample-1.v1-RiC120-untrimmed.fasta
+└── metadata/
+    └── sample_metadata.json                  # Pipeline diagnostics + cer_details
+
 __Summary__/
-├── sample-1.v1-RiC45.fasta                  # Primary variant (group 1, merged)
-├── sample-1.v2-RiC23.fasta                  # Additional variant (not merged)
-├── sample-2.v1-RiC30.fasta                  # Second organism group, primary variant
-├── summary.fasta                            # All final consensus sequences (excludes .raw)
+├── sample-1.v1-RiC120.fasta                 # Anchor of group 1 (passing)
+├── sample-1.v2-RiC45.fasta                  # Second variant in group 1
+├── sample-2.v1-RiC30.fasta                  # Anchor of group 2
+├── summary.fasta                            # All passing consensus sequences
 ├── summary.txt                              # Statistics
 ├── quality_report.txt                       # Quality assessment report
 ├── summarize_log.txt                        # Processing log
-├── FASTQ Files/                             # Reads for final consensus
-│   ├── sample-1.v1-RiC45.fastq              # All reads for merged consensus
-│   ├── sample-1.v2-RiC23.fastq              # Reads for additional variant
-│   └── sample-2.v1-RiC30.fastq              # All reads for second group
-└── variants/                                # Pre-merge variant files (for traceability)
-    ├── sample-1.v1.raw1-RiC30.fasta         # Pre-merge variant 1 FASTA
-    ├── sample-1.v1.raw2-RiC15.fasta         # Pre-merge variant 2 FASTA
-    └── FASTQ Files/                         # Pre-merge variant FASTQ files
-        ├── sample-1.v1.raw1-RiC30.fastq     # Reads for pre-merge variant 1
-        └── sample-1.v1.raw2-RiC15.fastq     # Reads for pre-merge variant 2
+├── FASTQ Files/
+│   ├── sample-1.v1-RiC120.fastq
+│   ├── sample-1.v2-RiC45.fastq
+│   └── sample-2.v1-RiC30.fastq
+├── trees/
+│   └── sample.txt                           # Per-specimen variant hierarchy
+└── variants/
+    ├── sample-1.v1.raw1-RiC75.fasta         # Pre-merge component of merged variant
+    ├── sample-1.v1.raw2-RiC45.fasta
+    ├── sample-1.v3.ns-RiC18.fasta           # Failed --min-cer-factor
+    ├── sample-2.v2.lq-RiC22.fasta           # Failed --max-err-factor
+    └── FASTQ Files/                         # Matching FASTQs for .raw / .ns / .lq
 ```
 
 ### FASTA Header Metadata
@@ -288,42 +317,50 @@ __Summary__/
 Consensus sequence headers contain metadata fields separated by spaces:
 
 **Core Fields (Always Present):**
-- `size=N` - Total number of raw sequence reads in the cluster
-- `ric=N` - **Reads in Consensus** - Number of reads actually used for consensus generation (may be less than size due to sampling limits)
+- `size=N` — Total number of raw sequence reads in the cluster
+- `ric=N` — **Reads in Consensus** — Number of reads actually used for consensus generation (may be less than `size` due to sampling limits)
+- `gid=N` — Identity group rank within the specimen (1 = largest)
+- `vid=N` — Variant rank within the identity group (1 = anchor / largest)
+
+**Statistical Validation Fields:**
+- `cer_factor=X.X` — Per-position multiplicative error rate inflation needed for the cluster to be plausible as basecaller-noise replicates of a larger peer. Higher = more confident the cluster is a real variant. `cer_factor=None` means anchor or no comparison peer found (always passes filtering)
+- `err_factor=X.X` — Cluster homogeneity ratio (observed disagreement / expected from q_ctx). Values near 1.0 indicate reads consistent with basecaller noise; values ≫ 1.0 indicate internal heterogeneity beyond what sequencing noise produces
 
 **Optional Fields:**
-- `rawric=N+N+...` - RiC values of .raw source variants (pre-merge, largest-first, only present in merged variants from speconsense-summarize)
-- `rawlen=N+N+...` - Original sequence lengths before overlap merging (largest-first, only present in overlap-merged variants)
-- `snp=N` - Number of SNP positions from IUPAC merging (only present in merged variants from speconsense-summarize)
-- `ambig=N` - Count of IUPAC ambiguity codes in consensus (Y, R, W, S, K, M, etc.)
-- `length=N` - Sequence length in bases (available via --fasta-fields option)
-- `primers=list` - Comma-separated list of detected primer names (e.g., `primers=ITS1F,ITS4`)
-- `rid=X.X` - Mean read identity percentage (0-100%, available via --fasta-fields qc preset)
-- `rid_min=X.X` - Minimum read identity percentage (worst-case read, available via --fasta-fields qc preset)
-- `group=N` - Variant group number (available via --fasta-fields option)
-- `variant=vN` - Variant identifier within group (available via --fasta-fields option, only for variants)
+- `rawric=N+N+...` — RiC values of `.raw` source variants (pre-merge, largest-first; only present in merged variants from `speconsense-summarize`)
+- `rawlen=N+N+...` — Original sequence lengths before overlap merging (largest-first; only present in overlap-merged variants)
+- `snp=N` — Number of SNP positions from IUPAC merging (only present in merged variants)
+- `ambig=N` — Count of IUPAC ambiguity codes in consensus (Y, R, W, S, K, M, etc.)
+- `length=N` — Sequence length in bases (via `--fasta-fields` option)
+- `primers=list` — Comma-separated list of detected primer names (e.g., `primers=ITS1F,ITS4`)
+- `rid=X.X` — Mean read identity percentage (0–100%; via `--fasta-fields qc` preset)
+- `rid_min=X.X` — Minimum read identity percentage (worst-case read; via `--fasta-fields qc` preset)
 
 **Example Headers:**
 ```
-# Simple consensus from speconsense (debug files):
->sample-c1 size=50 ric=45 rid=97.2 rid_min=94.1 primers=ITS1F,ITS4
+# Anchor of group 1, passing both CER and err_factor checks:
+>sample-1.v1 size=120 ric=100 gid=1 vid=1 cer_factor=None err_factor=1.02 primers=ITS1F,ITS4
 
-# Merged variant from speconsense-summarize (default fields):
->sample-1.v1 size=250 ric=250 rawric=100+89+61 snp=2 ambig=2 primers=ITS1F,ITS4
+# Second variant in group 1, statistically validated against the anchor:
+>sample-1.v2 size=45 ric=45 gid=1 vid=2 cer_factor=12.4 err_factor=0.97 primers=ITS1F,ITS4
+
+# Merged variant from speconsense-summarize:
+>sample-1.v1 size=250 ric=250 gid=1 vid=1 rawric=100+89+61 snp=2 ambig=2 cer_factor=None err_factor=1.05 primers=ITS1F,ITS4
 
 # Overlap-merged variant (different-length sequences merged):
->sample-1.v1 size=471 ric=471 rawric=248+223 rawlen=630+361 primers=ITS1F,ITS4
+>sample-1.v1 size=471 ric=471 gid=1 vid=1 rawric=248+223 rawlen=630+361 primers=ITS1F,ITS4
 
-# With QC preset (--fasta-fields qc):
->sample-1.v1 size=250 ric=250 length=589 rid=98.5 ambig=1
+# QC preset (--fasta-fields qc):
+>sample-1.v1 size=250 ric=250 gid=1 vid=1 length=589 rid=98.5 ambig=1
 ```
 
 **Notes:**
-- Use `--fasta-fields` option to customize which fields appear in output headers (see [Customizing FASTA Header Fields](#customizing-fasta-header-fields))
+- Use `--fasta-fields` to customize which fields appear in output headers (see [Customizing FASTA Header Fields](#customizing-fasta-header-fields))
 - Read identity metrics (`rid`, `rid_min`) reflect homopolymer-normalized sequence identity
-- Field name changes from earlier versions: `merged_ric` → `rawric`, `p50diff`/`p95diff` → `rid`/`rid_min`
-- Variant merging only occurs between sequences with identical primer sets
+- `cer_factor` is filtered by `--min-cer-factor` (default `1.0`) in summarize; `err_factor` by `--max-err-factor` (default `1.5`)
+- Variant merging only occurs between sequences with identical primer sets, within the same identity group (or via cross-primer overlap merging across groups)
 - `snp` counts positions where IUPAC codes were introduced during merging; `ambig` counts total ambiguity codes in the final sequence
+- Per-position CER reproduction data (peer id, K, p*, joint q, context tags, q_ctx values) lives in `clusters/metadata/{specimen}_metadata.json`, not in the FASTA header
 
 ## Scalability Features
 
@@ -463,28 +500,34 @@ This automatic merging step helps consolidate redundant clusters that were separ
 
 Speconsense provides two complementary filters to control which clusters are output:
 
-**Absolute size filtering (`--min-size`, default: 5):**
-- Filters clusters by absolute number of sequences
-- Applied **after merging** identical/homopolymer-equivalent clusters
+**Absolute size filtering (`--min-size`, default: 3):**
+- Filters clusters by absolute number of reads
+- Applied at the post-phasing size-filtering phase (after merging, phasing, reassignment, recovery, and CER validation)
 - Set to 0 to disable and output all clusters regardless of size
 
-**Relative size filtering (`--min-cluster-ratio`, default: 0.01):**
-- Filters clusters based on size relative to the largest cluster
-- Also applied **after merging** identical/homopolymer-equivalent clusters (post-merge sizes)
-- **Based on original cluster sizes**, not sampled sizes from `--max-sample-size`
-- Set to 0 to disable and keep all clusters that pass `--min-size`
+**Relative size filtering (`--min-cluster-ratio`, default: 0):**
+- Filters clusters based on size relative to the largest cluster in the specimen
+- Applied at the same phase as `--min-size`, against post-merge / post-reassignment cluster sizes
+- Default `0` disables this filter; the unconditional hard-floor of 3 reads (built into core) prevents trivially-small clusters from surviving
+- Set to a non-zero value to suppress weakly-supported variants relative to the dominant cluster
 
-**Processing order:**
+**Processing order (high level):**
 1. Initial clustering produces raw clusters
-2. Merge identical/homopolymer-equivalent clusters
-3. Filter by `--min-size` (absolute threshold, using post-merge sizes)
-4. Filter by `--min-cluster-ratio` (relative threshold, using post-merge sizes)
-5. Sample sequences for consensus generation if cluster > `--max-sample-size`
+2. Pre-phasing merge of identical/homopolymer-equivalent clusters
+3. Variant phasing splits clusters by haplotype
+4. Post-phasing merge collapses any newly-equivalent subclusters
+5. Noise filter drops clusters with no-majority MSA columns
+6. Read reassignment moves reads between clusters within identity groups
+7. Discard recovery re-admits previously-dropped reads to surviving clusters
+8. Second phasing pass re-phases any clusters that gained reads
+9. CER validation annotates each non-anchor cluster with a `cer_factor`
+10. **Size filtering: apply `--min-size` and `--min-cluster-ratio`**
+11. Final consensus + MAD outlier removal + FASTA writing
 
-This order ensures that small clusters with identical/homopolymer-equivalent consensus sequences can merge before size filtering is applied. This allows, for example, two clusters of size 3 with identical consensus to merge into a size-6 cluster that passes the `--min-size=5` threshold, rather than being discarded prematurely.
+For per-group filtering (e.g., suppressing weak minor variants without affecting secondary primer-pool groups), prefer summarize's `--select-min-size-ratio`, which applies within each identity group rather than against the global largest cluster.
 
 **Deferred filtering strategy:**
-For maximum flexibility in detecting rare variants and contaminants, disable filtering in speconsense (`--min-size 0 --min-cluster-ratio 0`) and apply final quality thresholds using `--min-ric` in speconsense-summarize. This allows you to run expensive clustering once and experiment with different quality thresholds during post-processing. However, be aware that permissive filtering may allow more bioinformatic contamination through the pipeline. When using this approach, consider stricter filtering during upstream demultiplexing or perform careful manual review of low-abundance clusters.
+For maximum flexibility in detecting rare variants and contaminants, set `--min-size 0 --min-cluster-ratio 0` in `speconsense` and apply final quality thresholds in summarize via `--min-ric`, `--min-cer-factor`, and `--max-err-factor`. This lets you run expensive clustering once and experiment with thresholds during post-processing. The CER and err_factor filters route low-confidence clusters to the `.ns`/`.lq` track rather than dropping them entirely, so you can revisit decisions without re-running core.
 
 ### Consensus Generation
 
@@ -517,29 +560,25 @@ By default, Speconsense automatically detects and separates biological variants 
 
 **How variant phasing works:**
 
-1. **Variant detection**: After initial clustering, Speconsense analyzes positional variation using multiple sequence alignment. Positions where the minor allele frequency exceeds the threshold (default 10%) and meets minimum read count requirements are identified as variant positions.
+1. **Variant detection**: After initial clustering, Speconsense analyzes positional variation using multiple sequence alignment. A position qualifies as a variant either across the full cluster or within a quality-biased sample of top-quality reads (whichever fires) when the minor allele frequency exceeds the threshold (default 10%) and meets minimum read count requirements.
 
 2. **Position selection**: When multiple variant positions are detected, Speconsense selects the single best position for splitting (minimizing within-cluster error), then recursively regenerates MSA for each subcluster to discover additional variant positions. This hierarchical approach prevents over-fragmentation while allowing deep phasing when supported by the data.
 
-3. **Haplotype separation**: Reads are grouped by their allele combinations at selected variant positions. Each unique combination becomes a separate sub-cluster (haplotype).
+3. **Haplotype separation**: Reads are grouped by their allele combinations at selected variant positions. Each unique combination becomes a separate sub-cluster (haplotype). Reads that don't qualify for any haplotype are discarded rather than force-reassigned, and may be recovered later by phase 7.
 
-4. **Haplotype filtering**: Small haplotypes that don't meet minimum thresholds are reassigned to the nearest qualifying haplotype, preventing read loss.
-
-5. **IUPAC ambiguity calling**: When only one haplotype qualifies (insufficient support for phasing), variant positions are encoded using IUPAC ambiguity codes (e.g., `Y` for C/T, `R` for A/G) rather than forcing a potentially incorrect consensus call. Ambiguity calling uses a lower count threshold (3 reads vs 5 for splitting), capturing variation that doesn't have enough support to form a viable separate cluster.
+4. **IUPAC ambiguity calling**: When only one haplotype qualifies (insufficient support for phasing), variant positions are encoded using IUPAC ambiguity codes (e.g., `Y` for C/T, `R` for A/G). The same machinery handles "no-majority" columns where phasing produced a single haplotype but multiple alleles still exceed thresholds. Ambiguity calling uses a lower count threshold (3 reads vs 5 for splitting), capturing variation that doesn't have enough support to form a viable separate cluster.
 
 **Key parameters for variant phasing:**
-- `--min-variant-frequency` - Minimum minor allele frequency to trigger cluster splitting (default: 0.10 = 10%)
-- `--min-variant-count` - Minimum read count for minor allele to trigger splitting (default: 5)
-- `--disable-position-phasing` - Disable variant phasing entirely (also skips the second phasing pass)
-- `--disable-read-reassignment` - Disable concordance-based reassignment of reads between clusters within an identity group
-- `--disable-discard-recovery` - Disable re-admission of previously discarded reads to surviving clusters (requires `--enable-read-reassignment`)
+- `--min-variant-frequency` — Minimum minor allele frequency to trigger cluster splitting (default: 0.10 = 10%)
+- `--min-variant-count` — Minimum read count for minor allele to trigger splitting (default: 3)
+- `--disable-position-phasing` — Disable variant phasing entirely (also skips the second phasing pass)
+- `--disable-read-reassignment` — Disable cross-cluster reassignment within identity groups (phase 6)
+- `--disable-discard-recovery` — Disable re-admission of previously discarded reads to surviving clusters (phase 7; requires `--enable-read-reassignment`)
 
 **Key parameters for IUPAC ambiguity calling:**
-- `--min-ambiguity-frequency` - Minimum minor allele frequency for IUPAC codes (default: 0.10 = 10%)
-- `--min-ambiguity-count` - Minimum read count for minor allele for IUPAC codes (default: 3)
-- `--disable-ambiguity-calling` - Disable IUPAC codes for unphased variants
-
-The frequency thresholds are unified at 10%, but the count thresholds differ: splitting requires 5 reads (matching `--min-size`) to ensure viable clusters, while ambiguity calling uses 3 reads since it doesn't create new clusters.
+- `--min-ambiguity-frequency` — Minimum minor allele frequency for IUPAC codes (default: 0.10 = 10%)
+- `--min-ambiguity-count` — Minimum read count for minor allele for IUPAC codes (default: 3)
+- `--disable-ambiguity-calling` — Disable IUPAC codes for unphased variants
 
 **Example:**
 ```bash
@@ -559,6 +598,84 @@ speconsense input.fastq --disable-position-phasing
 speconsense input.fastq --disable-position-phasing --disable-ambiguity-calling
 ```
 
+### Pipeline Phases (Core)
+
+After initial clustering, speconsense runs a 12-phase pipeline. Phases 5–9 are the post-phasing refinement work that distinguishes 0.8.x from earlier versions:
+
+| Phase | Name | Purpose |
+|------:|------|---------|
+| 1 | Initial clustering | MCL graph-based or greedy |
+| 2 | Pre-phasing merge | Combine HP-equivalent initial clusters |
+| 3 | Variant phasing | Split clusters by haplotype via MSA position analysis |
+| 4 | Post-phasing merge | Combine HP-equivalent subclusters |
+| 5 | Noise filter | Drop small clusters with no-majority MSA columns |
+| 6 | Read reassignment | Move reads between clusters within an identity group when consensus concordance supports it |
+| 7 | Discard recovery | Re-admit previously-dropped reads to surviving clusters |
+| 8 | Second phasing pass | Re-phase clusters whose membership changed via reassignment/recovery |
+| 9 | CER validation | Annotate each non-anchor cluster with a `cer_factor` |
+| 10 | Size filtering | Apply `--min-size` / `--min-cluster-ratio` |
+| 11 | Output generation | Final consensus, MAD outlier removal, FASTA writing |
+| 12 | Discard writeout | Optional, with `--collect-discards` |
+
+**Identity groups**: phases 6, 7, and 9 operate within identity groups computed via complete linkage at `--group-identity` (default 0.85). Every pair within a group must meet the threshold, preventing transitive collapse of close-but-distinct variants. Group ranks (`gid`) and within-group variant ranks (`vid`) are emitted into the FASTA header and travel through to summarize.
+
+### Statistical Variant Validation (CER)
+
+Each non-anchor cluster is annotated with a **CER factor** (`cer_factor=`) measuring how implausible it is as basecaller-noise replicates of a larger peer in its identity group. This is a per-position multiplicative inflation of the assumed error rate that would be required for the peer's read counts to plausibly produce the candidate's read counts at the observed disagreement positions, under a binomial test with combinatorial Bonferroni correction over `C(L, K)` site combinations (where `L` is the HP-compressed length and `K` is the number of disagreement sites).
+
+A higher `cer_factor` means more confidence the candidate is a real variant. Anchors and clusters that fail to find a valid pairwise comparison carry `cer_factor=None` and always pass filtering.
+
+**Context-aware error model**: Per-position error rates come from a shipped `dorado-v5.0` model (other models can be selected with `--error-model NAME`, listed via `--list-error-models`). Each variant event is classified as `non-hp-sub`, `non-hp-indel`, or `hp-l{N}` (HP run of length N) using the **reference** consensus's HP context (the artifact hypothesis under test is that the candidate's reads are miscalled copies of the reference). HP runs longer than the table's max length route to blanket HP normalization rather than CER evaluation; `--hp-normalization-length` (default 6) sets the cutoff.
+
+CER is only reported when `p* < 0.75` (the signal-destruction threshold; at 0.75 the implied reference population equals the variant count under the uniform model). Below that threshold the test is uninformative.
+
+**No filtering happens in core** — the CER decision is a summarize concern, applied via `--min-cer-factor` (default `1.0`, set to `0` to disable). Records below threshold route to `__Summary__/variants/{name}.ns-RiC{ric}.fasta`.
+
+### Cluster Homogeneity (err_factor)
+
+Complementary to CER, **`err_factor`** is a peer-independent metric: for each non-gap consensus column, the fraction of reads disagreeing with the consensus divided by the q_ctx rate predicted for that column's context (HP run length or non-HP). Values near 1.0 mean reads consistent with basecaller noise; values ≫ 1.0 indicate internal heterogeneity beyond what sequencing noise produces.
+
+Unlike `cer_factor`, `err_factor` distinguishes novel-but-real sequences (low `err_factor`, possibly high `cer_factor`) from noise combinations (high `err_factor` regardless of CER).
+
+Filtering happens in summarize via `--max-err-factor` (default `1.5`, set to `0` to disable). Records above threshold route to `__Summary__/variants/{name}.lq-RiC{ric}.fasta`. The `1.5` default is safe because MAD outlier removal at final consensus removes single-read outliers that would otherwise inflate `err_factor` on real clusters.
+
+### Error Models (q_ctx tables)
+
+Both `cer_factor` and `err_factor` rely on a per-context error model that says "what's the basecaller's error rate at a position with this HP context?" These models live as YAML files keyed by event type:
+
+```yaml
+name: dorado-v5.0
+chemistry: R10.4.1
+basecaller: Dorado v5.0
+source: Re-estimated on ont98 dataset under speconsense 0.8.0
+rates:
+  non-hp-sub:  0.005    # Substitution at a non-HP position
+  non-hp-indel: 0.010   # Insertion + deletion at a non-HP position
+  hp-l1: 0.006          # Length change in an HP run of length 1
+  hp-l2: 0.008
+  hp-l3: 0.010
+  hp-l4: 0.011
+  hp-l5: 0.012
+```
+
+**Selecting a model:**
+```bash
+speconsense input.fastq --error-model dorado-v5.0    # Default
+speconsense input.fastq --list-error-models          # Show installed models
+speconsense input.fastq --error-model /path/to/custom.yaml   # Filesystem path
+```
+
+Resolution order: filesystem path → `~/.config/speconsense/error_models/` → bundled. Bundled models include `dorado-v5.0` (default) and `dorado-v3.5`.
+
+**Creating a custom model:**
+
+Drop a YAML file into `~/.config/speconsense/error_models/my-basecaller.yaml` with the format above, then select it via `--error-model my-basecaller`. HP run lengths absent from the model route to blanket HP normalization rather than context-aware CER evaluation, so models can be sparse.
+
+**HP normalization length** (`--hp-normalization-length`, default 6):
+- HP runs of length ≥ this value are blanket-normalized in distance/MSA comparisons (treated as noise)
+- HP runs shorter than this are surfaced as candidates and evaluated by context-aware CER (using `hp-l1` ... `hp-l5` from the model)
+- Set to 1 for legacy blanket-normalize-all behavior; matches the HP error rate paper's recommendation of CER-evaluating L≤5 HP variants
+
 **When to use variant phasing (default):**
 - Heterozygous specimens where you want to separate alleles
 - Samples with potential mixed-species amplification
@@ -575,21 +692,19 @@ The `speconsense-summarize` tool provides sophisticated options for managing mul
 
 ### Variant Grouping and Selection
 
-When multiple variants exist per specimen, `speconsense-summarize` first groups similar variants together, then applies selection strategies within each group:
+Identity groups are computed once, in core, via complete linkage at `--group-identity` (default `0.85`). `speconsense-summarize` honors those groups via the `gid=`/`vid=` headers and does not re-cluster. Within each group, summarize applies MSA-based variant merging and selection.
 
-**Variant Grouping:**
+**Group identity (cross-primer overlap merging only):**
 ```bash
-speconsense-summarize --group-identity 0.9
+speconsense-summarize --group-identity 0.85
 ```
-- Uses **Hierarchical Agglomerative Clustering (HAC)** to group variants with sequence identity ≥ threshold
-- Default threshold is 0.9 (90% identity)
-- Variants within each group are considered similar enough to represent the same biological entity
-- **Occurs before merging** to separate dissimilar sequences (e.g., contaminants from primary targets)
-- Each group will contribute one primary variant plus additional variants based on selection strategy
+- Used by summarize **only** for cross-primer overlap merging — bridging two core groups whose anchors overlap above the identity threshold (e.g., ITS and ITS2 amplicons of the same biological entity)
+- Default `0.85` matches core's `--group-identity` so cross-primer pairs use the same anchor distance as core's complete-linkage groups
+- For raising/lowering core's grouping aggressiveness, set `--group-identity` on `speconsense` itself, then re-run summarize
 
 **Variant Selection (within each group):**
 
-When multiple variants exist per specimen, `speconsense-summarize` offers two strategies for selecting which variants to output from each group:
+When multiple variants exist per identity group, `speconsense-summarize` offers two strategies for selecting which variants to output:
 
 **Size-based selection (default):**
 ```bash
@@ -621,12 +736,16 @@ speconsense-summarize --select-strategy diversity --select-max-variants 2
    - Repeat until select_max_variants reached for this group
 
 **Overall Process:**
-1. Group variants by sequence identity using HAC clustering
-2. For each group independently:
+1. Read FASTA outputs from `speconsense`, parsing `gid=`/`vid=` to recover core's identity groups
+2. Cross-primer overlap merger across groups (matches different-primer anchors that overlap above `--group-identity`)
+3. For each (possibly conflated) group independently:
    - Apply MSA-based merging to find largest compatible subsets
+   - Apply selection size ratio filtering (`--select-min-size-ratio`)
    - Apply variant selection strategy (size or diversity)
-   - Output up to select_max_variants per group
-3. Final output contains representatives from all groups, ensuring both biological diversity (between groups) and appropriate sampling within each biological entity (within groups)
+   - Output up to `select_max_variants` per group
+4. Apply CER filter (`--min-cer-factor`) — route failing records to `.ns`
+5. Apply err_factor filter (`--max-err-factor`) — route failing records to `.lq` (`.lq` takes precedence over `.ns` if both fire)
+6. Final output contains representatives from all groups; filtered records remain accessible under `__Summary__/variants/`
 
 **Selection Size Ratio Filtering:**
 ```bash
@@ -682,18 +801,29 @@ speconsense-summarize --fasta-fields minimal,qc
 ```
 
 **Available fields:**
-- `size` - Total reads across merged variants
-- `ric` - Reads in consensus
-- `length` - Sequence length in bases
-- `rawric` - RiC values of .raw source variants (only when merged)
-- `rawlen` - Original sequence lengths before overlap merging (only when overlap-merged)
-- `snp` - Number of IUPAC positions from merging (only when >0)
-- `ambig` - Count of IUPAC ambiguity codes in consensus
-- `rid` - Mean read identity percentage (when available)
-- `rid_min` - Minimum read identity percentage (when available)
-- `primers` - Detected primer names (when detected)
-- `group` - Variant group number
-- `variant` - Variant identifier within group (only for variants)
+- `size` — Total reads across merged variants
+- `ric` — Reads in consensus
+- `length` — Sequence length in bases
+- `rawric` — RiC values of `.raw` source variants (only when merged)
+- `rawlen` — Original sequence lengths before overlap merging (only when overlap-merged)
+- `snp` — Number of IUPAC positions from merging (only when >0)
+- `ambig` — Count of IUPAC ambiguity codes in consensus
+- `rid` — Mean read identity percentage (when available)
+- `rid_min` — Minimum read identity percentage (when available)
+- `cer_factor` — Statistical variant validation factor (None for anchors)
+- `err_factor` — Cluster homogeneity ratio (observed/expected disagreement)
+- `primers` — Detected primer names (when detected)
+- `group` — Identity group number (extracted from `-{gid}.v{vid}` filename; superseded by `gid=` from core)
+- `variant` — Variant identifier within group (extracted from filename; superseded by `vid=` from core)
+
+**Preset definitions:**
+- `default`: `size, ric, rawric, rawlen, snp, ambig, primers`
+- `minimal`: `size, ric`
+- `qc`: `size, ric, length, rid, ambig, cer_factor, err_factor`
+- `full`: `size, ric, length, rawric, rawlen, snp, ambig, rid, cer_factor, err_factor, primers`
+- `id-only`: (no fields)
+
+The `default` preset does not include `cer_factor` / `err_factor` / `gid` / `vid`. If you want CER and homogeneity metrics in summarize-emitted FASTAs, use `--fasta-fields qc` or `--fasta-fields full`. Core's own FASTA always includes `gid`, `vid`, `cer_factor`, and `err_factor` regardless of the summarize preset.
 
 **Use cases:**
 - **Downstream tool compatibility**: Use `minimal` or `id-only` for tools expecting simple headers
@@ -703,75 +833,59 @@ speconsense-summarize --fasta-fields minimal,qc
 
 ### Quality Assessment and Reporting
 
-Speconsense-summarize automatically generates a `quality_report.txt` file to help prioritize manual review of sequences with potential quality concerns. This is particularly valuable for high-throughput workflows where human time for manual inspection is limited.
+Speconsense-summarize automatically generates a `quality_report.txt` to help prioritize manual review of sequences with potential quality concerns. The report is inspection-oriented — it highlights specimens and variants that warrant a closer look, rather than dumping descriptive statistics.
 
 **Report Generation:**
 - Created automatically in the summary output directory
-- No configuration required - generated regardless of `--fasta-fields` settings
-- Focuses exclusively on sequences that may need review (no "excellent" sequences listed)
+- No configuration required — generated regardless of `--fasta-fields` settings
+- Focuses on actionable issues, not exhaustive enumeration
 
-**What the Report Includes:**
+**Report Sections:**
 
-**1. Statistical Outliers (Low Read Identity):**
-- Sequences with mean read identity (`rid`) below the statistical threshold
-- Threshold is calculated as: mean - 2×standard deviation across all sequences
-- These represent the ~2.5% of sequences with lowest internal consistency
-- May indicate mixed clusters, contamination, or problematic consensus
+**1. Executive Summary:**
+- Pass/`.ns`/`.lq` counts across the run
+- Specimens that had input reads but produced no clusters (often a demultiplexing or input-quality signal)
+- Filter decisions from `--min-cer-factor` and `--max-err-factor`
 
-**2. Sequences with IUPAC Ambiguity Codes:**
-- Sequences containing IUPAC ambiguity codes (Y, R, W, S, K, M, etc.)
-- May result from merging or from unphased heterozygous positions
-- Count shown in `ambig` field
+**2. Passed Variants Worth Inspecting:**
+- Run-relative outliers on `err_factor` and ambiguity count (mean ± 2σ)
+- Variants that passed filters but stand out from the rest of the run
 
-**3. Overlap Merge Analysis:**
-- Lists specimens where partial overlap merging occurred (different-length sequences with shared overlap region)
-- Shows merge iterations, overlap percentages, and prefix/suffix extensions
-- Flags edge cases (overlap near threshold, large length ratios >3:1)
-- Only includes partial overlaps (prefix or suffix extension >0); excludes full containment merges
+**3. Possible Rescues:**
+- Low-yield specimens whose filtered (`.ns`/`.lq`) variants are close to the threshold
+- Suggests manual review of variants that might warrant a relaxed threshold for that specimen
 
-**Understanding Read Identity Metrics:**
+**4. Overlap Merge Details** (when present):
+- Lists cross-primer overlap merges, with overlap bp and prefix/suffix extensions
+- Flags edge cases (overlap near threshold, large length ratios)
 
-Read identity assessment works by:
-1. Aligning all reads in a cluster to the consensus using SPOA multiple sequence alignment
-2. Computing per-read identity with homopolymer normalization
-3. Reporting mean identity (`rid`) and minimum identity (`rid_min`)
+**5. Run-Wide Parameter Signals:**
+- Suggests parameter tuning when a metric is systematically high or low across the run
 
-**Key points about identity calculation:**
-- Uses homopolymer normalization - differences like AAA vs AAAAA don't reduce identity
-- Therefore, low identity indicates **true substitutions or structural indels**
-- `rid` typically ranges from 95-99% for good quality clusters
-- `rid_min` shows the worst-case read - very low values may indicate outlier reads
-
-**Example Report Entry:**
-```
-Type    Sequence                                              RiC    rid      Notes
-------------------------------------------------------------------------------------------------
-STAT    specimen-1                                            450    93.2     Statistical outlier (rid below threshold)
-        specimen-2                                            320    97.8     Contains 2 ambiguity codes
-```
+**6. Pipeline Activity:**
+- Phase-by-phase activity counts (clusters disbanded, reads reassigned, reads recovered, second-pass splits, CER-filtered, err_factor-filtered) aggregated across specimens
+- Helps surface unexpected pipeline behavior on a new dataset
 
 **Recommended Actions:**
 
-**For Statistical Outliers (low rid):**
-- Review cluster using `cluster_debug/` FASTQ files in source directory
-- Check for biological variation (multiple true variants) vs bioinformatic contamination
-- Variant phasing is enabled by default; consider adjusting `--min-variant-frequency` if variants weren't separated
-- May require manual curation or re-demultiplexing
+**For high `err_factor` outliers:**
+- The cluster's reads disagree with the consensus more than the basecaller's noise model predicts
+- Review `cluster_debug/` FASTQ files in source directory
+- Check for biological heterogeneity (multiple true variants in one cluster) — if so, consider lowering `--min-variant-frequency` or `--min-variant-count` and re-running core
+- May indicate cross-specimen contamination if the disagreement pattern aligns with another specimen
 
-**For Sequences with Ambiguity Codes:**
-- Review whether ambiguity represents true heterozygosity or merging artifact
-- Consider adjusting merge parameters if too many variants are being merged
-- Check if variant phasing would produce cleaner separate haplotypes
+**For high ambiguity count outliers:**
+- Review whether ambiguity represents true heterozygosity, merging artifact, or unphased variation
+- Check if variant phasing would produce cleaner separate haplotypes (lower `--min-variant-frequency`)
+- Cross-reference with `__Summary__/trees/{specimen}.txt` to see the variant hierarchy
 
-**Workflow Integration:**
+**For `.ns` records (failed CER):**
+- The cluster is statistically explained as basecaller noise replicated from a larger peer
+- Most are correctly filtered. To rescue: lower `--min-cer-factor` (default `1.0`; `0.5` is a common relaxation) and re-run summarize
 
-The quality report is designed for efficient triage:
-1. Statistical outliers are flagged automatically based on global thresholds
-2. Review flagged sequences starting with lowest `rid` values
-3. Use `rid_min` to identify sequences with problematic individual reads
-4. Consider re-processing with variant phasing for mixed clusters
-
-For high-throughput workflows (e.g., 100K sequences/year), this prioritization ensures human review time focuses on the most actionable quality issues.
+**For `.lq` records (failed err_factor):**
+- The cluster's internal heterogeneity exceeds the basecaller noise model
+- Consider whether the cluster is real but degraded (herbarium samples often inflate `err_factor`) — the `herbarium` profile disables this filter
 
 ### Additional Summarize Options
 
@@ -780,8 +894,30 @@ For high-throughput workflows (e.g., 100K sequences/year), this prioritization e
 speconsense-summarize --min-ric 5
 ```
 - Filters out consensus sequences with fewer than the specified number of Reads in Consensus (RiC)
-- Default is 3 - only sequences supported by at least 3 reads are processed
+- Default is 3 — only sequences supported by at least 3 reads are processed
 - Higher values provide more stringent quality control but may exclude valid low-abundance variants
+
+**CER Filtering (statistical variant validation):**
+```bash
+speconsense-summarize --min-cer-factor 1.0      # Default
+speconsense-summarize --min-cer-factor 0.5      # More permissive
+speconsense-summarize --min-cer-factor 0        # Disable
+```
+- `--min-cer-factor`: Minimum per-position CER factor for a variant to be kept on the primary track (default: `1.0`)
+- Variants with `cer_factor` below threshold route to `__Summary__/variants/{name}.ns-RiC{ric}.fasta` (and matching FASTQ) — they are not deleted, just sidelined
+- `cer_factor=None` (anchors and clusters without a valid pairwise comparison) always passes
+- See [Statistical Variant Validation (CER)](#statistical-variant-validation-cer) for the underlying model
+
+**Cluster Homogeneity Filtering (err_factor):**
+```bash
+speconsense-summarize --max-err-factor 1.5      # Default
+speconsense-summarize --max-err-factor 2.0      # More permissive (e.g., for herbarium specimens)
+speconsense-summarize --max-err-factor 0        # Disable
+```
+- `--max-err-factor`: Maximum cluster `err_factor` (observed/q_ctx-expected disagreement) for primary-track inclusion (default: `1.5`)
+- Variants above threshold route to `__Summary__/variants/{name}.lq-RiC{ric}.fasta`
+- `.lq` takes precedence over `.ns` when both fire — a cluster filtered by both labels appears only as `.lq`
+- See [Cluster Homogeneity (err_factor)](#cluster-homogeneity-err_factor) for the underlying metric
 
 **Length Filtering:**
 ```bash
@@ -789,7 +925,7 @@ speconsense-summarize --min-len 400 --max-len 800
 ```
 - `--min-len`: Minimum sequence length in bp (default: 0 = disabled)
 - `--max-len`: Maximum sequence length in bp (default: 0 = disabled)
-- Applied during initial sequence loading, before HAC grouping
+- Applied during initial sequence loading
 - Useful for filtering incomplete amplicons or chimeric sequences
 
 **Variant Merging:**
@@ -1005,19 +1141,21 @@ When a shorter sequence is fully contained within a longer one (e.g., ITS2 withi
 
 The complete speconsense-summarize workflow operates in this order:
 
-1. **Load sequences** with RiC filtering (`--min-ric`) and length filtering (`--min-len`, `--max-len`)
-2. **HAC variant grouping** by sequence identity to separate dissimilar sequences (`--group-identity`); uses single-linkage when overlap merging is enabled
-3. **Group filtering** to limit output groups (`--select-max-groups`)
-4. **Homopolymer-aware MSA-based variant merging** within each group, including **overlap merging** for different-length sequences (`--disable-merging`, `--merge-effort`, `--merge-position-count`, `--merge-indel-length`, `--min-merge-overlap`, `--merge-snp`, `--merge-min-size-ratio`, `--disable-homopolymer-equivalence`)
+1. **Load sequences** with RiC filtering (`--min-ric`) and length filtering (`--min-len`, `--max-len`); parse `gid=`/`vid=` from FASTA headers (hard-fails if missing)
+2. **Bucket by core-assigned identity group** — no re-grouping
+3. **Cross-primer overlap conflation** (`--min-merge-overlap`, `--group-identity`) merges different-primer core groups whose anchors overlap above the identity threshold
+4. **Homopolymer-aware MSA-based variant merging** within each (possibly-conflated) group (`--disable-merging`, `--merge-effort`, `--merge-position-count`, `--merge-indel-length`, `--min-merge-overlap`, `--merge-snp`, `--merge-min-size-ratio`, `--disable-homopolymer-equivalence`, `--hp-normalization-length`)
 5. **Selection size ratio filtering** to remove tiny post-merge variants (`--select-min-size-ratio`)
-6. **Variant selection** within each group (`--select-max-variants`, `--select-strategy`)
-7. **Output generation** with customizable header fields (`--fasta-fields`) and full traceability
+6. **Variant selection** within each group (`--select-max-variants`, `--select-strategy`, `--select-max-groups`)
+7. **CER and err_factor filtering** — route failing records to `.ns` / `.lq` (`--min-cer-factor`, `--max-err-factor`)
+8. **Output generation** — passing FASTA + FASTQ, filtered records under `variants/`, per-specimen tree under `trees/`, customizable header fields (`--fasta-fields`) and full traceability
 
 **Key architectural features**:
-- HAC grouping occurs BEFORE merging to prevent inappropriate merging of dissimilar sequences (e.g., contaminants with primary targets)
-- Merging is applied independently within each group using MSA-based consensus generation
-- Homopolymer-aware merging by default (AAA ≈ AAAA) to match pipeline-wide adjusted-identity semantics
-- Overlap merging enabled by default (`--min-merge-overlap 200`) for primer pool support
+- Identity grouping happens once, in core, via complete-linkage HAC at `--group-identity` (default 0.85). Summarize honors that grouping via `gid`/`vid` headers — no independent HAC pass
+- Cross-primer overlap conflation is the only operation that crosses core-group boundaries, gated by anchor identity AND sufficient sequence overlap
+- Merging is applied independently within each (possibly-conflated) group using MSA-based consensus generation
+- Homopolymer-aware merging by default (AAA ≈ AAAA, runs ≥ `--hp-normalization-length` blanket-normalized) to match pipeline-wide adjusted-identity semantics
+- CER and err_factor filtering routes records rather than deleting them — `.ns` / `.lq` files preserve the data for review and threshold tuning
 
 ### Enhanced Logging and Traceability
 
@@ -1475,7 +1613,7 @@ The following features are under consideration for future development:
 
 - **Background contamination detection tool**: A utility to identify contamination patterns affecting multiple specimens within the same sequencing run, helping to distinguish systematic contamination from genuine biological sequences
 
-- **Scalability improvements**: Algorithm enhancements to enable graph-based clustering to efficiently handle datasets with hundreds of thousands of sequences while maintaining accuracy
+- **Further scalability improvements**: 0.8.x added vsearch-based sparse identity grouping, sparse discard screening, and within-group top-K CER, which collectively make 100K-read inputs tractable. Continued work targets graph clustering for inputs in the hundreds of thousands of reads
 
 These features are being explored based on user feedback. Implementation timelines and feasibility are still being evaluated.
 

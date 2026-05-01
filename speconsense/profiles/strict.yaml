@@ -9,7 +9,7 @@
 # The settings prioritize quality over completeness, filtering out
 # low-support variants and limiting output to well-supported sequences.
 
-speconsense-version: "0.7.*"
+speconsense-version: "0.8.*"
 description: "High-precision settings for confident results"
 
 speconsense:

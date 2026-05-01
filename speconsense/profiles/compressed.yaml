@@ -12,7 +12,7 @@
 #   speconsense input.fastq -p compressed
 #   speconsense-summarize -p compressed
 
-speconsense-version: "0.7.*"
+speconsense-version: "0.8.*"
 description: "Compress variants into minimal IUPAC consensus sequences"
 
 speconsense:

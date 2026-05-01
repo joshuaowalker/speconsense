@@ -1,5 +1,7 @@
 # Testing with Speconsense-Synth
 
+> **Note (0.8.x):** This guide predates several pipeline-wide changes. References to `p50diff` / `p95diff` should be read as **`rid` (mean read identity, 0–100%) / `rid_min` (worst-case read identity)** — the underlying stability concept is the same, but the field names changed. References to the cluster-naming convention (`-c1`, `-c2`, `-c3`) should be read as the current `-{gid}.v{vid}` schema. For statistical variant validation see `cer_factor` and `err_factor` documented in [README.md](../README.md). The conceptual workflows below (synthetic data generation, contamination experiments, error-rate stress tests) are still applicable.
+
 This guide explains how to use `speconsense-synth` for empirical testing of consensus quality, variant detection, and understanding the behavior of the Nanopore + Specimux + Speconsense toolchain.
 
 ## Quick Reference
