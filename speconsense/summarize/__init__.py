@@ -32,18 +32,14 @@ from .fields import (
     format_fasta_header,
 )
 
-# MSA analysis and quality assessment
+# MSA analysis support
 from .analysis import (
-    ClusterQualityData,
     MAX_MSA_MERGE_VARIANTS,
     run_spoa_msa,
     identify_indel_events,
     is_homopolymer_event,
     analyze_msa_columns,
     analyze_msa_columns_overlap_aware,
-    analyze_cluster_quality,
-    identify_outliers,
-    analyze_positional_identity_outliers,
 )
 
 # MSA-based variant merging
@@ -102,16 +98,12 @@ __all__ = [
     "parse_fasta_fields",
     "format_fasta_header",
     # Analysis
-    "ClusterQualityData",
     "MAX_MSA_MERGE_VARIANTS",
     "run_spoa_msa",
     "identify_indel_events",
     "is_homopolymer_event",
     "analyze_msa_columns",
     "analyze_msa_columns_overlap_aware",
-    "analyze_cluster_quality",
-    "identify_outliers",
-    "analyze_positional_identity_outliers",
     # Merging
     "generate_all_subsets_by_size",
     "is_compatible_subset",
