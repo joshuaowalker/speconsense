@@ -10,15 +10,10 @@ from .cli import main
 # Main class
 from .clusterer import SpecimenClusterer
 
-# Worker functions and config classes (for advanced usage)
+# Config classes (for advanced usage)
 from .workers import (
     ClusterProcessingConfig,
     ConsensusGenerationConfig,
-    _run_spoa_worker,
-    _process_cluster_worker,
-    _generate_cluster_consensus_worker,
-    _trim_primers_standalone,
-    _phase_reads_by_variants_standalone,
 )
 
 __all__ = [

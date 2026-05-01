@@ -67,7 +67,7 @@ from .clustering import (
     select_variants,
 )
 from .merging import merge_group_with_msa
-from .analysis import MAX_MSA_MERGE_VARIANTS, MIN_MERGE_BATCH, MAX_MERGE_BATCH
+from .analysis import MAX_MSA_MERGE_VARIANTS
 from .tree import write_specimen_variant_tree
 
 
