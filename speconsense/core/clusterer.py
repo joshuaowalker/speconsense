@@ -2149,6 +2149,16 @@ class SpecimenClusterer:
         plausible artifact). The candidate's reported factor is the *minimum*
         across all pairwise comparisons (the nearest plausible artifact source).
 
+        For large identity groups (size > 50, scalability enabled), each
+        candidate is compared against the top-K most similar larger peers
+        rather than all larger peers. The minimum factor is dominated by the
+        most-similar peer (smaller pairwise distance → smaller K positions →
+        tighter Bonferroni → smaller factor), so top-K preserves the reported
+        minimum with very high probability. min over a subset is always ≥ min
+        over the full set, so the approximation only over-reports factors,
+        never under-reports — i.e., approximation errors result in slightly
+        less filtering, never over-filtering.
+
         Every candidate flows through to downstream phases. Summarize applies
         the user-visible pass/ns decision via --min-cer-factor.
 
@@ -2170,6 +2180,65 @@ class SpecimenClusterer:
         if len(sorted_indices) == 1:
             return 0
 
+        # Decide whether to use within-group top-K. Threshold matches the
+        # other vsearch-activation sites in the codebase (>50, e.g.
+        # _form_identity_groups, merge_similar_clusters HP-equivalence).
+        use_topk = (
+            self.scalability_config.enabled
+            and self._candidate_finder is not None
+            and self._candidate_finder.is_available
+            and len(sorted_indices) > 50
+        )
+
+        # In top-K mode, pre-compute each cluster's most-similar peers via a
+        # single batched vsearch query over the group's consensuses. The
+        # reference-pool filter inside the loop intersects this ranking with
+        # the strict-larger-peer subset.
+        #
+        # K_query = 30 is 3× the K_use = 10 we actually consume, providing
+        # headroom for the case where many of a candidate's most-similar
+        # peers turn out to be smaller-than-self and therefore not in the
+        # reference pool.
+        K_use = 10
+        K_query = 30
+        topk_neighbors: Dict[int, List[int]] = {}
+        if use_topk:
+            group_seqs: Dict[str, str] = {}
+            spoa_to_idx: Dict[str, int] = {}
+            for idx in sorted_indices:
+                cons = consensuses.get(idx)
+                if cons:
+                    spoa_id = f"__g_{idx}__"
+                    group_seqs[spoa_id] = cons
+                    spoa_to_idx[spoa_id] = idx
+
+            finder = self._candidate_finder
+            finder.build_index(group_seqs, self.output_dir)
+            try:
+                relaxed_threshold = self.group_identity * self.scalability_config.relaxed_identity_factor
+                vsearch_candidates = finder.find_candidates(
+                    query_ids=list(group_seqs.keys()),
+                    sequences=group_seqs,
+                    min_identity=relaxed_threshold,
+                    max_candidates=K_query,
+                )
+
+                for spoa_id, idx in spoa_to_idx.items():
+                    ranked: List[int] = []
+                    for cand_str in vsearch_candidates.get(spoa_id, []):
+                        cand_idx = spoa_to_idx.get(cand_str)
+                        if cand_idx is not None and cand_idx != idx:
+                            ranked.append(cand_idx)
+                    topk_neighbors[idx] = ranked
+
+                logging.debug(
+                    f"CER within-group top-K: group_size={len(sorted_indices)}, "
+                    f"K_query={K_query}, K_use={K_use}, "
+                    f"dense pairs avoided≈{len(sorted_indices) * (len(sorted_indices) - 1) // 2 - len(sorted_indices) * K_use}"
+                )
+            finally:
+                finder.cleanup()
+
         reference_pool = [anchor_idx]
         annotated = 0
 
@@ -2185,11 +2254,23 @@ class SpecimenClusterer:
                 annotated += 1
                 continue
 
+            if use_topk:
+                # Top-K most similar peers from the reference pool, preserving
+                # vsearch's identity-descending order. Empty intersections
+                # propagate to _compare_candidate_against_validated which
+                # returns None — same handling as the "no valid pairwise" case.
+                ref_set = set(reference_pool)
+                validated_for_compare = [
+                    i for i in topk_neighbors.get(candidate_idx, []) if i in ref_set
+                ][:K_use]
+            else:
+                validated_for_compare = reference_pool
+
             best = self._compare_candidate_against_validated(
                 candidate_consensus=candidate_consensus,
                 candidate_M=candidate_M,
                 group_N=group_N,
-                validated=reference_pool,
+                validated=validated_for_compare,
                 consensuses=consensuses,
             )
 

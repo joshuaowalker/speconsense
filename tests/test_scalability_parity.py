@@ -189,3 +189,86 @@ def test_form_identity_groups_skips_below_threshold():
     dense_groups = _run_form_identity_groups(consensuses, scale_threshold=0)
     sparse_attempt_groups = _run_form_identity_groups(consensuses, scale_threshold=10)
     assert dense_groups == sparse_attempt_groups
+
+
+# ---------- _validate_identity_group within-group top-K parity ----------
+
+def _run_validate_identity_group(consensuses: List[str], scale_threshold: int):
+    """Build a single identity group from `consensuses` and run CER validation.
+
+    Returns a dict {cluster_idx: cer_factor} after _validate_identity_group runs.
+    Uses pre-determined cluster sizes (descending by index) so the anchor is
+    deterministic.
+    """
+    clusterer = _make_clusterer(scale_threshold=scale_threshold)
+    n = len(consensuses)
+    # Synthetic subclusters with deterministic descending sizes so cluster 0
+    # is the anchor and the loop iterates in a predictable order.
+    subclusters = [{'read_ids': set(f'r{i}_{k}' for k in range(n - i + 5))}
+                   for i in range(n)]
+    consensus_dict = {i: c for i, c in enumerate(consensuses)}
+    group_indices = list(range(n))
+
+    annotated = clusterer._validate_identity_group(subclusters, consensus_dict, group_indices)
+    factors = {i: subclusters[i].get('cer_factor') for i in range(n)}
+    return factors, annotated
+
+
+def test_validate_identity_group_topk_dominates_dense_factor():
+    """Within-group top-K must produce factors >= dense factors for every
+    candidate (since min over a subset is always >= min over the full set).
+    For the most-similar-peer case, factors should exactly match in practice."""
+    # 60-cluster identity group: prototype + 59 mutated variants.
+    proto = _rng_seq(seed=42)
+    consensuses = [proto] + [_mutate(proto, seed=k + 1, n_subs=4) for k in range(59)]
+    assert len(consensuses) == 60
+
+    dense_factors, _ = _run_validate_identity_group(consensuses, scale_threshold=0)
+    topk_factors, _ = _run_validate_identity_group(consensuses, scale_threshold=10)
+
+    # Anchor (index 0) carries no factor in either path.
+    assert dense_factors[0] is None
+    assert topk_factors[0] is None
+
+    # For every other candidate: top-K factor must be >= dense factor.
+    # (None values mean "no valid comparison"; treat them separately.)
+    over_reports = 0
+    for i in range(1, len(consensuses)):
+        d = dense_factors[i]
+        t = topk_factors[i]
+        if d is None and t is None:
+            continue
+        if d is None:
+            # Dense couldn't classify any pairwise difference for this
+            # candidate (e.g., K=0). Top-K shouldn't either, but skip rather
+            # than fail.
+            continue
+        if t is None:
+            # top-K's intersection produced no validated peers AND vsearch
+            # missed all of them. Should be rare for our fixture.
+            continue
+        assert t >= d - 1e-9, (
+            f"top-K factor {t} should be >= dense factor {d} for cluster {i}"
+        )
+        if t > d + 1e-9:
+            over_reports += 1
+
+    # Most candidates should match exactly (most-similar peer is within top-30
+    # vsearch results and therefore preserved). Allow a small fraction of
+    # over-reports for the adversarial-like cases.
+    assert over_reports < len(consensuses) // 4, \
+        f"too many over-reports: {over_reports} of {len(consensuses) - 1}"
+
+
+def test_validate_identity_group_skips_below_threshold():
+    """Below the >50 threshold, dense path runs even with scalability enabled."""
+    proto = _rng_seq(seed=99)
+    consensuses = [proto] + [_mutate(proto, seed=k + 1, n_subs=4) for k in range(40)]
+    assert len(consensuses) == 41  # below the >50 threshold
+
+    dense_factors, _ = _run_validate_identity_group(consensuses, scale_threshold=0)
+    sparse_attempt, _ = _run_validate_identity_group(consensuses, scale_threshold=10)
+
+    # Identical, since scale_threshold=10 still triggers scalability_config.enabled
+    # but the per-group >50 gate inside _validate_identity_group keeps the dense path.
+    assert dense_factors == sparse_attempt
