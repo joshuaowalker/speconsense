@@ -7,13 +7,6 @@ is statistically distinguishable from sequencing error.
 
 Error model: uniform (q = p/3), where p is total per-position error rate.
 
-Interpretability constraint: Under the uniform model, the implied reference
-population (reads carrying the true sequence) at error rate p* is N(1-p*).
-At p* = 0.75 (the signal destruction threshold), the reference population
-equals the variant count — each of the 4 bases is equally likely. Above this,
-the "true sequence" has fewer supporting reads than the variant, making the
-artifact hypothesis incoherent. CER is therefore only reported when p* < 0.75.
-
 Numerical note: brentq solvers operate in log-space (parameter ``log_q`` or
 ``log_p``) so q* values below ~1e-15 — common at high K — are recoverable
 rather than silently clipped to zero. When ``scipy.stats.binom.logsf``
@@ -28,11 +21,6 @@ from typing import Optional, Sequence
 
 from scipy.stats import binom
 from scipy.optimize import brentq
-
-# Signal destruction threshold: at p* = 0.75, each of the 4 bases has equal
-# probability (25%) under the uniform error model. Above this, the implied
-# reference population is smaller than the variant count.
-SIGNAL_DESTRUCTION_THRESHOLD = 0.75
 
 # Log-space brentq bounds. exp(-700) ≈ 1e-304, just above float64 underflow;
 # the upper bound stops just below log(1) = 0.
@@ -163,11 +151,6 @@ def compute_critical_error_rate(N: int, M: int, L: int, alpha: float = 1e-5,
     Under independent errors across positions, the per-read probability of
     matching the variant at all K positions is q^K.
 
-    Returns the raw p* without capping. Values at or above
-    SIGNAL_DESTRUCTION_THRESHOLD (0.75) indicate the variant has more support
-    than the implied reference population under the error model. Callers
-    should check p* < SIGNAL_DESTRUCTION_THRESHOLD before reporting.
-
     Args:
         N: Total specimen reads (denominator)
         M: Variant read count
@@ -191,30 +174,6 @@ def compute_critical_error_rate(N: int, M: int, L: int, alpha: float = 1e-5,
     if log_pstar <= _LOG_Q_MIN + _LOG3:
         return 0.0
     return math.exp(log_pstar)
-
-
-def is_cer_reportable(p_star: float) -> bool:
-    """Check whether a computed p* value is meaningful for reporting.
-
-    Under the uniform error model, at p* = 0.75 (the signal destruction
-    threshold), each of the 4 bases is equally likely — the reference
-    population carrying the true sequence equals the variant count. Above
-    this, the artifact hypothesis is incoherent because the "true sequence"
-    has fewer supporting reads than the variant.
-
-    p* values below the threshold are physically meaningful and can be
-    reported as CER annotations. p* values at or above the threshold
-    indicate the variant is too well-supported for the error framework
-    to apply.
-
-    Args:
-        p_star: Computed critical error rate
-
-    Returns:
-        True if p* is below the signal destruction threshold (meaningful),
-        False otherwise.
-    """
-    return p_star < SIGNAL_DESTRUCTION_THRESHOLD
 
 
 # ---------------------------------------------------------------------------

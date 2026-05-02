@@ -220,7 +220,7 @@ def test_compute_critical_error_rate_high_k_returns_finite():
     # the same reason as the joint solver. We expect a small but positive p*.
     p_star = compute_critical_error_rate(N=970, M=3, L=759, alpha=1e-5, K=19)
     assert p_star > 0.0
-    assert p_star < 1.0   # well below the signal destruction threshold
+    assert p_star < 1.0   # finite and well-bounded
 
 
 def test_factor_rescaling_holds_at_high_k():

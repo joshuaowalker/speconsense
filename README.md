@@ -627,8 +627,6 @@ A higher `cer_factor` means more confidence the candidate is a real variant. Anc
 
 **Context-aware error model**: Per-position error rates come from a shipped `dorado-v5.0` model (other models can be selected with `--error-model NAME`, listed via `--list-error-models`). Each variant event is classified as `non-hp-sub`, `non-hp-indel`, or `hp-l{N}` (HP run of length N) using the **reference** consensus's HP context (the artifact hypothesis under test is that the candidate's reads are miscalled copies of the reference). HP runs longer than the table's max length route to blanket HP normalization rather than CER evaluation; `--hp-normalization-length` (default 6) sets the cutoff.
 
-CER is only reported when `p* < 0.75` (the signal-destruction threshold; at 0.75 the implied reference population equals the variant count under the uniform model). Below that threshold the test is uninformative.
-
 **No filtering happens in core** — the CER decision is a summarize concern, applied via `--min-cer-factor` (default `1.0`, set to `0` to disable). Records below threshold route to `__Summary__/variants/{name}.ns-RiC{ric}.fasta`.
 
 ### Cluster Homogeneity (err_factor)

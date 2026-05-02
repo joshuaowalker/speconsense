@@ -73,7 +73,7 @@ pytest -m "not slow"
 - `distances.py`: IUPAC-aware edlib alignment, adjusted-identity distance, variant difference counting. Defines `IUPAC_EQUIV` and `STANDARD_ADJUSTMENT_PARAMS`.
 - `context.py`: Per-position variant context classification (`ContextClass`, `ContextTag`) driving CER q_ctx lookup. HP context comes from the reference consensus.
 - `qctx.py`: Loads error models (context-specific error-rate tables) from `error_models/*.yaml`. `DEFAULT_MODEL_NAME = "dorado-v5.0"`. HP runs beyond `MAX_HP_LENGTH=5` route to blanket normalization. Resolution order: filesystem path → `~/.config/speconsense/error_models/` → bundled.
-- `significance.py`: Critical error rate (p*) via binomial survival with Bonferroni correction, uniform error model (q=p/3). CER only reported when `p* < SIGNAL_DESTRUCTION_THRESHOLD (0.75)`.
+- `significance.py`: Critical error rate (p*) via binomial survival with Bonferroni correction, uniform error model (q=p/3). The shipped pipeline reports `cer_factor` (per-position multiplicative inflation) directly from the joint q* solver; the uniform-p* form is retained for the variant-significance paper's tables.
 - `quality_report.py`: Multi-section quality report for `speconsense-summarize`.
 - `cli.py`: Top-level entry-point stub that re-exports `core.main`.
 
@@ -167,7 +167,6 @@ Phasing uses a three-stage architecture: phase indiscriminately, group by identi
 - `significance.compute_critical_error_rate(N, M, L, alpha, K)` — p* under uniform model (q=p/3), with combinatorial Bonferroni for `K>1` multi-position variants.
 - `context.classify_variant_context()` produces one `ContextTag` per variant event (substitution or contiguous indel block). HP context comes from the reference consensus — the artifact hypothesis under test is that the candidate's reads are miscalled copies of the reference.
 - `qctx.get_qctx(tag, table)` returns a per-position error rate; HP runs longer than the table's max route to blanket homopolymer normalization.
-- CER is reported only when `p* < 0.75` (signal destruction threshold: at 0.75 the implied reference population equals the variant count under the uniform model).
 
 **No gating in core.** Every non-anchor candidate is pairwise-compared against all larger peers in its identity group, annotated with a `cer_factor` (per-position multiplicative inflation; worst-case across peers), and flows through to the FASTA output. The reference pool accumulates all processed clusters regardless of factor — `min_factor` is inherently conservative for artifact-vs-artifact cases. **Summarize applies the user-visible pass/ns decision** via `--min-cer-factor` (default `1.0`; `0` disables). Records below the threshold are routed to `__Summary__/variants/{name}.ns-RiC{ric}.fasta` with matching FASTQ, mirroring the `.raw` layout. Records with `cer_factor=None` (anchors, failed pairwise comparison) always pass. The FASTA header carries only `cer_factor=`; full per-position detail (p*, K, context tags, q_ctx values, reference idx) lives in the metadata JSON via `_build_variant_record`.
 

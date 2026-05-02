@@ -28,7 +28,6 @@ from speconsense.significance import (
     compute_cer_factor,
     compute_critical_error_rate,
     compute_per_position_qstar,
-    is_cer_reportable,
 )
 from speconsense.scalability import (
     VsearchCandidateFinder,
