@@ -62,6 +62,11 @@ of basecaller and chemistry improvements. A $p^*$ of $6.8\%$ is robust against
 any reasonable nanopore configuration without committing to a specific assumed
 rate at output time.
 
+The implementation described here is deployed in speconsense~\cite{speconsense},
+the consensus generation tool used in the high-throughput fungal barcoding
+workflow of Russell~\cite{russell2023}. Empirical examples in this report draw
+on a sequencing run (ont98) produced by Mycota Lab under that workflow.
+
 \subsection{The context-dependence problem}
 
 The framework as originally formulated assumes a single per-position error rate
@@ -418,15 +423,16 @@ $L = 5$ on ont98~\cite{hp_paper}~Table~4, a $\sim\!1.7\times$ span resolved
 above cross-run noise.
 \end{itemize}
 
-The larger error-table uncertainty --- $\sim\!0.6\times$ between sequencing
-runs on the same basecaller~\cite{hp_paper}~\S 5.4 --- dominates the
-$\sim\!1.4\times$ per-base and $\sim\!3\text{--}5\times$ direction effects
-only for the insertion direction; for deletions on pooled data the dominant
-axes are length and run-to-run variation, which the current scheme captures.
-Finer segmentation by base and direction is straightforward to add (extend
-the YAML with \texttt{hp-l$\{L\}$-$\{b\}$-$\{\delta\}$} keys; the lookup
-function already accepts arbitrary string keys) if future data shows the
-finer cells stabilizing above the run-to-run noise floor. The output context
+Run-to-run uncertainty on a single basecaller is plausibly comparable in
+magnitude to the $\sim\!1.4\times$ per-base and $\sim\!3\text{--}5\times$
+direction effects, but is not characterized in the present empirical
+data~\cite{hp_paper}; for the insertion direction in particular, sparse
+per-cell counts in pooled data make finer segmentation unstable. The
+shipped scheme therefore captures length as the primary axis and pools the
+rest. Finer segmentation by base and direction is straightforward to add
+(extend the YAML with \texttt{hp-l$\{L\}$-$\{b\}$-$\{\delta\}$} keys; the
+lookup function already accepts arbitrary string keys) if future data shows
+the finer cells stabilizing above the cross-run noise floor. The output context
 tag records the base and direction regardless, so downstream re-analysis
 against a finer table requires no upstream re-run.
 
@@ -467,13 +473,15 @@ compatible.
 
 \subsection{Stability across runs}
 
-The cross-run scaling factor between ont98 and run116 (same basecaller, three
-months apart) is $\sim$0.6$\times$ at $L = 1$--5~\cite{hp_paper}~\S 5.4.
-This means a shipped Phase 1 table may differ from a specific run's actual
-rates by up to a factor of 2. The CER factor's linear sensitivity makes this
-a roughly 2$\times$ shift in factor values, which is large but interpretable;
-p-values under the same misspecification would shift by orders of magnitude.
-Phase 2 per-run estimation eliminates this source of uncertainty.
+Run-to-run variation within a single basecaller version is plausible
+(driven by flow cell quality, library preparation, and basecaller calibration
+drift) but is not characterized in~\cite{hp_paper}; the shipped Phase 1
+table is derived from a single ont98 run on Dorado v5.0. Real-world deployment
+will encounter runs whose actual rates differ from the shipped values; the
+CER factor's linear sensitivity to $q_\text{ctx}$ means that any such
+divergence shifts factor values linearly rather than by orders of magnitude
+as p-values would under the same misspecification. Phase 2 per-run estimation
+would eliminate this source of uncertainty entirely.
 
 \section{Implementation in speconsense}
 \label{sec:implementation}
@@ -1026,10 +1034,6 @@ partitioned by variant class ($K{=}1$ non-HP, $K{=}1$ HP, $K{>}1$ mixed), to
 empirically motivate the \texttt{--min-cer-factor} default
 (Section~\ref{sec:factor}).
 
-\item Apply to run116 (127 specimens, herbarium type material) and quantify
-the impact of the cross-run $q_\text{ctx}$ scaling factor identified
-in~\cite{hp_paper}~\S 5.4 on accept/reject decisions.
-
 \item Sensitivity analysis: vary $q_\text{ctx}$ by $\pm 50\%$ at each context
 class and quantify the fraction of decisions that flip. This characterizes the
 framework's robustness to $q_\text{ctx}$ misspecification under realistic
@@ -1130,6 +1134,11 @@ incorporation of biological-variant priors --- remains future work, scoped
 beyond the initial context-aware deployment.
 
 \subsection*{Acknowledgments}
+
+The empirical case studies in this report use a sequencing run produced by
+Mycota Lab (Hoosier Mushroom Society) under the protocol of
+Russell~\cite{russell2023}. The author thanks Stephen D.~Russell for sharing
+the run-level outputs.
 
 Substantial portions of the text were drafted with the assistance of Claude
 (Anthropic, Opus 4.7). The core ideas, framework design, and implementation
@@ -1234,7 +1243,7 @@ a singleton group (\texttt{g2}).
 \section{Default $q_\text{ctx}$ table for Dorado v5.0}
 \label{app:qctx_table}
 
-Drawn from~\cite{hp_paper}~\S 8.6 Table 16 (re-estimation under the current
+Drawn from~\cite{hp_paper}~\S 8.6 (re-estimation under the current
 speconsense pipeline, 0.7.7). Values are filtered per-position error rates
 (after biological-variant filtering) for the ont98 dataset (R10.4.1, Dorado
 SUP v5.0.0). HP rates use the \texttt{v2\_ef} primary-anchor values
@@ -1242,9 +1251,9 @@ SUP v5.0.0). HP rates use the \texttt{v2\_ef} primary-anchor values
 use the all-cluster pooled values (approach 2), which match the operational
 distribution CER evaluates against in production. Per-base and per-direction
 sub-dimensions are pooled for the reasons given in
-Section~\ref{sec:qctx_pooling}: the effects are smaller than the run-to-run
-noise floor and cross-cell counts are too sparse to resolve the finer
-segmentation stably.
+Section~\ref{sec:qctx_pooling}: the effects are likely below the cross-run
+noise floor (not directly characterized in~\cite{hp_paper}) and cross-cell
+counts are too sparse to resolve the finer segmentation stably.
 
 \begin{table}[htbp]
 \centering
@@ -1257,14 +1266,14 @@ and per-direction variation is folded into each entry.}
 \toprule
 Context tag & $q_\text{ctx}$ & Source \\
 \midrule
-\texttt{non-hp-sub}            & 0.0039 & \cite{hp_paper}~\S 8.6 Table 16 (approach 2, ont98) \\
-\texttt{non-hp-indel}          & 0.0074 & \cite{hp_paper}~\S 8.6 Table 16 (approach 2, ont98) \\
+\texttt{non-hp-sub}            & 0.0039 & \cite{hp_paper}~\S 8.6 (approach 2, ont98) \\
+\texttt{non-hp-indel}          & 0.0074 & \cite{hp_paper}~\S 8.6 (approach 2, ont98) \\
 \midrule
-\texttt{hp-l1}                 & 0.0047 & \cite{hp_paper}~\S 8.6 Table 16 (v2\_ef, ont98) \\
-\texttt{hp-l2}                 & 0.0062 & \cite{hp_paper}~\S 8.6 Table 16 (v2\_ef, ont98) \\
-\texttt{hp-l3}                 & 0.0076 & \cite{hp_paper}~\S 8.6 Table 16 (v2\_ef, ont98) \\
-\texttt{hp-l4}                 & 0.0081 & \cite{hp_paper}~\S 8.6 Table 16 (v2\_ef, ont98) \\
-\texttt{hp-l5}                 & 0.0087 & \cite{hp_paper}~\S 8.6 Table 16 (v2\_ef, ont98) \\
+\texttt{hp-l1}                 & 0.0047 & \cite{hp_paper}~\S 8.6 (v2\_ef, ont98) \\
+\texttt{hp-l2}                 & 0.0062 & \cite{hp_paper}~\S 8.6 (v2\_ef, ont98) \\
+\texttt{hp-l3}                 & 0.0076 & \cite{hp_paper}~\S 8.6 (v2\_ef, ont98) \\
+\texttt{hp-l4}                 & 0.0081 & \cite{hp_paper}~\S 8.6 (v2\_ef, ont98) \\
+\texttt{hp-l5}                 & 0.0087 & \cite{hp_paper}~\S 8.6 (v2\_ef, ont98) \\
 \midrule
 \texttt{hp-l6+}                & N/A    & blanket discard, \cite{hp_paper}~\S 8.1 \\
 \bottomrule
@@ -1279,11 +1288,12 @@ lookup function already accepts any string key, and the context tag persisted
 in the metadata JSON records the full $(b, L, \delta)$ triple. Downstream
 recomputation under a finer table therefore requires no upstream re-run. The
 current simplification reflects the data available at publication time: with
-run-to-run variation of $\sim\!0.6\times$~\cite{hp_paper}~\S 5.4, the finer
-cells would introduce false precision rather than discrimination. Per-base
-and per-direction re-estimation under the current pipeline has not been
-performed; the shipped pooled values in Table~\ref{tab:default_qctx} are the
-authoritative production defaults.
+likely cross-run variation on the same basecaller (not characterized
+in~\cite{hp_paper}), finer cells would risk false precision rather than
+delivering additional discrimination. Per-base and per-direction
+re-estimation under the current pipeline has not been performed; the shipped
+pooled values in Table~\ref{tab:default_qctx} are the authoritative
+production defaults.
 
 HP-interface substitutions inherit the \texttt{non-hp-sub} rate automatically:
 the context classifier reports them as \texttt{NON\_HP\_SUB} tags per the
@@ -1308,6 +1318,12 @@ J.~Walker.
 \newblock Speconsense: High-quality clustering and consensus generation for
 {Oxford Nanopore} amplicon reads.
 \newblock \url{https://github.com/joshuaowalker/speconsense}, 2024.
+
+\bibitem[Russell, 2023]{russell2023}
+S.~D. Russell.
+\newblock {ONT DNA} barcoding fungal amplicons w/ {MinION \& Flongle V.3}.
+\newblock \emph{protocols.io}, March 2023.
+\newblock \url{https://dx.doi.org/10.17504/protocols.io.36wgq7qykvk5/v3}.
 
 \bibitem[Delahaye and Nicolas, 2021]{delahaye2021}
 C.~Delahaye and J.~Nicolas.

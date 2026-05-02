@@ -39,7 +39,11 @@ Oxford Nanopore sequencing of PCR amplicons is widely used for taxonomic
 identification, particularly in fungal DNA barcoding of the internal transcribed
 spacer (ITS) region~\cite{schoch2012}. After demultiplexing, reads from a single
 specimen are clustered and consensus sequences are generated to produce
-high-accuracy reference sequences suitable for database matching.
+high-accuracy reference sequences suitable for database matching. The analysis
+in this report is motivated by deployment of speconsense within the high-
+throughput fungal barcoding workflow of Russell~\cite{russell2023}, which
+prepares pooled, dual-indexed ITS amplicons for ONT MinION/Flongle sequencing
+and downstream consensus generation.
 
 When a specimen contains multiple sequence variants---arising from heterozygosity,
 paralogous loci, mixed templates, or multi-copy rDNA polymorphism~\cite{bradshaw2023}---the clustering
@@ -563,6 +567,12 @@ C.~Lee.
 \newblock Generating consensus sequences from partial order multiple sequence
 alignment graphs.
 \newblock \emph{Bioinformatics}, 19(8):999--1008, 2003.
+
+\bibitem[Russell, 2023]{russell2023}
+S.~D. Russell.
+\newblock {ONT DNA} barcoding fungal amplicons w/ {MinION \& Flongle V.3}.
+\newblock \emph{protocols.io}, March 2023.
+\newblock \url{https://dx.doi.org/10.17504/protocols.io.36wgq7qykvk5/v3}.
 
 \bibitem[Schoch et~al., 2012]{schoch2012}
 C.~L. Schoch, K.~A. Seifert, S.~Huhndorf, V.~Robert, J.~L. Spouge, C.~A.
