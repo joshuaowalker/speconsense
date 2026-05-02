@@ -215,6 +215,9 @@ class SpecimenClusterer:
                  enable_secondpass_phasing: bool = True,
                  enable_read_reassignment: bool = True,
                  enable_discard_recovery: bool = True,
+                 enable_phase8: bool = True,
+                 enable_noise_filter: bool = True,
+                 enable_mad_outlier_removal: bool = True,
                  min_variant_frequency: float = 0.10,
                  min_variant_count: int = 3,
                  min_ambiguity_frequency: float = 0.10,
@@ -242,6 +245,9 @@ class SpecimenClusterer:
         self.enable_secondpass_phasing = enable_secondpass_phasing
         self.enable_read_reassignment = enable_read_reassignment
         self.enable_discard_recovery = enable_discard_recovery
+        self.enable_phase8 = enable_phase8
+        self.enable_noise_filter = enable_noise_filter
+        self.enable_mad_outlier_removal = enable_mad_outlier_removal
         self.min_variant_frequency = min_variant_frequency
         self.min_variant_count = min_variant_count
         self.min_ambiguity_frequency = min_ambiguity_frequency
@@ -2381,7 +2387,8 @@ class SpecimenClusterer:
             min_ambiguity_frequency=self.min_ambiguity_frequency,
             min_ambiguity_count=self.min_ambiguity_count,
             disable_homopolymer_equivalence=self.disable_homopolymer_equivalence,
-            primers=primers
+            primers=primers,
+            enable_mad_outlier_removal=self.enable_mad_outlier_removal,
         )
 
         # Compute identity group/variant ranks for the surviving clusters.
@@ -2634,7 +2641,11 @@ class SpecimenClusterer:
             merged_subclusters = self._run_postphasing_merge(all_subclusters)
 
             # Phase 5: Noise filter (drop small clusters with no-majority columns)
-            cleaned_subclusters = self._filter_noisy_clusters(merged_subclusters)
+            if self.enable_noise_filter:
+                cleaned_subclusters = self._filter_noisy_clusters(merged_subclusters)
+            else:
+                cleaned_subclusters = merged_subclusters
+                logging.debug("Phase 5 noise filter disabled by --disable-noise-filter")
 
             # Phase 6: Read reassignment (optional)
             if self.enable_read_reassignment:
@@ -2658,9 +2669,11 @@ class SpecimenClusterer:
             # Phase 6 having run — Phase 7 is coupled to Phase 6, so if 6 did
             # not run nothing has changed since Phase 3 and there is no new
             # work for Phase 8 to do.
-            if self.enable_secondpass_phasing and self.enable_read_reassignment:
+            if self.enable_secondpass_phasing and self.enable_read_reassignment and self.enable_phase8:
                 rephased_subclusters = self._run_second_phasing_pass(discard_reassigned)
             else:
+                if self.enable_secondpass_phasing and self.enable_read_reassignment and not self.enable_phase8:
+                    logging.debug("Phase 8 second phasing pass disabled by --disable-second-phasing")
                 rephased_subclusters = discard_reassigned
 
             # Phase 9: CER validation

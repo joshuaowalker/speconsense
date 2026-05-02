@@ -63,20 +63,23 @@ class ConsensusGenerationConfig:
     Passed to worker processes to avoid needing to pickle the entire SpecimenClusterer.
     """
     __slots__ = ['max_sample_size', 'enable_iupac_calling', 'min_ambiguity_frequency',
-                 'min_ambiguity_count', 'disable_homopolymer_equivalence', 'primers']
+                 'min_ambiguity_count', 'disable_homopolymer_equivalence', 'primers',
+                 'enable_mad_outlier_removal']
 
     def __init__(self, max_sample_size: int,
                  enable_iupac_calling: bool,
                  min_ambiguity_frequency: float,
                  min_ambiguity_count: int,
                  disable_homopolymer_equivalence: bool,
-                 primers: Optional[List[Tuple[str, str]]] = None):
+                 primers: Optional[List[Tuple[str, str]]] = None,
+                 enable_mad_outlier_removal: bool = True):
         self.max_sample_size = max_sample_size
         self.enable_iupac_calling = enable_iupac_calling
         self.min_ambiguity_frequency = min_ambiguity_frequency
         self.min_ambiguity_count = min_ambiguity_count
         self.disable_homopolymer_equivalence = disable_homopolymer_equivalence
         self.primers = primers
+        self.enable_mad_outlier_removal = enable_mad_outlier_removal
 
 
 # Worker functions
@@ -786,7 +789,7 @@ def _generate_cluster_consensus_worker(args) -> Dict:
     # caller can add them to the specimen-level discard pool.
     mad_outlier_ids: Set[str] = set()
     dropped_by_min_reads = False
-    if result is not None and result.consensus:
+    if result is not None and result.consensus and config.enable_mad_outlier_removal:
         flagged = _identify_mad_outlier_reads_standalone(
             result.alignments, result.consensus
         )

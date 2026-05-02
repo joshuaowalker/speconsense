@@ -76,6 +76,27 @@ def main():
     phasing_group.add_argument("--enable-discard-recovery", action="store_false",
                                dest="disable_discard_recovery",
                                help="Override --disable-discard-recovery or profile setting")
+    phasing_group.add_argument("--disable-second-phasing", action="store_true",
+                               help="Disable the Phase 8 second phasing pass without disabling "
+                                    "the Phase 3 first pass. Has no effect if --disable-position-phasing "
+                                    "or --disable-read-reassignment is also set (Phase 8 is gated on both).")
+    phasing_group.add_argument("--enable-second-phasing", action="store_false",
+                               dest="disable_second_phasing",
+                               help="Override --disable-second-phasing or profile setting")
+    phasing_group.add_argument("--disable-noise-filter", action="store_true",
+                               help="Disable the Phase 5 noise filter. Small clusters whose MSA "
+                                    "has no-majority columns are normally disbanded; this flag "
+                                    "preserves them and lets them flow through to final consensus.")
+    phasing_group.add_argument("--enable-noise-filter", action="store_false",
+                               dest="disable_noise_filter",
+                               help="Override --disable-noise-filter or profile setting")
+    phasing_group.add_argument("--disable-mad-outlier-removal", action="store_true",
+                               help="Disable MAD-based outlier removal at final consensus generation. "
+                                    "Reads whose identity to the cluster consensus is more than n*MAD "
+                                    "from the median are normally dropped; this flag preserves them.")
+    phasing_group.add_argument("--enable-mad-outlier-removal", action="store_false",
+                               dest="disable_mad_outlier_removal",
+                               help="Override --disable-mad-outlier-removal or profile setting")
     phasing_group.add_argument("--min-variant-frequency", type=float, default=0.10,
                                help="Minimum alternative allele frequency to call variant (default: 0.10 for 10%%)")
     phasing_group.add_argument("--min-variant-count", type=int, default=3,
@@ -236,6 +257,9 @@ def main():
         enable_secondpass_phasing=not args.disable_position_phasing,
         enable_read_reassignment=not args.disable_read_reassignment,
         enable_discard_recovery=not args.disable_discard_recovery,
+        enable_phase8=not args.disable_second_phasing,
+        enable_noise_filter=not args.disable_noise_filter,
+        enable_mad_outlier_removal=not args.disable_mad_outlier_removal,
         min_variant_frequency=args.min_variant_frequency,
         min_variant_count=args.min_variant_count,
         min_ambiguity_frequency=args.min_ambiguity_frequency,
