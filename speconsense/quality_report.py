@@ -33,6 +33,17 @@ from speconsense.types import ConsensusInfo, OverlapMergeInfo
 
 
 # ---------------------------------------------------------------------------
+# q_ctx calibration tuning constants
+# ---------------------------------------------------------------------------
+# Pooled obs/exp ratio is a directional check; thresholds are weakly held.
+# Asymmetry: underestimation is the more common failure mode, since residual
+# heterogeneity inflates obs_sum and newer basecallers tend to be cleaner.
+MIN_CALIBRATION_COLS = 5000
+CALIBRATION_LOW = 0.70
+CALIBRATION_HIGH = 1.40
+
+
+# ---------------------------------------------------------------------------
 # Per-cluster wrapper
 # ---------------------------------------------------------------------------
 
@@ -48,6 +59,18 @@ class _Cluster:
     @property
     def err_factor(self) -> Optional[float]:
         return self.info.err_factor
+
+    @property
+    def err_factor_obs_sum(self) -> Optional[float]:
+        return self.info.err_factor_obs_sum
+
+    @property
+    def err_factor_exp_sum(self) -> Optional[float]:
+        return self.info.err_factor_exp_sum
+
+    @property
+    def err_factor_cols(self) -> Optional[int]:
+        return self.info.err_factor_cols
 
     @property
     def cer_factor(self) -> Optional[float]:
@@ -602,6 +625,98 @@ def _render_pipeline_activity(
     return body + "\n".join(lines) + "\n"
 
 
+def _render_qctx_calibration(specimens: Dict[str, _Specimen]) -> str:
+    """Pooled-ratio calibration check across all clusters.
+
+    Aggregates obs_sum / exp_sum from per-cluster err_factor details (loaded
+    from per-specimen metadata JSON). A pooled ratio far from 1.0 is a
+    directional signal that the bundled q_ctx model diverges from the
+    basecaller's actual error behavior.
+
+    The headline number pools all states (passed + .ns + .lq) to match the
+    "all-cluster pooled" methodology used to derive the shipped q_ctx tables
+    (see cer_in_practice §8.4 / Appendix B). Excluding .lq would top-truncate
+    the right tail by construction and bias the estimator low regardless of
+    model quality. The per-state breakdown below is more diagnostic than the
+    headline alone — divergence between buckets is itself informative.
+    """
+    body = _section("q_ctx CALIBRATION CHECK (run-pooled)")
+
+    bucket_order = ("passed", "ns", "lq")
+    bucket_label = {"passed": "passed", "ns": ".ns", "lq": ".lq"}
+    buckets: Dict[str, Dict[str, float]] = {
+        s: {"obs": 0.0, "exp": 0.0, "cols": 0, "n": 0} for s in bucket_order
+    }
+
+    for sp in specimens.values():
+        for c in sp.clusters:
+            if c.state not in buckets:
+                continue
+            obs = c.err_factor_obs_sum
+            exp = c.err_factor_exp_sum
+            cols = c.err_factor_cols
+            if obs is None or exp is None or cols is None:
+                continue
+            b = buckets[c.state]
+            b["obs"] += obs
+            b["exp"] += exp
+            b["cols"] += cols
+            b["n"] += 1
+
+    obs_total = sum(b["obs"] for b in buckets.values())
+    exp_total = sum(b["exp"] for b in buckets.values())
+    cols_total = sum(b["cols"] for b in buckets.values())
+    n_clusters = sum(b["n"] for b in buckets.values())
+
+    if cols_total < MIN_CALIBRATION_COLS or exp_total <= 0 or n_clusters == 0:
+        return (
+            body
+            + f"\n  Insufficient data for calibration check "
+            f"({cols_total} cols across {n_clusters} clusters; "
+            f"need >= {MIN_CALIBRATION_COLS} cols).\n"
+        )
+
+    pooled = obs_total / exp_total
+    lines = [
+        f"  Pooled obs/exp:    {pooled:.2f} "
+        f"(all states: {n_clusters} clusters, {cols_total} consensus columns)",
+    ]
+    if pooled < CALIBRATION_LOW:
+        lines.append(
+            f"  WARNING: q_ctx model appears to overestimate per-column "
+            f"disagreement; pooled ratio {pooled:.2f} < {CALIBRATION_LOW:.2f} "
+            f"suggests recorded error rates exceed observed."
+        )
+    elif pooled > CALIBRATION_HIGH:
+        lines.append(
+            f"  WARNING: q_ctx model appears to underestimate per-column "
+            f"disagreement; pooled ratio {pooled:.2f} > {CALIBRATION_HIGH:.2f} "
+            f"suggests cluster heterogeneity beyond MAD reach or a "
+            f"basecaller/error-model mismatch."
+        )
+    else:
+        lines.append(
+            f"  Within expected range "
+            f"[{CALIBRATION_LOW:.2f}, {CALIBRATION_HIGH:.2f}]; "
+            f"q_ctx model appears reasonably calibrated for this run."
+        )
+
+    lines.append("")
+    lines.append("  Per-state breakdown:")
+    lines.append(f"    {'state':<8} {'n':>6} {'cols':>10}  obs/exp")
+    for state in bucket_order:
+        b = buckets[state]
+        if b["n"] == 0:
+            continue
+        sub_pooled = b["obs"] / b["exp"] if b["exp"] > 0 else float("nan")
+        lines.append(
+            f"    {bucket_label[state]:<8} "
+            f"{b['n']:>6} {b['cols']:>10}  {sub_pooled:.2f}"
+        )
+
+    return body + "\n".join(lines) + "\n"
+
+
 # ---------------------------------------------------------------------------
 # Public entry point
 # ---------------------------------------------------------------------------
@@ -670,6 +785,7 @@ def write_quality_report(
         + _render_low_yield_rescues(specimens)
         + _render_overlap_merges(overlap_merges, min_merge_overlap)
         + _render_parameter_signals(specimens, counts, max_err_factor)
+        + _render_qctx_calibration(specimens)
         + _render_pipeline_activity(specimens, counts, overlap_merges,
                                      min_merge_overlap, final_consensus)
     )

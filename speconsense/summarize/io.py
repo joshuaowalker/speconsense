@@ -167,6 +167,24 @@ def load_consensus_sequences(
     for fasta_file in fasta_files:
         logging.debug(f"Processing consensus file: {fasta_file}")
 
+        # Pre-load per-specimen metadata JSON once (best effort) so each
+        # ConsensusInfo can carry the raw err_factor sums needed for the
+        # run-scale q_ctx calibration check in quality_report.
+        specimen_base = os.path.basename(fasta_file)
+        if specimen_base.endswith('-all.fasta'):
+            specimen_base = specimen_base[:-len('-all.fasta')]
+        metadata = load_metadata_from_json(source_folder, specimen_base)
+        ef_lookup: Dict[str, Tuple[Optional[float], Optional[float], Optional[int]]] = {}
+        if metadata:
+            for variant in metadata.get('variants', []) or []:
+                cid = variant.get('cluster_id')
+                if cid:
+                    ef_lookup[cid] = (
+                        variant.get('err_factor_obs_sum'),
+                        variant.get('err_factor_exp_sum'),
+                        variant.get('err_factor_cols'),
+                    )
+
         with open(fasta_file, 'r') as f:
             for record in SeqIO.parse(f, "fasta"):
                 (sample_name, ric, size, primers, rid, rid_min,
@@ -199,6 +217,8 @@ def load_consensus_sequences(
                 cluster_match = re.search(r'-(\d+\.v\d+)$', sample_name)
                 cluster_id = cluster_match.group(1) if cluster_match else sample_name
 
+                ef_obs, ef_exp, ef_cols = ef_lookup.get(cluster_id, (None, None, None))
+
                 consensus_info = ConsensusInfo(
                     sample_name=sample_name,
                     cluster_id=cluster_id,
@@ -213,6 +233,9 @@ def load_consensus_sequences(
                     rid_min=rid_min,  # Minimum read identity if available
                     cer_factor=cer_factor,
                     err_factor=err_factor,
+                    err_factor_obs_sum=ef_obs,
+                    err_factor_exp_sum=ef_exp,
+                    err_factor_cols=ef_cols,
                     group_rank=group_rank,
                     variant_rank=variant_rank,
                 )

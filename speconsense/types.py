@@ -25,6 +25,9 @@ class ConsensusInfo(NamedTuple):
     merge_indel_count: Optional[int] = None  # Number of indels consumed by merging (for cumulative tracking)
     cer_factor: Optional[float] = None  # Per-position CER factor (q*/q_ctx, K-th rooted)
     err_factor: Optional[float] = None  # Cluster-wide observed/q_ctx-expected disagreement ratio
+    err_factor_obs_sum: Optional[float] = None  # Raw observed disagreement sum (from metadata JSON)
+    err_factor_exp_sum: Optional[float] = None  # Raw q_ctx-expected disagreement sum (from metadata JSON)
+    err_factor_cols: Optional[int] = None  # Consensus columns counted for err_factor (from metadata JSON)
     group_rank: Optional[int] = None  # Core-assigned identity group rank (gid=N in header)
     variant_rank: Optional[int] = None  # Core-assigned variant rank within group (vid=N in header)
 
