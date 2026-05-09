@@ -36,8 +36,10 @@ We present a context-aware extension of the framework, retaining the single
 binomial equation but replacing the uniform error rate $p$ with a
 context-specific $q_\text{ctx}$ derived from empirical measurement. To preserve
 cross-variant comparability under context-aware $q_\text{ctx}$, we introduce
-the \emph{CER factor}, $p^*/q_\text{ctx}$, as the primary derived metric. The
-factor is dimensionless, comparable across variants and specimens, degrades
+the \emph{CER factor}, the per-position multiplicative inflation of empirical
+$q_\text{ctx}$ that would make the variant plausible as artifact, as the primary
+derived metric. The factor is dimensionless, comparable across variants and
+specimens, degrades
 linearly under $q_\text{ctx}$ misspecification, and re-scales cleanly when the
 empirical error table is updated. We describe the implementation in the
 speconsense pipeline, including N-denominator choice for post-phasing
@@ -114,11 +116,13 @@ For multi-position variants ($K > 1$), the joint per-read error probability
 becomes $\prod_i q_{\text{ctx},i}$ instead of $q^K$, accommodating mixed
 contexts naturally.
 
-\item A \textbf{practical decision metric}, the \emph{CER factor}, defined as
-$p^* / q_\text{ctx}$. The factor is dimensionless and context-comparable by
-construction, recovering the cross-variant comparability that raw $p^*$ loses
-under context-aware $q_\text{ctx}$. We compare it against alternative metrics
-(raw $p^*$, p-value) and recommend it as the primary annotation.
+\item A \textbf{practical decision metric}, the \emph{CER factor}, defined
+in Section~\ref{sec:factor} as the per-position multiplicative inflation of
+$q_\text{ctx}$ required to explain the variant as artifact. The factor is
+dimensionless and context-comparable by construction, recovering the
+cross-variant comparability that raw $p^*$ loses under context-aware
+$q_\text{ctx}$. We compare it against alternative metrics (raw $p^*$,
+p-value) and recommend it as the primary annotation.
 
 \item Implementation choices in the \textbf{speconsense pipeline} that follow
 from the framework: how $N$ is chosen for post-phasing validation, how
@@ -211,15 +215,39 @@ shifts $p^*$ by less than 5\%).
 
 \subsection{Definition}
 
-The \emph{CER factor} is the dimensionless ratio
+For a single-position variant ($K = 1$), the \emph{CER factor} is the
+dimensionless ratio
 \begin{equation}
 \label{eq:factor}
-\mathrm{CER\ factor} = \frac{p^*}{q_\text{ctx}}.
+\mathrm{CER\ factor} = \frac{q^*}{q_\text{ctx}},
 \end{equation}
-It answers the question: \emph{by what factor would the platform error rate at
-this variant's context need to be inflated to make the observation plausible as
-artifact?} A factor of 4 means quadruple the empirical error rate would be
-needed; a factor of 1 corresponds exactly to the platform rate.
+where $q^*$ is the critical joint error probability solving
+Equation~\ref{eq:unified_k1}. For $K > 1$ the natural generalization preserves
+the per-position interpretation by taking the $K$-th root of the joint ratio:
+\begin{equation}
+\label{eq:factor_k}
+\mathrm{CER\ factor} = \left( \frac{q^*_\text{joint}}{\prod_{i=1}^{K} q_{\text{ctx},i}} \right)^{\!\!1/K},
+\end{equation}
+where $q^*_\text{joint}$ is the joint critical probability solving
+Equation~\ref{eq:unified_kn}. Both forms answer the same question:
+\emph{by what factor would the platform error rate at each of this variant's
+positions need to be inflated to make the observation plausible as artifact?}
+A factor of 4 means each per-position context rate would need to be
+quadrupled; a factor of 1 corresponds exactly to the platform's empirical
+rates. The $K$-th root keeps the factor dimensionless and on a per-position
+scale, so a factor of 4 carries the same meaning whether $K = 1$ or $K = 5$.
+Equation~\ref{eq:factor_k} reduces to Equation~\ref{eq:factor} at $K = 1$.
+
+The factor is unit-invariant under the variant-significance paper's
+$q = p/3$ uniform model: numerator and denominator are both scaled by the
+same factor of 3 in the conversion from per-alternative ($q$) to total
+($p$) rates, so $q^*/q_\text{ctx}$ and $p^*/p_\text{ctx}$ are the same
+number provided both are in matching units. We use $q$-form here to align
+with the $q_\text{ctx}$ values in the shipped tables (per-alternative,
+\cite{hp_paper}~\S 8.6) and with the joint solver
+(Section~\ref{sec:unified}); the implementation passes empirical
+$q_\text{ctx}$ through unchanged and the reported factor is
+context-comparable on the shipped scale.
 
 \subsection{Comparison with alternative metrics}
 
@@ -518,14 +546,22 @@ In the current implementation, this is computed in
 \paragraph{Why the identity-group sum is the right choice.} The artifact
 hypothesis under test is ``the candidate cluster is misclassified reads from
 its sibling.'' The relevant population is the union of reads that could
-plausibly have ended up in either cluster --- the identity group. Using the
-total specimen reads as $N$ would inflate the denominator relative to the
-hypothesis under test, producing artificially small $p^*$ values (and CER
-factors) and over-accepting weak variants. Using only the candidate cluster's
-own size as $N$ would conversely understate the denominator and over-reject.
-The identity-group sum corresponds exactly to the population over which the
-candidate is hypothesized to be a redistribution of reads from validated
-siblings.
+plausibly have ended up in either cluster --- the identity group. The two
+natural alternatives both produce the wrong test, in opposite directions. For
+fixed candidate count $M$, $p^*$ decreases as $N$ grows: a larger pool admits
+more chances to error, so a smaller per-read rate suffices to produce $M$
+errors under the null. Using the total specimen reads as $N$ would inflate
+the denominator and produce artificially small $p^*$ values (and CER
+factors), \emph{over-rejecting} weak-but-real variants whose support is
+modest relative to the full specimen. Using only the candidate cluster's own
+size as $N$ ($N = M$) would conversely shrink the denominator to its
+extreme and produce inflated $p^*$ values, \emph{over-accepting} variants
+whose support is small in absolute terms. The identity-group sum corresponds
+exactly to the population over which the candidate is hypothesized to be a
+redistribution of reads from validated siblings, neither broader (extra-group
+reads were never plausible candidates for this cluster) nor narrower (the
+candidate cluster's reads were not the only ones that could have ended up
+here).
 
 \paragraph{Why not ``total specimen reads''.} A natural alternative is to use
 the total specimen input reads as $N$, on the conservative reasoning that any
@@ -918,7 +954,7 @@ revised assumptions without re-running --- is substantial: as basecaller
 versions evolve and empirical error tables improve, every stored output
 remains scientifically valid without recomputation cost.
 
-\section{Cluster denoising precedes CER}
+\section{Cluster denoising and CER}
 \label{sec:denoising}
 
 CER's significance is sharply sensitive to $K$, the number of positions
@@ -931,48 +967,76 @@ positions will therefore compute a dramatically inflated factor against its
 true peer, obscuring the distinction between real variants and cluster
 artifacts.
 
-This places a specific demand on the upstream pipeline: CER is a meaningful
+This places a specific demand on the pipeline: CER is a meaningful
 discrimination metric only for clusters whose consensus is a faithful
-representation of the reads that compose it. Before CER evaluation, speconsense
-applies several denoising mechanisms whose purpose is to keep $K$ honest:
+representation of the reads that compose it. Speconsense addresses this with
+two layers of mechanism, distinguished by their position relative to CER
+evaluation in the pipeline.
+
+\paragraph{Pre-CER cleanup} runs before \texttt{cer\_factor} is computed
+(speconsense Phases 2--5) and reduces $K$-inflation at the source by
+preventing spurious cluster splits and dropping internally inconsistent
+clusters before they reach pairwise comparison:
 
 \begin{itemize}
-\item \textbf{Outlier removal during final consensus generation.} MAD-based
-detection of read-identity outliers excludes single-read noise that would
-otherwise inflate consensus-level disagreement at isolated positions.
-
 \item \textbf{Homopolymer-equivalence merging of near-identical post-phasing
-clusters} (pre-merge step), collapsing splits whose only distinguishing
+clusters} (Phases 2 and 4), collapsing splits whose only distinguishing
 feature is HP length variation --- the dominant systematic error mode that
 would inflate $K$ by one or more positions per HP run.
 
-\item \textbf{MSA-based variant merging in summarize with IUPAC consensus},
-further collapsing post-phasing clusters whose remaining differences are
-dominated by positions already classified as ambiguity-compatible under the
-specimen's error profile.
-
-\item \textbf{A cluster-wide homogeneity statistic, \texttt{err\_factor}},
-reported per cluster and filtered in summarize via \texttt{--max-err-factor}
-(default 1.5). \texttt{err\_factor} is the ratio of observed per-column
-disagreement to the $q_\text{ctx}$-predicted disagreement rate, pooled across
-the cluster's MSA (non-gap consensus columns). Values near 1.0 indicate a
-cluster consistent with per-position basecaller noise; values well above 1.0
-indicate internal heterogeneity beyond what the platform's error model
-predicts. Unlike \texttt{cer\_factor}, \texttt{err\_factor} is peer-independent:
-it distinguishes novel-but-real sequences (low \texttt{err\_factor}, potentially
-high \texttt{cer\_factor}) from noise aggregates (high \texttt{err\_factor},
-often also spuriously high \texttt{cer\_factor}). Filtering on
-\texttt{err\_factor} before CER evaluation removes clusters whose $K$
-measurement would be unreliable regardless of the pairwise comparison. The
-raw components (\texttt{err\_factor\_obs\_sum}, \texttt{err\_factor\_exp\_sum},
-\texttt{err\_factor\_cols}) are persisted in the metadata JSON
-(Section~\ref{sec:reproducibility}) so the factor can be recomputed under a
-revised $q_\text{ctx}$ table.
+\item \textbf{Noise filter} (Phase 5) drops small clusters with no-majority
+consensus columns: a cluster whose reads cannot agree on any single sequence
+at multiple positions cannot serve as a reliable $K$ input.
 \end{itemize}
 
-None of these mechanisms replaces CER; they make CER's $K$ input trustworthy.
-The natural place in the pipeline for this preprocessing is between phasing
-and pairwise CER validation, which is where speconsense applies them.
+\paragraph{Post-CER cleanup} runs after \texttt{cer\_factor} is annotated
+and acts on a different lever --- routing rather than recomputation. The
+\texttt{cer\_factor} value carried into summarize is computed from the
+Phase 9 consensus, so post-Phase-9 cleanup does not change CER's $K$ input
+unless CER is re-evaluated. In practice this matters less than it might
+appear:
+
+\begin{itemize}
+\item \textbf{MAD outlier removal during final consensus generation}
+(Phase 11) excludes single-read identity outliers from the cluster before
+the final SPOA call. The resulting consensus may differ from the Phase 9
+consensus at the outlier positions, but those positions are by construction
+single-read instabilities; they are unlikely to coincide with the
+between-cluster differences that determine $K$. CER could be recomputed
+post-MAD for strict consistency, at the cost of a second pairwise pass; we
+have not seen the recomputation flip routing decisions in spot-checks of
+the corpus, but quantifying this is open future work.
+
+\item \textbf{MSA-based variant merging in summarize with IUPAC consensus}
+collapses post-phasing clusters whose remaining differences are dominated
+by ambiguity-compatible positions. These merges happen at the summarize
+stage, after \texttt{cer\_factor} annotation. A merged variant inherits the
+larger member's \texttt{cer\_factor}; the smaller member's annotation is
+preserved in the merge record for reproducibility.
+
+\item \textbf{Cluster-wide homogeneity statistic, \texttt{err\_factor}},
+reported per cluster (Phase 11) and filtered in summarize via
+\texttt{--max-err-factor} (default 1.5). \texttt{err\_factor} is the ratio
+of observed per-column disagreement to the $q_\text{ctx}$-predicted rate,
+pooled across the cluster's MSA. Values near 1.0 indicate a cluster
+consistent with per-position basecaller noise; values well above 1.0
+indicate internal heterogeneity. Unlike \texttt{cer\_factor},
+\texttt{err\_factor} is peer-independent: it distinguishes novel-but-real
+sequences (low \texttt{err\_factor}, potentially high \texttt{cer\_factor})
+from noise aggregates (high \texttt{err\_factor}, often also spuriously
+high \texttt{cer\_factor}). Routing on \texttt{err\_factor} sends suspect
+clusters to a separate \texttt{.lq} track instead of recomputing CER --- a
+deliberate ``flag-don't-fix'' design, on the reasoning that a cluster whose
+$K$ measurement is unreliable is also unreliable for any decision derived
+from it. The raw components (\texttt{err\_factor\_obs\_sum},
+\texttt{err\_factor\_exp\_sum}, \texttt{err\_factor\_cols}) are persisted
+in the metadata JSON (Section~\ref{sec:reproducibility}) so the factor can
+be recomputed under a revised $q_\text{ctx}$ table.
+\end{itemize}
+
+None of these mechanisms replaces CER; the pre-CER ones make CER's $K$
+input more trustworthy upstream, while the post-CER ones provide a second
+line of triage by routing rather than re-adjudicating.
 
 \subsection{Filter behavior under $q_\text{ctx}$ refresh}
 \label{sec:qctx_refresh}
