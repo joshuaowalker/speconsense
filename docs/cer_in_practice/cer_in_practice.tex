@@ -378,7 +378,7 @@ in~\cite{hp_paper}~\S 3.3, pooled across base and direction
 
 \item[HP length change at $L \geq 6$.] Suppressed by blanket normalization;
 no $q_\text{ctx}$ assigned and no CER evaluation. This follows the
-recommendation of~\cite{hp_paper}~\S 8.1: at $L \geq 6$ accuracy degrades
+recommendation of~\cite{hp_paper}~\S 9.1: at $L \geq 6$ accuracy degrades
 sharply and variant calling becomes unreliable.
 
 \item[Indel at non-HP position.] Treated as a substitution-class event with
@@ -408,12 +408,12 @@ simplification driven by empirical signal-to-noise in~\cite{hp_paper}:
 \begin{itemize}
 \item \textbf{Base (pooled).} Per-base variation at $L \leq 5$ on Dorado v5.0
 is small: maximum over minimum across bases is $1.14$ at $L = 1$ rising to
-$1.39$ at $L = 5$~\cite{hp_paper}~\S 7.6. The ``worst-case base'' is not
+$1.39$ at $L = 5$~\cite{hp_paper}~\S 6.7. The ``worst-case base'' is not
 consistent across lengths (T at $L = 2$--$3$, G at $L = 4$--$5$), so no
 stable A/T-vs-C/G split is supported in this regime.
 
 \item \textbf{Direction (pooled).} The deletion-to-insertion ratio is 3--5:1
-at moderate lengths~\cite{hp_paper}~\S 3.4, but per-cell counts for
+at moderate lengths~\cite{hp_paper}~\S 3.5, but per-cell counts for
 insertions --- especially at $(b, L, \delta = +\!1)$ --- are sparse. Splitting
 would produce unstable rates for the less-populated cells.
 
@@ -454,7 +454,7 @@ flag (\texttt{--error-model dorado-v5.0}) or accept the default.
 estimated from the current run's MSAs at pipeline startup. The estimator
 pools positions across all specimens after applying the
 outlier-and-bimodal-detection biological-variant filter
-of~\cite{hp_paper}~\S 5.3. The estimated $q_\text{ctx}$ is recorded in
+of~\cite{hp_paper}~\S 5. The estimated $q_\text{ctx}$ is recorded in
 metadata so that downstream interpretation can use the run-specific values
 or fall back to the shipped defaults.
 
@@ -723,7 +723,7 @@ The pipeline treats HP-length variation at three distinct stages with
 deliberately different normalization defaults. Taken together, these stages
 admit HP length variants at $L \leq 5$ into CER evaluation with an appropriate
 $q_\text{ctx}$ while suppressing the noisier $L \geq 6$ regime, as motivated
-by~\cite{hp_paper}~\S 8.1.
+by~\cite{hp_paper}~\S 9.1.
 
 \paragraph{Stage 1 --- initial clustering identity.} Initial read clustering
 (both the MCL K-NN graph and the greedy algorithm) uses \emph{raw} edlib
@@ -1014,44 +1014,195 @@ table without re-running upstream core.
 \section{Validation}
 \label{sec:validation}
 
-\textbf{This section is a placeholder. Empirical content will be added as
-Phase 1 output accumulates.}
+We evaluate the context-aware framework on a single full sequencing run
+(\texttt{ont98}, 955 ITS amplicon specimens; Mycota Lab~\cite{russell2023};
+Dorado v5.0 SUP basecalling; speconsense 0.8.0 defaults). The schema-2.0
+metadata emitted per cluster (Section~\ref{sec:reproducibility}) lets every
+analysis below run as an offline replay against the cached
+$N, M, K$, $n_\text{sites}$, context tags, and $q_\text{ctx,i}$ values, so no
+re-running of the core pipeline is required. The corpus contains
+12,948 non-anchor variants across the 955 specimens. Reproduction scripts
+and the CSV outputs cited below live in the \texttt{validation/} directory
+of the speconsense paper bundle.
 
-Schema-2.0 metadata is now emitted by the current implementation. A full
-ONT98 run (955 specimens) at \texttt{dorado-v5.0} is available as initial
-input to the validation work below.
+\subsection{Decision agreement with raw $p^*$}
+\label{sec:val_b1}
 
-The planned validation reproduces the structure of the original CER
-validation~\cite{cer_paper}~\S 8 but with the context-aware framework:
+For each non-anchor variant we recompute the raw uniform-model $p^*$ via the
+single-rate solver (Walker~2026a~\S 2) and compare its accept/reject decision
+to the context-aware decision $\texttt{cer\_factor} \geq 1.0$. The raw-$p^*$
+threshold is set in \emph{p-units} consistent with $p^*$: we use $p^* > 3\bar{q}$
+where $\bar{q} = 0.5954\%$ is the run-pooled mean of all 39{,}746 stored
+$q_\text{ctx,i}$ values (q-units, per-base). The factor of 3 converts $\bar{q}$
+to a total-rate $\bar{p} = 1.79\%$ under the uniform model $q = p/3$. With both
+sides of the comparison in p-units, the gate isolates the value of context
+awareness: if the framework collapsed $q_\text{ctx,i}$ to a single rate,
+$\bar{q}$ would be the natural choice, so any disagreement at the comparable
+threshold reflects context-class effects directly.
 
-\begin{itemize}
-\item Apply context-aware CER to the ONT98 dataset (955 specimens) and
-compare per-variant decisions against the existing raw-$p^*$ implementation
-at default settings.
+\begin{table}[h]
+\centering
+\caption{Per-variant decision agreement, raw $p^*$ vs.\ context-aware
+\texttt{cer\_factor}, on the 12{,}948 non-anchor variants of the
+\texttt{ont98} run, with raw threshold $p^* > 3\bar{q} = 1.79\%$.}
+\label{tab:val_decisions}
+\begin{tabular}{l r r}
+\toprule
+                & ctx pass & ctx fail \\
+\midrule
+raw pass        & 4{,}197  & 154 \\
+raw fail        & 195      & 8{,}402 \\
+\bottomrule
+\end{tabular}
+\end{table}
 
-\item Distribution of \texttt{cer\_factor} on the 955-specimen workload,
-partitioned by variant class ($K{=}1$ non-HP, $K{=}1$ HP, $K{>}1$ mixed), to
-empirically motivate the \texttt{--min-cer-factor} default
-(Section~\ref{sec:factor}).
+Agreement is 97.3\%. The 349 disagreements split in both directions:
+195 variants are admitted only by the context-aware framework (ctx-only),
+and 154 are admitted only by raw $p^*$ (raw-only). The two cells correspond
+to opposite halves of the $q_\text{ctx}$ distribution. Variants in the
+ctx-only cell sit at non-HP positions where $q_\text{ctx,i} < \bar{q}$
+(typically $q_\text{ctx} \approx 0.39\%$ for non-HP substitutions): the
+context-aware framework accepts them at a lower per-position bar than
+raw $p^*$. Variants in the raw-only cell sit predominantly at HP positions
+where $q_\text{ctx,i} > \bar{q}$ (HP errors are 2--20$\times$ more common
+than non-HP): the context-aware framework demands a stronger signal there
+and rejects them. Net effect on the corpus: the context-aware framework
+admits 41 more variants than raw $p^*$ at $\bar{p} = 3\bar{q}$, but with
+substantially different per-context allocation.
 
-\item Sensitivity analysis: vary $q_\text{ctx}$ by $\pm 50\%$ at each context
-class and quantify the fraction of decisions that flip. This characterizes the
-framework's robustness to $q_\text{ctx}$ misspecification under realistic
-uncertainty.
+\subsection{\texttt{cer\_factor} distribution by variant class}
+\label{sec:val_b2}
 
-\item HP-variant rescue: identify HP length variants that the current pipeline
-discards via blanket normalization but the context-aware framework would
-accept. Manual review of a sample to assess biological plausibility.
+Partitioning the 12{,}948 non-anchor variants by $K$ and HP-context yields
+three classes: $K{=}1$ non-HP (4{,}039), $K{=}1$ HP (2{,}996), and $K{>}1$
+mixed (5{,}913). The shipped \texttt{--min-cer-factor=1.0} default rejects
+each class at very different rates (Table~\ref{tab:val_distribution}).
 
-\item Specimen-level outcomes: confirm that no specimens are lost (zero
-organism dropouts), consistent with the original CER validation.
-\end{itemize}
+\begin{table}[h]
+\centering
+\caption{\texttt{cer\_factor} distribution by variant class on the
+\texttt{ont98} run. Percentiles are over the per-class population; the
+\texttt{<1.0} column is the fraction of each class falling below the
+\texttt{--min-cer-factor=1.0} default.}
+\label{tab:val_distribution}
+\small
+\begin{tabular}{l r r r r r r r r}
+\toprule
+class       & $n$    & $p_5$   & $p_{25}$ & $p_{50}$ & $p_{75}$ & $p_{95}$ & $<\!1.0$ & $<\!2.0$ \\
+\midrule
+$K{=}1$ non-HP & 4{,}039 & 0.0007 & 0.0016 & 0.0119  & 0.0741 & 5.46  & 90.8\% & 92.9\% \\
+$K{=}1$ HP     & 2{,}996 & 0.0006 & 0.0016 & 0.0124  & 0.0967 & 1.15  & 94.5\% & 96.7\% \\
+$K{>}1$ mixed  & 5{,}913 & 0.130  & 0.641  & 2.43    & 10.6   & 97.0  & 34.8\% & 45.3\% \\
+\bottomrule
+\end{tabular}
+\end{table}
 
-Expected results: a moderate increase in HP-variant calls (mostly $L = 1$--$3$
-variants currently discarded), a modest reduction in marginal substitution
-variants at HP-interface positions (where the empirical $q_\text{ctx}$ is
-slightly lower than the current uniform assumption), and stable specimen-level
-counts.
+The default behaves empirically as a $K{=}1$ noise filter: 91--94\% of
+single-position variants fall below threshold, while only 35\% of $K{>}1$
+variants do. This separation is the empirical justification for the default.
+$K{=}1$ variants have a wide median range (10$^{-3}$) because their
+\texttt{cer\_factor} is essentially $p^*/q_\text{ctx,1}$ for a single
+position --- highly variable with $M$ and $q_\text{ctx,1}$ ---
+while $K{>}1$ variants benefit from the multiplicative $K$th-root structure
+of the joint solver and concentrate above 1.0.
+
+The $K{=}1$ HP class has a noticeably tighter upper tail ($p_{95} = 1.15$
+vs.\ $5.46$ for non-HP), reflecting that HP-context $q_\text{ctx,i}$ is
+2--20$\times$ larger than non-HP, so even strongly supported single-HP
+variants struggle to clear the threshold. This is the framework working as
+designed: a strong HP-only signal at $K{=}1$ is precisely what one would
+expect from miscalled HP runs in a peer cluster.
+
+\subsection{Robustness to $q_\text{ctx}$ misspecification}
+\label{sec:val_b3}
+
+We perturb every stored $q_\text{ctx,i}$ by $\pm 50\%$ and recompute
+\texttt{cer\_factor}. A flip is a decision change relative to the
+threshold $\geq\!1.0$.
+
+\begin{table}[h]
+\centering
+\caption{Decision flip rate under $q_\text{ctx}$ perturbation, 12{,}948
+non-anchor variants.}
+\label{tab:val_sensitivity}
+\begin{tabular}{l r r r}
+\toprule
+scaling      & pass count & pass rate & flips vs.\ baseline \\
+\midrule
+$0.5\times$  & 5{,}352    & 41.3\%    & 960 \quad (7.4\%) \\
+$1.0\times$  & 4{,}392    & 33.9\%    & 0 \\
+$1.5\times$  & 3{,}887    & 30.0\%    & 505 \quad (3.9\%) \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+Fewer than 8\% of decisions change at $\pm 50\%$ perturbation. The
+asymmetry follows from the geometry: at $K{=}1$, the factor scales as
+$q^*/q_\text{ctx}$, so halving $q_\text{ctx}$ doubles the factor while
+inflating by 1.5$\times$ only divides it by 1.5. Most decisions sit far
+from the threshold (Section~\ref{sec:val_b2}), insulating them from
+$q_\text{ctx}$ misspecification within this band.
+
+\subsection{HP-variant rescue}
+\label{sec:val_b4}
+
+A pure-HP-context variant — every position is an HP-length event — would
+be invisible under v0.7's blanket HP normalization
+(\texttt{hp\_normalize\_min\_length=1}; see~\cite{hp_paper}~\S 1.2),
+which collapses any HP-length difference into the parent cluster's
+identity-equivalent. In the current corpus, 3{,}244 of 12{,}948 non-anchor
+variants are pure-HP. Of these, 215 (6.6\%) clear the
+$\texttt{cer\_factor} \geq 1.0$ threshold; these are the variants the
+framework rescues.
+
+The rescue count is modest in absolute terms but qualitatively distinct:
+v0.7 could not see this class of variation at all. A 20-record uniform
+sample (RNG seed 42, file
+\texttt{validation/metrics/cer\_validation\_b4\_review\_sample.csv}) is
+available for biological-plausibility review; rescue candidates are
+predominantly L=2--3 single-deletion events, consistent with the most
+populated HP-context tags in the empirical $q_\text{ctx}$ tables
+(\cite{hp_paper}~\S 8.6). A more thorough biological-truth assessment would
+require taxonomic verification of each rescued variant against reference
+databases — beyond the scope of this validation, but tractable as a
+follow-up using the validation pipeline already in use for the speconsense
+0.8 release report.
+
+\subsection{Specimen-level outcomes}
+\label{sec:val_b5}
+
+The framework affects which non-anchor variants survive but not whether a
+specimen produces output: anchor clusters always pass under both the
+context-aware and raw-$p^*$ frameworks. Aggregating the per-variant
+decisions from Section~\ref{sec:val_b1} to the specimen level
+(Table~\ref{tab:val_dropouts}) yields a near-symmetric outcome: 2 specimens
+lose all non-anchor variants under context-aware that would have survived
+under raw $p^*$, and 3 specimens in the reverse direction. All five retain
+their anchor, so the run produces no organism dropouts in either framework.
+
+\begin{table}[h]
+\centering
+\caption{Per-specimen pass-count comparison, 955 specimens, raw threshold
+$p^* > 3\bar{q}$.}
+\label{tab:val_dropouts}
+\begin{tabular}{l r}
+\toprule
+status                  & specimens \\
+\midrule
+agree, both pass        & 758 \\
+agree, neither passes   & 192 \\
+ctx-only dropout        & 2 \\
+raw-only dropout        & 3 \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+The 192 ``neither passes'' specimens have no non-anchor variants strong
+enough to clear either threshold; their primary anchor cluster carries the
+specimen's call. The five disagreement specimens are predominantly
+low-variant-count cases (1--4 non-anchors each) whose lone candidate sits
+on the threshold under one framework but not the other. Their anchor calls
+are unaffected.
 
 \section{Limitations}
 
@@ -1089,7 +1240,7 @@ but is not yet implemented.
 
 \paragraph{Long HP runs ($L \geq 6$).} The framework does not extend to
 $L \geq 6$ HP variants; these continue to be blanket-discarded as in the
-existing pipeline. The HP error analysis~\cite{hp_paper}~\S 8.1 documents that
+existing pipeline. The HP error analysis~\cite{hp_paper}~\S 9.1 documents that
 accuracy degrades sharply at $L \geq 6$ and variant calling becomes
 unreliable; this is a property of the data, not the framework.
 
