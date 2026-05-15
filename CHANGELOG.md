@@ -7,6 +7,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed (pipeline reorder — pre-release of 0.8.0)
+
+- **MAD outlier removal now runs before CER validation.** Previously MAD lived inside the final-consensus worker (Phase 11), after CER (Phase 9) had already annotated each cluster against the pre-MAD M, N, and consensus. The shipped FASTA therefore described a post-MAD cluster while its `cer_factor` annotation described a pre-MAD cluster. The pipeline now runs MAD-cleaned consensus generation as Phase 9, with CER (Phase 10), size filtering (Phase 11), and output emission (Phase 12) all consuming the post-MAD state. The `err_factor` calculation already used the post-MAD MSA and continues to do so.
+- **`--min-size` and `--min-cluster-ratio` now apply to post-MAD read counts.** A cluster whose pre-MAD size exceeds `--min-size` but whose post-MAD size falls below will be dropped where previously it would have survived. The semantic shift is small in practice because MAD typically removes single-read outliers, but it is observable on edge cases.
+- **Metadata is now internally consistent on M and N.** Previously `M` was post-MAD (read at metadata-emission time, after MAD had subtracted outliers in Phase 11) but `N = cer_group_N` was pre-MAD (stamped during Phase 9 CER before MAD ran). Both are now post-MAD, so the CER decision recorded in metadata references the same population that's reported in the variant record.
+- Pipeline phases renumbered 1–13 to reflect the new ordering (was 1–12).
+
 ## [0.8.0] - 2026-05-01
 
 This is a major release. Headline themes:
@@ -52,7 +59,7 @@ This is a major release. Headline themes:
 
 #### Other additions
 
-- **MAD-based outlier removal at final consensus** (core) — Replaces the earlier `--outlier-identity` static threshold. Computes per-read identity to consensus, drops reads beyond `n × MAD` from the median (robust to skewed distributions). No knob — runs unconditionally. Removes single-read outliers that would otherwise inflate `err_factor`
+- **MAD-based outlier removal in cluster consensus generation** (core) — Replaces the earlier `--outlier-identity` static threshold. Computes per-read identity to consensus, drops reads beyond `n × MAD` from the median (robust to skewed distributions). The MAD pass runs before CER validation, so CER, size filtering, err_factor, and final FASTA emission all observe the post-MAD cluster. Removes single-read outliers that would otherwise inflate `err_factor` and skew CER decisions
 - **Per-specimen variant tree** (summarize) — `__Summary__/trees/{specimen}.txt` renders an ASCII hierarchy of every variant in a specimen (passed, `.ns`, `.lq` together), grouped by core identity group. Each non-anchor variant branches from the larger-size peer with the highest pairwise identity, with a one-line edit summary (substitutions, single-nt indels, short ≤3 nt indels, long indels). Filtered variants carry the on-disk status marker (`-1.v4.ns`, `-1.v8.lq`) so they're visually distinct from passed variants that may share the same vid after summarize's renaming
 - **`--hp-normalization-length` parameter** (core + summarize) — Unifies the HP threshold across `are_homopolymer_equivalent`, `_classify_subcluster_groups`, `is_homopolymer_event`, distance calculations, and MSA-based variant merging. Default 6 matches the HP error rate paper's recommendation of CER-evaluating L≤5 HP variants. Set to 1 for legacy blanket-normalize-all behavior
 - **`build_adjustment_params(hp_normalization_length=N)` factory** (`speconsense.distances`) — Returns an `AdjustmentParams` variant with the requested HP threshold, sharing all other STANDARD settings

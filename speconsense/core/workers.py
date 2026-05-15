@@ -636,13 +636,13 @@ def _process_cluster_worker(args) -> Tuple[List[Dict], Set[str]]:
 
     # Note: a first-pass absolute-identity outlier filter used to run here
     # (see ``--outlier-identity``, removed). Outlier screening is now done
-    # via MAD-based detection at final consensus generation
+    # via MAD-based detection in Phase 9 cluster consensus generation
     # (_generate_cluster_consensus_worker), which is sensitive to cluster-
     # relative spread rather than an absolute threshold. Contaminant reads
     # from a different organism are handled by cross-cluster reassignment
     # (Phase 6); low-quality reads from the correct organism are handled
-    # by MAD at final consensus. If initial-consensus quality turns out to
-    # degrade phasing meaningfully, revisit adding a MAD pass here too.
+    # by MAD in Phase 9. If initial-consensus quality turns out to degrade
+    # phasing meaningfully, revisit adding a MAD pass here too.
 
     # Detect variants (OR across full cluster and quality-biased sample).
     # The sample mirrors what the final IUPAC ambiguity pass will see; without
@@ -745,20 +745,31 @@ def _trim_primers_standalone(sequence: str, primers: Optional[List[Tuple[str, st
 
 
 def _generate_cluster_consensus_worker(args) -> Dict:
-    """Worker function for parallel final consensus generation.
+    """Worker function for parallel cluster consensus generation (Phase 9).
+
+    Runs SPOA → MAD outlier detection → re-SPOA on cleaned reads → IUPAC
+    ambiguity calling → primer trimming. The outputs are stamped onto each
+    cluster_dict by the Phase 9 orchestrator so that CER (Phase 10), size
+    filtering (Phase 11), and output emission (Phase 12) all observe the
+    same post-MAD cluster state.
 
     Must be at module level for ProcessPoolExecutor pickling.
 
     Args:
         args: Tuple of (final_idx, cluster_read_ids, sequences, qualities, config)
-              - final_idx: 1-based cluster index
+              - final_idx: cluster index (used to correlate results back to
+                the originating cluster_dict; not an output rank)
               - cluster_read_ids: Set of read IDs in this cluster
               - sequences: Dict mapping read_id -> sequence
               - qualities: Dict mapping read_id -> mean quality score
               - config: ConsensusGenerationConfig
 
     Returns:
-        Dict with all computed results for this cluster
+        Dict with all computed results for this cluster. Key fields:
+            consensus, trimmed_consensus, msa, rid, rid_min, iupac_count,
+            cluster (post-MAD set), actual_size (post-MAD), sampled_ids,
+            sorted_cluster_ids, sorted_sampled_ids, mad_outlier_ids,
+            dropped_by_min_reads, found_primers.
     """
     final_idx, cluster_read_ids, sequences, qualities, config = args
 
