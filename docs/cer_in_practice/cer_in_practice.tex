@@ -21,7 +21,7 @@
 
 \title{Critical error rate in practice:\\context-aware variant significance for nanopore amplicon pipelines}
 \author{Josh Walker}
-\date{Internal review draft, May 2026 (commit 5d33d1d)}
+\date{Internal review draft, May 2026 (commit 611245a)}
 
 \begin{document}
 \maketitle
@@ -976,9 +976,10 @@ two layers of mechanism, distinguished by their position relative to CER
 evaluation in the pipeline.
 
 \paragraph{Pre-CER cleanup} runs before \texttt{cer\_factor} is computed
-(speconsense Phases 2--5) and reduces $K$-inflation at the source by
-preventing spurious cluster splits and dropping internally inconsistent
-clusters before they reach pairwise comparison:
+(speconsense Phases 2--9) and reduces $K$-inflation at the source by
+preventing spurious cluster splits, dropping internally inconsistent
+clusters, and removing read-level outliers that would distort the
+consensus:
 
 \begin{itemize}
 \item \textbf{Homopolymer-equivalence merging of near-identical post-phasing
@@ -989,26 +990,22 @@ would inflate $K$ by one or more positions per HP run.
 \item \textbf{Noise filter} (Phase 5) drops small clusters with no-majority
 consensus columns: a cluster whose reads cannot agree on any single sequence
 at multiple positions cannot serve as a reliable $K$ input.
+
+\item \textbf{MAD outlier removal} (Phase 9), part of cluster consensus
+generation: identifies reads whose identity to the initial consensus is
+more than $n\!\times\!\text{MAD}$ below the cluster median, drops them,
+and re-runs SPOA on the cleaned reads. Removes single-read instabilities
+that would otherwise show up as spurious differing positions in the
+pairwise comparison or distort the IUPAC ambiguity calling. The cleaned
+MSA and consensus then flow forward as CER's inputs, so $M$, $N$, $K$, and
+the per-position context tags all describe the same post-outlier cluster
+that is ultimately emitted to the FASTA.
 \end{itemize}
 
 \paragraph{Post-CER cleanup} runs after \texttt{cer\_factor} is annotated
-and acts on a different lever --- routing rather than recomputation. The
-\texttt{cer\_factor} value carried into summarize is computed from the
-Phase 9 consensus, so post-Phase-9 cleanup does not change CER's $K$ input
-unless CER is re-evaluated. In practice this matters less than it might
-appear:
+and acts on a different lever --- routing rather than recomputation:
 
 \begin{itemize}
-\item \textbf{MAD outlier removal during final consensus generation}
-(Phase 11) excludes single-read identity outliers from the cluster before
-the final SPOA call. The resulting consensus may differ from the Phase 9
-consensus at the outlier positions, but those positions are by construction
-single-read instabilities; they are unlikely to coincide with the
-between-cluster differences that determine $K$. CER could be recomputed
-post-MAD for strict consistency, at the cost of a second pairwise pass; we
-have not seen the recomputation flip routing decisions in spot-checks of
-the corpus, but quantifying this is open future work.
-
 \item \textbf{MSA-based variant merging in summarize with IUPAC consensus}
 collapses post-phasing clusters whose remaining differences are dominated
 by ambiguity-compatible positions. These merges happen at the summarize
@@ -1017,7 +1014,7 @@ larger member's \texttt{cer\_factor}; the smaller member's annotation is
 preserved in the merge record for reproducibility.
 
 \item \textbf{Cluster-wide homogeneity statistic, \texttt{err\_factor}},
-reported per cluster (Phase 11) and filtered in summarize via
+reported per cluster (Phase 12) and filtered in summarize via
 \texttt{--max-err-factor} (default 1.5). \texttt{err\_factor} is the ratio
 of observed per-column disagreement to the $q_\text{ctx}$-predicted rate,
 pooled across the cluster's MSA. Values near 1.0 indicate a cluster
@@ -1037,8 +1034,10 @@ be recomputed under a revised $q_\text{ctx}$ table.
 \end{itemize}
 
 None of these mechanisms replaces CER; the pre-CER ones make CER's $K$
-input more trustworthy upstream, while the post-CER ones provide a second
-line of triage by routing rather than re-adjudicating.
+input more trustworthy upstream --- including by removing the read-level
+outliers that the previous pipeline ordering would only have cleaned up
+after \texttt{cer\_factor} was already stamped --- while the post-CER ones
+provide a second line of triage by routing rather than re-adjudicating.
 
 \subsection{Filter behavior under $q_\text{ctx}$ refresh}
 \label{sec:qctx_refresh}
@@ -1087,7 +1086,7 @@ metadata emitted per cluster (Section~\ref{sec:reproducibility}) lets every
 analysis below run as an offline replay against the cached
 $N, M, K$, $n_\text{sites}$, context tags, and $q_\text{ctx,i}$ values, so no
 re-running of the core pipeline is required. The corpus contains
-12,948 non-anchor variants across the 955 specimens. Reproduction scripts
+11{,}883 non-anchor variants across the 955 specimens. Reproduction scripts
 and the CSV outputs cited below live in the \texttt{validation/} directory
 of the speconsense paper bundle.
 
@@ -1098,9 +1097,9 @@ For each non-anchor variant we recompute the raw uniform-model $p^*$ via the
 single-rate solver (Walker~2026a~\S 2) and compare its accept/reject decision
 to the context-aware decision $\texttt{cer\_factor} \geq 1.0$. The raw-$p^*$
 threshold is set in \emph{p-units} consistent with $p^*$: we use $p^* > 3\bar{q}$
-where $\bar{q} = 0.5954\%$ is the run-pooled mean of all 39{,}746 stored
+where $\bar{q} = 0.5925\%$ is the run-pooled mean of all 33{,}216 stored
 $q_\text{ctx,i}$ values (q-units, per-base). The factor of 3 converts $\bar{q}$
-to a total-rate $\bar{p} = 1.79\%$ under the uniform model $q = p/3$. With both
+to a total-rate $\bar{p} = 1.78\%$ under the uniform model $q = p/3$. With both
 sides of the comparison in p-units, the gate isolates the value of context
 awareness: if the framework collapsed $q_\text{ctx,i}$ to a single rate,
 $\bar{q}$ would be the natural choice, so any disagreement at the comparable
@@ -1109,22 +1108,22 @@ threshold reflects context-class effects directly.
 \begin{table}[h]
 \centering
 \caption{Per-variant decision agreement, raw $p^*$ vs.\ context-aware
-\texttt{cer\_factor}, on the 12{,}948 non-anchor variants of the
-\texttt{ont98} run, with raw threshold $p^* > 3\bar{q} = 1.79\%$.}
+\texttt{cer\_factor}, on the 11{,}883 non-anchor variants of the
+\texttt{ont98} run, with raw threshold $p^* > 3\bar{q} = 1.78\%$.}
 \label{tab:val_decisions}
 \begin{tabular}{l r r}
 \toprule
                 & ctx pass & ctx fail \\
 \midrule
-raw pass        & 4{,}197  & 154 \\
-raw fail        & 195      & 8{,}402 \\
+raw pass        & 3{,}535  & 138 \\
+raw fail        & 187      & 8{,}023 \\
 \bottomrule
 \end{tabular}
 \end{table}
 
-Agreement is 97.3\%. The 349 disagreements split in both directions:
-195 variants are admitted only by the context-aware framework (ctx-only),
-and 154 are admitted only by raw $p^*$ (raw-only). The two cells correspond
+Agreement is 97.3\%. The 325 disagreements split in both directions:
+187 variants are admitted only by the context-aware framework (ctx-only),
+and 138 are admitted only by raw $p^*$ (raw-only). The two cells correspond
 to opposite halves of the $q_\text{ctx}$ distribution. Variants in the
 ctx-only cell sit at non-HP positions where $q_\text{ctx,i} < \bar{q}$
 (typically $q_\text{ctx} \approx 0.39\%$ for non-HP substitutions): the
@@ -1133,15 +1132,15 @@ raw $p^*$. Variants in the raw-only cell sit predominantly at HP positions
 where $q_\text{ctx,i} > \bar{q}$ (HP errors are 2--20$\times$ more common
 than non-HP): the context-aware framework demands a stronger signal there
 and rejects them. Net effect on the corpus: the context-aware framework
-admits 41 more variants than raw $p^*$ at $\bar{p} = 3\bar{q}$, but with
+admits 49 more variants than raw $p^*$ at $\bar{p} = 3\bar{q}$, but with
 substantially different per-context allocation.
 
 \subsection{\texttt{cer\_factor} distribution by variant class}
 \label{sec:val_b2}
 
-Partitioning the 12{,}948 non-anchor variants by $K$ and HP-context yields
-three classes: $K{=}1$ non-HP (4{,}039), $K{=}1$ HP (2{,}996), and $K{>}1$
-mixed (5{,}913). The shipped \texttt{--min-cer-factor=1.0} default rejects
+Partitioning the 11{,}883 non-anchor variants by $K$ and HP-context yields
+three classes: $K{=}1$ non-HP (3{,}930), $K{=}1$ HP (2{,}882), and $K{>}1$
+mixed (5{,}071). The shipped \texttt{--min-cer-factor=1.0} default rejects
 each class at very different rates (Table~\ref{tab:val_distribution}).
 
 \begin{table}[h]
@@ -1156,15 +1155,15 @@ each class at very different rates (Table~\ref{tab:val_distribution}).
 \toprule
 class       & $n$    & $p_5$   & $p_{25}$ & $p_{50}$ & $p_{75}$ & $p_{95}$ & $<\!1.0$ & $<\!2.0$ \\
 \midrule
-$K{=}1$ non-HP & 4{,}039 & 0.0007 & 0.0016 & 0.0119  & 0.0741 & 5.46  & 90.8\% & 92.9\% \\
-$K{=}1$ HP     & 2{,}996 & 0.0006 & 0.0016 & 0.0124  & 0.0967 & 1.15  & 94.5\% & 96.7\% \\
-$K{>}1$ mixed  & 5{,}913 & 0.130  & 0.641  & 2.43    & 10.6   & 97.0  & 34.8\% & 45.3\% \\
+$K{=}1$ non-HP & 3{,}930 & 0.0007 & 0.0016 & 0.0107  & 0.0719 & 5.37  & 90.9\% & 93.0\% \\
+$K{=}1$ HP     & 2{,}882 & 0.0006 & 0.0016 & 0.0116  & 0.0863 & 1.12  & 94.6\% & 96.8\% \\
+$K{>}1$ mixed  & 5{,}071 & 0.130  & 0.517  & 2.19    & 10.57  & 106   & 36.7\% & 47.2\% \\
 \bottomrule
 \end{tabular}
 \end{table}
 
-The default behaves empirically as a $K{=}1$ noise filter: 91--94\% of
-single-position variants fall below threshold, while only 35\% of $K{>}1$
+The default behaves empirically as a $K{=}1$ noise filter: 91--95\% of
+single-position variants fall below threshold, while only 37\% of $K{>}1$
 variants do. This separation is the empirical justification for the default.
 $K{=}1$ variants have a wide median range (10$^{-3}$) because their
 \texttt{cer\_factor} is essentially $p^*/q_\text{ctx,1}$ for a single
@@ -1172,8 +1171,8 @@ position --- highly variable with $M$ and $q_\text{ctx,1}$ ---
 while $K{>}1$ variants benefit from the multiplicative $K$th-root structure
 of the joint solver and concentrate above 1.0.
 
-The $K{=}1$ HP class has a noticeably tighter upper tail ($p_{95} = 1.15$
-vs.\ $5.46$ for non-HP), reflecting that HP-context $q_\text{ctx,i}$ is
+The $K{=}1$ HP class has a noticeably tighter upper tail ($p_{95} = 1.12$
+vs.\ $5.37$ for non-HP), reflecting that HP-context $q_\text{ctx,i}$ is
 2--20$\times$ larger than non-HP, so even strongly supported single-HP
 variants struggle to clear the threshold. This is the framework working as
 designed: a strong HP-only signal at $K{=}1$ is precisely what one would
@@ -1188,16 +1187,16 @@ threshold $\geq\!1.0$.
 
 \begin{table}[h]
 \centering
-\caption{Decision flip rate under $q_\text{ctx}$ perturbation, 12{,}948
+\caption{Decision flip rate under $q_\text{ctx}$ perturbation, 11{,}883
 non-anchor variants.}
 \label{tab:val_sensitivity}
 \begin{tabular}{l r r r}
 \toprule
 scaling      & pass count & pass rate & flips vs.\ baseline \\
 \midrule
-$0.5\times$  & 5{,}352    & 41.3\%    & 960 \quad (7.4\%) \\
-$1.0\times$  & 4{,}392    & 33.9\%    & 0 \\
-$1.5\times$  & 3{,}887    & 30.0\%    & 505 \quad (3.9\%) \\
+$0.5\times$  & 4{,}559    & 38.4\%    & 837 \quad (7.0\%) \\
+$1.0\times$  & 3{,}722    & 31.3\%    & 0 \\
+$1.5\times$  & 3{,}303    & 27.8\%    & 419 \quad (3.5\%) \\
 \bottomrule
 \end{tabular}
 \end{table}
@@ -1216,8 +1215,8 @@ A pure-HP-context variant — every position is an HP-length event — would
 be invisible under v0.7's blanket HP normalization
 (\texttt{hp\_normalize\_min\_length=1}; see~\cite{hp_paper}~\S 1.2),
 which collapses any HP-length difference into the parent cluster's
-identity-equivalent. In the current corpus, 3{,}244 of 12{,}948 non-anchor
-variants are pure-HP. Of these, 215 (6.6\%) clear the
+identity-equivalent. In the current corpus, 3{,}101 of 11{,}883 non-anchor
+variants are pure-HP. Of these, 197 (6.4\%) clear the
 $\texttt{cer\_factor} \geq 1.0$ threshold; these are the variants the
 framework rescues.
 
@@ -1241,9 +1240,9 @@ The framework affects which non-anchor variants survive but not whether a
 specimen produces output: anchor clusters always pass under both the
 context-aware and raw-$p^*$ frameworks. Aggregating the per-variant
 decisions from Section~\ref{sec:val_b1} to the specimen level
-(Table~\ref{tab:val_dropouts}) yields a near-symmetric outcome: 2 specimens
+(Table~\ref{tab:val_dropouts}) yields a near-symmetric outcome: 4 specimens
 lose all non-anchor variants under context-aware that would have survived
-under raw $p^*$, and 3 specimens in the reverse direction. All five retain
+under raw $p^*$, and 5 specimens in the reverse direction. All nine retain
 their anchor, so the run produces no organism dropouts in either framework.
 
 \begin{table}[h]
@@ -1255,18 +1254,18 @@ $p^* > 3\bar{q}$.}
 \toprule
 status                  & specimens \\
 \midrule
-agree, both pass        & 758 \\
-agree, neither passes   & 192 \\
-ctx-only dropout        & 2 \\
-raw-only dropout        & 3 \\
+agree, both pass        & 737 \\
+agree, neither passes   & 209 \\
+ctx-only dropout        & 4 \\
+raw-only dropout        & 5 \\
 \bottomrule
 \end{tabular}
 \end{table}
 
-The 192 ``neither passes'' specimens have no non-anchor variants strong
+The 209 ``neither passes'' specimens have no non-anchor variants strong
 enough to clear either threshold; their primary anchor cluster carries the
-specimen's call. The five disagreement specimens are predominantly
-low-variant-count cases (1--4 non-anchors each) whose lone candidate sits
+specimen's call. The nine disagreement specimens are predominantly
+low-variant-count cases (1--14 non-anchors each) whose lone candidate sits
 on the threshold under one framework but not the other. Their anchor calls
 are unaffected.
 
