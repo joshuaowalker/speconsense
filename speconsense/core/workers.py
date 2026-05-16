@@ -749,9 +749,12 @@ def _generate_cluster_consensus_worker(args) -> Dict:
 
     Runs SPOA → MAD outlier detection → re-SPOA on cleaned reads → IUPAC
     ambiguity calling → primer trimming. The outputs are stamped onto each
-    cluster_dict by the Phase 9 orchestrator so that CER (Phase 10), size
-    filtering (Phase 11), and output emission (Phase 12) all observe the
-    same post-MAD cluster state.
+    cluster_dict by the Phase 9 orchestrator so that the post-refinement
+    merge (Phase 10), CER (Phase 11), size filtering (Phase 12), and output
+    emission (Phase 13) all observe the same post-MAD cluster state. The
+    Phase 10 orchestrator re-invokes this worker on the union of read_ids
+    when it merges clusters; the outputs are identical in shape and are
+    re-stamped onto the survivor cluster_dict.
 
     Must be at module level for ProcessPoolExecutor pickling.
 

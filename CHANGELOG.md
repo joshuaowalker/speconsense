@@ -9,10 +9,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed (pipeline reorder — pre-release of 0.8.0)
 
-- **MAD outlier removal now runs before CER validation.** Previously MAD lived inside the final-consensus worker (Phase 11), after CER (Phase 9) had already annotated each cluster against the pre-MAD M, N, and consensus. The shipped FASTA therefore described a post-MAD cluster while its `cer_factor` annotation described a pre-MAD cluster. The pipeline now runs MAD-cleaned consensus generation as Phase 9, with CER (Phase 10), size filtering (Phase 11), and output emission (Phase 12) all consuming the post-MAD state. The `err_factor` calculation already used the post-MAD MSA and continues to do so.
+- **MAD outlier removal now runs before CER validation.** Previously MAD lived inside the final-consensus worker (Phase 11), after CER (Phase 9) had already annotated each cluster against the pre-MAD M, N, and consensus. The shipped FASTA therefore described a post-MAD cluster while its `cer_factor` annotation described a pre-MAD cluster. The pipeline now runs MAD-cleaned consensus generation as Phase 9, with the post-refinement merge (Phase 10), CER (Phase 11), size filtering (Phase 12), and output emission (Phase 13) all consuming the post-MAD state. The `err_factor` calculation already used the post-MAD MSA and continues to do so.
 - **`--min-size` and `--min-cluster-ratio` now apply to post-MAD read counts.** A cluster whose pre-MAD size exceeds `--min-size` but whose post-MAD size falls below will be dropped where previously it would have survived. The semantic shift is small in practice because MAD typically removes single-read outliers, but it is observable on edge cases.
 - **Metadata is now internally consistent on M and N.** Previously `M` was post-MAD (read at metadata-emission time, after MAD had subtracted outliers in Phase 11) but `N = cer_group_N` was pre-MAD (stamped during Phase 9 CER before MAD ran). Both are now post-MAD, so the CER decision recorded in metadata references the same population that's reported in the variant record.
-- Pipeline phases renumbered 1–13 to reflect the new ordering (was 1–12).
+- Pipeline phases renumbered to 1–14 to reflect the new ordering (was 1–12).
+
+### Added (pipeline reorder — pre-release of 0.8.0)
+
+- **Post-refinement merge (Phase 10).** A new phase between MAD-cleaned consensus generation (Phase 9) and CER validation (Phase 11). It collapses clusters whose post-MAD `trimmed_consensus` values are identical (or HP-equivalent under `--hp-normalization-length`) into a single survivor, then re-runs the Phase 9 worker on the union of read_ids so the survivor's MSA, consensus, rid metrics, and IUPAC count reflect the merged read set. Catches convergence introduced by Phases 6–9 — read reassignment (6), discard recovery (7), second phasing (8), and MAD itself (9) can leave two clusters with the same shipped consensus, which the earlier Phase 2 and Phase 4 merges (operating on pre-MAD SPOA consensuses) cannot detect. Honors `--disable-cluster-merging` exactly as Phases 2 and 4 do. Affected metadata: `cer_group_N` and `M` reflect the merged cluster's read counts where merges occurred; identity-group composition shrinks by exactly the merge count.
 
 ## [0.8.0] - 2026-05-01
 

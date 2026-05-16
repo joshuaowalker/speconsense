@@ -2050,8 +2050,219 @@ class SpecimenClusterer:
 
         return surviving
 
+    def _run_postrefinement_merge(self, subclusters: List[Dict]) -> List[Dict]:
+        """Phase 10: Post-refinement merge — combine clusters whose post-MAD
+        consensuses are identical or HP-equivalent.
+
+        Phases 6–9 (read reassignment, discard recovery, second phasing, MAD
+        outlier removal) can leave the specimen with two clusters that ship
+        the same FASTA sequence. The earlier merge passes (Phases 2 and 4)
+        compared pre-MAD SPOA consensuses and cannot catch convergence that
+        only appears after MAD cleanup. This phase compares the post-MAD
+        ``trimmed_consensus`` already stamped by Phase 9 (no extra SPOA for
+        the comparison itself) and unions the read sets of any equivalent
+        clusters.
+
+        For each merge group with more than one member, the largest member
+        is kept and the others' ``read_ids`` are unioned into it; the merged
+        cluster's Phase 9 artifacts are then refreshed by re-running
+        ``_generate_cluster_consensus_worker`` on the union so that CER
+        (Phase 11), size filtering (Phase 12), and err_factor (Phase 13)
+        all observe a single coherent MSA per surviving cluster.
+
+        Honors ``--disable-cluster-merging`` (no-op when set), matching
+        Phases 2 and 4.
+        """
+        if self.disable_cluster_merging:
+            logging.debug("Cluster merging disabled, skipping post-refinement merge")
+            return subclusters
+        if len(subclusters) < 2:
+            return subclusters
+
+        # Build (index → trimmed_consensus) map from stamped Phase 9 outputs.
+        # Fall back to the IUPAC-called untrimmed consensus when trimmed is
+        # absent (e.g., no primers configured); that's the same fallback the
+        # FASTA emission uses.
+        idx_to_consensus: Dict[int, str] = {}
+        for idx, cluster_dict in enumerate(subclusters):
+            seq = cluster_dict.get('trimmed_consensus') or cluster_dict.get('consensus')
+            if seq:
+                idx_to_consensus[idx] = seq
+
+        if len(idx_to_consensus) < 2:
+            return subclusters
+
+        # Equivalence grouping. Mirror the dispatch in merge_similar_clusters:
+        # use the scalable path (vsearch candidates + union-find) when the
+        # cluster count exceeds the same 50-cluster threshold, otherwise the
+        # brute-force O(n²) path.
+        consensus_to_clusters: Dict[str, List[int]] = defaultdict(list)
+
+        if self.disable_homopolymer_equivalence:
+            for idx, consensus in sorted(idx_to_consensus.items()):
+                consensus_to_clusters[consensus].append(idx)
+        else:
+            use_scalable = (
+                self.scale_threshold > 0
+                and self._candidate_finder is not None
+                and self._candidate_finder.is_available
+                and len(idx_to_consensus) > 50
+            )
+            if use_scalable:
+                str_to_index = {str(i): i for i in idx_to_consensus.keys()}
+                consensus_seq_dict = {str(i): seq for i, seq in idx_to_consensus.items()}
+                operation = self._get_scalable_operation()
+                equivalence_groups = operation.compute_equivalence_groups(
+                    sequences=consensus_seq_dict,
+                    equivalence_fn=self.are_homopolymer_equivalent,
+                    output_dir=self.output_dir,
+                    min_candidate_identity=0.95,
+                )
+                for group in equivalence_groups:
+                    if group:
+                        representative = group[0]
+                        repr_consensus = consensus_seq_dict[representative]
+                        for str_id in group:
+                            consensus_to_clusters[repr_consensus].append(str_to_index[str_id])
+            else:
+                for idx, consensus in sorted(idx_to_consensus.items()):
+                    found_group = False
+                    for existing_consensus in consensus_to_clusters.keys():
+                        if self.are_homopolymer_equivalent(consensus, existing_consensus):
+                            consensus_to_clusters[existing_consensus].append(idx)
+                            found_group = True
+                            break
+                    if not found_group:
+                        consensus_to_clusters[consensus].append(idx)
+
+        # Collect merge groups (size > 1) and pick a survivor per group: the
+        # cluster with the most reads. Ties broken by lower index for
+        # determinism. Other members are dropped after the union.
+        merge_groups: List[Tuple[int, List[int]]] = []
+        for member_indices in consensus_to_clusters.values():
+            if len(member_indices) <= 1:
+                continue
+            survivor = max(
+                member_indices,
+                key=lambda i: (len(subclusters[i]['read_ids']), -i),
+            )
+            others = [i for i in member_indices if i != survivor]
+            merge_groups.append((survivor, others))
+
+        if not merge_groups:
+            logging.debug("Post-refinement merge: no equivalent clusters")
+            return subclusters
+
+        # Union read_ids on survivors and queue a Phase 9 worker rerun for
+        # each. Track which indices are dropped so the final list can be
+        # rebuilt in input order.
+        primers = getattr(self, 'primers', None)
+        config = ConsensusGenerationConfig(
+            max_sample_size=self.max_sample_size,
+            enable_iupac_calling=self.enable_iupac_calling,
+            min_ambiguity_frequency=self.min_ambiguity_frequency,
+            min_ambiguity_count=self.min_ambiguity_count,
+            disable_homopolymer_equivalence=self.disable_homopolymer_equivalence,
+            primers=primers,
+            enable_mad_outlier_removal=self.enable_mad_outlier_removal,
+        )
+
+        dropped_indices: Set[int] = set()
+        work_packages = []
+        for survivor_idx, others in merge_groups:
+            survivor_dict = subclusters[survivor_idx]
+            merged_read_ids = set(survivor_dict['read_ids'])
+            merged_from = list(survivor_dict.get('merged_from') or [])
+            for other_idx in others:
+                other_dict = subclusters[other_idx]
+                merged_read_ids.update(other_dict['read_ids'])
+                merged_from.append({
+                    'initial_cluster_num': other_dict.get('initial_cluster_num'),
+                    'allele_combo': other_dict.get('allele_combo'),
+                    'size': len(other_dict['read_ids']),
+                })
+                dropped_indices.add(other_idx)
+            survivor_dict['read_ids'] = merged_read_ids
+            survivor_dict['merged_from'] = merged_from
+
+            qualities = {
+                seq_id: statistics.mean(self.records[seq_id].letter_annotations["phred_quality"])
+                for seq_id in merged_read_ids
+            }
+            sequences = {seq_id: self.sequences[seq_id] for seq_id in merged_read_ids}
+            work_packages.append((survivor_idx, merged_read_ids, sequences, qualities, config))
+
+        # Re-run the Phase 9 worker on each merged read set so the survivor's
+        # MSA, post-MAD consensus, rid metrics, and IUPAC count reflect the
+        # union. Parallelism is unlikely to help since merge counts are
+        # typically small; threshold matches Phase 9.
+        if self.max_threads > 1 and len(work_packages) > 4:
+            from concurrent.futures import ProcessPoolExecutor
+            with ProcessPoolExecutor(max_workers=self.max_threads) as executor:
+                rerun_results = list(executor.map(
+                    _generate_cluster_consensus_worker, work_packages
+                ))
+        else:
+            rerun_results = [
+                _generate_cluster_consensus_worker(wp) for wp in work_packages
+            ]
+
+        # Re-stamp survivors with refreshed artifacts. Outliers identified on
+        # the merged read set go to discards; if MAD now drops the merged
+        # cluster below the 3-read floor, drop it entirely.
+        rerun_outlier_reads = 0
+        for result in rerun_results:
+            survivor_idx = result['final_idx']
+            cluster_dict = subclusters[survivor_idx]
+            mad_outlier_ids = result.get('mad_outlier_ids') or set()
+            dropped_by_min_reads = result.get('dropped_by_min_reads')
+
+            if dropped_by_min_reads:
+                self.discarded_read_ids.update(mad_outlier_ids)
+                rerun_outlier_reads += len(mad_outlier_ids)
+                dropped_indices.add(survivor_idx)
+                continue
+
+            if mad_outlier_ids:
+                self.discarded_read_ids.update(mad_outlier_ids)
+                rerun_outlier_reads += len(mad_outlier_ids)
+
+            cluster_dict['read_ids'] = set(result['cluster'])
+            cluster_dict['actual_size'] = result['actual_size']
+            cluster_dict['consensus'] = result['consensus']
+            cluster_dict['trimmed_consensus'] = result['trimmed_consensus']
+            cluster_dict['found_primers'] = result['found_primers']
+            cluster_dict['msa'] = result['msa']
+            cluster_dict['rid'] = result['rid']
+            cluster_dict['rid_min'] = result['rid_min']
+            cluster_dict['iupac_count'] = result['iupac_count']
+            cluster_dict['sampled_ids'] = result['sampled_ids']
+            cluster_dict['sorted_cluster_ids'] = result['sorted_cluster_ids']
+            cluster_dict['sorted_sampled_ids'] = result['sorted_sampled_ids']
+
+            if not cluster_dict['consensus']:
+                # Re-SPOA on the union failed somehow; drop the survivor and
+                # send its reads to discards rather than ship a no-consensus
+                # cluster.
+                self.discarded_read_ids.update(cluster_dict['read_ids'])
+                dropped_indices.add(survivor_idx)
+
+        surviving = [
+            cluster_dict
+            for idx, cluster_dict in enumerate(subclusters)
+            if idx not in dropped_indices
+        ]
+
+        merge_count = sum(len(others) for _, others in merge_groups)
+        message = f"Post-refinement merge: collapsed {merge_count} cluster(s) into {len(merge_groups)} survivor(s)"
+        if rerun_outlier_reads:
+            message += f" (-{rerun_outlier_reads} read(s) via MAD on merged sets)"
+        self._log_stage(message, surviving)
+
+        return surviving
+
     def _run_cer_validation(self, subclusters: List[Dict]) -> List[Dict]:
-        """Phase 10: CER validation — annotate clusters with pairwise CER factors.
+        """Phase 11: CER validation — annotate clusters with pairwise CER factors.
 
         Groups clusters by adjusted identity, then within each group:
         - The largest cluster (anchor) carries no pairwise comparison
@@ -2455,10 +2666,11 @@ class SpecimenClusterer:
         return best
 
     def _run_size_filtering(self, subclusters: List[Dict]) -> List[Dict]:
-        """Phase 11: Size filtering — drop clusters by size and ratio thresholds.
+        """Phase 12: Size filtering — drop clusters by size and ratio thresholds.
 
         Args:
-            subclusters: List of subclusters from Phase 10 (CER-annotated, post-MAD)
+            subclusters: List of subclusters from Phase 11 (CER-annotated, post-MAD,
+                post-refinement-merge)
 
         Returns:
             List of filtered clusters, sorted by size (largest first)
@@ -2503,11 +2715,12 @@ class SpecimenClusterer:
         return large_clusters
 
     def _write_cluster_outputs(self, clusters: List[Dict], output_file: str) -> Tuple[int, int]:
-        """Phase 12: Output emission — write final FASTA, FASTQ, MSA, and
-        compute err_factor on the post-MAD MSA stamped by Phase 9.
+        """Phase 13: Output emission — write final FASTA, FASTQ, MSA, and
+        compute err_factor on the post-MAD MSA stamped by Phase 9 (refreshed
+        by Phase 10 for any merged clusters).
 
         Args:
-            clusters: List of filtered clusters from Phase 11
+            clusters: List of filtered clusters from Phase 12
             output_file: Path to the output FASTA file
 
         Returns:
@@ -2586,13 +2799,16 @@ class SpecimenClusterer:
         return clusters_with_ambiguities, total_ambiguity_positions
 
     def _write_discarded_reads(self) -> None:
-        """Phase 13: Write discarded reads to a FASTQ file for inspection.
+        """Phase 14: Write discarded reads to a FASTQ file for inspection.
 
         Discards include:
         - Outlier reads removed during variant phasing
         - Reads from clusters dropped by the hard-floor filter or noise filter
         - Reads removed by MAD outlier filtering during Phase 9 consensus generation
-        - Reads from clusters filtered out by size/ratio thresholds (Phase 11)
+          or the Phase 10 post-refinement merge rerun
+        - Reads from clusters dropped by the Phase 10 merge when re-SPOA on the
+          merged read set failed
+        - Reads from clusters filtered out by size/ratio thresholds (Phase 12)
         - Reads filtered during orientation (when --orient-mode filter-failed)
 
         Output: cluster_debug/{sample_name}-discards.fastq
@@ -2623,11 +2839,14 @@ class SpecimenClusterer:
              9. Cluster consensus generation (SPOA → MAD outlier removal → re-SPOA →
                 IUPAC ambiguity calling → primer trimming; stamps post-MAD MSA and
                 consensus onto each cluster_dict for downstream phases)
-            10. CER validation (pairwise significance testing within identity groups,
+            10. Post-refinement merge (combine clusters whose post-MAD consensuses
+                are identical or HP-equivalent; re-runs Phase 9 worker on each
+                merge survivor so MSA and stamped artifacts reflect the union)
+            11. CER validation (pairwise significance testing within identity groups,
                 operating on post-MAD M, N, and consensuses)
-            11. Size filtering (min size and cluster-ratio thresholds, post-MAD counts)
-            12. Output emission (write FASTA, FASTQ, MSA; compute err_factor)
-            13. Write discarded reads (optional)
+            12. Size filtering (min size and cluster-ratio thresholds, post-MAD counts)
+            13. Output emission (write FASTA, FASTQ, MSA; compute err_factor)
+            14. Write discarded reads (optional)
 
         Args:
             algorithm: Clustering algorithm to use ('graph' for MCL or 'greedy')
@@ -2702,27 +2921,33 @@ class SpecimenClusterer:
 
             # Phase 9: Cluster consensus generation (SPOA → MAD → re-SPOA →
             # IUPAC ambiguity calling → primer trimming). Post-MAD MSA and
-            # consensus are stamped onto each cluster_dict so that CER (Phase
-            # 10), size filtering (Phase 11), and output emission (Phase 12)
-            # all observe the same post-MAD cluster state.
+            # consensus are stamped onto each cluster_dict so that the
+            # post-refinement merge (Phase 10), CER (Phase 11), size filtering
+            # (Phase 12), and output emission (Phase 13) all observe the same
+            # post-MAD cluster state.
             consensus_subclusters = self._run_cluster_consensus_generation(rephased_subclusters)
 
-            # Phase 10: CER validation (operates on post-MAD consensuses)
-            validated_subclusters = self._run_cer_validation(consensus_subclusters)
+            # Phase 10: Post-refinement merge (combine clusters whose post-MAD
+            # consensuses are identical or HP-equivalent; refreshes the
+            # survivor's Phase 9 artifacts via a worker rerun on the union).
+            merged_consensus_subclusters = self._run_postrefinement_merge(consensus_subclusters)
 
-            # Phase 11: Size filtering (post-MAD counts)
+            # Phase 11: CER validation (operates on post-MAD, post-merge consensuses)
+            validated_subclusters = self._run_cer_validation(merged_consensus_subclusters)
+
+            # Phase 12: Size filtering (post-MAD counts)
             filtered_clusters = self._run_size_filtering(validated_subclusters)
 
             # Capture for metadata serialization (write_metadata reads this).
             self.final_cluster_dicts = filtered_clusters
 
-            # Phase 12: Output emission
+            # Phase 13: Output emission
             consensus_output_file = os.path.join(self.output_dir, f"{self.sample_name}-all.fasta")
             clusters_with_ambiguities, total_ambiguity_positions = self._write_cluster_outputs(
                 filtered_clusters, consensus_output_file
             )
 
-            # Phase 13: Write discarded reads (optional)
+            # Phase 14: Write discarded reads (optional)
             if self.collect_discards and self.discarded_read_ids:
                 self._write_discarded_reads()
 

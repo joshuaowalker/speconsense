@@ -96,7 +96,7 @@ pytest -m "not slow"
 
 ### Key Processing Pipeline
 
-Read in `SpecimenClusterer.cluster()` (`speconsense/core/clusterer.py`); 12 sequential phases:
+Read in `SpecimenClusterer.cluster()` (`speconsense/core/clusterer.py`); 14 sequential phases:
 
 1. **Initial clustering** — MCL graph-based or greedy
 2. **Pre-phasing merge** — combine HP-equivalent initial clusters
@@ -106,10 +106,12 @@ Read in `SpecimenClusterer.cluster()` (`speconsense/core/clusterer.py`); 12 sequ
 6. **Read reassignment** (optional) — concordance-based moves within identity groups
 7. **Discard recovery** (optional, coupled to 6) — re-admit previously-dropped reads
 8. **Second phasing pass** — re-phase any clusters that gained reads via 6/7
-9. **CER validation** — annotate each non-anchor candidate with its `cer_factor`
-10. **Size filtering** — drop clusters below `--min-size` and `--min-cluster-ratio`
-11. **Output generation** — final consensus, MAD outlier removal, FASTA writing
-12. **Discard reads written** (optional, `--collect-discards`)
+9. **Cluster consensus generation** — SPOA → MAD outlier removal → re-SPOA → IUPAC ambiguity calling → primer trimming; stamps post-MAD MSA and consensus on each cluster_dict
+10. **Post-refinement merge** — combine clusters whose post-MAD consensuses are identical or HP-equivalent; reruns Phase 9 worker on each merge survivor
+11. **CER validation** — annotate each non-anchor candidate with its `cer_factor`
+12. **Size filtering** — drop clusters below `--min-size` and `--min-cluster-ratio`
+13. **Output emission** — write FASTA/FASTQ/MSA; compute `err_factor` on stamped MSA
+14. **Discard reads written** (optional, `--collect-discards`)
 
 Orientation (when `--orient-mode` ≠ skip) and primer trimming run during input processing and final consensus respectively, outside the numbered phases. Reads that fail clustering or are dropped by any filter accumulate in `self.discarded_read_ids`; phase 7 attempts to recover concordant ones.
 
