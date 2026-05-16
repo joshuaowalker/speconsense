@@ -121,6 +121,30 @@ def main():
                                     "~/.config/speconsense/error_models/, or a filesystem path to "
                                     "a YAML file with a 'rates' mapping. (default: dorado-v5.0)")
 
+    # MAD outlier removal tuning (internal). Exposed so the defaults can be
+    # calibrated against empirical runs; once dialed in, end users should
+    # not normally need to touch these. Defaults mirror
+    # ``speconsense.outliers.detect_rid_outliers`` so behavior is unchanged
+    # when these flags are omitted.
+    mad_group = parser.add_argument_group("MAD Outlier Removal (tuning)")
+    mad_group.add_argument("--mad-z-threshold", type=float, default=3.0,
+                           help="Modified Z-score cutoff for the MAD rule. A read with "
+                                "(0.6745 * (rid - median) / MAD) below -threshold is flagged. "
+                                "Lower values flag more aggressively. (default: 3.0)")
+    mad_group.add_argument("--mad-gap-factor", type=float, default=2.5,
+                           help="Gap-rule multiplier. The worst read is flagged if "
+                                "(r_second - r_worst) > gap_factor * (r_best - r_second). "
+                                "Lower values flag more aggressively. (default: 2.5)")
+    mad_group.add_argument("--mad-min-mad", type=float, default=0.002,
+                           help="Floor for the MAD value to avoid divide-by-zero when most "
+                                "reads have near-identical rid. Expressed on the 0..1 rid "
+                                "scale (0.002 = 0.2pp). (default: 0.002)")
+    mad_group.add_argument("--mad-min-drop-from-median", type=float, default=0.02,
+                           help="Safety floor on the absolute drop below the cluster's median "
+                                "rid. A statistically-unusual read is only flagged when its "
+                                "rid is at least this far below the median. Expressed on the "
+                                "0..1 rid scale (0.02 = 2pp). (default: 0.02)")
+
     # Ambiguity Calling group
     ambiguity_group = parser.add_argument_group("Ambiguity Calling")
     ambiguity_group.add_argument("--disable-ambiguity-calling", action="store_true",
@@ -260,6 +284,10 @@ def main():
         enable_phase8=not args.disable_second_phasing,
         enable_noise_filter=not args.disable_noise_filter,
         enable_mad_outlier_removal=not args.disable_mad_outlier_removal,
+        mad_z_threshold=args.mad_z_threshold,
+        mad_gap_factor=args.mad_gap_factor,
+        mad_min_mad=args.mad_min_mad,
+        mad_min_drop_from_median=args.mad_min_drop_from_median,
         min_variant_frequency=args.min_variant_frequency,
         min_variant_count=args.min_variant_count,
         min_ambiguity_frequency=args.min_ambiguity_frequency,

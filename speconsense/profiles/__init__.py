@@ -72,6 +72,11 @@ VALID_SPECONSENSE_KEYS = {
     "group-identity",
     "hp-normalization-length",
     "error-model",
+    # MAD outlier removal tuning (internal)
+    "mad-z-threshold",
+    "mad-gap-factor",
+    "mad-min-mad",
+    "mad-min-drop-from-median",
     # Ambiguity calling
     "min-ambiguity-frequency",
     "min-ambiguity-count",

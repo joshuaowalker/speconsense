@@ -218,6 +218,10 @@ class SpecimenClusterer:
                  enable_phase8: bool = True,
                  enable_noise_filter: bool = True,
                  enable_mad_outlier_removal: bool = True,
+                 mad_z_threshold: float = 3.0,
+                 mad_gap_factor: float = 2.5,
+                 mad_min_mad: float = 0.002,
+                 mad_min_drop_from_median: float = 0.02,
                  min_variant_frequency: float = 0.10,
                  min_variant_count: int = 3,
                  min_ambiguity_frequency: float = 0.10,
@@ -248,6 +252,14 @@ class SpecimenClusterer:
         self.enable_phase8 = enable_phase8
         self.enable_noise_filter = enable_noise_filter
         self.enable_mad_outlier_removal = enable_mad_outlier_removal
+        # MAD tuning knobs. Forwarded to detect_rid_outliers via
+        # ConsensusGenerationConfig. Defaults mirror the function's own defaults
+        # so a clusterer constructed with no MAD kwargs is identical to the
+        # pre-CLI-exposure behavior.
+        self.mad_z_threshold = mad_z_threshold
+        self.mad_gap_factor = mad_gap_factor
+        self.mad_min_mad = mad_min_mad
+        self.mad_min_drop_from_median = mad_min_drop_from_median
         self.min_variant_frequency = min_variant_frequency
         self.min_variant_count = min_variant_count
         self.min_ambiguity_frequency = min_ambiguity_frequency
@@ -1946,6 +1958,10 @@ class SpecimenClusterer:
             disable_homopolymer_equivalence=self.disable_homopolymer_equivalence,
             primers=primers,
             enable_mad_outlier_removal=self.enable_mad_outlier_removal,
+            mad_z_threshold=self.mad_z_threshold,
+            mad_gap_factor=self.mad_gap_factor,
+            mad_min_mad=self.mad_min_mad,
+            mad_min_drop_from_median=self.mad_min_drop_from_median,
         )
 
         # Build work packages. Index is the position in the input subclusters
@@ -2165,6 +2181,10 @@ class SpecimenClusterer:
             disable_homopolymer_equivalence=self.disable_homopolymer_equivalence,
             primers=primers,
             enable_mad_outlier_removal=self.enable_mad_outlier_removal,
+            mad_z_threshold=self.mad_z_threshold,
+            mad_gap_factor=self.mad_gap_factor,
+            mad_min_mad=self.mad_min_mad,
+            mad_min_drop_from_median=self.mad_min_drop_from_median,
         )
 
         dropped_indices: Set[int] = set()

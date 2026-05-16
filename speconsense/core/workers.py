@@ -64,7 +64,8 @@ class ConsensusGenerationConfig:
     """
     __slots__ = ['max_sample_size', 'enable_iupac_calling', 'min_ambiguity_frequency',
                  'min_ambiguity_count', 'disable_homopolymer_equivalence', 'primers',
-                 'enable_mad_outlier_removal']
+                 'enable_mad_outlier_removal', 'mad_z_threshold', 'mad_gap_factor',
+                 'mad_min_mad', 'mad_min_drop_from_median']
 
     def __init__(self, max_sample_size: int,
                  enable_iupac_calling: bool,
@@ -72,7 +73,11 @@ class ConsensusGenerationConfig:
                  min_ambiguity_count: int,
                  disable_homopolymer_equivalence: bool,
                  primers: Optional[List[Tuple[str, str]]] = None,
-                 enable_mad_outlier_removal: bool = True):
+                 enable_mad_outlier_removal: bool = True,
+                 mad_z_threshold: float = 3.0,
+                 mad_gap_factor: float = 2.5,
+                 mad_min_mad: float = 0.002,
+                 mad_min_drop_from_median: float = 0.02):
         self.max_sample_size = max_sample_size
         self.enable_iupac_calling = enable_iupac_calling
         self.min_ambiguity_frequency = min_ambiguity_frequency
@@ -80,6 +85,10 @@ class ConsensusGenerationConfig:
         self.disable_homopolymer_equivalence = disable_homopolymer_equivalence
         self.primers = primers
         self.enable_mad_outlier_removal = enable_mad_outlier_removal
+        self.mad_z_threshold = mad_z_threshold
+        self.mad_gap_factor = mad_gap_factor
+        self.mad_min_mad = mad_min_mad
+        self.mad_min_drop_from_median = mad_min_drop_from_median
 
 
 # Worker functions
@@ -186,13 +195,21 @@ def _run_spoa_for_cluster_worker(sequences: Dict[str, str],
 
 
 def _identify_mad_outlier_reads_standalone(
-    alignments: List[ReadAlignment], consensus_seq: str
+    alignments: List[ReadAlignment],
+    consensus_seq: str,
+    modified_z_threshold: float = 3.0,
+    gap_factor: float = 2.5,
+    min_mad: float = 0.002,
+    min_drop_from_median: float = 0.02,
 ) -> Set[str]:
     """Identify low-rid outlier reads using MAD-based detection.
 
     Computes per-read identity against the consensus, then applies the shared
     ``detect_rid_outliers`` helper (MAD modified Z-score + gap rule). Returns
     the set of read IDs flagged as outliers.
+
+    The four tuning parameters are forwarded to ``detect_rid_outliers``; see
+    its docstring for semantics. Defaults match the helper's own defaults.
     """
     from speconsense.outliers import detect_rid_outliers
 
@@ -209,7 +226,13 @@ def _identify_mad_outlier_reads_standalone(
         read_ids.append(alignment.read_id)
         rids.append(1.0 - error_rate)
 
-    outlier_indices = detect_rid_outliers(rids)
+    outlier_indices = detect_rid_outliers(
+        rids,
+        modified_z_threshold=modified_z_threshold,
+        gap_factor=gap_factor,
+        min_mad=min_mad,
+        min_drop_from_median=min_drop_from_median,
+    )
     return {read_ids[i] for i in outlier_indices}
 
 
@@ -805,7 +828,11 @@ def _generate_cluster_consensus_worker(args) -> Dict:
     dropped_by_min_reads = False
     if result is not None and result.consensus and config.enable_mad_outlier_removal:
         flagged = _identify_mad_outlier_reads_standalone(
-            result.alignments, result.consensus
+            result.alignments, result.consensus,
+            modified_z_threshold=config.mad_z_threshold,
+            gap_factor=config.mad_gap_factor,
+            min_mad=config.mad_min_mad,
+            min_drop_from_median=config.mad_min_drop_from_median,
         )
         if flagged:
             remaining_ids = [rid for rid in sorted_sampled_ids if rid not in flagged]
