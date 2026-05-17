@@ -684,3 +684,145 @@ class TestParseConsensusHeaderGidVid:
         assert err_factor == 1.1
         assert group_rank == 3
         assert variant_rank == 2
+
+
+class TestProcessSingleSpecimenNaming:
+    """process_single_specimen should preserve core gid/vid except across cross-primer conflation."""
+
+    @staticmethod
+    def _make(name, group_rank, variant_rank, size,
+              sequence=None, primers=None):
+        from speconsense.types import ConsensusInfo
+        return ConsensusInfo(
+            sample_name=name,
+            cluster_id=f"{group_rank}.v{variant_rank}",
+            sequence=sequence or ("ACGT" * 100),
+            ric=size,
+            size=size,
+            file_path="/tmp/test-all.fasta",
+            primers=primers or ["P1"],
+            group_rank=group_rank,
+            variant_rank=variant_rank,
+        )
+
+    @staticmethod
+    def _args(**overrides):
+        from types import SimpleNamespace
+        defaults = dict(
+            min_merge_overlap=0,
+            group_identity=0.85,
+            hp_normalization_length=6,
+            select_max_groups=-1,
+            select_min_size_ratio=0,
+            select_max_variants=-1,
+            select_strategy="size",
+            disable_merging=True,
+        )
+        defaults.update(overrides)
+        return SimpleNamespace(**defaults)
+
+    def test_no_conflation_preserves_core_names(self):
+        from speconsense.summarize.cli import process_single_specimen
+        members = [
+            self._make("test-1.v1", 1, 1, 100),
+            self._make("test-1.v2", 1, 2, 50),
+            self._make("test-1.v3", 1, 3, 10),
+        ]
+        final, _, _, _, _ = process_single_specimen(members, self._args())
+        names = {v.sample_name for v in final}
+        assert names == {"test-1.v1", "test-1.v2", "test-1.v3"}
+
+    def test_gaps_from_size_ratio_filter_preserve_remaining_vids(self):
+        from speconsense.summarize.cli import process_single_specimen
+        members = [
+            self._make("test-1.v1", 1, 1, 100),
+            self._make("test-1.v2", 1, 2, 80),
+            self._make("test-1.v3", 1, 3, 5),  # filtered by ratio
+        ]
+        args = self._args(select_min_size_ratio=0.5)
+        final, _, _, _, _ = process_single_specimen(members, args)
+        names = sorted(v.sample_name for v in final)
+        assert names == ["test-1.v1", "test-1.v2"]
+
+    def test_two_group_conflation_allocates_new_vids_above_max(self):
+        from speconsense.summarize.cli import process_single_specimen
+        shared = "ACGT" * 100  # 400bp common
+        members = [
+            self._make("test-1.v1", 1, 1, 100, shared + "TAAA" * 50, ["P1"]),
+            self._make("test-1.v2", 1, 2, 80, shared + "TAAA" * 50, ["P1"]),
+            self._make("test-2.v1", 2, 1, 50, "AAA" * 20 + shared, ["P2"]),
+        ]
+        args = self._args(min_merge_overlap=200)
+        final, _, _, _, _ = process_single_specimen(members, args)
+        names = sorted(v.sample_name for v in final)
+        # gid=1 keeps v1/v2 verbatim; gid=2's v1 is moved to v3 under gid=1
+        assert names == ["test-1.v1", "test-1.v2", "test-1.v3"]
+
+    def test_two_group_conflation_skips_ns_vid(self):
+        from speconsense.summarize.cli import process_single_specimen
+        shared = "ACGT" * 100
+        members = [
+            self._make("test-1.v1", 1, 1, 100, shared + "TAAA" * 50, ["P1"]),
+            self._make("test-2.v1", 2, 1, 50, "AAA" * 20 + shared, ["P2"]),
+        ]
+        ns_records = [self._make("test-1.v2", 1, 2, 5)]  # vid=2 already used in gid=1
+        args = self._args(min_merge_overlap=200)
+        final, _, _, _, _ = process_single_specimen(
+            members, args, ns_for_specimen=ns_records)
+        names = sorted(v.sample_name for v in final)
+        # moved record gets v3, skipping v2 occupied by ns
+        assert names == ["test-1.v1", "test-1.v3"]
+
+    def test_two_group_conflation_skips_lq_vid(self):
+        from speconsense.summarize.cli import process_single_specimen
+        shared = "ACGT" * 100
+        members = [
+            self._make("test-1.v1", 1, 1, 100, shared + "TAAA" * 50, ["P1"]),
+            self._make("test-2.v1", 2, 1, 50, "AAA" * 20 + shared, ["P2"]),
+        ]
+        lq_records = [self._make("test-1.v4", 1, 4, 5)]  # lq occupies vid=4
+        args = self._args(min_merge_overlap=200)
+        final, _, _, _, _ = process_single_specimen(
+            members, args, lq_for_specimen=lq_records)
+        names = sorted(v.sample_name for v in final)
+        # moved record gets v5 (max(used={1,4}) + 1), not v2/v3 (gaps in core)
+        assert names == ["test-1.v1", "test-1.v5"]
+
+    def test_three_group_conflation_assigns_unique_vids(self):
+        from speconsense.summarize.cli import process_single_specimen
+        shared = "ACGT" * 100  # common backbone all three pairs share
+        members = [
+            self._make("test-1.v1", 1, 1, 100, shared + "TAAA" * 50, ["P1"]),
+            self._make("test-2.v1", 2, 1, 80, "AAA" * 20 + shared, ["P2"]),
+            self._make("test-2.v2", 2, 2, 60, "AAA" * 20 + shared, ["P2"]),
+            self._make("test-3.v1", 3, 1, 40, shared + "GGG" * 50, ["P3"]),
+        ]
+        args = self._args(min_merge_overlap=200)
+        final, _, _, _, _ = process_single_specimen(members, args)
+        names = sorted(v.sample_name for v in final)
+        assert len(names) == 4
+        # All emit under gid=1
+        assert all(n.startswith("test-1.v") for n in names)
+        # All vids unique, gid=1's original v1 preserved, moved members
+        # allocated sequentially above max
+        vids = sorted(int(n.rsplit(".v", 1)[1]) for n in names)
+        assert vids == [1, 2, 3, 4]
+
+    def test_absorbed_groups_ns_lq_do_not_pollute_survivor_namespace(self):
+        from speconsense.summarize.cli import process_single_specimen
+        shared = "ACGT" * 100
+        members = [
+            self._make("test-1.v1", 1, 1, 100, shared + "TAAA" * 50, ["P1"]),
+            self._make("test-2.v1", 2, 1, 50, "AAA" * 20 + shared, ["P2"]),
+        ]
+        # ns/lq under gid=2 should NOT enter gid=1's collision set
+        ns_records = [self._make("test-2.v2", 2, 2, 5)]
+        lq_records = [self._make("test-2.v3", 2, 3, 5)]
+        args = self._args(min_merge_overlap=200)
+        final, _, _, _, _ = process_single_specimen(
+            members, args, ns_for_specimen=ns_records,
+            lq_for_specimen=lq_records)
+        names = sorted(v.sample_name for v in final)
+        # moved record gets v2 (next free under gid=1 — gid=2's ns/lq vids
+        # remain in gid=2 on disk, not blocking gid=1)
+        assert names == ["test-1.v1", "test-1.v2"]

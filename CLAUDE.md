@@ -127,6 +127,8 @@ Orientation (when `--orient-mode` ≠ skip) and primer trimming run during input
 
 Note: Identity grouping is performed once, in core, via complete linkage on `--group-identity` (default 0.85). Summarize honors those groups verbatim (hard-fails on inputs lacking `gid=`/`vid=`) and only merges *across* core groups when cross-primer overlap passes threshold.
 
+**Naming policy** (`process_single_specimen`): summarize preserves core's `gid`/`vid` on every record that is **not moved between groups by cross-primer conflation**. Variants dropped by within-group MSA merging, `--select-max-variants`, `--select-min-size-ratio`, `--min-cer-factor`, or `--max-err-factor` leave their vids as gaps. Variants moved into a survivor group by cross-primer conflation adopt the survivor's `gid` and get a freshly-minted `vid` strictly above the highest vid core ever wrote under that gid — collision-avoidance considers passed + `.ns` + `.lq` records under that gid plus any vids already minted in the same pass (covers 3+ group conflation). Vids under absorbed-group gids stay on disk under their original gid in `.ns`/`.lq` outputs and do not block the survivor's namespace.
+
 ### External Dependencies
 
 - **SPOA**: Required for consensus generation, must be in PATH. When running SPOA, the candidate sequence must be the first input.

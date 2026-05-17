@@ -20,7 +20,6 @@ from Bio import SeqIO
 from speconsense.types import ConsensusInfo
 
 from .fields import FastaField, format_fasta_header
-from .clustering import select_variants
 
 
 _CLUSTER_SUFFIX_RE = re.compile(r'-\d+\.v\d+(?:\.raw\d+)?$')
@@ -292,50 +291,6 @@ def load_metadata_from_json(source_folder: str, sample_name: str) -> Optional[Di
     except Exception as e:
         logging.warning(f"Failed to load metadata from {metadata_file}: {e}")
         return None
-
-
-def create_output_structure(groups: Dict[int, List[ConsensusInfo]],
-                           max_variants: int,
-                           variant_selection: str,
-                           summary_folder: str) -> Tuple[List[ConsensusInfo], Dict]:
-    """
-    Create the final output structure with proper naming.
-    Returns final consensus list and naming information.
-    """
-    os.makedirs(summary_folder, exist_ok=True)
-    os.makedirs(os.path.join(summary_folder, 'FASTQ Files'), exist_ok=True)
-    os.makedirs(os.path.join(summary_folder, 'variants'), exist_ok=True)
-    os.makedirs(os.path.join(summary_folder, 'variants', 'FASTQ Files'), exist_ok=True)
-
-    final_consensus = []
-    naming_info = {}
-
-    # Sort groups by size of largest member (descending)
-    sorted_groups = sorted(groups.items(),
-                          key=lambda x: max(m.size for m in x[1]),
-                          reverse=True)
-
-    for group_idx, (_, group_members) in enumerate(sorted_groups, 1):
-        # Select variants for this group
-        selected_variants = select_variants(group_members, max_variants, variant_selection, group_number=group_idx)
-
-        # Create naming for this group
-        group_naming = []
-
-        for variant_idx, variant in enumerate(selected_variants):
-            # All variants get .v suffix (primary is .v1, additional are .v2, .v3, etc.)
-            specimen_base = strip_cluster_suffix(variant.sample_name)
-            new_name = f"{specimen_base}-{group_idx}.v{variant_idx + 1}"
-
-            # Use _replace to preserve all fields while updating sample_name
-            renamed_variant = variant._replace(sample_name=new_name)
-
-            final_consensus.append(renamed_variant)
-            group_naming.append((variant.sample_name, new_name))
-
-        naming_info[group_idx] = group_naming
-
-    return final_consensus, naming_info
 
 
 def write_consensus_fastq(consensus: ConsensusInfo,

@@ -692,6 +692,8 @@ The `speconsense-summarize` tool provides sophisticated options for managing mul
 
 Identity groups are computed once, in core, via complete linkage at `--group-identity` (default `0.85`). `speconsense-summarize` honors those groups via the `gid=`/`vid=` headers and does not re-cluster. Within each group, summarize applies MSA-based variant merging and selection.
 
+Output naming round-trips core's `gid.vid` for every variant unless cross-primer overlap conflation moved that variant into a different group. Filtered-out or merged-away variants leave their vids as gaps under the surviving gid. Moved variants adopt the survivor group's `gid` and receive a freshly-minted `vid` above the highest vid core wrote under that gid (across passed, `.ns`, and `.lq` records); the allocator handles 2+ group conflation without collisions.
+
 **Group identity (cross-primer overlap merging only):**
 ```bash
 speconsense-summarize --group-identity 0.85

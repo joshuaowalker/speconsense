@@ -321,18 +321,27 @@ def setup_logging(log_level: str, log_file: str = None):
 
 
 def process_single_specimen(file_consensuses: List[ConsensusInfo],
-                           args) -> Tuple[List[ConsensusInfo], Dict[str, List[str]], Dict, int, List[OverlapMergeInfo]]:
+                           args,
+                           ns_for_specimen: List[ConsensusInfo] = None,
+                           lq_for_specimen: List[ConsensusInfo] = None,
+                           ) -> Tuple[List[ConsensusInfo], Dict[str, List[str]], Dict, int, List[OverlapMergeInfo]]:
     """
-    Process a single specimen file: HAC cluster, MSA-based merge per group, and select final variants.
-    Returns final consensus list, merge traceability, naming info, limited_count, and overlap merge info.
+    Process a single specimen file: bucket by core gid, MSA-merge within each
+    bucket, conflate cross-primer groups, select variants, and emit final
+    names that honor core's gid/vid except where cross-primer conflation moved
+    a record between groups. Returns final consensus list, merge traceability,
+    naming info (keyed by final gid), limited_count, and overlap merge info.
 
-    Architecture (Phase 3):
-    1. HAC clustering to separate variant groups (primary vs contaminants)
-    2. MSA-based merging within each group
-    3. Select representative variants per group
+    ``ns_for_specimen`` and ``lq_for_specimen`` are the specimen's filtered
+    records (CER-routed and err_factor-routed). They are not renamed, but their
+    core-assigned vids contribute to the collision set when summarize allocates
+    fresh vids for cross-primer-moved variants.
     """
     if not file_consensuses:
         return [], {}, {}, 0, []
+
+    ns_for_specimen = ns_for_specimen or []
+    lq_for_specimen = lq_for_specimen or []
 
     file_name = os.path.basename(file_consensuses[0].file_path)
     logging.info(f"Processing specimen from file: {file_name}")
@@ -387,18 +396,47 @@ def process_single_specimen(file_consensuses: List[ConsensusInfo],
             total_limited_count += limited_count
             all_overlap_merges.extend(overlap_merges)
 
-    # Phase 3: Select representative variants for each group in this specimen
+    # Phase 3: Select representative variants and emit final names.
+    #
+    # Naming policy: preserve core's gid/vid verbatim except for variants moved
+    # between groups by cross-primer overlap conflation in Phase 1b. The dict
+    # key in ``merged_groups`` is the survivor's pre-conflation core gid (the
+    # absorbing bucket). For each variant in that bucket:
+    #   - If ``variant.group_rank == final_gid``, the variant originated in
+    #     this group; emit ``(final_gid, variant.variant_rank)`` directly,
+    #     letting MSA-merge and filter drops manifest as vid gaps.
+    #   - Else the variant was moved here from an absorbed group; allocate a
+    #     new vid above ``max(used_vids)``.
+    #
+    # ``used_vids`` for a given final_gid is seeded from every record core
+    # emitted under that gid (passed + ns + lq), pre-MSA-merge, so moved
+    # members never collide with names core ever produced — including vids
+    # that became gaps via within-group merging or filtering. Each newly
+    # allocated vid is added to ``used_vids`` so subsequent moved members in
+    # the same pass (e.g., 3+ group conflation) cannot collide with each other.
     final_consensus = []
     naming_info = {}
 
-    # Sort variant groups by size of largest member (descending)
+    # Pre-index core-emitted vids by core gid. Pre-merge passed records plus
+    # ns/lq records — covers everything core wrote to disk under each gid.
+    core_vids_by_gid: Dict[int, set] = defaultdict(set)
+    for record in file_consensuses:
+        if record.group_rank is not None and record.variant_rank is not None:
+            core_vids_by_gid[record.group_rank].add(record.variant_rank)
+    for record in ns_for_specimen:
+        if record.group_rank is not None and record.variant_rank is not None:
+            core_vids_by_gid[record.group_rank].add(record.variant_rank)
+    for record in lq_for_specimen:
+        if record.group_rank is not None and record.variant_rank is not None:
+            core_vids_by_gid[record.group_rank].add(record.variant_rank)
+
+    # Iterate groups in anchor-size desc order for stable selection logging;
+    # naming itself is gid-based so iteration order does not affect output.
     sorted_groups = sorted(merged_groups.items(),
                           key=lambda x: max(m.size for m in x[1]),
                           reverse=True)
 
-    for group_idx, (group_id, group_members) in enumerate(sorted_groups):
-        final_group_name = group_idx + 1
-
+    for final_gid, group_members in sorted_groups:
         # Apply select-min-size-ratio filter
         if args.select_min_size_ratio > 0 and len(group_members) > 1:
             largest_size = max(v.size for v in group_members)
@@ -406,7 +444,7 @@ def process_single_specimen(file_consensuses: List[ConsensusInfo],
                         if (v.size / largest_size) >= args.select_min_size_ratio]
             if len(filtered) < len(group_members):
                 filtered_count = len(group_members) - len(filtered)
-                logging.debug(f"Group {group_idx + 1}: filtered out {filtered_count} "
+                logging.debug(f"Group {final_gid}: filtered out {filtered_count} "
                               f"variants with size ratio < {args.select_min_size_ratio} "
                               f"relative to largest (size={largest_size})")
                 group_members = filtered
@@ -414,24 +452,26 @@ def process_single_specimen(file_consensuses: List[ConsensusInfo],
         # Select variants for this group
         selected_variants = select_variants(
             group_members, args.select_max_variants, args.select_strategy,
-            group_number=final_group_name,
+            group_number=final_gid,
             hp_normalization_length=args.hp_normalization_length)
 
-        # Create naming for this group within this specimen
+        used_vids = set(core_vids_by_gid.get(final_gid, set()))
+
         group_naming = []
-
-        for variant_idx, variant in enumerate(selected_variants):
-            # All variants get .v suffix (primary is .v1, additional are .v2, .v3, etc.)
+        for variant in selected_variants:
             specimen_base = strip_cluster_suffix(variant.sample_name)
-            new_name = f"{specimen_base}-{group_idx + 1}.v{variant_idx + 1}"
+            if variant.group_rank == final_gid and variant.variant_rank is not None:
+                new_vid = variant.variant_rank
+            else:
+                new_vid = (max(used_vids) + 1) if used_vids else 1
+                used_vids.add(new_vid)
+            new_name = f"{specimen_base}-{final_gid}.v{new_vid}"
 
-            # Use _replace to preserve all fields while updating sample_name
             renamed_variant = variant._replace(sample_name=new_name)
-
             final_consensus.append(renamed_variant)
             group_naming.append((variant.sample_name, new_name))
 
-        naming_info[group_idx + 1] = group_naming
+        naming_info[final_gid] = group_naming
 
     logging.info(f"Processed {file_name}: {len(final_consensus)} final variants across {len(merged_groups)} groups")
 
@@ -604,10 +644,15 @@ def main():
     sorted_file_paths = sorted(all_file_paths)
     for file_path in tqdm(sorted_file_paths, desc="Processing specimens", unit="specimen"):
         file_consensuses = file_groups.get(file_path, [])
+        specimen_ns = ns_by_file.get(file_path, [])
+        specimen_lq = lq_by_file.get(file_path, [])
 
-        # Process specimen
+        # Process specimen. ns/lq slices feed the vid collision-avoidance
+        # allocator for cross-primer-conflated records.
         final_consensus, merge_traceability, naming_info, limited_count, overlap_merges = process_single_specimen(
-            file_consensuses, args
+            file_consensuses, args,
+            ns_for_specimen=specimen_ns,
+            lq_for_specimen=specimen_lq,
         )
 
         # Write individual data files immediately
@@ -623,14 +668,12 @@ def main():
         )
 
         # Emit ns variants (CER-filtered) for this specimen
-        specimen_ns = ns_by_file.get(file_path, [])
         if specimen_ns:
             write_ns_variant_files(
                 specimen_ns, args.summary_dir, fastq_lookup, fasta_fields
             )
 
         # Emit lq variants (err_factor-filtered) for this specimen
-        specimen_lq = lq_by_file.get(file_path, [])
         if specimen_lq:
             write_lq_variant_files(
                 specimen_lq, args.summary_dir, fastq_lookup, fasta_fields
