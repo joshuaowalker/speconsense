@@ -74,7 +74,7 @@ class ConsensusGenerationConfig:
                  disable_homopolymer_equivalence: bool,
                  primers: Optional[List[Tuple[str, str]]] = None,
                  enable_mad_outlier_removal: bool = True,
-                 mad_z_threshold: float = 3.0,
+                 mad_z_threshold: float = 1.5,
                  mad_gap_factor: float = 2.5,
                  mad_min_mad: float = 0.002,
                  mad_min_drop_from_median: float = 0.02):
@@ -197,7 +197,7 @@ def _run_spoa_for_cluster_worker(sequences: Dict[str, str],
 def _identify_mad_outlier_reads_standalone(
     alignments: List[ReadAlignment],
     consensus_seq: str,
-    modified_z_threshold: float = 3.0,
+    modified_z_threshold: float = 1.5,
     gap_factor: float = 2.5,
     min_mad: float = 0.002,
     min_drop_from_median: float = 0.02,

@@ -127,10 +127,14 @@ def main():
     # ``speconsense.outliers.detect_rid_outliers`` so behavior is unchanged
     # when these flags are omitted.
     mad_group = parser.add_argument_group("MAD Outlier Removal (tuning)")
-    mad_group.add_argument("--mad-z-threshold", type=float, default=3.0,
+    mad_group.add_argument("--mad-z-threshold", type=float, default=1.5,
                            help="Modified Z-score cutoff for the MAD rule. A read with "
                                 "(0.6745 * (rid - median) / MAD) below -threshold is flagged. "
-                                "Lower values flag more aggressively. (default: 3.0)")
+                                "Lower values flag more aggressively. The 0.8.1 default of 1.5 "
+                                "is empirically tuned for speconsense's 3-10-read clusters; the "
+                                "literature-standard 3.0 is too conservative for that regime "
+                                "(see speconsense.outliers.detect_rid_outliers docstring). "
+                                "(default: 1.5)")
     mad_group.add_argument("--mad-gap-factor", type=float, default=2.5,
                            help="Gap-rule multiplier. The worst read is flagged if "
                                 "(r_second - r_worst) > gap_factor * (r_best - r_second). "

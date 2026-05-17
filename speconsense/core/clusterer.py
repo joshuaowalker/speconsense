@@ -218,7 +218,7 @@ class SpecimenClusterer:
                  enable_phase8: bool = True,
                  enable_noise_filter: bool = True,
                  enable_mad_outlier_removal: bool = True,
-                 mad_z_threshold: float = 3.0,
+                 mad_z_threshold: float = 1.5,
                  mad_gap_factor: float = 2.5,
                  mad_min_mad: float = 0.002,
                  mad_min_drop_from_median: float = 0.02,
