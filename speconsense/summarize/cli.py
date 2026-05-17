@@ -11,7 +11,7 @@ import sys
 import argparse
 import logging
 import tempfile
-from typing import List, Tuple, Dict
+from typing import List, Tuple, Dict, Optional
 from collections import defaultdict
 
 # Python 3.8 compatibility: BooleanOptionalAction was added in Python 3.9
@@ -59,6 +59,7 @@ from .io import (
     write_ns_variant_files,
     write_lq_variant_files,
     write_output_files,
+    load_metadata_from_json,
     strip_cluster_suffix,
 )
 from .clustering import (
@@ -66,7 +67,7 @@ from .clustering import (
     merge_groups_by_anchor_overlap,
     select_variants,
 )
-from .merging import merge_group_with_msa
+from .merging import merge_group_with_msa, _refresh_cluster_metrics, _refresh_cer_factor
 from .analysis import MAX_MSA_MERGE_VARIANTS
 from .tree import write_specimen_variant_tree
 
@@ -324,6 +325,9 @@ def process_single_specimen(file_consensuses: List[ConsensusInfo],
                            args,
                            ns_for_specimen: List[ConsensusInfo] = None,
                            lq_for_specimen: List[ConsensusInfo] = None,
+                           fastq_lookup: Dict[str, List[str]] = None,
+                           qctx_table: Dict[str, float] = None,
+                           cer_alpha: float = 1e-5,
                            ) -> Tuple[List[ConsensusInfo], Dict[str, List[str]], Dict, int, List[OverlapMergeInfo]]:
     """
     Process a single specimen file: bucket by core gid, MSA-merge within each
@@ -395,6 +399,66 @@ def process_single_specimen(file_consensuses: List[ConsensusInfo],
             all_merge_traceability.update(traceability)
             total_limited_count += limited_count
             all_overlap_merges.extend(overlap_merges)
+
+    # Phase 2b: Recompute per-cluster metrics on merged records. For each
+    # record that absorbed ≥2 contributors, re-derive:
+    #   - rid, rid_min, err_factor from a SPOA MSA over the union of
+    #     contributor reads (cluster-local, always run when fastq_lookup is
+    #     available).
+    #   - cer_factor from the post-merge peer landscape via
+    #     ``classify_pairwise_differences`` + ``compute_cer_factor``. Same-
+    #     primer merges recompute against larger peers in the same bucket;
+    #     cross-primer merges set cer_factor=None (CER noise model doesn't
+    #     apply to merged-locus candidates).
+    # Inherited values from ``_build_merged_consensus_info`` are otherwise
+    # stale because they describe the largest contributor's pre-merge state.
+    if fastq_lookup is not None:
+        original_consensus_lookup = {c.sample_name: c for c in file_consensuses}
+        for group_id, group_members in merged_groups.items():
+            for idx, record in enumerate(group_members):
+                contributors_names = all_merge_traceability.get(record.sample_name)
+                if not contributors_names or len(contributors_names) <= 1:
+                    continue
+                contributors = [
+                    original_consensus_lookup[n]
+                    for n in contributors_names
+                    if n in original_consensus_lookup
+                ]
+                if len(contributors) <= 1:
+                    continue
+                refreshed = _refresh_cluster_metrics(
+                    record,
+                    contributors,
+                    fastq_lookup=fastq_lookup,
+                    qctx_table=qctx_table,
+                    hp_normalization_length=args.hp_normalization_length,
+                    disable_homopolymer_equivalence=args.disable_homopolymer_equivalence,
+                )
+                group_members[idx] = refreshed
+
+        # cer_factor recompute: needs the post-rid/err_factor refresh to have
+        # settled, and uses each bucket's full membership for peer lookup.
+        for group_id, group_members in merged_groups.items():
+            for idx, record in enumerate(group_members):
+                contributors_names = all_merge_traceability.get(record.sample_name)
+                if not contributors_names or len(contributors_names) <= 1:
+                    continue
+                contributors = [
+                    original_consensus_lookup[n]
+                    for n in contributors_names
+                    if n in original_consensus_lookup
+                ]
+                if len(contributors) <= 1:
+                    continue
+                refreshed = _refresh_cer_factor(
+                    record,
+                    contributors,
+                    bucket_members=group_members,
+                    qctx_table=qctx_table,
+                    alpha=cer_alpha,
+                    hp_min_length=args.hp_normalization_length,
+                )
+                group_members[idx] = refreshed
 
     # Phase 3: Select representative variants and emit final names.
     #
@@ -476,6 +540,48 @@ def process_single_specimen(file_consensuses: List[ConsensusInfo],
     logging.info(f"Processed {file_name}: {len(final_consensus)} final variants across {len(merged_groups)} groups")
 
     return final_consensus, all_merge_traceability, naming_info, total_limited_count, all_overlap_merges
+
+
+def _resolve_specimen_cer_context(
+    source_folder: str,
+    file_path: str,
+    cache: Dict[str, Optional[Dict[str, float]]],
+) -> Tuple[Optional[Dict[str, float]], float]:
+    """Load the q_ctx table and CER alpha that core used for this specimen.
+
+    Reads ``parameters.error_model`` and ``parameters.significance_level``
+    from the specimen's metadata JSON in ``cluster_debug/`` and loads the
+    corresponding q_ctx table via ``speconsense.qctx.load_table``. Tables
+    are cached by model name across specimens. Returns ``(qctx_table,
+    alpha)`` where ``qctx_table`` may be None (metadata missing, model
+    unloadable) — callers must treat None as "skip err_factor / cer_factor
+    recompute". ``alpha`` falls back to the canonical 1e-5 default when
+    metadata doesn't specify one.
+    """
+    DEFAULT_ALPHA = 1e-5
+    specimen_base = os.path.basename(file_path)
+    if specimen_base.endswith('-all.fasta'):
+        specimen_base = specimen_base[:-len('-all.fasta')]
+    metadata = load_metadata_from_json(source_folder, specimen_base)
+    if not metadata:
+        return None, DEFAULT_ALPHA
+    params = metadata.get('parameters') or {}
+    alpha = float(params.get('significance_level') or DEFAULT_ALPHA)
+    model_name = params.get('error_model')
+    if not model_name:
+        return None, alpha
+    if model_name in cache:
+        return cache[model_name], alpha
+    try:
+        from speconsense.qctx import load_table
+        table = load_table(model_name)
+    except Exception as e:
+        logging.debug(
+            f"Could not load q_ctx model '{model_name}' for merge recompute: {e}"
+        )
+        table = None
+    cache[model_name] = table
+    return table, alpha
 
 
 def _clean_specimen_output(summary_dir: str, specimen_id: str) -> None:
@@ -626,6 +732,11 @@ def main():
     fastq_lookup = build_fastq_lookup_table(args.source)
     original_consensus_lookup = {cons.sample_name: cons for cons in consensus_list}
 
+    # Cache of qctx tables keyed by error_model name (read per-specimen from
+    # the metadata JSON). Used by the merge-time recompute of err_factor and
+    # cer_factor. Populated lazily inside the per-specimen loop.
+    qctx_table_cache: Dict[str, Optional[Dict[str, float]]] = {}
+
     # Process each specimen file independently
     all_final_consensus = []
     all_merge_traceability = {}
@@ -647,12 +758,26 @@ def main():
         specimen_ns = ns_by_file.get(file_path, [])
         specimen_lq = lq_by_file.get(file_path, [])
 
+        # Resolve the q_ctx table + CER alpha for this specimen so merge-time
+        # recompute of err_factor and cer_factor uses the same model and
+        # significance level core did. Falls back silently if the metadata
+        # JSON is missing or the model is unloadable — merge recompute then
+        # skips err_factor/cer_factor.
+        specimen_qctx, specimen_alpha = _resolve_specimen_cer_context(
+            args.source, file_path, qctx_table_cache
+        )
+
         # Process specimen. ns/lq slices feed the vid collision-avoidance
-        # allocator for cross-primer-conflated records.
+        # allocator for cross-primer-conflated records. fastq_lookup +
+        # qctx_table feed the merge-time metric recompute (rid, rid_min,
+        # err_factor, cer_factor) on records that absorbed ≥2 contributors.
         final_consensus, merge_traceability, naming_info, limited_count, overlap_merges = process_single_specimen(
             file_consensuses, args,
             ns_for_specimen=specimen_ns,
             lq_for_specimen=specimen_lq,
+            fastq_lookup=fastq_lookup,
+            qctx_table=specimen_qctx,
+            cer_alpha=specimen_alpha,
         )
 
         # Write individual data files immediately

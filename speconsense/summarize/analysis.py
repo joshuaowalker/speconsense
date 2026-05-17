@@ -8,11 +8,13 @@ import logging
 import os
 import subprocess
 import tempfile
-from typing import List, Tuple
+from typing import Dict, List, Optional, Tuple
 
 from Bio import SeqIO
 from Bio.SeqRecord import SeqRecord
 from Bio.Seq import Seq
+
+from speconsense.msa import MSAResult, extract_alignments_from_msa
 
 
 # Maximum number of variants to evaluate for MSA-based merging (legacy constant)
@@ -47,6 +49,78 @@ def compute_merge_batch_size(group_size: int, effort: int) -> int:
     batch = effort + 1 - log_v
 
     return max(MIN_MERGE_BATCH, min(MAX_MERGE_BATCH, batch))
+
+
+def run_spoa_for_cluster_metrics(
+    sequences: Dict[str, str],
+    disable_homopolymer_equivalence: bool = False,
+    min_hp_length: int = 6,
+) -> Optional[MSAResult]:
+    """Run SPOA over a cluster's read set and return the parsed MSAResult.
+
+    Mirrors core's ``_run_spoa_for_cluster_worker`` invocation (linear gap
+    scoring ``-m1 -n-1 -g-1 -e-1`` which reduces ambiguous columns ~4× vs
+    SPOA defaults) so that summarize-side metrics recomputed from the same
+    reads are comparable to core's. Used to refresh ``rid``, ``rid_min``,
+    and ``err_factor`` on merged clusters whose contributors come from
+    multiple pre-merge clusters.
+
+    Args:
+        sequences: Mapping of read_id -> raw read sequence (ungapped).
+        disable_homopolymer_equivalence: Pass through to
+            ``extract_alignments_from_msa``. When True the per-read
+            normalized edit distance is just the raw edit distance.
+        min_hp_length: Minimum consensus HP run length for HP normalization
+            in ``extract_alignments_from_msa``. Matches the
+            ``--hp-normalization-length`` semantics shared across core and
+            summarize.
+
+    Returns:
+        ``MSAResult`` with the SPOA consensus, raw MSA string (suitable for
+        ``compute_cluster_err_factor``), parsed read alignments, and the
+        MSA-to-consensus position map. Returns ``None`` if SPOA fails or
+        the consensus can't be extracted.
+    """
+    if not sequences:
+        return None
+
+    temp_input = None
+    try:
+        with tempfile.NamedTemporaryFile(mode='w', delete=False, suffix='.fasta') as f:
+            for read_id, seq in sequences.items():
+                f.write(f">{read_id}\n{seq}\n")
+            temp_input = f.name
+
+        cmd = [
+            "spoa", temp_input,
+            "-r", "2", "-l", "1", "-m", "1", "-n", "-1", "-g", "-1", "-e", "-1",
+        ]
+        result = subprocess.run(cmd, capture_output=True, text=True, check=True)
+
+        enable_normalization = not disable_homopolymer_equivalence
+        alignments, consensus, msa_to_consensus_pos = extract_alignments_from_msa(
+            result.stdout,
+            enable_homopolymer_normalization=enable_normalization,
+            min_hp_length=min_hp_length,
+        )
+        if not consensus:
+            return None
+
+        return MSAResult(
+            consensus=consensus,
+            msa_string=result.stdout,
+            alignments=alignments,
+            msa_to_consensus_pos=msa_to_consensus_pos,
+        )
+    except subprocess.CalledProcessError as e:
+        logging.debug(f"SPOA failed during merge-metric recompute: rc={e.returncode}")
+        return None
+    except Exception as e:
+        logging.debug(f"Merge-metric recompute failed: {e}")
+        return None
+    finally:
+        if temp_input and os.path.exists(temp_input):
+            os.unlink(temp_input)
 
 
 def run_spoa_msa(sequences: List[str], alignment_mode: int = 1) -> List:

@@ -466,19 +466,20 @@ def write_specimen_data_files(specimen_consensus: List[ConsensusInfo],
                 for raw_idx, raw_info in enumerate(contributing_infos, 1):
                     raw_name = f"{consensus.sample_name}.raw{raw_idx}"
 
-                    # Create new ConsensusInfo with .raw name but original sequence/metadata
-                    raw_consensus = ConsensusInfo(
+                    # Build .raw ConsensusInfo from the pre-merge cluster's full
+                    # field set. Mirrors the .ns/.lq pass-through treatment so
+                    # every per-cluster metric core emitted (cer_factor,
+                    # err_factor, gid/vid, err_factor raw sums for the quality
+                    # report's calibration check) is preserved on the .raw
+                    # output. Only the merge-only fields (snp_count, raw_ric,
+                    # raw_len, merge_indel_count) are reset since the .raw
+                    # represents a single pre-merge cluster.
+                    raw_consensus = raw_info._replace(
                         sample_name=raw_name,
-                        cluster_id=raw_info.cluster_id,
-                        sequence=raw_info.sequence,
-                        ric=raw_info.ric,
-                        size=raw_info.size,
-                        file_path=raw_info.file_path,
-                        snp_count=None,  # Pre-merge, no SNPs from merging
-                        primers=raw_info.primers,
-                        raw_ric=None,  # Pre-merge, not merged
-                        rid=raw_info.rid,  # Preserve read identity metrics
-                        rid_min=raw_info.rid_min,
+                        snp_count=None,
+                        raw_ric=None,
+                        raw_len=None,
+                        merge_indel_count=None,
                     )
                     raw_file_consensuses.append((raw_consensus, raw_info.sample_name))
 

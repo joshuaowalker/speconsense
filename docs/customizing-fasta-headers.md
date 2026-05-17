@@ -108,6 +108,33 @@ speconsense-summarize --fasta-fields minimal,cer_factor,err_factor
 - `group` and `variant` are vestigial — they parse the `-{gid}.v{vid}` pattern from the filename and emit redundant labels. Core's own `clusters/{sample}-all.fasta` already carries `gid=N` and `vid=N` directly, and summarize preserves `gid`/`vid` from input headers when re-writing
 - See [Understanding RiC and Merging](understanding-ric-and-merging.md) for interpreting `rawric`
 
+### Merge-time field handling
+
+When summarize collapses ≥2 contributors into a single record via within-group MSA merging or cross-primer overlap conflation, the merged record's fields are computed as follows:
+
+| Field | Computation on merge |
+|-------|----------------------|
+| `size`, `ric` | Summed across contributors |
+| `length` | Length of the column-voted merged consensus (not summed) |
+| `rawric`, `rawlen` | Flattened history of contributing RiCs / lengths, sorted desc |
+| `snp` | Cumulative across iterative merge rounds. Can over-count by 0–2 when the same physical position becomes ambiguous in multiple rounds. Use `ambig` (count of non-ACGT characters in the final consensus) as the canonical IUPAC site count |
+| `ambig` | Recomputed from the merged sequence at format time |
+| `primers` | Union of primer names across contributors, sorted. Cross-primer merges (primer-pool conflations) surface as multi-primer lists like `5'-ITS1F,5'-ITS3,3'-ITS4_RC` |
+| `rid`, `rid_min` | Re-derived from a SPOA MSA over the union of contributor reads (loaded from each contributor's `cluster_debug` FASTQ). Same homopolymer-normalized per-read identity that core uses |
+| `err_factor` | Re-derived from the same merged-cluster MSA via `msa.compute_cluster_err_factor`. Reads with terminal gaps don't vote in columns they don't cover, so the metric remains well-defined under cross-primer merges |
+| `cer_factor` | Same-primer merges: recomputed against larger peers in the post-merge bucket via the standard CER pipeline (classify pairwise differences, q_ctx lookup, joint solver). Cross-primer merges: `None` — the CER noise model is per-locus and isn't well-defined for merged-locus candidates. `None` is treated by summarize routing as "no valid peer comparison" (record always passes the `--min-cer-factor` filter) |
+| `gid`, `vid` (`group_rank`, `variant_rank` internally) | Inherited from the largest contributor; the naming pass then preserves or reallocates the `vid` per the gid/vid naming policy |
+
+**Interpretation caveats:**
+
+- The recomputed `rid`/`rid_min`/`err_factor` describe the merged cluster's homogeneity against a SPOA-derived consensus over its union reads. This consensus may differ slightly from the shipped column-voted `sequence` (which is voted over input consensuses, not raw reads), but it's the canonical MSA representation for cluster-internal metrics — the same one core uses for any single cluster.
+- Recompute requires the contributors' `cluster_debug` FASTQ files. If those are missing (e.g., the directory was pruned, or the FASTAs were copied without their debug FASTQs), the merged record falls back to the inherited values from the largest contributor; the fallback is debug-logged.
+- The q_ctx table for `err_factor` and `cer_factor` is loaded per-specimen from `parameters.error_model` in the per-specimen metadata JSON. If the metadata file is missing or doesn't record an error model, the recompute is skipped and the inherited values are kept.
+
+### `.raw` pre-merge variant records
+
+`.raw` files emitted for each pre-merge contributor of a merged record carry every field from the source cluster (matching the pass-through treatment of `.ns` and `.lq` records). Only the merge-history fields (`snp`, `rawric`, `rawlen`, `merge_indel_count`) are reset, since a `.raw` represents a single pre-merge cluster. This includes `cer_factor`, `err_factor`, `gid`, `vid`, and the err_factor raw sums (`err_factor_obs_sum`, `err_factor_exp_sum`, `err_factor_cols`) used by the quality report's q_ctx calibration check.
+
 ## Preset Reference
 
 | Preset | Fields Included | Use Case |

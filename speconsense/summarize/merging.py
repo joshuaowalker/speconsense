@@ -6,14 +6,22 @@ using exhaustive subset evaluation with SPOA multiple sequence alignment.
 
 import itertools
 import logging
-from typing import List, Tuple, Dict
+import os
+from typing import List, Tuple, Dict, Optional
 from collections import defaultdict
 
+from Bio import SeqIO
+
 from speconsense.types import ConsensusInfo, OverlapMergeInfo
+from speconsense.msa import compute_cluster_err_factor
+from speconsense.context import classify_pairwise_differences
+from speconsense.qctx import get_qctx
+from speconsense.significance import compute_cer_factor
 
 from .iupac import merge_bases_to_iupac, primers_are_same
 from .analysis import (
     run_spoa_msa,
+    run_spoa_for_cluster_metrics,
     analyze_msa_columns,
     analyze_msa_columns_overlap_aware,
     MAX_MSA_MERGE_VARIANTS,  # Kept for backward compatibility
@@ -111,17 +119,38 @@ def _build_merged_consensus_info(
 ) -> ConsensusInfo:
     """Assemble a ConsensusInfo from column-voting results and source variants.
 
-    Handles joining the consensus sequence, aggregating size/ric totals,
-    flattening raw_ric/raw_len merge history, and selecting metadata
-    from the largest variant.
+    Field handling summary:
+        - ``sequence``: column-voted, passed in as ``consensus_seq``.
+        - ``size``, ``ric``: summed across contributors.
+        - ``raw_ric``, ``raw_len``: flattened merge history, sorted desc.
+        - ``snp_count``: count of new IUPAC positions from this column vote;
+          the caller in ``merge_group_with_msa`` overwrites with the cumulative
+          total across iterative rounds. Cumulation can overcount when the
+          same physical position becomes ambiguous in multiple rounds; the
+          final consensus's ``ambig`` (count of non-ACGT characters) is the
+          canonical IUPAC site count.
+        - ``primers``: union across contributors, sorted. Aligns with the
+          set-based comparator in ``primers_are_same``. Cross-primer merges
+          surface as multi-primer lists in the output header.
+        - ``rid``, ``rid_min``, ``err_factor``, ``cer_factor``: inherited from
+          the largest contributor here; ``merge_group_with_msa`` recomputes
+          ``rid``, ``rid_min``, and ``err_factor`` from the merged cluster's
+          SPOA MSA over the union of contributor reads, and recomputes
+          ``cer_factor`` for same-primer merges (sets it to None for
+          cross-primer merges).
+        - ``group_rank``, ``variant_rank``, ``cluster_id``, ``file_path``,
+          ``sample_name``: inherited from the largest contributor; the naming
+          pass in ``process_single_specimen`` may overwrite ``sample_name``.
 
     Args:
-        consensus_seq: List of consensus characters from column voting
-        snp_count: Number of ambiguous (multi-base) positions
-        variants: Source ConsensusInfo objects that were merged
+        consensus_seq: List of consensus characters from column voting.
+        snp_count: Number of ambiguous (multi-base) positions in this vote.
+        variants: Source ConsensusInfo objects that were merged.
 
     Returns:
-        ConsensusInfo with merged metadata
+        ConsensusInfo with merged metadata. The merge-time recompute of
+        ``rid``/``rid_min``/``err_factor``/``cer_factor`` happens in the
+        caller after this helper returns.
     """
     consensus_sequence = ''.join(consensus_seq)
     total_size = sum(v.size for v in variants)
@@ -145,6 +174,14 @@ def _build_merged_consensus_info(
             raw_len_values.append(len(v.sequence))
     raw_len_values = sorted(raw_len_values, reverse=True) if len(variants) > 1 else None
 
+    # Union primer names across contributors, sorted. Matches the set-based
+    # semantics of primers_are_same and gives cross-primer merges an honest
+    # multi-primer header (e.g., 5'-ITS1F,5'-ITS3,3'-ITS4_RC for a 2-pair
+    # primer-pool conflation). Single-pair merges produce the same primer
+    # list they would have inherited from the largest contributor.
+    primer_set = {p for v in variants for p in (v.primers or [])}
+    merged_primers = sorted(primer_set) if primer_set else None
+
     largest_variant = max(variants, key=lambda v: v.size)
 
     return ConsensusInfo(
@@ -155,11 +192,16 @@ def _build_merged_consensus_info(
         size=total_size,
         file_path=largest_variant.file_path,
         snp_count=snp_count if snp_count > 0 else None,
-        primers=largest_variant.primers,
+        primers=merged_primers,
         raw_ric=raw_ric_values,
         raw_len=raw_len_values,
         rid=largest_variant.rid,
         rid_min=largest_variant.rid_min,
+        cer_factor=largest_variant.cer_factor,
+        err_factor=largest_variant.err_factor,
+        err_factor_obs_sum=largest_variant.err_factor_obs_sum,
+        err_factor_exp_sum=largest_variant.err_factor_exp_sum,
+        err_factor_cols=largest_variant.err_factor_cols,
         group_rank=largest_variant.group_rank,
         variant_rank=largest_variant.variant_rank,
     )
@@ -588,3 +630,289 @@ def merge_group_with_msa(variants: List[ConsensusInfo], args) -> Tuple[List[Cons
             break
 
     return merged_results, all_traceability, potentially_suboptimal, overlap_merges
+
+
+# ---------------------------------------------------------------------------
+# Merge-time metric recomputation
+#
+# When ``merge_group_with_msa`` collapses ≥2 contributors into a single
+# record, ``_build_merged_consensus_info`` inherits ``rid``, ``rid_min``,
+# ``err_factor`` from the largest contributor. Those values describe the
+# largest contributor's pre-merge cluster, not the merged cluster. The
+# helpers below re-derive them from the union of contributor reads.
+#
+# Cross-primer merges (different-primer contributors conflated by overlap)
+# remain meaningful for ``rid``/``rid_min``/``err_factor`` because each
+# metric is per-position-coverage-aware: reads with terminal gaps simply
+# don't contribute to columns they don't cover. ``cer_factor`` is more
+# delicate — the noise model wasn't designed for merged-locus candidates —
+# so the cross-primer branch sets it to None (treated as "no valid peer
+# comparison" by summarize's routing).
+# ---------------------------------------------------------------------------
+
+
+def _resolve_contributor_fastq(
+    contributor: ConsensusInfo,
+    fastq_lookup: Optional[Dict[str, List[str]]],
+) -> Optional[str]:
+    """Return the cluster_debug FASTQ path for ``contributor``.
+
+    Matches via the ``{sample_name}-RiC{ric}-`` substring that core uses
+    for cluster_debug filenames. Returns None when the lookup is missing
+    or no file matches.
+    """
+    if not fastq_lookup or not contributor.sample_name:
+        return None
+    # Lazy import to avoid a circular dependency with io.
+    from .io import strip_cluster_suffix
+    specimen_name = strip_cluster_suffix(contributor.sample_name)
+    if specimen_name == contributor.sample_name:
+        return None
+    files = fastq_lookup.get(specimen_name, [])
+    if not files:
+        return None
+    needle = f"{contributor.sample_name}-RiC{contributor.ric}-"
+    for path in files:
+        if needle in os.path.basename(path):
+            return path
+    return None
+
+
+def _load_contributor_reads(
+    contributors: List[ConsensusInfo],
+    fastq_lookup: Optional[Dict[str, List[str]]],
+) -> Dict[str, str]:
+    """Load the union of reads from each contributor's debug FASTQ.
+
+    Read IDs are namespaced ``{cluster_id}:{read_id}`` so cross-cluster
+    duplicates don't collide in the SPOA input dict.
+    """
+    sequences: Dict[str, str] = {}
+    for contributor in contributors:
+        fastq_path = _resolve_contributor_fastq(contributor, fastq_lookup)
+        if not fastq_path or not os.path.exists(fastq_path):
+            continue
+        try:
+            for record in SeqIO.parse(fastq_path, "fastq"):
+                key = f"{contributor.cluster_id}:{record.id}"
+                sequences[key] = str(record.seq)
+        except Exception as e:
+            logging.debug(
+                f"Could not parse {fastq_path} during merge recompute: {e}"
+            )
+    return sequences
+
+
+def _refresh_cluster_metrics(
+    merged_record: ConsensusInfo,
+    contributors: List[ConsensusInfo],
+    fastq_lookup: Optional[Dict[str, List[str]]],
+    qctx_table: Optional[Dict[str, float]],
+    hp_normalization_length: int,
+    disable_homopolymer_equivalence: bool,
+) -> ConsensusInfo:
+    """Recompute rid, rid_min, err_factor for a merged cluster.
+
+    Runs SPOA over the union of contributor reads (loaded from each
+    contributor's ``cluster_debug`` FASTQ) and replaces the inherited
+    metrics with values derived from the merged read set:
+
+    - ``rid``, ``rid_min`` come from per-read homopolymer-normalized
+      identity against SPOA's re-derived consensus, the same calculation
+      core uses for single-cluster rid (``extract_alignments_from_msa``).
+    - ``err_factor`` and its raw sums come from
+      ``msa.compute_cluster_err_factor`` against the same MSA.
+
+    When the reads can't be loaded (missing debug FASTQs, lookup failure)
+    or SPOA fails, the merged record is returned unchanged — the inherited
+    values stay in place as a best-effort fallback.
+
+    Interpretation notes:
+    - The recomputed metrics describe the merged cluster's homogeneity
+      against an MSA built from its union reads. SPOA's MSA-derived
+      consensus may differ slightly from the shipped column-voted
+      ``sequence``; the metrics describe cluster internal structure rather
+      than agreement with the shipped consensus per se.
+    - Cross-primer reads with terminal gaps contribute zero to columns
+      they don't cover, so err_factor remains well-defined under primer
+      conflation. rid uses HP-normalized edit distance over the read's
+      MSA length and is correspondingly unaffected by uncovered terminal
+      regions of the merged-locus consensus.
+    """
+    if len(contributors) <= 1:
+        return merged_record
+
+    sequences = _load_contributor_reads(contributors, fastq_lookup)
+    if len(sequences) < 2:
+        logging.debug(
+            f"Skipping merge-metric recompute for {merged_record.sample_name}: "
+            f"could not load union reads"
+        )
+        return merged_record
+
+    msa_result = run_spoa_for_cluster_metrics(
+        sequences,
+        disable_homopolymer_equivalence=disable_homopolymer_equivalence,
+        min_hp_length=hp_normalization_length,
+    )
+    if msa_result is None:
+        logging.debug(
+            f"Skipping merge-metric recompute for {merged_record.sample_name}: "
+            f"SPOA failed on {len(sequences)} reads"
+        )
+        return merged_record
+
+    # rid / rid_min from per-read homopolymer-normalized identity against
+    # SPOA's MSA consensus.
+    new_rid: Optional[float] = merged_record.rid
+    new_rid_min: Optional[float] = merged_record.rid_min
+    if msa_result.alignments and msa_result.consensus:
+        consensus_len = len(msa_result.consensus)
+        if consensus_len > 0:
+            identities = [
+                1.0 - (a.normalized_edit_distance / consensus_len)
+                for a in msa_result.alignments
+            ]
+            if identities:
+                new_rid = sum(identities) / len(identities)
+                new_rid_min = min(identities)
+
+    # err_factor against the same MSA, weighted by q_ctx where available.
+    new_err = merged_record.err_factor
+    new_obs = merged_record.err_factor_obs_sum
+    new_exp = merged_record.err_factor_exp_sum
+    new_cols = merged_record.err_factor_cols
+    if qctx_table is not None:
+        ef, obs, exp, cols = compute_cluster_err_factor(
+            msa_result.msa_string, qctx_table
+        )
+        # Preserve inherited sums when err_factor can't be computed; replace
+        # otherwise. cols/obs/exp are 0 in the failure case so guarding on
+        # ef avoids silently zeroing the quality report's calibration.
+        if ef is not None:
+            new_err = ef
+            new_obs = obs
+            new_exp = exp
+            new_cols = cols
+
+    return merged_record._replace(
+        rid=new_rid,
+        rid_min=new_rid_min,
+        err_factor=new_err,
+        err_factor_obs_sum=new_obs,
+        err_factor_exp_sum=new_exp,
+        err_factor_cols=new_cols,
+    )
+
+
+def _count_independent_sites(seq: str) -> int:
+    """Bonferroni site count for context-aware CER (cer_in_practice §2.3).
+
+    Replicated from ``speconsense.core.clusterer._count_independent_sites``
+    to avoid a cross-package private-helper import. Each maximal run of
+    identical bases counts as one site regardless of run length.
+    """
+    if not seq:
+        return 0
+    n = 1
+    for i in range(1, len(seq)):
+        if seq[i] != seq[i - 1]:
+            n += 1
+    return n
+
+
+def _refresh_cer_factor(
+    merged_record: ConsensusInfo,
+    contributors: List[ConsensusInfo],
+    bucket_members: List[ConsensusInfo],
+    qctx_table: Optional[Dict[str, float]],
+    alpha: float,
+    hp_min_length: int,
+) -> ConsensusInfo:
+    """Recompute cer_factor for a merged cluster against post-merge peers.
+
+    Walks the surviving records in the merged record's bucket and, for each
+    peer with strictly larger size, classifies the pairwise differences via
+    ``classify_pairwise_differences``, looks up each variant event's q_ctx,
+    and runs ``compute_cer_factor`` with N = bucket-total reads (post-merge),
+    M = candidate size. The minimum factor across peers is the candidate's
+    new cer_factor (same convention core uses in
+    ``SpecimenClusterer._compute_cer_for_candidate``).
+
+    Cross-primer merges (contributors had different primer sets) bypass this
+    pipeline and get ``cer_factor=None``. The CER noise model is per-locus
+    by construction and isn't well-defined when the merged candidate spans
+    multiple primer-pool loci stitched together.
+
+    Returns ``merged_record`` unchanged when the recompute cannot proceed
+    (no qctx table, no larger peer, etc.) — caller is responsible for
+    setting cer_factor=None upstream if a stale inherited value is
+    unacceptable.
+
+    Interpretation:
+    - The recomputed factor compares the merged candidate's shipped
+      consensus (column-vote of contributor consensuses) to each larger
+      peer's shipped consensus. K and the per-position q_ctx values are
+      re-derived from the merged consensus, so the factor reflects the
+      merged object's variant signature against post-merge peers.
+    - For same-primer merges within a core identity group, this is the
+      semantically correct CER call: the noise model was originally
+      designed for exactly this comparison, just with a re-derived
+      candidate state.
+    - For cross-primer merges (None), summarize's routing treats the value
+      identically to other "no valid peer comparison" cases — record always
+      passes the cer_factor filter.
+    """
+    contributor_primer_sets = {frozenset(c.primers or []) for c in contributors}
+    is_cross_primer = len(contributor_primer_sets) > 1
+    if is_cross_primer:
+        return merged_record._replace(cer_factor=None)
+
+    if qctx_table is None:
+        return merged_record
+
+    larger_peers = [
+        p for p in bucket_members
+        if p is not merged_record and p.size > merged_record.size
+    ]
+    if not larger_peers:
+        # Anchor of its bucket (or only peer) — no comparison available.
+        return merged_record._replace(cer_factor=None)
+
+    group_N = sum(m.size for m in bucket_members)
+
+    best_factor: Optional[float] = None
+    for peer in larger_peers:
+        tags = classify_pairwise_differences(
+            merged_record.sequence, peer.sequence,
+            hp_min_length=hp_min_length,
+        )
+        if not tags:
+            continue
+        qctx_values: List[float] = []
+        for tag in tags:
+            q = get_qctx(tag, table=qctx_table)
+            if q is None:
+                continue
+            qctx_values.append(q)
+        if not qctx_values:
+            continue
+        longer = (
+            peer.sequence
+            if len(peer.sequence) >= len(merged_record.sequence)
+            else merged_record.sequence
+        )
+        n_sites = _count_independent_sites(longer)
+        factor = compute_cer_factor(
+            N=group_N,
+            M=merged_record.size,
+            n_sites=n_sites,
+            q_ctx_per_position=qctx_values,
+            alpha=alpha,
+        )
+        if factor is None:
+            continue
+        if best_factor is None or factor < best_factor:
+            best_factor = factor
+
+    return merged_record._replace(cer_factor=best_factor)

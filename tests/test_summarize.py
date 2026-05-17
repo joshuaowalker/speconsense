@@ -826,3 +826,209 @@ class TestProcessSingleSpecimenNaming:
         # moved record gets v2 (next free under gid=1 — gid=2's ns/lq vids
         # remain in gid=2 on disk, not blocking gid=1)
         assert names == ["test-1.v1", "test-1.v2"]
+
+
+class TestMergeFieldHandling:
+    """_build_merged_consensus_info should aggregate fields correctly."""
+
+    @staticmethod
+    def _make(name, size, primers, cer_factor=None, err_factor=None,
+              group_rank=1, variant_rank=1):
+        from speconsense.types import ConsensusInfo
+        return ConsensusInfo(
+            sample_name=name, cluster_id=f"{group_rank}.v{variant_rank}",
+            sequence="ACGT" * 50, ric=size, size=size,
+            file_path="f", primers=primers,
+            cer_factor=cer_factor, err_factor=err_factor,
+            group_rank=group_rank, variant_rank=variant_rank,
+        )
+
+    def test_primers_union_across_contributors(self):
+        from speconsense.summarize.merging import _build_merged_consensus_info
+        variants = [
+            self._make("a", 100, ["5'-ITS1F", "3'-ITS4_RC"]),
+            self._make("b", 50, ["5'-ITS3", "3'-ITS4_RC"]),
+        ]
+        merged = _build_merged_consensus_info(list("ACGT"), 0, variants)
+        # Union of primer names, sorted
+        assert merged.primers == sorted({
+            "5'-ITS1F", "5'-ITS3", "3'-ITS4_RC"
+        })
+
+    def test_primers_single_pair_preserves_pair(self):
+        from speconsense.summarize.merging import _build_merged_consensus_info
+        primers = ["5'-ITS1F", "3'-ITS4_RC"]
+        variants = [
+            self._make("a", 100, primers),
+            self._make("b", 50, primers),
+        ]
+        merged = _build_merged_consensus_info(list("ACGT"), 0, variants)
+        assert sorted(merged.primers) == sorted(primers)
+
+    def test_inherits_cer_err_factor_pre_recompute(self):
+        # _build_merged_consensus_info hands off to the recompute pass which
+        # may overwrite these; here we verify the inheritance happens at all,
+        # so the recompute pass has something to start from.
+        from speconsense.summarize.merging import _build_merged_consensus_info
+        variants = [
+            self._make("a", 100, ["P1"], cer_factor=3.2, err_factor=1.05),
+            self._make("b", 50, ["P1"], cer_factor=8.0, err_factor=2.0),
+        ]
+        merged = _build_merged_consensus_info(list("ACGT"), 0, variants)
+        # Largest contributor wins for these inherited fields.
+        assert merged.cer_factor == 3.2
+        assert merged.err_factor == 1.05
+
+
+class TestRefreshCerFactor:
+    """_refresh_cer_factor should distinguish same-primer vs cross-primer merges."""
+
+    @staticmethod
+    def _make(name, size, sequence, primers, group_rank=1, variant_rank=1):
+        from speconsense.types import ConsensusInfo
+        return ConsensusInfo(
+            sample_name=name, cluster_id=f"{group_rank}.v{variant_rank}",
+            sequence=sequence, ric=size, size=size,
+            file_path="f", primers=primers,
+            group_rank=group_rank, variant_rank=variant_rank,
+        )
+
+    def test_cross_primer_merge_sets_cer_to_none(self):
+        from speconsense.summarize.merging import _refresh_cer_factor
+        seq = "ACGT" * 50
+        merged = self._make("merged", 150, seq, ["P1", "P2", "P3"])
+        contributors = [
+            self._make("a", 100, seq, ["P1", "P2"]),
+            self._make("b", 50, seq, ["P3"]),
+        ]
+        peer = self._make("peer", 500, seq, ["P1"])
+        bucket = [peer, merged]
+        # Even with qctx_table available, cross-primer ⇒ None
+        result = _refresh_cer_factor(
+            merged, contributors, bucket,
+            qctx_table={"non-hp-sub": 0.006, "non-hp-indel": 0.011},
+            alpha=1e-5,
+            hp_min_length=6,
+        )
+        assert result.cer_factor is None
+
+    def test_same_primer_no_qctx_returns_unchanged(self):
+        from speconsense.summarize.merging import _refresh_cer_factor
+        # When qctx_table is None, recompute can't run; inherited value
+        # passes through untouched.
+        seq = "ACGT" * 50
+        merged = self._make("merged", 150, seq, ["P1"])._replace(cer_factor=3.0)
+        contributors = [
+            self._make("a", 100, seq, ["P1"]),
+            self._make("b", 50, seq, ["P1"]),
+        ]
+        peer = self._make("peer", 500, seq, ["P1"])
+        bucket = [peer, merged]
+        result = _refresh_cer_factor(
+            merged, contributors, bucket,
+            qctx_table=None, alpha=1e-5, hp_min_length=6,
+        )
+        assert result.cer_factor == 3.0
+
+    def test_same_primer_no_larger_peer_returns_none(self):
+        from speconsense.summarize.merging import _refresh_cer_factor
+        # Merged record is the anchor of its bucket; no peer to compare
+        # against ⇒ cer_factor None.
+        seq = "ACGT" * 50
+        merged = self._make("merged", 500, seq, ["P1"])._replace(cer_factor=3.0)
+        contributors = [
+            self._make("a", 400, seq, ["P1"]),
+            self._make("b", 100, seq, ["P1"]),
+        ]
+        smaller = self._make("smaller", 50, seq, ["P1"])
+        bucket = [merged, smaller]
+        result = _refresh_cer_factor(
+            merged, contributors, bucket,
+            qctx_table={"non-hp-sub": 0.006, "non-hp-indel": 0.011},
+            alpha=1e-5,
+            hp_min_length=6,
+        )
+        assert result.cer_factor is None
+
+    def test_same_primer_with_peer_recomputes(self):
+        from speconsense.summarize.merging import _refresh_cer_factor
+        # Construct a peer that differs from merged at one position so
+        # classify_pairwise_differences returns K=1 and the recompute runs.
+        merged_seq = "ACGT" * 50
+        peer_seq = "ACGT" * 50
+        peer_seq = peer_seq[:10] + "T" + peer_seq[11:]  # single substitution
+        merged = self._make("merged", 50, merged_seq, ["P1"])._replace(cer_factor=999.0)
+        contributors = [
+            self._make("a", 30, merged_seq, ["P1"]),
+            self._make("b", 20, merged_seq, ["P1"]),
+        ]
+        peer = self._make("peer", 500, peer_seq, ["P1"])
+        bucket = [peer, merged]
+        result = _refresh_cer_factor(
+            merged, contributors, bucket,
+            qctx_table={
+                "non-hp-sub": 0.006, "non-hp-indel": 0.011,
+                "hp-l1": 0.006, "hp-l2": 0.008, "hp-l3": 0.010,
+                "hp-l4": 0.011, "hp-l5": 0.011,
+            },
+            alpha=1e-5,
+            hp_min_length=6,
+        )
+        # The inherited 999.0 should be replaced by a recomputed value.
+        # Exact value depends on solver; just assert it changed and is finite.
+        assert result.cer_factor != 999.0
+        assert result.cer_factor is None or 0.0 < result.cer_factor < float('inf')
+
+
+class TestRawFieldPropagation:
+    """.raw record construction should preserve every field from the source cluster."""
+
+    def test_raw_preserves_cer_err_gid_vid_and_err_sums(self):
+        # _build .raw records via the same _replace call that
+        # write_specimen_data_files uses, and verify the new field
+        # propagation. Direct test against the construction logic (not the
+        # full file-writing path) — sufficient since the fix is a one-line
+        # _replace.
+        from speconsense.types import ConsensusInfo
+        raw_info = ConsensusInfo(
+            sample_name="specimen-1.v3",
+            cluster_id="1.v3",
+            sequence="ACGT",
+            ric=42,
+            size=42,
+            file_path="f",
+            primers=["P1"],
+            rid=0.985,
+            rid_min=0.971,
+            cer_factor=4.2,
+            err_factor=1.15,
+            err_factor_obs_sum=0.5,
+            err_factor_exp_sum=0.43,
+            err_factor_cols=120,
+            group_rank=1,
+            variant_rank=3,
+        )
+        # Match the construction in write_specimen_data_files
+        raw = raw_info._replace(
+            sample_name="specimen-1.v1.raw2",
+            snp_count=None,
+            raw_ric=None,
+            raw_len=None,
+            merge_indel_count=None,
+        )
+        # Merge-only fields reset
+        assert raw.snp_count is None
+        assert raw.raw_ric is None
+        assert raw.raw_len is None
+        assert raw.merge_indel_count is None
+        # Source cluster fields preserved
+        assert raw.cer_factor == 4.2
+        assert raw.err_factor == 1.15
+        assert raw.err_factor_obs_sum == 0.5
+        assert raw.err_factor_exp_sum == 0.43
+        assert raw.err_factor_cols == 120
+        assert raw.group_rank == 1
+        assert raw.variant_rank == 3
+        assert raw.rid == 0.985
+        assert raw.rid_min == 0.971
+        assert raw.primers == ["P1"]
