@@ -22,7 +22,7 @@ from speconsense.types import ConsensusInfo
 from .fields import FastaField, format_fasta_header
 
 
-_CLUSTER_SUFFIX_RE = re.compile(r'-\d+\.v\d+(?:\.raw\d+)?$')
+_CLUSTER_SUFFIX_RE = re.compile(r'-\d+(?:\.v\d+|-full)(?:\.raw\d+)?$')
 
 
 def strip_cluster_suffix(sample_name: str) -> str:
@@ -31,6 +31,7 @@ def strip_cluster_suffix(sample_name: str) -> str:
     Handles the end-to-end gid.vid naming conventions:
     - ``specimen-1.v2`` → ``specimen``
     - ``specimen-1.v2.raw3`` → ``specimen``
+    - ``specimen-1-full`` → ``specimen``
 
     Returns the input unchanged when no suffix is present.
     """
@@ -423,7 +424,8 @@ def write_specimen_data_files(specimen_consensus: List[ConsensusInfo],
                                fastq_dir: str,
                                fastq_lookup: Dict[str, List[str]],
                                original_consensus_lookup: Dict[str, ConsensusInfo],
-                               fasta_fields: List[FastaField]
+                               fasta_fields: List[FastaField],
+                               full_reads_by_name: Optional[Dict[str, List]] = None,
                                ) -> List[Tuple[ConsensusInfo, str]]:
     """
     Write individual FASTA and FASTQ files for a single specimen.
@@ -431,10 +433,16 @@ def write_specimen_data_files(specimen_consensus: List[ConsensusInfo],
 
     Args:
         fasta_fields: List of FastaField objects defining header format
+        full_reads_by_name: Optional map of ``-full`` sample_name -> list
+            of sampled SeqRecord reads. When present, the matching
+            ``-full`` records emit a FASTQ of these reads in place of the
+            usual cluster_debug lookup (which has no matching files for
+            the synthetic ``-full`` record).
 
     Returns:
         List of (raw_consensus, original_cluster_name) tuples for later use in summary.fasta
     """
+    full_reads_by_name = full_reads_by_name or {}
     # Generate .raw file consensuses for merged variants
     raw_file_consensuses = []
     for consensus in specimen_consensus:
@@ -491,8 +499,23 @@ def write_specimen_data_files(specimen_consensus: List[ConsensusInfo],
             f.write(f">{header}\n")
             f.write(f"{consensus.sequence}\n")
 
-    # Write FASTQ files for each final consensus containing all contributing reads
+    # Write FASTQ files for each final consensus containing all contributing reads.
+    # -full records are synthetic (no single source cluster_debug FASTQ); their
+    # sampled reads come in via full_reads_by_name and we write them directly.
     for consensus in specimen_consensus:
+        if consensus.sample_name in full_reads_by_name:
+            os.makedirs(fastq_dir, exist_ok=True)
+            fastq_output_path = os.path.join(
+                fastq_dir,
+                f"{consensus.sample_name}-RiC{consensus.ric}.fastq",
+            )
+            try:
+                with open(fastq_output_path, 'w') as outf:
+                    SeqIO.write(full_reads_by_name[consensus.sample_name], outf, "fastq")
+                logging.debug(f"Wrote -full FASTQ: {os.path.basename(fastq_output_path)}")
+            except Exception as e:
+                logging.warning(f"Could not write -full FASTQ for {consensus.sample_name}: {e}")
+            continue
         write_consensus_fastq(consensus, merge_traceability, naming_info, fastq_dir, fastq_lookup, original_consensus_lookup)
 
     # Write .raw files (individual FASTA and FASTQ for pre-merge variants)

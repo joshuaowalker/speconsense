@@ -25,3 +25,4 @@ speconsense-summarize:
   merge-min-size-ratio: 0.2     # Match 20% calling threshold
   select-min-size-ratio: 0.2    # Match 20% calling threshold
   min-merge-overlap: 0          # Disable partial overlap merging
+  enable-full-consensus: true   # Emit -{gid}-full noise-scrubbed query consensus

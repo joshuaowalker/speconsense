@@ -761,6 +761,18 @@ speconsense-summarize --select-min-size-ratio 0.2
 
 This two-stage process ensures that distinct biological sequences are preserved as separate groups, while providing control over variant complexity within each group.
 
+**Group "full" Consensus (query-optimized):**
+```bash
+speconsense-summarize --enable-full-consensus
+```
+- Per identity group with ≥2 selected variants on the pass track, emit an additional `-{gid}-full` consensus alongside the phased variants
+- Built from a size-weighted, top-mean-Phred read sample (budget = core's `--max-sample-size`, default 100) drawn across the pre-merge core variants whose size clears the running-total gate at `--min-ambiguity-frequency` (also inherited from the core run, default 0.10)
+- SPOA with linear gap scoring; local alignment (`-l 0`) for cross-primer-conflated groups, global (`-l 1`) otherwise
+- Consensus uses one-vote-per-read, majority-wins gaps, and IUPAC ambiguity codes at columns where ≥2 bases each clear `--min-ambiguity-frequency`
+- Suppressed when fewer than 2 pass-track variants exist or fewer than 2 contributors clear the gate; `.ns` / `.lq` records are not eligible to contribute
+- Intended use: BLAST query against legacy unphased ITS references. The `-full` output is IUPAC-bearing by construction and should be scored with adjusted-identity (MycoBLAST) tools — under raw BLAST it will silently degrade because every IUPAC code counts as a mismatch
+- Enabled by default in the `compressed` profile
+
 ### Customizing FASTA Header Fields
 
 Control which metadata fields appear in FASTA headers using the `--fasta-fields` option:

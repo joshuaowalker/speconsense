@@ -55,6 +55,7 @@ def run_spoa_for_cluster_metrics(
     sequences: Dict[str, str],
     disable_homopolymer_equivalence: bool = False,
     min_hp_length: int = 6,
+    alignment_mode: int = 1,
 ) -> Optional[MSAResult]:
     """Run SPOA over a cluster's read set and return the parsed MSAResult.
 
@@ -74,6 +75,10 @@ def run_spoa_for_cluster_metrics(
             in ``extract_alignments_from_msa``. Matches the
             ``--hp-normalization-length`` semantics shared across core and
             summarize.
+        alignment_mode: SPOA alignment mode (0=local SW, 1=global NW,
+            2=semi-global). Default 1 matches core's per-cluster consensus.
+            The ``-full`` builder passes 0 for cross-primer-conflated groups
+            whose reads span overlapping-but-different regions.
 
     Returns:
         ``MSAResult`` with the SPOA consensus, raw MSA string (suitable for
@@ -93,7 +98,8 @@ def run_spoa_for_cluster_metrics(
 
         cmd = [
             "spoa", temp_input,
-            "-r", "2", "-l", "1", "-m", "1", "-n", "-1", "-g", "-1", "-e", "-1",
+            "-r", "2", "-l", str(alignment_mode),
+            "-m", "1", "-n", "-1", "-g", "-1", "-e", "-1",
         ]
         result = subprocess.run(cmd, capture_output=True, text=True, check=True)
 

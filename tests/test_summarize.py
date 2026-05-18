@@ -717,6 +717,7 @@ class TestProcessSingleSpecimenNaming:
             select_max_variants=-1,
             select_strategy="size",
             disable_merging=True,
+            enable_full_consensus=False,
         )
         defaults.update(overrides)
         return SimpleNamespace(**defaults)
@@ -728,7 +729,7 @@ class TestProcessSingleSpecimenNaming:
             self._make("test-1.v2", 1, 2, 50),
             self._make("test-1.v3", 1, 3, 10),
         ]
-        final, _, _, _, _ = process_single_specimen(members, self._args())
+        final, _, _, _, _, _ = process_single_specimen(members, self._args())
         names = {v.sample_name for v in final}
         assert names == {"test-1.v1", "test-1.v2", "test-1.v3"}
 
@@ -740,7 +741,7 @@ class TestProcessSingleSpecimenNaming:
             self._make("test-1.v3", 1, 3, 5),  # filtered by ratio
         ]
         args = self._args(select_min_size_ratio=0.5)
-        final, _, _, _, _ = process_single_specimen(members, args)
+        final, _, _, _, _, _ = process_single_specimen(members, args)
         names = sorted(v.sample_name for v in final)
         assert names == ["test-1.v1", "test-1.v2"]
 
@@ -753,7 +754,7 @@ class TestProcessSingleSpecimenNaming:
             self._make("test-2.v1", 2, 1, 50, "AAA" * 20 + shared, ["P2"]),
         ]
         args = self._args(min_merge_overlap=200)
-        final, _, _, _, _ = process_single_specimen(members, args)
+        final, _, _, _, _, _ = process_single_specimen(members, args)
         names = sorted(v.sample_name for v in final)
         # gid=1 keeps v1/v2 verbatim; gid=2's v1 is moved to v3 under gid=1
         assert names == ["test-1.v1", "test-1.v2", "test-1.v3"]
@@ -767,7 +768,7 @@ class TestProcessSingleSpecimenNaming:
         ]
         ns_records = [self._make("test-1.v2", 1, 2, 5)]  # vid=2 already used in gid=1
         args = self._args(min_merge_overlap=200)
-        final, _, _, _, _ = process_single_specimen(
+        final, _, _, _, _, _ = process_single_specimen(
             members, args, ns_for_specimen=ns_records)
         names = sorted(v.sample_name for v in final)
         # moved record gets v3, skipping v2 occupied by ns
@@ -782,7 +783,7 @@ class TestProcessSingleSpecimenNaming:
         ]
         lq_records = [self._make("test-1.v4", 1, 4, 5)]  # lq occupies vid=4
         args = self._args(min_merge_overlap=200)
-        final, _, _, _, _ = process_single_specimen(
+        final, _, _, _, _, _ = process_single_specimen(
             members, args, lq_for_specimen=lq_records)
         names = sorted(v.sample_name for v in final)
         # moved record gets v5 (max(used={1,4}) + 1), not v2/v3 (gaps in core)
@@ -798,7 +799,7 @@ class TestProcessSingleSpecimenNaming:
             self._make("test-3.v1", 3, 1, 40, shared + "GGG" * 50, ["P3"]),
         ]
         args = self._args(min_merge_overlap=200)
-        final, _, _, _, _ = process_single_specimen(members, args)
+        final, _, _, _, _, _ = process_single_specimen(members, args)
         names = sorted(v.sample_name for v in final)
         assert len(names) == 4
         # All emit under gid=1
@@ -819,7 +820,7 @@ class TestProcessSingleSpecimenNaming:
         ns_records = [self._make("test-2.v2", 2, 2, 5)]
         lq_records = [self._make("test-2.v3", 2, 3, 5)]
         args = self._args(min_merge_overlap=200)
-        final, _, _, _, _ = process_single_specimen(
+        final, _, _, _, _, _ = process_single_specimen(
             members, args, ns_for_specimen=ns_records,
             lq_for_specimen=lq_records)
         names = sorted(v.sample_name for v in final)
@@ -1032,3 +1033,269 @@ class TestRawFieldPropagation:
         assert raw.rid == 0.985
         assert raw.rid_min == 0.971
         assert raw.primers == ["P1"]
+
+
+class TestFullConsensus:
+    """Unit tests for --enable-full-consensus group consensus builder."""
+
+    @staticmethod
+    def _variant(name, size, primers=None):
+        from speconsense.types import ConsensusInfo
+        return ConsensusInfo(
+            sample_name=name,
+            cluster_id=name.rsplit("-", 1)[-1],
+            sequence="ACGT" * 50,
+            ric=size,
+            size=size,
+            file_path="/tmp/test-all.fasta",
+            primers=primers or ["P1"],
+            group_rank=1,
+            variant_rank=1,
+        )
+
+    def test_gate_admits_strong_minor_signal(self):
+        from speconsense.summarize.full_consensus import _gate_variants
+        variants = [
+            self._variant("a", 100),
+            self._variant("b", 30),
+            self._variant("c", 20),
+        ]
+        # Sorted desc: 100; 30 >= 0.10 * 100; 20 >= 0.10 * 130 ⇒ all three
+        gated = _gate_variants(variants, 0.10)
+        assert [v.size for v in gated] == [100, 30, 20]
+
+    def test_gate_excludes_noise_tail(self):
+        from speconsense.summarize.full_consensus import _gate_variants
+        variants = [
+            self._variant("a", 100),
+            self._variant("b", 30),
+            self._variant("c", 8),
+            self._variant("d", 2),
+        ]
+        # 30 passes; 8 < 0.10 * 130 = 13 ⇒ stop
+        gated = _gate_variants(variants, 0.10)
+        assert [v.size for v in gated] == [100, 30]
+
+    def test_gate_handles_single_variant(self):
+        from speconsense.summarize.full_consensus import _gate_variants
+        gated = _gate_variants([self._variant("a", 100)], 0.10)
+        assert len(gated) == 1
+
+    def test_allocation_sums_to_budget(self):
+        from speconsense.summarize.full_consensus import _allocate_reads
+        alloc = _allocate_reads([80, 20], 100)
+        assert sum(alloc) == 100
+        # Size-weighted
+        assert alloc == [80, 20]
+
+    def test_allocation_rounds_fairly(self):
+        from speconsense.summarize.full_consensus import _allocate_reads
+        # 100 budget across [33, 33, 34] sizes: raw=[33,33,34], floored sums to 100 — no remainder
+        alloc = _allocate_reads([33, 33, 34], 100)
+        assert sum(alloc) == 100
+        # 70 budget across [50, 50, 50] (total=150 > budget): raw=[23.3, 23.3, 23.3],
+        # floored=[23,23,23] sums to 69, remainder=1 → goes to one of them
+        alloc = _allocate_reads([50, 50, 50], 70)
+        assert sum(alloc) == 70
+        assert sorted(alloc) == [23, 23, 24]
+
+    def test_allocation_caps_at_available(self):
+        from speconsense.summarize.full_consensus import _allocate_reads
+        # Total available smaller than budget: return sizes verbatim
+        alloc = _allocate_reads([10, 5], 100)
+        assert alloc == [10, 5]
+
+    def test_cross_primer_detection(self):
+        from speconsense.summarize.full_consensus import _is_cross_primer
+        same = [self._variant("a", 100, ["P1"]), self._variant("b", 50, ["P1"])]
+        cross = [self._variant("a", 100, ["P1"]), self._variant("b", 50, ["P2"])]
+        assert not _is_cross_primer(same)
+        assert _is_cross_primer(cross)
+
+    def test_consensus_majority_gap_omits_position(self):
+        from speconsense.summarize.merging import build_full_consensus_from_msa
+        from Bio.SeqRecord import SeqRecord
+        from Bio.Seq import Seq
+
+        # Column 0: 4 gap, 2 A → omitted
+        # Column 1: 2 gap, 4 A → kept as A
+        rows = [
+            SeqRecord(Seq("-A"), id="r1"),
+            SeqRecord(Seq("-A"), id="r2"),
+            SeqRecord(Seq("-A"), id="r3"),
+            SeqRecord(Seq("-A"), id="r4"),
+            SeqRecord(Seq("A-"), id="r5"),
+            SeqRecord(Seq("A-"), id="r6"),
+        ]
+        consensus, snp = build_full_consensus_from_msa(rows, 0.10)
+        assert consensus == "A"
+        assert snp == 0
+
+    def test_consensus_iupac_at_threshold(self):
+        from speconsense.summarize.merging import build_full_consensus_from_msa
+        from Bio.SeqRecord import SeqRecord
+        from Bio.Seq import Seq
+
+        # 9 A, 1 T at col 0 → T is at 10%, meets threshold → IUPAC W
+        rows = [SeqRecord(Seq("A"), id=f"r{i}") for i in range(9)]
+        rows.append(SeqRecord(Seq("T"), id="rT"))
+        consensus, snp = build_full_consensus_from_msa(rows, 0.10)
+        assert consensus == "W"
+        assert snp == 1
+
+    def test_consensus_iupac_below_threshold(self):
+        from speconsense.summarize.merging import build_full_consensus_from_msa
+        from Bio.SeqRecord import SeqRecord
+        from Bio.Seq import Seq
+
+        # 19 A, 1 T at col 0 → T is at 5%, below 10% threshold → plain A
+        rows = [SeqRecord(Seq("A"), id=f"r{i}") for i in range(19)]
+        rows.append(SeqRecord(Seq("T"), id="rT"))
+        consensus, snp = build_full_consensus_from_msa(rows, 0.10)
+        assert consensus == "A"
+        assert snp == 0
+
+    def test_consensus_three_way_iupac(self):
+        from speconsense.summarize.merging import build_full_consensus_from_msa
+        from Bio.SeqRecord import SeqRecord
+        from Bio.Seq import Seq
+
+        # 5 A, 3 C, 2 G → all above 10%: IUPAC V (A/C/G)
+        rows = [SeqRecord(Seq(b), id=f"r{i}") for i, b in enumerate("AAAAACCCGG")]
+        consensus, snp = build_full_consensus_from_msa(rows, 0.10)
+        assert consensus == "V"
+        assert snp == 1
+
+    def test_pass_track_guard_blocks_single_variant(self):
+        from speconsense.summarize.full_consensus import build_group_full_consensus
+        result = build_group_full_consensus(
+            final_gid=1,
+            group_members=[self._variant("a", 100)],
+            pass_track_count=1,  # only one variant on pass track
+            fastq_lookup={},
+            min_ambiguity_frequency=0.10,
+            max_sample_size=100,
+            specimen_base="test",
+            primary_file_path="/tmp/test-all.fasta",
+        )
+        assert result is None
+
+    def test_single_gate_guard_blocks_emission(self):
+        from speconsense.summarize.full_consensus import build_group_full_consensus
+        # Two pass-track variants but the smaller doesn't clear the gate
+        result = build_group_full_consensus(
+            final_gid=1,
+            group_members=[self._variant("a", 100), self._variant("b", 2)],
+            pass_track_count=2,
+            fastq_lookup={},
+            min_ambiguity_frequency=0.10,
+            max_sample_size=100,
+            specimen_base="test",
+            primary_file_path="/tmp/test-all.fasta",
+        )
+        assert result is None
+
+    def test_no_fastq_lookup_returns_none(self):
+        from speconsense.summarize.full_consensus import build_group_full_consensus
+        # Gate would pass but no reads can be loaded
+        result = build_group_full_consensus(
+            final_gid=1,
+            group_members=[self._variant("a", 100), self._variant("b", 50)],
+            pass_track_count=2,
+            fastq_lookup=None,
+            min_ambiguity_frequency=0.10,
+            max_sample_size=100,
+            specimen_base="test",
+            primary_file_path="/tmp/test-all.fasta",
+        )
+        assert result is None
+
+    def test_strip_cluster_suffix_handles_full(self):
+        from speconsense.summarize.io import strip_cluster_suffix
+        assert strip_cluster_suffix("specimen-1-full") == "specimen"
+        assert strip_cluster_suffix("specimen-1.v2") == "specimen"
+        assert strip_cluster_suffix("specimen-1.v2.raw3") == "specimen"
+        assert strip_cluster_suffix("specimen-1-full.raw1") == "specimen"
+        assert strip_cluster_suffix("plain_name") == "plain_name"
+
+    def test_end_to_end_emits_full_record(self):
+        """Integration smoke: with real cluster_debug FASTQs and SPOA available,
+        process_single_specimen should emit a -{gid}-full record."""
+        import tempfile
+        from speconsense.types import ConsensusInfo
+        from speconsense.summarize.cli import process_single_specimen
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            # Synthesize cluster_debug FASTQ files for two variants of the same gid.
+            # Both share a backbone; v2 has a single SNP at position 50.
+            backbone = "ACGT" * 40  # 160bp
+            v1_seq = backbone
+            v2_seq = backbone[:50] + "C" + backbone[51:]  # G→C at position 50
+
+            cluster_dir = os.path.join(tmpdir, "cluster_debug")
+            os.makedirs(cluster_dir)
+
+            def write_reads(path, seq, count, ric_label):
+                with open(path, "w") as f:
+                    for i in range(count):
+                        f.write(f"@read{i}\n{seq}\n+\n{'I' * len(seq)}\n")
+
+            v1_fastq = os.path.join(cluster_dir, f"specimen-1.v1-RiC60-reads.fastq")
+            v2_fastq = os.path.join(cluster_dir, f"specimen-1.v2-RiC20-reads.fastq")
+            write_reads(v1_fastq, v1_seq, 60, "RiC60")
+            write_reads(v2_fastq, v2_seq, 20, "RiC20")
+
+            fastq_lookup = {"specimen": [v1_fastq, v2_fastq]}
+
+            members = [
+                ConsensusInfo(
+                    sample_name="specimen-1.v1",
+                    cluster_id="1.v1",
+                    sequence=v1_seq,
+                    ric=60, size=60,
+                    file_path=os.path.join(tmpdir, "specimen-all.fasta"),
+                    primers=["P1"],
+                    group_rank=1, variant_rank=1,
+                ),
+                ConsensusInfo(
+                    sample_name="specimen-1.v2",
+                    cluster_id="1.v2",
+                    sequence=v2_seq,
+                    ric=20, size=20,
+                    file_path=os.path.join(tmpdir, "specimen-all.fasta"),
+                    primers=["P1"],
+                    group_rank=1, variant_rank=2,
+                ),
+            ]
+
+            from types import SimpleNamespace
+            args = SimpleNamespace(
+                min_merge_overlap=0,
+                group_identity=0.85,
+                hp_normalization_length=6,
+                select_max_groups=-1,
+                select_min_size_ratio=0,
+                select_max_variants=-1,
+                select_strategy="size",
+                disable_merging=True,
+                enable_full_consensus=True,
+            )
+            final, _, _, _, _, full_reads = process_single_specimen(
+                members, args,
+                fastq_lookup=fastq_lookup,
+                full_min_ambiguity_frequency=0.10,
+                full_max_sample_size=50,
+            )
+
+            full_records = [c for c in final if c.sample_name.endswith("-full")]
+            assert len(full_records) == 1, f"expected 1 -full record, got {[c.sample_name for c in final]}"
+            full = full_records[0]
+            assert full.sample_name == "specimen-1-full"
+            assert full.group_rank == 1
+            assert full.variant_rank is None
+            assert full.size == 80  # 60 + 20
+            # Sampled reads accessible for FASTQ emission
+            assert full.sample_name in full_reads
+            assert len(full_reads[full.sample_name]) > 0
+            # Sequence should incorporate IUPAC at the SNP position (G/C → S)
+            assert "S" in full.sequence, f"expected S code in {full.sequence}"

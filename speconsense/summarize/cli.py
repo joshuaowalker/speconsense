@@ -210,6 +210,13 @@ def parse_arguments():
     selection_group.add_argument("--select-min-size-ratio", type=float, default=0,
                                  help="Minimum size ratio (variant/largest) to include in output "
                                       "(default: 0 = disabled, e.g. 0.2 for 20%% cutoff)")
+    selection_group.add_argument("--enable-full-consensus", action="store_true", default=False,
+                                 help="Per identity group with >=2 selected variants, emit an "
+                                      "additional ``-{gid}-full`` consensus built from a "
+                                      "size-weighted, quality-sorted sample of the pre-merge core "
+                                      "variants' reads. Intended as a query substrate for BLAST "
+                                      "against legacy unphased references. Uses local SPOA "
+                                      "alignment when the group spans multiple primer sets.")
 
     # Performance group
     perf_group = parser.add_argument_group("Performance")
@@ -328,7 +335,9 @@ def process_single_specimen(file_consensuses: List[ConsensusInfo],
                            fastq_lookup: Dict[str, List[str]] = None,
                            qctx_table: Dict[str, float] = None,
                            cer_alpha: float = 1e-5,
-                           ) -> Tuple[List[ConsensusInfo], Dict[str, List[str]], Dict, int, List[OverlapMergeInfo]]:
+                           full_min_ambiguity_frequency: float = 0.10,
+                           full_max_sample_size: int = 100,
+                           ) -> Tuple[List[ConsensusInfo], Dict[str, List[str]], Dict, int, List[OverlapMergeInfo], Dict[str, List]]:
     """
     Process a single specimen file: bucket by core gid, MSA-merge within each
     bucket, conflate cross-primer groups, select variants, and emit final
@@ -342,7 +351,7 @@ def process_single_specimen(file_consensuses: List[ConsensusInfo],
     fresh vids for cross-primer-moved variants.
     """
     if not file_consensuses:
-        return [], {}, {}, 0, []
+        return [], {}, {}, 0, [], {}
 
     ns_for_specimen = ns_for_specimen or []
     lq_for_specimen = lq_for_specimen or []
@@ -480,6 +489,7 @@ def process_single_specimen(file_consensuses: List[ConsensusInfo],
     # the same pass (e.g., 3+ group conflation) cannot collide with each other.
     final_consensus = []
     naming_info = {}
+    full_consensus_reads: Dict[str, List] = {}
 
     # Pre-index core-emitted vids by core gid. Pre-merge passed records plus
     # ns/lq records — covers everything core wrote to disk under each gid.
@@ -537,9 +547,34 @@ def process_single_specimen(file_consensuses: List[ConsensusInfo],
 
         naming_info[final_gid] = group_naming
 
+        # Phase 3b: Optional -full group consensus. Source from
+        # variant_groups[final_gid] (pre-MSA-merge, post-conflation core
+        # variants — .ns/.lq already excluded). Independent of
+        # merged_groups / select_variants output, so MSA merging never
+        # collapses the pool the -full pipeline draws from.
+        if getattr(args, 'enable_full_consensus', False) and len(selected_variants) >= 2:
+            from .full_consensus import build_group_full_consensus
+            pre_merge_variants = variant_groups.get(final_gid, [])
+            specimen_base_for_full = strip_cluster_suffix(selected_variants[0].sample_name)
+            full_result = build_group_full_consensus(
+                final_gid=final_gid,
+                group_members=pre_merge_variants,
+                pass_track_count=len(selected_variants),
+                fastq_lookup=fastq_lookup,
+                min_ambiguity_frequency=full_min_ambiguity_frequency,
+                max_sample_size=full_max_sample_size,
+                specimen_base=specimen_base_for_full,
+                primary_file_path=selected_variants[0].file_path,
+            )
+            if full_result is not None:
+                full_record, sampled_reads = full_result
+                final_consensus.append(full_record)
+                full_consensus_reads[full_record.sample_name] = sampled_reads
+
     logging.info(f"Processed {file_name}: {len(final_consensus)} final variants across {len(merged_groups)} groups")
 
-    return final_consensus, all_merge_traceability, naming_info, total_limited_count, all_overlap_merges
+    return (final_consensus, all_merge_traceability, naming_info,
+            total_limited_count, all_overlap_merges, full_consensus_reads)
 
 
 def _resolve_specimen_cer_context(
@@ -582,6 +617,32 @@ def _resolve_specimen_cer_context(
         table = None
     cache[model_name] = table
     return table, alpha
+
+
+def _resolve_full_consensus_params(
+    source_folder: str,
+    file_path: str,
+) -> Tuple[float, int]:
+    """Return ``(min_ambiguity_frequency, max_sample_size)`` for the
+    ``-full`` builder, sourced from the specimen's metadata JSON. Falls
+    back to the speconsense defaults when metadata is missing — older
+    runs predate per-field serialization.
+    """
+    DEFAULT_MIN_AMBIG = 0.10
+    DEFAULT_MAX_SAMPLE = 100
+    specimen_base = os.path.basename(file_path)
+    if specimen_base.endswith('-all.fasta'):
+        specimen_base = specimen_base[:-len('-all.fasta')]
+    metadata = load_metadata_from_json(source_folder, specimen_base)
+    if not metadata:
+        return DEFAULT_MIN_AMBIG, DEFAULT_MAX_SAMPLE
+    params = metadata.get('parameters') or {}
+    min_ambig = params.get('min_ambiguity_frequency')
+    max_sample = params.get('max_sample_size')
+    return (
+        float(min_ambig) if min_ambig is not None else DEFAULT_MIN_AMBIG,
+        int(max_sample) if max_sample is not None else DEFAULT_MAX_SAMPLE,
+    )
 
 
 def _clean_specimen_output(summary_dir: str, specimen_id: str) -> None:
@@ -767,17 +828,30 @@ def main():
             args.source, file_path, qctx_table_cache
         )
 
+        # When --enable-full-consensus is on, also resolve the per-specimen
+        # IUPAC frequency and read budget from the core run's metadata so
+        # the -full builder reuses the exact thresholds the per-cluster
+        # consensus already applied.
+        if args.enable_full_consensus:
+            full_min_ambig, full_max_sample = _resolve_full_consensus_params(args.source, file_path)
+        else:
+            full_min_ambig, full_max_sample = 0.10, 100
+
         # Process specimen. ns/lq slices feed the vid collision-avoidance
         # allocator for cross-primer-conflated records. fastq_lookup +
         # qctx_table feed the merge-time metric recompute (rid, rid_min,
         # err_factor, cer_factor) on records that absorbed ≥2 contributors.
-        final_consensus, merge_traceability, naming_info, limited_count, overlap_merges = process_single_specimen(
+        # full_* params drive the optional -{gid}-full group consensus.
+        (final_consensus, merge_traceability, naming_info,
+         limited_count, overlap_merges, full_reads_by_name) = process_single_specimen(
             file_consensuses, args,
             ns_for_specimen=specimen_ns,
             lq_for_specimen=specimen_lq,
             fastq_lookup=fastq_lookup,
             qctx_table=specimen_qctx,
             cer_alpha=specimen_alpha,
+            full_min_ambiguity_frequency=full_min_ambig,
+            full_max_sample_size=full_max_sample,
         )
 
         # Write individual data files immediately
@@ -789,7 +863,8 @@ def main():
             os.path.join(args.summary_dir, 'FASTQ Files'),
             fastq_lookup,
             original_consensus_lookup,
-            fasta_fields
+            fasta_fields,
+            full_reads_by_name=full_reads_by_name,
         )
 
         # Emit ns variants (CER-filtered) for this specimen

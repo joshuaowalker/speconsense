@@ -264,6 +264,79 @@ def create_consensus_from_msa(aligned_seqs: List, variants: List[ConsensusInfo])
     return _build_merged_consensus_info(consensus_seq, snp_count, variants)
 
 
+def build_full_consensus_from_msa(
+    aligned_reads: List,
+    min_ambiguity_frequency: float,
+) -> Tuple[str, int]:
+    """Per-column consensus over a read MSA, one vote per read.
+
+    Used by the ``-full`` group-consensus builder. Reads in ``aligned_reads``
+    are a noise-scrubbed, size-weighted stratified sample drawn across the
+    gated pre-merge variants of one identity group, so the abundance of
+    each haplotype in the sample reflects its abundance in the specimen.
+    Calling consensus from that pool with one-vote-per-read reproduces a
+    legacy NGSpeciesID heaviest-bundle path on noise-scrubbed input.
+
+    Per column:
+    - If gap count >= base count, omit the position (majority-wins gap).
+    - Otherwise, keep bases whose fraction of the base total is
+      >= ``min_ambiguity_frequency``. A single survivor emits unchanged;
+      multiple survivors collapse to an IUPAC ambiguity code via
+      ``merge_bases_to_iupac``.
+
+    Differs from ``create_consensus_from_msa`` in two ways: equal voting
+    per row (no size weighting; the sample is already abundance-stratified)
+    and a frequency threshold on minor bases (the size-weighted variant
+    upgrades every multi-base column regardless of minor frequency).
+
+    Args:
+        aligned_reads: MSA rows (SeqRecord-like) with gaps as ``-``.
+        min_ambiguity_frequency: Minimum minor-base fraction to keep at
+            an IUPAC site. Sourced from the core run's metadata so the
+            threshold matches the per-cluster IUPAC calling.
+
+    Returns:
+        ``(consensus_str, snp_count)``. ``consensus_str`` excludes gap
+        columns and contains IUPAC codes at multi-allele positions.
+        ``snp_count`` is the number of IUPAC columns emitted.
+    """
+    if not aligned_reads:
+        return "", 0
+
+    alignment_length = len(aligned_reads[0].seq)
+    consensus_seq = []
+    snp_count = 0
+
+    for col_idx in range(alignment_length):
+        base_counts: Dict[str, int] = defaultdict(int)
+        gap_count = 0
+        for record in aligned_reads:
+            symbol = str(record.seq[col_idx]).upper()
+            if symbol == '-':
+                gap_count += 1
+            else:
+                base_counts[symbol] += 1
+
+        base_total = sum(base_counts.values())
+        if base_total == 0 or gap_count >= base_total:
+            continue
+
+        surviving = {
+            base for base, count in base_counts.items()
+            if count / base_total >= min_ambiguity_frequency
+        }
+        if not surviving:
+            surviving = {max(base_counts.items(), key=lambda kv: kv[1])[0]}
+
+        if len(surviving) == 1:
+            consensus_seq.append(next(iter(surviving)))
+        else:
+            consensus_seq.append(merge_bases_to_iupac(surviving))
+            snp_count += 1
+
+    return "".join(consensus_seq), snp_count
+
+
 def create_overlap_consensus_from_msa(aligned_seqs: List, variants: List[ConsensusInfo]) -> ConsensusInfo:
     """
     Generate consensus from MSA where sequences may have different lengths.
