@@ -204,6 +204,8 @@ def _build_merged_consensus_info(
         err_factor_cols=largest_variant.err_factor_cols,
         group_rank=largest_variant.group_rank,
         variant_rank=largest_variant.variant_rank,
+        group_size_total=largest_variant.group_size_total,
+        global_size_total=largest_variant.global_size_total,
     )
 
 

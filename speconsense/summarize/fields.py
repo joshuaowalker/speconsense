@@ -141,6 +141,42 @@ class ErrFactorField(FastaField):
         return f"err_factor={consensus.err_factor:.3f}"
 
 
+class GroupFrequencyField(FastaField):
+    """Variant size as a percentage of the conflation-aware identity bucket.
+
+    Denominator is the sum of ``size`` over every record (passed + ``.ns`` +
+    ``.lq``) in the same post-conflation bucket — i.e., for cross-primer-
+    conflated groups, the merged variant is measured "in the context of the
+    merged groups." Suppressed when the denominator is unknown (legacy
+    inputs lacking ``gid=`` headers).
+    """
+
+    def __init__(self):
+        super().__init__('group_frequency', 'Variant size as % of identity bucket total')
+
+    def format_value(self, consensus: ConsensusInfo) -> Optional[str]:
+        if not consensus.group_size_total:
+            return None
+        return f"group_frequency={consensus.size / consensus.group_size_total * 100:.1f}"
+
+
+class GlobalFrequencyField(FastaField):
+    """Variant size as a percentage of the specimen's total presampled reads.
+
+    Denominator is ``total_input_reads`` from the per-specimen metadata JSON
+    — the post-presample-cap count actually fed into clustering. Suppressed
+    when the metadata is missing or doesn't carry that field.
+    """
+
+    def __init__(self):
+        super().__init__('global_frequency', 'Variant size as % of presampled specimen total')
+
+    def format_value(self, consensus: ConsensusInfo) -> Optional[str]:
+        if not consensus.global_size_total:
+            return None
+        return f"global_frequency={consensus.size / consensus.global_size_total * 100:.1f}"
+
+
 class GroupField(FastaField):
     def __init__(self):
         super().__init__('group', 'Variant group number')
@@ -181,6 +217,8 @@ FASTA_FIELDS = {
     'primers': PrimersField(),
     'group': GroupField(),
     'variant': VariantField(),
+    'group_frequency': GroupFrequencyField(),
+    'global_frequency': GlobalFrequencyField(),
 }
 
 # Preset definitions
@@ -188,7 +226,7 @@ FASTA_FIELD_PRESETS = {
     'default': ['size', 'ric', 'rawric', 'rawlen', 'snp', 'ambig', 'primers'],
     'minimal': ['size', 'ric'],
     'qc': ['size', 'ric', 'length', 'rid', 'ambig', 'cer_factor', 'err_factor'],
-    'full': ['size', 'ric', 'length', 'rawric', 'rawlen', 'snp', 'ambig', 'rid', 'cer_factor', 'err_factor', 'primers'],
+    'full': ['size', 'ric', 'length', 'rawric', 'rawlen', 'snp', 'ambig', 'rid', 'cer_factor', 'err_factor', 'primers', 'group_frequency', 'global_frequency'],
     'id-only': [],
 }
 

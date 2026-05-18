@@ -353,21 +353,31 @@ def process_single_specimen(file_consensuses: List[ConsensusInfo],
                            cer_alpha: float = 1e-5,
                            full_min_ambiguity_frequency: float = 0.10,
                            full_max_sample_size: int = 100,
-                           ) -> Tuple[List[ConsensusInfo], Dict[str, List[str]], Dict, int, List[OverlapMergeInfo], Dict[str, List]]:
+                           specimen_global_size_total: Optional[int] = None,
+                           ) -> Tuple[List[ConsensusInfo], Dict[str, List[str]], Dict, int, List[OverlapMergeInfo], Dict[str, List], List[ConsensusInfo], List[ConsensusInfo]]:
     """
     Process a single specimen file: bucket by core gid, MSA-merge within each
     bucket, conflate cross-primer groups, select variants, and emit final
     names that honor core's gid/vid except where cross-primer conflation moved
     a record between groups. Returns final consensus list, merge traceability,
-    naming info (keyed by final gid), limited_count, and overlap merge info.
+    naming info (keyed by final gid), limited_count, overlap merge info,
+    full-consensus reads, and the *annotated* ns/lq lists (with
+    ``group_size_total`` / ``global_size_total`` populated for the
+    frequency fields).
 
     ``ns_for_specimen`` and ``lq_for_specimen`` are the specimen's filtered
     records (CER-routed and err_factor-routed). They are not renamed, but their
     core-assigned vids contribute to the collision set when summarize allocates
-    fresh vids for cross-primer-moved variants.
+    fresh vids for cross-primer-moved variants, and their ``size`` contributes
+    to the conflation-aware ``group_size_total`` denominator. Callers should
+    use the returned annotated lists when writing ``.ns`` / ``.lq`` outputs.
+
+    ``specimen_global_size_total`` is the per-specimen denominator for
+    ``global_frequency=`` (``total_input_reads`` from the metadata JSON).
+    None when metadata is missing.
     """
     if not file_consensuses:
-        return [], {}, {}, 0, [], {}
+        return [], {}, {}, 0, [], {}, ns_for_specimen or [], lq_for_specimen or []
 
     ns_for_specimen = ns_for_specimen or []
     lq_for_specimen = lq_for_specimen or []
@@ -393,6 +403,54 @@ def process_single_specimen(file_consensuses: List[ConsensusInfo],
         variant_groups = merge_groups_by_anchor_overlap(
             variant_groups, args.min_merge_overlap, args.group_identity,
             hp_normalization_length=args.hp_normalization_length)
+
+    # Phase 1c: Compute conflation-aware bucket totals for the
+    # ``group_frequency=`` field. Each record's denominator is the sum of
+    # ``size`` across every record (passed + ns + lq) in its post-conflation
+    # bucket, so cross-primer-conflated variants are measured against the
+    # merged-group total. Annotate every record's ``group_size_total`` and
+    # ``global_size_total`` here so the field formatters can read them
+    # directly without recomputing.
+    core_to_bucket: Dict[int, int] = {}
+    for final_gid, members in variant_groups.items():
+        for member in members:
+            if member.group_rank is not None:
+                core_to_bucket[member.group_rank] = final_gid
+
+    bucket_totals: Dict[int, int] = defaultdict(int)
+    for record in file_consensuses:
+        if record.group_rank is not None:
+            bucket = core_to_bucket.get(record.group_rank, record.group_rank)
+            bucket_totals[bucket] += record.size
+    for record in ns_for_specimen:
+        if record.group_rank is not None:
+            bucket = core_to_bucket.get(record.group_rank, record.group_rank)
+            bucket_totals[bucket] += record.size
+    for record in lq_for_specimen:
+        if record.group_rank is not None:
+            bucket = core_to_bucket.get(record.group_rank, record.group_rank)
+            bucket_totals[bucket] += record.size
+
+    def _annotate(record: ConsensusInfo) -> ConsensusInfo:
+        if record.group_rank is None:
+            group_total = None
+        else:
+            bucket = core_to_bucket.get(record.group_rank, record.group_rank)
+            group_total = bucket_totals.get(bucket)
+        return record._replace(
+            group_size_total=group_total,
+            global_size_total=specimen_global_size_total,
+        )
+
+    # Re-bind annotated copies of each list. ``variant_groups`` is rebuilt
+    # so downstream Phases see the annotated records.
+    file_consensuses = [_annotate(r) for r in file_consensuses]
+    ns_for_specimen = [_annotate(r) for r in ns_for_specimen]
+    lq_for_specimen = [_annotate(r) for r in lq_for_specimen]
+    variant_groups = {
+        gid: [_annotate(m) for m in members]
+        for gid, members in variant_groups.items()
+    }
 
     # Filter to max groups if specified
     if args.select_max_groups > 0 and len(variant_groups) > args.select_max_groups:
@@ -581,6 +639,8 @@ def process_single_specimen(file_consensuses: List[ConsensusInfo],
                 max_sample_size=full_max_sample_size,
                 specimen_base=specimen_base_for_full,
                 primary_file_path=selected_variants[0].file_path,
+                group_size_total=bucket_totals.get(final_gid),
+                global_size_total=specimen_global_size_total,
             )
             if full_result is not None:
                 full_record, sampled_reads = full_result
@@ -590,7 +650,8 @@ def process_single_specimen(file_consensuses: List[ConsensusInfo],
     logging.info(f"Processed {file_name}: {len(final_consensus)} final variants across {len(merged_groups)} groups")
 
     return (final_consensus, all_merge_traceability, naming_info,
-            total_limited_count, all_overlap_merges, full_consensus_reads)
+            total_limited_count, all_overlap_merges, full_consensus_reads,
+            ns_for_specimen, lq_for_specimen)
 
 
 def _resolve_specimen_cer_context(
@@ -633,6 +694,33 @@ def _resolve_specimen_cer_context(
         table = None
     cache[model_name] = table
     return table, alpha
+
+
+def _resolve_specimen_global_total(
+    source_folder: str,
+    file_path: str,
+) -> Optional[int]:
+    """Return the per-specimen denominator for ``global_frequency=``.
+
+    Reads ``total_input_reads`` from the specimen's metadata JSON — the
+    post-presample-cap count actually fed into clustering. Returns ``None``
+    when the metadata is missing or doesn't carry that field; the
+    ``global_frequency=`` formatter then silently omits the field on
+    that specimen's records.
+    """
+    specimen_base = os.path.basename(file_path)
+    if specimen_base.endswith('-all.fasta'):
+        specimen_base = specimen_base[:-len('-all.fasta')]
+    metadata = load_metadata_from_json(source_folder, specimen_base)
+    if not metadata:
+        return None
+    value = metadata.get('total_input_reads')
+    if value is None:
+        return None
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return None
 
 
 def _resolve_full_consensus_params(
@@ -853,13 +941,23 @@ def main():
         else:
             full_min_ambig, full_max_sample = 0.10, 100
 
+        # Per-specimen denominator for global_frequency=. Sourced from
+        # parameters.total_input_reads in the metadata JSON (post-presample
+        # count). None when metadata is missing → global_frequency= is
+        # silently omitted from headers for that specimen.
+        specimen_global_total = _resolve_specimen_global_total(args.source, file_path)
+
         # Process specimen. ns/lq slices feed the vid collision-avoidance
         # allocator for cross-primer-conflated records. fastq_lookup +
         # qctx_table feed the merge-time metric recompute (rid, rid_min,
         # err_factor, cer_factor) on records that absorbed ≥2 contributors.
         # full_* params drive the optional -{gid}-full group consensus.
+        # specimen_global_size_total feeds the global_frequency= field.
+        # ns/lq lists come back annotated with the new frequency
+        # denominators so the .ns/.lq writers emit those fields too.
         (final_consensus, merge_traceability, naming_info,
-         limited_count, overlap_merges, full_reads_by_name) = process_single_specimen(
+         limited_count, overlap_merges, full_reads_by_name,
+         specimen_ns, specimen_lq) = process_single_specimen(
             file_consensuses, args,
             ns_for_specimen=specimen_ns,
             lq_for_specimen=specimen_lq,
@@ -868,6 +966,7 @@ def main():
             cer_alpha=specimen_alpha,
             full_min_ambiguity_frequency=full_min_ambig,
             full_max_sample_size=full_max_sample,
+            specimen_global_size_total=specimen_global_total,
         )
 
         # Write individual data files immediately

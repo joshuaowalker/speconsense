@@ -127,6 +127,8 @@ def build_group_full_consensus(
     max_sample_size: int,
     specimen_base: str,
     primary_file_path: str,
+    group_size_total: Optional[int] = None,
+    global_size_total: Optional[int] = None,
 ) -> Optional[Tuple[ConsensusInfo, List[SeqRecord]]]:
     """Build the ``-{gid}-full`` consensus and return it with the sampled
     reads, or ``None`` when the guards fire (single pass-track variant,
@@ -237,5 +239,7 @@ def build_group_full_consensus(
         err_factor_cols=None,
         group_rank=final_gid,
         variant_rank=None,
+        group_size_total=group_size_total,
+        global_size_total=global_size_total,
     )
     return full_record, sampled

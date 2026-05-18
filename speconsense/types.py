@@ -30,6 +30,8 @@ class ConsensusInfo(NamedTuple):
     err_factor_cols: Optional[int] = None  # Consensus columns counted for err_factor (from metadata JSON)
     group_rank: Optional[int] = None  # Core-assigned identity group rank (gid=N in header)
     variant_rank: Optional[int] = None  # Core-assigned variant rank within group (vid=N in header)
+    group_size_total: Optional[int] = None  # Sum of size over conflation-aware bucket (passed+ns+lq); denominator for group_frequency
+    global_size_total: Optional[int] = None  # Specimen-level total_input_reads (post-presample); denominator for global_frequency
 
 
 class OverlapMergeInfo(NamedTuple):

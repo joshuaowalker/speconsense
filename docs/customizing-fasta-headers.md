@@ -101,11 +101,15 @@ speconsense-summarize --fasta-fields minimal,cer_factor,err_factor
 | `primers` | Detected primer names | `primers=ITS1F,ITS4` | When detected |
 | `group` | Identity group number (extracted from filename) | `group=1` | Yes (superseded by `gid=` from core) |
 | `variant` | Variant identifier within group | `variant=v1` | Yes (superseded by `vid=` from core) |
+| `group_frequency` | Variant size as % of conflation-aware identity-bucket total (passed+`.ns`+`.lq`) | `group_frequency=37.4` | `full` preset only; suppressed when `gid=` is absent |
+| `global_frequency` | Variant size as % of specimen's `total_input_reads` (post-presample) | `global_frequency=2.1` | `full` preset only; suppressed when specimen metadata is missing |
 
 **Notes:**
 - Conditional fields (marked "Only when…") are automatically omitted if not applicable
 - `cer_factor` is `None` for anchors (largest cluster in a group) and clusters that fail to find a comparison peer; the field is dropped from the header in that case
 - `group` and `variant` are vestigial — they parse the `-{gid}.v{vid}` pattern from the filename and emit redundant labels. Core's own `clusters/{sample}-all.fasta` already carries `gid=N` and `vid=N` directly, and summarize preserves `gid`/`vid` from input headers when re-writing
+- `group_frequency` uses the **conflation-aware** denominator: for a cross-primer-conflated bucket, the sum spans every record (passed, `.ns`, `.lq`) from every absorbed core identity group. A variant moved into a survivor group by cross-primer conflation is therefore measured against the merged-group total, not its original core group's total
+- `global_frequency` uses `total_input_reads` from the specimen's metadata JSON — the read count actually fed into clustering after the `--presample` cap was applied. Not the literal cap value (which would yield >100% for small specimens). When `total_input_reads` is missing from metadata, the field is silently dropped from the header
 - See [Understanding RiC and Merging](understanding-ric-and-merging.md) for interpreting `rawric`
 
 ### Merge-time field handling

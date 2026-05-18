@@ -729,7 +729,7 @@ class TestProcessSingleSpecimenNaming:
             self._make("test-1.v2", 1, 2, 50),
             self._make("test-1.v3", 1, 3, 10),
         ]
-        final, _, _, _, _, _ = process_single_specimen(members, self._args())
+        final, _, _, _, _, _, _, _ = process_single_specimen(members, self._args())
         names = {v.sample_name for v in final}
         assert names == {"test-1.v1", "test-1.v2", "test-1.v3"}
 
@@ -741,7 +741,7 @@ class TestProcessSingleSpecimenNaming:
             self._make("test-1.v3", 1, 3, 5),  # filtered by ratio
         ]
         args = self._args(select_min_size_ratio=0.5)
-        final, _, _, _, _, _ = process_single_specimen(members, args)
+        final, _, _, _, _, _, _, _ = process_single_specimen(members, args)
         names = sorted(v.sample_name for v in final)
         assert names == ["test-1.v1", "test-1.v2"]
 
@@ -754,7 +754,7 @@ class TestProcessSingleSpecimenNaming:
             self._make("test-2.v1", 2, 1, 50, "AAA" * 20 + shared, ["P2"]),
         ]
         args = self._args(min_merge_overlap=200)
-        final, _, _, _, _, _ = process_single_specimen(members, args)
+        final, _, _, _, _, _, _, _ = process_single_specimen(members, args)
         names = sorted(v.sample_name for v in final)
         # gid=1 keeps v1/v2 verbatim; gid=2's v1 is moved to v3 under gid=1
         assert names == ["test-1.v1", "test-1.v2", "test-1.v3"]
@@ -768,7 +768,7 @@ class TestProcessSingleSpecimenNaming:
         ]
         ns_records = [self._make("test-1.v2", 1, 2, 5)]  # vid=2 already used in gid=1
         args = self._args(min_merge_overlap=200)
-        final, _, _, _, _, _ = process_single_specimen(
+        final, _, _, _, _, _, _, _ = process_single_specimen(
             members, args, ns_for_specimen=ns_records)
         names = sorted(v.sample_name for v in final)
         # moved record gets v3, skipping v2 occupied by ns
@@ -783,7 +783,7 @@ class TestProcessSingleSpecimenNaming:
         ]
         lq_records = [self._make("test-1.v4", 1, 4, 5)]  # lq occupies vid=4
         args = self._args(min_merge_overlap=200)
-        final, _, _, _, _, _ = process_single_specimen(
+        final, _, _, _, _, _, _, _ = process_single_specimen(
             members, args, lq_for_specimen=lq_records)
         names = sorted(v.sample_name for v in final)
         # moved record gets v5 (max(used={1,4}) + 1), not v2/v3 (gaps in core)
@@ -799,7 +799,7 @@ class TestProcessSingleSpecimenNaming:
             self._make("test-3.v1", 3, 1, 40, shared + "GGG" * 50, ["P3"]),
         ]
         args = self._args(min_merge_overlap=200)
-        final, _, _, _, _, _ = process_single_specimen(members, args)
+        final, _, _, _, _, _, _, _ = process_single_specimen(members, args)
         names = sorted(v.sample_name for v in final)
         assert len(names) == 4
         # All emit under gid=1
@@ -820,7 +820,7 @@ class TestProcessSingleSpecimenNaming:
         ns_records = [self._make("test-2.v2", 2, 2, 5)]
         lq_records = [self._make("test-2.v3", 2, 3, 5)]
         args = self._args(min_merge_overlap=200)
-        final, _, _, _, _, _ = process_single_specimen(
+        final, _, _, _, _, _, _, _ = process_single_specimen(
             members, args, ns_for_specimen=ns_records,
             lq_for_specimen=lq_records)
         names = sorted(v.sample_name for v in final)
@@ -1280,7 +1280,7 @@ class TestFullConsensus:
                 disable_merging=True,
                 enable_full_consensus=True,
             )
-            final, _, _, _, _, full_reads = process_single_specimen(
+            final, _, _, _, _, full_reads, _, _ = process_single_specimen(
                 members, args,
                 fastq_lookup=fastq_lookup,
                 full_min_ambiguity_frequency=0.10,
@@ -1299,3 +1299,148 @@ class TestFullConsensus:
             assert len(full_reads[full.sample_name]) > 0
             # Sequence should incorporate IUPAC at the SNP position (G/C → S)
             assert "S" in full.sequence, f"expected S code in {full.sequence}"
+
+
+class TestFrequencyFields:
+    """Tests for group_frequency= and global_frequency= FASTA header fields."""
+
+    @staticmethod
+    def _make(name, gid, vid, size, sequence=None, primers=None):
+        from speconsense.types import ConsensusInfo
+        return ConsensusInfo(
+            sample_name=name,
+            cluster_id=f"{gid}.v{vid}",
+            sequence=sequence or "ACGT" * 50,
+            ric=size,
+            size=size,
+            file_path="/tmp/test-all.fasta",
+            primers=primers or ["P1"],
+            group_rank=gid,
+            variant_rank=vid,
+        )
+
+    @staticmethod
+    def _args(**overrides):
+        from types import SimpleNamespace
+        defaults = dict(
+            min_merge_overlap=0,
+            group_identity=0.85,
+            hp_normalization_length=6,
+            select_max_groups=-1,
+            select_min_size_ratio=0,
+            select_max_variants=-1,
+            select_strategy="size",
+            disable_merging=True,
+            enable_full_consensus=False,
+        )
+        defaults.update(overrides)
+        return SimpleNamespace(**defaults)
+
+    def test_group_frequency_format(self):
+        from speconsense.summarize.fields import GroupFrequencyField
+        c = self._make("test-1.v1", 1, 1, 30)._replace(group_size_total=100)
+        assert GroupFrequencyField().format_value(c) == "group_frequency=30.0"
+
+    def test_group_frequency_none_when_denom_missing(self):
+        from speconsense.summarize.fields import GroupFrequencyField
+        c = self._make("test-1.v1", 1, 1, 30)._replace(group_size_total=None)
+        assert GroupFrequencyField().format_value(c) is None
+
+    def test_group_frequency_none_when_denom_zero(self):
+        from speconsense.summarize.fields import GroupFrequencyField
+        c = self._make("test-1.v1", 1, 1, 30)._replace(group_size_total=0)
+        assert GroupFrequencyField().format_value(c) is None
+
+    def test_global_frequency_format(self):
+        from speconsense.summarize.fields import GlobalFrequencyField
+        c = self._make("test-1.v1", 1, 1, 30)._replace(global_size_total=1000)
+        assert GlobalFrequencyField().format_value(c) == "global_frequency=3.0"
+
+    def test_global_frequency_none_when_denom_missing(self):
+        from speconsense.summarize.fields import GlobalFrequencyField
+        c = self._make("test-1.v1", 1, 1, 30)._replace(global_size_total=None)
+        assert GlobalFrequencyField().format_value(c) is None
+
+    def test_full_preset_includes_both_fields(self):
+        from speconsense.summarize.fields import FASTA_FIELD_PRESETS
+        assert 'group_frequency' in FASTA_FIELD_PRESETS['full']
+        assert 'global_frequency' in FASTA_FIELD_PRESETS['full']
+
+    def test_default_preset_excludes_both_fields(self):
+        from speconsense.summarize.fields import FASTA_FIELD_PRESETS
+        assert 'group_frequency' not in FASTA_FIELD_PRESETS['default']
+        assert 'global_frequency' not in FASTA_FIELD_PRESETS['default']
+        assert 'group_frequency' not in FASTA_FIELD_PRESETS['qc']
+        assert 'global_frequency' not in FASTA_FIELD_PRESETS['qc']
+
+    def test_process_single_specimen_annotates_passed_variants(self):
+        """Passed variants get group_size_total summed across their group
+        including .ns/.lq records, plus the specimen's global_size_total."""
+        from speconsense.summarize.cli import process_single_specimen
+        members = [
+            self._make("test-1.v1", 1, 1, 100),
+            self._make("test-1.v2", 1, 2, 50),
+        ]
+        ns_records = [self._make("test-1.v3", 1, 3, 10)]
+        lq_records = [self._make("test-1.v4", 1, 4, 5)]
+        # Group total = 100 + 50 + 10 + 5 = 165
+        # Global total provided as 2000.
+        result = process_single_specimen(
+            members, self._args(),
+            ns_for_specimen=ns_records,
+            lq_for_specimen=lq_records,
+            specimen_global_size_total=2000,
+        )
+        final, _, _, _, _, _, annotated_ns, annotated_lq = result
+        for v in final:
+            assert v.group_size_total == 165
+            assert v.global_size_total == 2000
+        for v in annotated_ns:
+            assert v.group_size_total == 165
+            assert v.global_size_total == 2000
+        for v in annotated_lq:
+            assert v.group_size_total == 165
+            assert v.global_size_total == 2000
+
+    def test_process_single_specimen_cross_primer_uses_conflated_total(self):
+        """Cross-primer conflation: the denominator includes records from
+        every absorbed group, plus the .ns/.lq records under any of those
+        gids. Verifies the conflation-aware bucket-total computation."""
+        from speconsense.summarize.cli import process_single_specimen
+        shared = "ACGT" * 100  # 400bp common anchor
+        members = [
+            self._make("test-1.v1", 1, 1, 100, shared + "TAAA" * 50, ["P1"]),
+            self._make("test-2.v1", 2, 1, 30, "AAA" * 20 + shared, ["P2"]),
+            self._make("test-2.v2", 2, 2, 20, "AAA" * 20 + shared, ["P2"]),
+        ]
+        # .ns record under gid=2 — should still contribute to the bucket
+        # total of the conflated (1,2) bucket because gid=2 absorbs into gid=1.
+        ns_records = [self._make("test-2.v3", 2, 3, 5, "AAA" * 20 + shared, ["P2"])]
+        args = self._args(min_merge_overlap=200)
+        result = process_single_specimen(
+            members, args,
+            ns_for_specimen=ns_records,
+            specimen_global_size_total=500,
+        )
+        final, _, _, _, _, _, annotated_ns, _ = result
+        # Bucket total = 100 + 30 + 20 + 5 = 155 — across all conflated gids
+        for v in final:
+            assert v.group_size_total == 155, \
+                f"{v.sample_name}: expected 155, got {v.group_size_total}"
+            assert v.global_size_total == 500
+        for v in annotated_ns:
+            assert v.group_size_total == 155
+            assert v.global_size_total == 500
+
+    def test_process_single_specimen_no_global_total(self):
+        """When specimen metadata is missing, global_size_total stays None
+        and global_frequency= is suppressed at format time."""
+        from speconsense.summarize.cli import process_single_specimen
+        members = [self._make("test-1.v1", 1, 1, 100), self._make("test-1.v2", 1, 2, 50)]
+        result = process_single_specimen(
+            members, self._args(), specimen_global_size_total=None,
+        )
+        final, _, _, _, _, _, _, _ = result
+        for v in final:
+            assert v.group_size_total == 150
+            assert v.global_size_total is None
