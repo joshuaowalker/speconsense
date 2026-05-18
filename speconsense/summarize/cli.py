@@ -46,6 +46,7 @@ from speconsense.profiles import (
     ProfileError,
     print_profiles_list,
 )
+from speconsense._help import install_advanced_help, add_advanced_argument
 from speconsense.scalability import ScalabilityConfig
 from speconsense.types import ConsensusInfo, OverlapMergeInfo
 
@@ -111,6 +112,7 @@ def parse_merge_effort(spec: str) -> int:
 
 def parse_arguments():
     parser = argparse.ArgumentParser(description="Process Speconsense output with advanced variant handling.")
+    install_advanced_help(parser)
 
     # Input/Output group
     io_group = parser.add_argument_group("Input/Output")
@@ -162,10 +164,6 @@ def parse_arguments():
 
     # Merging group
     merging_group = parser.add_argument_group("Merging")
-    merging_group.add_argument("--disable-merging", action="store_true",
-                               help="Disable all variant merging (skip MSA-based merge evaluation entirely)")
-    merging_group.add_argument("--enable-merging", action="store_false", dest="disable_merging",
-                               help="Override --disable-merging or profile setting")
     merging_group.add_argument("--merge-snp", action=argparse.BooleanOptionalAction, default=True,
                                help="Enable SNP-based merging (default: True, use --no-merge-snp to disable)")
     merging_group.add_argument("--merge-indel-length", type=int, default=0,
@@ -176,11 +174,6 @@ def parse_arguments():
                                help="Minimum size ratio (smaller/larger) for merging clusters (default: 0.1, 0 to disable)")
     merging_group.add_argument("--min-merge-overlap", type=int, default=200,
                                help="Minimum overlap in bp for merging sequences of different lengths (default: 200, 0 to disable)")
-    merging_group.add_argument("--disable-homopolymer-equivalence", action="store_true",
-                               help="Disable homopolymer equivalence in merging (treat AAA vs AAAA as different)")
-    merging_group.add_argument("--enable-homopolymer-equivalence", action="store_false",
-                               dest="disable_homopolymer_equivalence",
-                               help="Override --disable-homopolymer-equivalence or profile setting")
     merging_group.add_argument("--merge-effort", type=str, default="balanced", metavar="LEVEL",
                                help="Merging effort level: fast (8), balanced (10), thorough (12), "
                                     "or numeric 6-14. Higher values allow larger batch sizes for "
@@ -231,6 +224,24 @@ def parse_arguments():
     perf_group.add_argument("--threads", type=int, default=0, metavar="N",
                             help="Max threads for internal parallelism. "
                                  "0=auto-detect (default), N>0 for explicit count.")
+
+    # Advanced group (hidden from --help; view with --help-advanced).
+    # Disables for integral merging behavior — primarily retained for
+    # ablation studies, not user-facing tuning.
+    advanced_group = parser.add_argument_group(
+        "Advanced (pre-tuned — rarely needed)",
+        "Hidden from --help; view with --help-advanced. Disable flags for "
+        "integral merging phases — primarily retained for ablation studies.",
+    )
+    add_advanced_argument(advanced_group, "--disable-merging", action="store_true",
+                          help="Disable all variant merging (skip MSA-based merge evaluation entirely)")
+    add_advanced_argument(advanced_group, "--enable-merging", action="store_false", dest="disable_merging",
+                          help="Override --disable-merging or profile setting")
+    add_advanced_argument(advanced_group, "--disable-homopolymer-equivalence", action="store_true",
+                          help="Disable homopolymer equivalence in merging (treat AAA vs AAAA as different)")
+    add_advanced_argument(advanced_group, "--enable-homopolymer-equivalence", action="store_false",
+                          dest="disable_homopolymer_equivalence",
+                          help="Override --disable-homopolymer-equivalence or profile setting")
 
     # Version and profile options (default group)
     parser.add_argument("--log-level", default="INFO",

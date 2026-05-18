@@ -17,6 +17,7 @@ from speconsense.profiles import (
     ProfileError,
     print_profiles_list,
 )
+from speconsense._help import install_advanced_help, add_advanced_argument
 
 from .clusterer import SpecimenClusterer
 
@@ -25,6 +26,7 @@ def main():
     parser = argparse.ArgumentParser(
         description="MCL-based clustering of nanopore amplicon reads"
     )
+    install_advanced_help(parser)
 
     # Input/Output group
     io_group = parser.add_argument_group("Input/Output")
@@ -40,10 +42,6 @@ def main():
                                   help="Clustering algorithm to use (default: graph)")
     clustering_group.add_argument("--min-identity", type=float, default=0.9,
                                   help="Minimum sequence identity threshold for clustering (default: 0.9)")
-    clustering_group.add_argument("--inflation", type=float, default=4.0,
-                                  help="MCL inflation parameter (default: 4.0)")
-    clustering_group.add_argument("--k-nearest-neighbors", type=int, default=5,
-                                  help="Number of nearest neighbors for graph construction (default: 5)")
 
     # Filtering group
     filtering_group = parser.add_argument_group("Filtering")
@@ -53,50 +51,9 @@ def main():
                                  help="Minimum size ratio between a cluster and the largest cluster (default: 0, 0 to disable)")
     filtering_group.add_argument("--max-sample-size", type=int, default=100,
                                  help="Maximum cluster size for consensus (default: 100)")
-    # Variant Phasing group
-    phasing_group = parser.add_argument_group("Variant Phasing")
-    phasing_group.add_argument("--disable-position-phasing", action="store_true",
-                               help="Disable position-based variant phasing (enabled by default). "
-                                    "MCL graph clustering already separates most variants; this "
-                                    "second pass analyzes MSA positions to phase remaining variants.")
-    phasing_group.add_argument("--enable-position-phasing", action="store_false",
-                               dest="disable_position_phasing",
-                               help="Override --disable-position-phasing or profile setting")
-    phasing_group.add_argument("--disable-read-reassignment", action="store_true",
-                               help="Disable post-phasing read reassignment within identity groups. "
-                                    "Reassignment moves reads between clusters based on consensus "
-                                    "concordance; disable to preserve original phasing-time membership.")
-    phasing_group.add_argument("--enable-read-reassignment", action="store_false",
-                               dest="disable_read_reassignment",
-                               help="Override --disable-read-reassignment or profile setting")
-    phasing_group.add_argument("--disable-discard-recovery", action="store_true",
-                               help="Disable recovery of previously discarded reads into existing "
-                                    "clusters. Has no effect if --disable-read-reassignment is also "
-                                    "set (recovery requires reassignment).")
-    phasing_group.add_argument("--enable-discard-recovery", action="store_false",
-                               dest="disable_discard_recovery",
-                               help="Override --disable-discard-recovery or profile setting")
-    phasing_group.add_argument("--disable-second-phasing", action="store_true",
-                               help="Disable the Phase 8 second phasing pass without disabling "
-                                    "the Phase 3 first pass. Has no effect if --disable-position-phasing "
-                                    "or --disable-read-reassignment is also set (Phase 8 is gated on both).")
-    phasing_group.add_argument("--enable-second-phasing", action="store_false",
-                               dest="disable_second_phasing",
-                               help="Override --disable-second-phasing or profile setting")
-    phasing_group.add_argument("--disable-noise-filter", action="store_true",
-                               help="Disable the Phase 5 noise filter. Small clusters whose MSA "
-                                    "has no-majority columns are normally disbanded; this flag "
-                                    "preserves them and lets them flow through to final consensus.")
-    phasing_group.add_argument("--enable-noise-filter", action="store_false",
-                               dest="disable_noise_filter",
-                               help="Override --disable-noise-filter or profile setting")
-    phasing_group.add_argument("--disable-mad-outlier-removal", action="store_true",
-                               help="Disable MAD-based outlier removal at final consensus generation. "
-                                    "Reads whose identity to the cluster consensus is more than n*MAD "
-                                    "from the median are normally dropped; this flag preserves them.")
-    phasing_group.add_argument("--enable-mad-outlier-removal", action="store_false",
-                               dest="disable_mad_outlier_removal",
-                               help="Override --disable-mad-outlier-removal or profile setting")
+
+    # Variant Phasing & Validation group
+    phasing_group = parser.add_argument_group("Variant Phasing & Validation")
     phasing_group.add_argument("--min-variant-frequency", type=float, default=0.10,
                                help="Minimum alternative allele frequency to call variant (default: 0.10 for 10%%)")
     phasing_group.add_argument("--min-variant-count", type=int, default=3,
@@ -121,58 +78,12 @@ def main():
                                     "~/.config/speconsense/error_models/, or a filesystem path to "
                                     "a YAML file with a 'rates' mapping. (default: dorado-v5.0)")
 
-    # MAD outlier removal tuning (internal). Exposed so the defaults can be
-    # calibrated against empirical runs; once dialed in, end users should
-    # not normally need to touch these. Defaults mirror
-    # ``speconsense.outliers.detect_rid_outliers`` so behavior is unchanged
-    # when these flags are omitted.
-    mad_group = parser.add_argument_group("MAD Outlier Removal (tuning)")
-    mad_group.add_argument("--mad-z-threshold", type=float, default=1.5,
-                           help="Modified Z-score cutoff for the MAD rule. A read with "
-                                "(0.6745 * (rid - median) / MAD) below -threshold is flagged. "
-                                "Lower values flag more aggressively. The 0.8.1 default of 1.5 "
-                                "is empirically tuned for speconsense's 3-10-read clusters; the "
-                                "literature-standard 3.0 is too conservative for that regime "
-                                "(see speconsense.outliers.detect_rid_outliers docstring). "
-                                "(default: 1.5)")
-    mad_group.add_argument("--mad-gap-factor", type=float, default=2.5,
-                           help="Gap-rule multiplier. The worst read is flagged if "
-                                "(r_second - r_worst) > gap_factor * (r_best - r_second). "
-                                "Lower values flag more aggressively. (default: 2.5)")
-    mad_group.add_argument("--mad-min-mad", type=float, default=0.002,
-                           help="Floor for the MAD value to avoid divide-by-zero when most "
-                                "reads have near-identical rid. Expressed on the 0..1 rid "
-                                "scale (0.002 = 0.2pp). (default: 0.002)")
-    mad_group.add_argument("--mad-min-drop-from-median", type=float, default=0.02,
-                           help="Safety floor on the absolute drop below the cluster's median "
-                                "rid. A statistically-unusual read is only flagged when its "
-                                "rid is at least this far below the median. Expressed on the "
-                                "0..1 rid scale (0.02 = 2pp). (default: 0.02)")
-
     # Ambiguity Calling group
     ambiguity_group = parser.add_argument_group("Ambiguity Calling")
-    ambiguity_group.add_argument("--disable-ambiguity-calling", action="store_true",
-                                 help="Disable IUPAC ambiguity code calling for unphased variant positions")
-    ambiguity_group.add_argument("--enable-ambiguity-calling", action="store_false",
-                                 dest="disable_ambiguity_calling",
-                                 help="Override --disable-ambiguity-calling or profile setting")
     ambiguity_group.add_argument("--min-ambiguity-frequency", type=float, default=0.10,
                                  help="Minimum alternative allele frequency for IUPAC ambiguity calling (default: 0.10 for 10%%)")
     ambiguity_group.add_argument("--min-ambiguity-count", type=int, default=3,
                                  help="Minimum alternative allele read count for IUPAC ambiguity calling (default: 3)")
-
-    # Cluster Merging group
-    merging_group = parser.add_argument_group("Cluster Merging")
-    merging_group.add_argument("--disable-cluster-merging", action="store_true",
-                               help="Disable merging of clusters with identical consensus sequences")
-    merging_group.add_argument("--enable-cluster-merging", action="store_false",
-                               dest="disable_cluster_merging",
-                               help="Override --disable-cluster-merging or profile setting")
-    merging_group.add_argument("--disable-homopolymer-equivalence", action="store_true",
-                               help="Disable homopolymer equivalence in cluster merging (only merge identical sequences)")
-    merging_group.add_argument("--enable-homopolymer-equivalence", action="store_false",
-                               dest="disable_homopolymer_equivalence",
-                               help="Override --disable-homopolymer-equivalence or profile setting")
 
     # Orientation group
     orient_group = parser.add_argument_group("Orientation")
@@ -199,6 +110,103 @@ def main():
                              help="Override --collect-discards or profile setting")
     debug_group.add_argument("--log-level", default="INFO",
                              choices=["DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL"])
+
+    # Advanced group (pre-tuned / experimental). Hidden from --help; users
+    # discover via --help-advanced. Most of these existed to support paper-
+    # side empirical analysis or expose pre-tuned algorithm internals.
+    advanced_group = parser.add_argument_group(
+        "Advanced (pre-tuned — rarely needed)",
+        "Hidden from --help; view with --help-advanced. Pre-tuned algorithm "
+        "internals, MAD knobs, and phase-disable flags retained primarily "
+        "for empirical analysis.",
+    )
+    # MCL internals
+    add_advanced_argument(advanced_group, "--inflation", type=float, default=4.0,
+                          help="MCL inflation parameter (default: 4.0)")
+    add_advanced_argument(advanced_group, "--k-nearest-neighbors", type=int, default=5,
+                          help="Number of nearest neighbors for graph construction (default: 5)")
+    # Phase disable flags (integral phases — disabling is for ablation studies)
+    add_advanced_argument(advanced_group, "--disable-position-phasing", action="store_true",
+                          help="Disable position-based variant phasing (enabled by default). "
+                               "MCL graph clustering already separates most variants; this "
+                               "second pass analyzes MSA positions to phase remaining variants.")
+    add_advanced_argument(advanced_group, "--enable-position-phasing", action="store_false",
+                          dest="disable_position_phasing",
+                          help="Override --disable-position-phasing or profile setting")
+    add_advanced_argument(advanced_group, "--disable-read-reassignment", action="store_true",
+                          help="Disable post-phasing read reassignment within identity groups. "
+                               "Reassignment moves reads between clusters based on consensus "
+                               "concordance; disable to preserve original phasing-time membership.")
+    add_advanced_argument(advanced_group, "--enable-read-reassignment", action="store_false",
+                          dest="disable_read_reassignment",
+                          help="Override --disable-read-reassignment or profile setting")
+    add_advanced_argument(advanced_group, "--disable-discard-recovery", action="store_true",
+                          help="Disable recovery of previously discarded reads into existing "
+                               "clusters. Has no effect if --disable-read-reassignment is also "
+                               "set (recovery requires reassignment).")
+    add_advanced_argument(advanced_group, "--enable-discard-recovery", action="store_false",
+                          dest="disable_discard_recovery",
+                          help="Override --disable-discard-recovery or profile setting")
+    add_advanced_argument(advanced_group, "--disable-second-phasing", action="store_true",
+                          help="Disable the Phase 8 second phasing pass without disabling "
+                               "the Phase 3 first pass. Has no effect if --disable-position-phasing "
+                               "or --disable-read-reassignment is also set (Phase 8 is gated on both).")
+    add_advanced_argument(advanced_group, "--enable-second-phasing", action="store_false",
+                          dest="disable_second_phasing",
+                          help="Override --disable-second-phasing or profile setting")
+    add_advanced_argument(advanced_group, "--disable-noise-filter", action="store_true",
+                          help="Disable the Phase 5 noise filter. Small clusters whose MSA "
+                               "has no-majority columns are normally disbanded; this flag "
+                               "preserves them and lets them flow through to final consensus.")
+    add_advanced_argument(advanced_group, "--enable-noise-filter", action="store_false",
+                          dest="disable_noise_filter",
+                          help="Override --disable-noise-filter or profile setting")
+    add_advanced_argument(advanced_group, "--disable-mad-outlier-removal", action="store_true",
+                          help="Disable MAD-based outlier removal at final consensus generation. "
+                               "Reads whose identity to the cluster consensus is more than n*MAD "
+                               "from the median are normally dropped; this flag preserves them.")
+    add_advanced_argument(advanced_group, "--enable-mad-outlier-removal", action="store_false",
+                          dest="disable_mad_outlier_removal",
+                          help="Override --disable-mad-outlier-removal or profile setting")
+    add_advanced_argument(advanced_group, "--disable-ambiguity-calling", action="store_true",
+                          help="Disable IUPAC ambiguity code calling for unphased variant positions")
+    add_advanced_argument(advanced_group, "--enable-ambiguity-calling", action="store_false",
+                          dest="disable_ambiguity_calling",
+                          help="Override --disable-ambiguity-calling or profile setting")
+    add_advanced_argument(advanced_group, "--disable-cluster-merging", action="store_true",
+                          help="Disable merging of clusters with identical consensus sequences")
+    add_advanced_argument(advanced_group, "--enable-cluster-merging", action="store_false",
+                          dest="disable_cluster_merging",
+                          help="Override --disable-cluster-merging or profile setting")
+    add_advanced_argument(advanced_group, "--disable-homopolymer-equivalence", action="store_true",
+                          help="Disable homopolymer equivalence in cluster merging (only merge identical sequences)")
+    add_advanced_argument(advanced_group, "--enable-homopolymer-equivalence", action="store_false",
+                          dest="disable_homopolymer_equivalence",
+                          help="Override --disable-homopolymer-equivalence or profile setting")
+    # MAD outlier removal tuning. Defaults mirror
+    # ``speconsense.outliers.detect_rid_outliers``; once calibrated for the
+    # release, end users shouldn't need to touch these.
+    add_advanced_argument(advanced_group, "--mad-z-threshold", type=float, default=1.5,
+                          help="Modified Z-score cutoff for the MAD rule. A read with "
+                               "(0.6745 * (rid - median) / MAD) below -threshold is flagged. "
+                               "Lower values flag more aggressively. The 0.8.1 default of 1.5 "
+                               "is empirically tuned for speconsense's 3-10-read clusters; the "
+                               "literature-standard 3.0 is too conservative for that regime "
+                               "(see speconsense.outliers.detect_rid_outliers docstring). "
+                               "(default: 1.5)")
+    add_advanced_argument(advanced_group, "--mad-gap-factor", type=float, default=2.5,
+                          help="Gap-rule multiplier. The worst read is flagged if "
+                               "(r_second - r_worst) > gap_factor * (r_best - r_second). "
+                               "Lower values flag more aggressively. (default: 2.5)")
+    add_advanced_argument(advanced_group, "--mad-min-mad", type=float, default=0.002,
+                          help="Floor for the MAD value to avoid divide-by-zero when most "
+                               "reads have near-identical rid. Expressed on the 0..1 rid "
+                               "scale (0.002 = 0.2pp). (default: 0.002)")
+    add_advanced_argument(advanced_group, "--mad-min-drop-from-median", type=float, default=0.02,
+                          help="Safety floor on the absolute drop below the cluster's median "
+                               "rid. A statistically-unusual read is only flagged when its "
+                               "rid is at least this far below the median. Expressed on the "
+                               "0..1 rid scale (0.02 = 2pp). (default: 0.02)")
 
     # Version and profile options (default group)
     parser.add_argument("--version", action="version",

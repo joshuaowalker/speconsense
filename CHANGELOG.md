@@ -5,6 +5,13 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Changed (CLI help surface)
+
+- **`speconsense` and `speconsense-summarize` help is now tiered.** Default `--help` shows only the user-facing flags (Common + Tuning). Pre-tuned algorithm internals, MAD knobs, and integral-phase disable flags move into a new "Advanced (pre-tuned — rarely needed)" group hidden from `--help` and shown under `--help-advanced`. Flags themselves are unchanged — parsing, semantics, and profile-loading all work identically. The trailing line `For pre-tuned/internal flags, use --help-advanced.` points users to the expanded view. Implementation in `speconsense/_help.py` is a 70-line `argparse.HelpFormatter` subclass + a `_HelpAdvancedAction` that toggles per-action help strings, applied via `install_advanced_help(parser)`. Specifically moved to Advanced in `speconsense`: `--inflation`, `--k-nearest-neighbors`, the four MAD knobs (`--mad-z-threshold`, `--mad-gap-factor`, `--mad-min-mad`, `--mad-min-drop-from-median`), and every `--disable-*` / `--enable-*` flag (position-phasing, read-reassignment, discard-recovery, second-phasing, noise-filter, mad-outlier-removal, ambiguity-calling, cluster-merging, homopolymer-equivalence). In `speconsense-summarize`: `--disable-merging` / `--enable-merging`, `--disable-homopolymer-equivalence` / `--enable-homopolymer-equivalence`. `--presample` stays in the default Performance group.
+- **Three previously CLI-only disable flags became valid profile keys** to align with the other `disable-*` flags that were already profile-loadable: `disable-second-phasing`, `disable-noise-filter`, `disable-mad-outlier-removal`. No semantic change — they were always functional on the CLI; the profile validator now accepts them too.
+
 ## [0.8.1] - 2026-05-18
 
 Correctness pass on the pipeline + significant summarize-side improvements. Headlines:
