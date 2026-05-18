@@ -217,6 +217,11 @@ def parse_arguments():
                                       "variants' reads. Intended as a query substrate for BLAST "
                                       "against legacy unphased references. Uses local SPOA "
                                       "alignment when the group spans multiple primer sets.")
+    selection_group.add_argument("--disable-full-consensus", action="store_false",
+                                 dest="enable_full_consensus",
+                                 help="Override --enable-full-consensus or profile setting "
+                                      "(e.g. when using the compressed profile but the -full "
+                                      "artifact isn't wanted for this run).")
 
     # Performance group
     perf_group = parser.add_argument_group("Performance")
