@@ -1046,6 +1046,74 @@ $\approx 1.29$ under the revised table---still below the default
 \texttt{-{}-max-err-factor~1.5} filter threshold. Selection is therefore
 stable; no bootstrap iteration is required.
 
+\subsection{ont37 retune (Dorado v3.5)}
+\label{sec:reestimation_ont37}
+
+The same procedure was applied to ont37 to refresh
+\texttt{dorado-v3.5.yaml}. Re-clustering was performed under speconsense
+0.8.1 (released after the v5.0 retune) with
+\texttt{-{}-error-model~dorado-v3.5} (chemistry-matched to avoid
+underestimating the noise floor).
+
+\paragraph{Selection criterion.} ont37's lower per-specimen depth (median
+primary RiC was 59 in the original analysis) interacts with the more
+aggressive context-aware phasing of 0.8.x: primaries shrink further, and
+\texttt{RiC}~$\geq~200$ yields only 10 specimens. We relaxed the floor to
+\texttt{RiC}~$\geq~50$, yielding 80 qualifying specimens (vs.\ 94 under the
+original \texttt{RiC}~$\geq~100$, \texttt{primary\_frac}~$\geq~0.50$
+criterion). The \texttt{err\_factor}~$<~1.0$ gate is empirically
+\emph{fully} non-binding at this threshold (maximum observed value 0.737),
+preserving the circularity defense for the q\_ctx-driven selection. The
+revised table inflates this maximum to $\approx 1.32$ under
+$1/q_\text{ctx}$ scaling---still below the \texttt{-{}-max-err-factor~1.5}
+cap---so selection remains stable after the table refresh.
+
+\paragraph{Results.} Table~\ref{tab:reestimation_ont37} compares the
+original ont37 rates to the v2\_ef re-estimation. Rate ratios are broadly
+similar to ont98's (0.56--0.74$\times$ on ont37 vs.\ 0.66--0.82$\times$ on
+ont98), confirming that the pipeline mechanisms responsible for the v5.0
+rate drop apply to v3.5 data as well. The v3.5/v5.0 ratio narrows somewhat
+at higher $L$ under the new pipeline (2.23$\times$ at $L=1$ down to
+1.41$\times$ at $L=5$, vs.\ a more uniform $\sim 2.2\times$ under the
+original) but remains well above unity at every short HP length.
+
+\begin{table}[h]
+\centering
+\caption{Filtered per-position error rates on ont37: original analysis vs.\
+re-estimation under speconsense 0.8.1 (80 qualifying specimens at
+\texttt{RiC}~$\geq~50$, \texttt{err\_factor}~$<~1.0$). Non-HP rates from
+approach 2 (all-cluster pooled, \texttt{RiC}~$\geq~20$, 184 clusters).}
+\label{tab:reestimation_ont37}
+\begin{tabular}{lrrr}
+\toprule
+Context & Original & v2\_ef & Ratio \\
+\midrule
+\texttt{non-hp-sub}   & 0.0144 & 0.0081 & 0.56 \\
+\texttt{non-hp-indel} & 0.0222 & 0.0158 & 0.71 \\
+\midrule
+\texttt{hp-l1}        & 0.0156 & 0.0105 & 0.67 \\
+\texttt{hp-l2}        & 0.0184 & 0.0137 & 0.74 \\
+\texttt{hp-l3}        & 0.0217 & 0.0150 & 0.69 \\
+\texttt{hp-l4}        & 0.0227 & 0.0142 & 0.63 \\
+\texttt{hp-l5}        & 0.0213 & 0.0123 & 0.58 \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\paragraph{Caveats specific to ont37.} The qualifying pool is smaller than
+ont98's (80 vs.\ 445 specimens) and has lower per-specimen depth
+(\texttt{RiC} range 51--396 vs.\ ont98's $\geq 200$). HP run counts at
+$L=4$--$5$ are correspondingly limited (526 and 154 runs respectively),
+producing slight non-monotonicity in the rate-vs-length curve at high $L$.
+The bimodal/outlier filter exclusion rate is low (0.5\%, 217/43,276 runs),
+indicating the filter's biological-variant cleanup is operating
+conservatively at this specimen count. These values should therefore be
+treated as the best current estimates rather than as tightly constrained
+measurements; the test in
+\texttt{tests/test\_qctx.py:test\_v3\_5\_rates\_higher\_than\_v5\_0\_at\_short\_lengths}
+remains satisfied (v3.5 rates exceed v5.0 by 1.75$\times$--2.23$\times$ at
+$L=1$--$4$).
+
 \subsection{Limitations}
 
 \begin{itemize}
