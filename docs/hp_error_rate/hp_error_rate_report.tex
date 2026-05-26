@@ -1114,6 +1114,27 @@ measurements; the test in
 remains satisfied (v3.5 rates exceed v5.0 by 1.75$\times$--2.23$\times$ at
 $L=1$--$4$).
 
+\paragraph{Convergence (fixed-point check).} Because the shipped table
+participates in the clustering step via the CER significance gate
+(through \texttt{err\_factor} and variant phasing decisions), we verified
+that ont37 has converged to a fixed point of the bootstrap. ont37 was
+re-clustered a second time under the revised \texttt{dorado-v3.5.yaml}
+and the analysis re-run. Selection was highly stable (80 specimens both
+passes, 77 shared), and measured rates drifted by at most 2.5\%
+relative: \texttt{hp-l1}~$-2.40\%$, \texttt{hp-l2}~$-2.49\%$,
+\texttt{hp-l3}~$-1.46\%$, \texttt{hp-l4}~$+0.41\%$, \texttt{hp-l5}~$+0.36\%$;
+\texttt{non-hp-sub}~$-0.61\%$, \texttt{non-hp-indel}~$-0.66\%$. The mild
+downward direction at $L=1$--$3$ is mechanistic: under the lower q\_ctx
+expectations, the CER gate is more permissive at HP positions, so a few
+additional variants phase out into siblings and primaries are
+infinitesimally cleaner. All drifts sit within the sampling noise of the
+80-specimen pool, so the shipped values are retained without further
+iteration. Median primary \texttt{err\_factor} inflated from 0.541 to
+0.731 between passes (less than the $1/q_\text{ctx}$-only prediction of
+$\sim 1.78\times$, because cluster cleanup under the new yaml partially
+offsets the denominator drop); maximum observed value 1.092 remains well
+below the \texttt{-{}-max-err-factor~1.5} cap.
+
 \subsection{Limitations}
 
 \begin{itemize}
