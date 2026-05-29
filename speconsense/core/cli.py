@@ -329,7 +329,11 @@ def main():
     logging.info(f"Reading sequences from {args.input_file}")
     format = "fasta" if args.input_file.endswith(".fasta") else "fastq"
     records = list(SeqIO.parse(args.input_file, format))
-    logging.info(f"Loaded {len(records)} primary reads")
+    duplicate_ids = len(records) - len({r.id for r in records})
+    if duplicate_ids:
+        logging.info(f"Loaded {len(records)} primary reads ({len(records) - duplicate_ids} unique; {duplicate_ids} duplicate ID(s) will be deduplicated)")
+    else:
+        logging.info(f"Loaded {len(records)} primary reads")
 
     if len(records) == 0:
         logging.warning("No reads found in input file. Nothing to cluster.")
