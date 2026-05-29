@@ -50,6 +50,7 @@ After installation, the tools will be available as command-line programs:
 - `speconsense` - Main clustering and consensus tool
 - `speconsense-summarize` - Post-processing and summary tool
 - `speconsense-synth` - Synthetic read generator for testing
+- `speconsense-fit-error-model` - Fit a custom q_ctx error model from a finished speconsense run (see [Fitting a Custom Error Model](#fitting-a-custom-error-model))
 
 To deactivate the virtual environment when done:
 ```bash
@@ -667,7 +668,15 @@ Resolution order: filesystem path → `~/.config/speconsense/error_models/` → 
 
 **Creating a custom model:**
 
-Drop a YAML file into `~/.config/speconsense/error_models/my-basecaller.yaml` with the format above, then select it via `--error-model my-basecaller`. HP run lengths absent from the model route to blanket HP normalization rather than context-aware CER evaluation, so models can be sparse.
+The easiest way is to **fit one from a finished run** using `speconsense-fit-error-model`:
+
+```bash
+speconsense-fit-error-model /path/to/clusters --name my-basecaller
+```
+
+This walks the run's `cluster_debug/` and writes `~/.config/speconsense/error_models/my-basecaller.yaml`, then prints a comparison against the model the run was clustered under. See [Fitting a Custom Error Model](#fitting-a-custom-error-model) for the full workflow and the underlying procedure (HP paper §8 re-estimation: approach-1 mode-as-ground-truth at qualifying primary anchors + approach-2 all-cluster non-HP pooling, with biological-variant filtering).
+
+Alternatively, drop a YAML file into `~/.config/speconsense/error_models/my-basecaller.yaml` by hand with the format above, then select it via `--error-model my-basecaller`. HP run lengths absent from the model route to blanket HP normalization rather than context-aware CER evaluation, so models can be sparse.
 
 **HP normalization length** (`--hp-normalization-length`, default 6):
 - HP runs of length ≥ this value are blanket-normalized in distance/MSA comparisons (treated as noise)
@@ -1536,6 +1545,64 @@ Performance:
 ## Specialized Workflows
 
 The following features support less common workflows and specialized use cases.
+
+### Fitting a Custom Error Model
+
+**Use Case:** Calibrating CER and `err_factor` against your own basecaller version, chemistry, library prep, or amplicon system — without waiting for a shipped update. Typical scenarios: a new Dorado release the suite doesn't yet ship a model for, a non-fungal amplicon system whose error profile differs from the bundled ITS-tuned models, or confirming that a custom flowcell/library prep behaves like the shipped table predicts.
+
+`speconsense-fit-error-model` productizes the offline q_ctx re-estimation procedure documented in the HP paper §8 / CER paper §4.2 ("Phase 1 deployment regime"). It walks a finished speconsense output tree, applies the paper's selection and filtering, and writes a YAML error model to `~/.config/speconsense/error_models/`.
+
+**Basic usage:**
+
+```bash
+# Default thresholds (RiC>=200, err_factor<1.0) — matches the v5.0 retune
+speconsense-fit-error-model /path/to/clusters --name my-model
+```
+
+The output model becomes pickable in subsequent runs via `--error-model my-model`. The tool also prints a comparison against the model the run was clustered under (or `--compare-against` if explicit), with loud-warns when any key drifts more than 2× from the source — useful for catching cross-basecaller comparisons or material library-prep effects.
+
+**Common options:**
+
+```bash
+# Lower thresholds for shallower datasets (paper's ont37 setting)
+speconsense-fit-error-model /path/to/clusters --name my-model --min-ric 50
+
+# Tighten the approach-2 non-HP RiC floor (matches paper §8 ont37 methods)
+speconsense-fit-error-model /path/to/clusters --name my-model --nonhp-min-ric 20
+
+# Override the auto-detected comparison model
+speconsense-fit-error-model /path/to/clusters --name my-model --compare-against dorado-v3.5
+
+# Annotate the YAML frontmatter (chemistry/basecaller default to source-model values)
+speconsense-fit-error-model /path/to/clusters --name my-model \
+  --chemistry R10.4.1 --basecaller "Dorado SUP v5.1" --dataset run123 \
+  --description "Custom calibration for run123 LSU amplicons"
+
+# Preview without writing
+speconsense-fit-error-model /path/to/clusters --name my-model --dry-run
+
+# Write diagnostic TSVs alongside the model
+speconsense-fit-error-model /path/to/clusters --name my-model \
+  --debug-dir /path/to/debug-output
+```
+
+**Selection criteria** (paper defaults):
+- `--min-ric` (default 200): primary anchor must have at least this many reads. Use 50 for lower-depth datasets — the paper's ont37 retune used 50.
+- `--max-err-factor` (default 1.0): primary anchor's `err_factor` must be below this. Acts as a single-template plausibility gate; set 0 to disable.
+- `--nonhp-min-ric` (default 5): cluster must have at least this many reads to contribute to approach-2 non-HP rate pooling.
+
+**How it works** (HP paper §8):
+1. **Indexes specimens** via `cluster_debug/*-metadata.json` (requires schema_version 2.0+ — re-cluster on a current speconsense version if you see schema warnings).
+2. **Approach 1 (HP rates)**: For each qualifying specimen's primary-anchor MSA, identifies HP runs in the consensus, extracts each read's called HP length via flanking-anchor columns, takes the mode across reads as ground truth, and aggregates per `(base, hp_length)` context. Bonferroni-corrected binomial outlier and bimodal-distribution filters exclude positions that look like biological HP-only variants. The final `hp-l{N}` value is the **implied per-position error rate** `p` such that `(1-p)^N` equals the observed run-level fraction-correct (HP paper §3.5), pooled across bases.
+3. **Approach 2 (non-HP rates)**: Walks every cluster MSA in the tree (regardless of qualification), computes per-position errors against each cluster's own consensus excluding HP runs of length > 1, and pools across clusters. The pooled rates match the operational distribution CER evaluates against in production.
+4. **Source-model comparison**: Auto-detects the model the run was clustered under (the most common `parameters.error_model` across metadata JSONs), loads it via `qctx.load_table`, and prints a per-key diff.
+5. **YAML output**: Writes the model to `~/.config/speconsense/error_models/{name}.yaml`, creating the directory if needed. Refuses to overwrite without `--force`.
+
+**Reproducibility check:**
+
+Run against the same dataset that produced a shipped model and compare. On `/Users/josh/mm/data/ont37/hp-analysis/clusters-2026-05-26-pass2` with paper-matching settings (`--min-ric 50 --nonhp-min-ric 20`), the tool reproduces `dorado-v3.5.yaml` essentially exactly (all eight keys within 3% of the shipped values).
+
+**See also:** the HP error rate paper (`docs/hp_error_rate/hp_error_rate_report.pdf`) for the empirical foundation and the CER paper (`docs/cer_in_practice/cer_in_practice.pdf`) §4.2 for the framework's "Phase 1" deployment regime that this tool implements.
 
 ### Sequence Orientation Normalization
 

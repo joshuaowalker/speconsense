@@ -21,6 +21,9 @@ speconsense-summarize --min-ric 5 --source /path/to/output --summary-dir MyResul
 
 # Synthetic data generator for testing
 speconsense-synth reference.fasta --num-reads 1000 --error-rate 0.05 --output synthetic.fastq
+
+# Custom error-model fitter (deposits ~/.config/speconsense/error_models/{name}.yaml)
+speconsense-fit-error-model /path/to/clusters --name my-model --min-ric 200 --max-err-factor 1.0
 ```
 
 ### Development setup
@@ -93,6 +96,8 @@ pytest -m "not slow"
 **speconsense/error_models/** - Bundled per-basecaller error models (YAML), loadable by name (`--error-model dorado-v5.0`), from `~/.config/speconsense/error_models/`, or by filesystem path.
 
 **speconsense/synth.py** - Synthetic read generator for testing consensus algorithms.
+
+**speconsense/fit_error_model/** - `speconsense-fit-error-model` CLI: offline q_ctx re-estimation from a finished output tree, writes a user model to `~/.config/speconsense/error_models/{name}.yaml`. Approach-1 (HP rates from primary-anchor MSAs, mode-as-ground-truth + Bonferroni outlier + bimodal filter) and approach-2 (non-HP rates pooled across all-cluster MSAs) from HP paper §8 / CER paper §4.2. `hp-l{N}` is the implied per-position rate `p` such that `(1-p)^N = frac_correct` (HP paper §3.5), not raw `1-frac_correct`.
 
 ### Key Processing Pipeline
 
