@@ -217,6 +217,119 @@ class TestAugmentInput:
             # Should show size=4 (3 similar primary + 1 augmented) or size=5 (all sequences)
             assert ('size=4' in header or 'size=5' in header), f"Unexpected sequence count in header: {header}"
     
+    def test_multiple_augment_files(self, temp_dir, core_module, test_data):
+        """Test that repeated --augment-input loads reads from every file."""
+        self.create_test_files(test_data)
+
+        # Second augment file with another read that clusters with the primaries
+        aug_seq2 = 'ACGTACGTACGTACGTACGTACGTACGTACGTACGTACGTACGTACGTACGTACGTACGTACGT'
+        with open('test_augment2.fasta', 'w') as f:
+            SeqIO.write([SeqRecord(Seq(aug_seq2), id='augmented_2', description='')], f, 'fasta')
+
+        result = subprocess.run([
+            sys.executable, '-m', core_module,
+            'test_main.fastq',
+            '--augment-input', 'test_augment.fasta',
+            '--augment-input', 'test_augment2.fasta',
+            '--min-size', '2', '--algorithm', 'greedy',
+            '--log-level', 'INFO'
+        ], capture_output=True, text=True)
+
+        assert result.returncode == 0, f"Speconsense should succeed: {result.stderr}"
+        assert "Loaded 2 augmented reads total from 2 files" in result.stderr
+
+        # Both augmented reads should appear in cluster output
+        debug_content = ""
+        for fname in os.listdir('clusters/cluster_debug'):
+            if fname.endswith('-reads.fastq'):
+                with open(os.path.join('clusters/cluster_debug', fname)) as f:
+                    debug_content += f.read()
+        assert 'augmented_1' in debug_content, "First augment file's read should be clustered"
+        assert 'augmented_2' in debug_content, "Second augment file's read should be clustered"
+
+    def test_augmented_only_cluster_dropped(self, temp_dir, core_module, test_data):
+        """A cluster with no primary read is discarded by default."""
+        self.create_test_files(test_data)
+
+        # Augment file forming its own cluster (distinct from every primary)
+        aug_only = 'TGCATGCATGCATGCATGCATGCATGCATGCATGCATGCATGCATGCATGCATGCATGCA'
+        recs = [
+            SeqRecord(Seq(aug_only), id='augonly_1', description=''),
+            SeqRecord(Seq(aug_only), id='augonly_2', description=''),
+            SeqRecord(Seq(aug_only), id='augonly_3', description=''),
+        ]
+        with open('test_augonly.fasta', 'w') as f:
+            SeqIO.write(recs, f, 'fasta')
+
+        result = subprocess.run([
+            sys.executable, '-m', core_module,
+            'test_main.fastq', '--augment-input', 'test_augonly.fasta',
+            '--min-size', '2', '--algorithm', 'greedy',
+            '--collect-discards', '--log-level', 'INFO'
+        ], capture_output=True, text=True)
+
+        assert result.returncode == 0, f"Speconsense should succeed: {result.stderr}"
+        assert "Augmented-only filter: dropped" in result.stderr
+
+        # The augmented-only consensus must not reach the final FASTA
+        with open('clusters/test_main-all.fasta') as f:
+            all_fasta = f.read()
+        assert 'TGCATGCATGCA' not in all_fasta, "Augmented-only cluster should be absent from output"
+
+        # Its reads should land in the discards file
+        discards = os.path.join('clusters/cluster_debug', 'test_main-discards.fastq')
+        assert os.path.exists(discards), "Discards file should be written with --collect-discards"
+        with open(discards) as f:
+            discard_content = f.read()
+        assert 'augonly_1' in discard_content and 'augonly_2' in discard_content, \
+            "Augmented-only reads should be discarded"
+
+    def test_keep_augmented_only_clusters(self, temp_dir, core_module, test_data):
+        """--keep-augmented-only-clusters retains clusters with no primary read."""
+        self.create_test_files(test_data)
+
+        aug_only = 'TGCATGCATGCATGCATGCATGCATGCATGCATGCATGCATGCATGCATGCATGCATGCA'
+        recs = [
+            SeqRecord(Seq(aug_only), id='augonly_1', description=''),
+            SeqRecord(Seq(aug_only), id='augonly_2', description=''),
+            SeqRecord(Seq(aug_only), id='augonly_3', description=''),
+        ]
+        with open('test_augonly.fasta', 'w') as f:
+            SeqIO.write(recs, f, 'fasta')
+
+        result = subprocess.run([
+            sys.executable, '-m', core_module,
+            'test_main.fastq', '--augment-input', 'test_augonly.fasta',
+            '--min-size', '2', '--algorithm', 'greedy',
+            '--keep-augmented-only-clusters', '--log-level', 'INFO'
+        ], capture_output=True, text=True)
+
+        assert result.returncode == 0, f"Speconsense should succeed: {result.stderr}"
+        assert "Augmented-only filter" not in result.stderr
+
+        with open('clusters/test_main-all.fasta') as f:
+            all_fasta = f.read()
+        assert 'TGCATGCATGCA' in all_fasta, "Augmented-only cluster should be retained with opt-out flag"
+
+    def test_duplicate_id_collision_dedup(self, temp_dir, core_module, test_data):
+        """A read ID present in both primary and augment inputs is deduped (primary wins)."""
+        self.create_test_files(test_data)
+
+        # Augment file reusing a primary read ID
+        dup_seq = 'ACGTACGTACGTACGTACGTACGTACGTACGTACGTACGTACGTACGTACGTACGTACGTACGT'
+        with open('test_dup.fasta', 'w') as f:
+            SeqIO.write([SeqRecord(Seq(dup_seq), id='primary_1', description='')], f, 'fasta')
+
+        result = subprocess.run([
+            sys.executable, '-m', core_module,
+            'test_main.fastq', '--augment-input', 'test_dup.fasta',
+            '--min-size', '2', '--algorithm', 'greedy',
+            '--log-level', 'INFO'
+        ], capture_output=True, text=True)
+
+        assert result.returncode == 0, f"Speconsense should succeed: {result.stderr}"
+        assert "Skipped 1 read(s) with duplicate IDs" in result.stderr
+
     def test_empty_augment_file_warning(self, temp_dir, core_module):
         """Test warning for empty augment input file."""
         # Create main file with one sequence, empty augment file

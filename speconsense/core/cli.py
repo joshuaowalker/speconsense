@@ -34,7 +34,14 @@ def main():
     io_group.add_argument("-O", "--output-dir", default="clusters",
                           help="Output directory for all files (default: clusters)")
     io_group.add_argument("--primers", help="FASTA file containing primer sequences (default: looks for primers.fasta in input file directory)")
-    io_group.add_argument("--augment-input", help="Additional FASTQ/FASTA file with sequences recovered after primary demultiplexing (e.g., from specimine)")
+    io_group.add_argument("--augment-input", action="append", metavar="FILE",
+                          help="Additional FASTQ/FASTA file with sequences recovered after primary demultiplexing "
+                               "(e.g., from specimine, or specimux partial forward/reverse barcode matches). "
+                               "Repeat the flag to supply multiple files. Clusters built entirely from augmented "
+                               "reads are discarded unless --keep-augmented-only-clusters is given.")
+    io_group.add_argument("--keep-augmented-only-clusters", action="store_true",
+                          help="Keep clusters that contain no primary-input reads (by default, augmented-only "
+                               "clusters are discarded when --augment-input is used).")
 
     # Clustering group
     clustering_group = parser.add_argument_group("Clustering")
@@ -321,7 +328,8 @@ def main():
 
     # Set additional attributes for metadata
     clusterer.input_file = os.path.abspath(args.input_file)
-    clusterer.augment_input = os.path.abspath(args.augment_input) if args.augment_input else None
+    clusterer.augment_input = [os.path.abspath(f) for f in args.augment_input] if args.augment_input else None
+    clusterer.keep_augmented_only_clusters = args.keep_augmented_only_clusters
     clusterer.algorithm = args.algorithm
     clusterer.orient_mode = args.orient_mode
 
@@ -339,37 +347,44 @@ def main():
         logging.warning("No reads found in input file. Nothing to cluster.")
         sys.exit(0)
 
-    # Load augmented sequences if specified
+    # Load augmented sequences if specified (one or more files via repeated --augment-input)
     augment_records = None
     if args.augment_input:
-        # Check if augment input file exists
-        if not os.path.exists(args.augment_input):
-            logging.error(f"Augment input file not found: {args.augment_input}")
-            sys.exit(1)
+        augment_records = []
+        for augment_file in args.augment_input:
+            # Check if augment input file exists
+            if not os.path.exists(augment_file):
+                logging.error(f"Augment input file not found: {augment_file}")
+                sys.exit(1)
 
-        logging.info(f"Reading augmented reads from {args.augment_input}")
+            logging.info(f"Reading augmented reads from {augment_file}")
 
-        # Auto-detect format like main input
-        augment_format = "fasta" if args.augment_input.endswith(".fasta") else "fastq"
+            # Auto-detect format like main input
+            augment_format = "fasta" if augment_file.endswith(".fasta") else "fastq"
 
-        try:
-            augment_records = list(SeqIO.parse(args.augment_input, augment_format))
-            logging.info(f"Loaded {len(augment_records)} augmented reads")
+            try:
+                file_records = list(SeqIO.parse(augment_file, augment_format))
+                logging.info(f"Loaded {len(file_records)} augmented reads from {augment_file}")
 
-            if len(augment_records) == 0:
-                logging.warning(f"No reads found in augment input file: {args.augment_input}")
+                if len(file_records) == 0:
+                    logging.warning(f"No reads found in augment input file: {augment_file}")
 
-            # Add dummy quality scores to FASTA sequences so they can be written as FASTQ later
-            if augment_format == "fasta":
-                for record in augment_records:
-                    if not hasattr(record, 'letter_annotations') or 'phred_quality' not in record.letter_annotations:
-                        # Add dummy quality scores (quality 30 = '?' in FASTQ)
-                        record.letter_annotations = {'phred_quality': [30] * len(record.seq)}
-                logging.debug(f"Added quality scores to {len(augment_records)} FASTA sequences for downstream compatibility")
+                # Add dummy quality scores to FASTA sequences so they can be written as FASTQ later
+                if augment_format == "fasta":
+                    for record in file_records:
+                        if not hasattr(record, 'letter_annotations') or 'phred_quality' not in record.letter_annotations:
+                            # Add dummy quality scores (quality 30 = '?' in FASTQ)
+                            record.letter_annotations = {'phred_quality': [30] * len(record.seq)}
+                    logging.debug(f"Added quality scores to {len(file_records)} FASTA sequences for downstream compatibility")
 
-        except Exception as e:
-            logging.error(f"Failed to read augment input file '{args.augment_input}': {e}")
-            sys.exit(1)
+                augment_records.extend(file_records)
+
+            except Exception as e:
+                logging.error(f"Failed to read augment input file '{augment_file}': {e}")
+                sys.exit(1)
+
+        if len(args.augment_input) > 1:
+            logging.info(f"Loaded {len(augment_records)} augmented reads total from {len(args.augment_input)} files")
 
     # Add sequences to clusterer (both primary and augmented)
     clusterer.add_sequences(records, augment_records)

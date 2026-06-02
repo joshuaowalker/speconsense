@@ -114,7 +114,7 @@ Read in `SpecimenClusterer.cluster()` (`speconsense/core/clusterer.py`); 14 sequ
 9. **Cluster consensus generation** — SPOA → MAD outlier removal → re-SPOA → IUPAC ambiguity calling → primer trimming; stamps post-MAD MSA and consensus on each cluster_dict
 10. **Post-refinement merge** — combine clusters whose post-MAD consensuses are identical or HP-equivalent; reruns Phase 9 worker on each merge survivor
 11. **CER validation** — annotate each non-anchor candidate with its `cer_factor`
-12. **Size filtering** — drop clusters below `--min-size` and `--min-cluster-ratio`
+12. **Size filtering** — when `--augment-input` is used, first drop clusters with no primary-input read (unless `--keep-augmented-only-clusters`); then drop clusters below `--min-size` and `--min-cluster-ratio`
 13. **Output emission** — write FASTA/FASTQ/MSA; compute `err_factor` on stamped MSA
 14. **Discard reads written** (optional, `--collect-discards`)
 
@@ -220,6 +220,7 @@ Parameters are controlled via CLI arguments, optionally pre-set via YAML profile
 - Clustering algorithm choice (`--algorithm`)
 - Sample size limits (`--max-sample-size`, `--presample`)
 - Cluster size filtering (`--min-size`, `--min-cluster-ratio`)
+- Input augmentation (`--augment-input`, repeatable for multiple recovered-read files; `--keep-augmented-only-clusters` to retain clusters with no primary read). Read-ID collisions across inputs are deduped first-occurrence-wins (primary over augment) with a warning. Metadata JSON carries `augment_inputs` (list), `total_primary_reads`, `total_augmented_reads`.
 - Primer handling (`--primers`, `--orient-mode`)
 - Variant phasing (`--disable-position-phasing`, `--min-variant-frequency`, `--significance-level`)
 - Post-phasing refinement: `--disable-read-reassignment` (concordance-based reassignment within identity groups), `--disable-discard-recovery` (re-admit dropped reads; auto-skipped if read reassignment is disabled). The second phasing pass is gated by `--disable-position-phasing` AND `--disable-read-reassignment` — disabling either skips it.

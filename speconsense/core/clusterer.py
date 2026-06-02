@@ -310,6 +310,9 @@ class SpecimenClusterer:
         # Initialize attributes that may be set later
         self.input_file = None
         self.augment_input = None
+        self.keep_augmented_only_clusters = False
+        self.primary_read_ids: Set[str] = set()
+        self.augmented_read_ids: Set[str] = set()
         self.algorithm = None
         self.orient_mode = None
         self.primers_file = None
@@ -380,8 +383,10 @@ class SpecimenClusterer:
                 "error_model": self.error_model,
             },
             "input_file": self.input_file,
-            "augment_input": self.augment_input,
+            "augment_inputs": self.augment_input,
             "total_input_reads": self.total_input_reads,
+            "total_primary_reads": len(self.primary_read_ids),
+            "total_augmented_reads": len(self.augmented_read_ids),
         }
 
         # Add primer information if loaded
@@ -570,10 +575,29 @@ class SpecimenClusterer:
                          f"({primary_to_include} primary, {len(presampled) - primary_to_include} augmented)")
             all_records = presampled
 
-        # Add all selected records to internal storage
+        # Add all selected records to internal storage, deduplicating by read ID.
+        # all_records lists primary records before augmented ones (both in the
+        # presample and non-presample paths), so keeping the first occurrence of
+        # each ID means primary wins over augment, and earlier augment files win
+        # over later ones.
+        seen = set()
+        collisions = 0
         for record in all_records:
+            if record.id in seen:
+                collisions += 1
+                continue
+            seen.add(record.id)
             self.sequences[record.id] = str(record.seq)
             self.records[record.id] = record
+
+        if collisions:
+            logging.warning(f"Skipped {collisions} read(s) with duplicate IDs across "
+                            "primary/augment inputs (kept first occurrence)")
+
+        # Record per-read origin so augmented-only clusters can be filtered later.
+        primary_ids = {r.id for r in records}
+        self.primary_read_ids = set(self.records) & primary_ids
+        self.augmented_read_ids = set(self.records) - primary_ids
 
         # Log scalability mode status for large datasets
         if len(self.sequences) >= self.scale_threshold and self.scale_threshold > 0:
@@ -2695,6 +2719,27 @@ class SpecimenClusterer:
         Returns:
             List of filtered clusters, sorted by size (largest first)
         """
+        # Discard clusters with no primary-input read. Augmented reads are only
+        # meant to reinforce real specimen clusters; a cluster built entirely
+        # from augmented reads has no primary-demultiplex support. This runs
+        # before the size/ratio checks so the min-cluster-ratio denominator is
+        # computed only over primary-supported clusters, and after all merging
+        # and read recovery (phases 6-10) so augmented reads that legitimately
+        # join a primary cluster are retained.
+        if self.augment_input and not self.keep_augmented_only_clusters:
+            primary_clusters = [c for c in subclusters
+                                if c['read_ids'] & self.primary_read_ids]
+            augmented_only = [c for c in subclusters
+                              if not (c['read_ids'] & self.primary_read_ids)]
+            if augmented_only:
+                for cluster in augmented_only:
+                    self.discarded_read_ids.update(cluster['read_ids'])
+                self._log_stage(
+                    f"Augmented-only filter: dropped {len(augmented_only)} cluster(s) with no primary read",
+                    primary_clusters,
+                )
+            subclusters = primary_clusters
+
         # Filter by absolute size
         large_clusters = [c for c in subclusters if len(c['read_ids']) >= self.min_size]
         small_clusters = [c for c in subclusters if len(c['read_ids']) < self.min_size]
