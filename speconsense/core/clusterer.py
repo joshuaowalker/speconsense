@@ -2889,6 +2889,117 @@ class SpecimenClusterer:
 
         logging.info(f"Wrote {len(self.discarded_read_ids)} discarded reads to {discards_file}")
 
+    def _screen_augmented_reads(self) -> None:
+        """Discard augmented reads not within --min-identity of any primary read.
+
+        Every final cluster must contain at least one primary read (enforced in
+        Phase 12), so an augmented read can only contribute if it shares an edge
+        with a primary read in the initial similarity graph. Screening such reads
+        out before the matrix is built avoids paying O(n^2) / K-NN cost on
+        augmented reads that can never join a primary-supported cluster — a large
+        saving when augmented reads greatly outnumber primary reads.
+
+        The screen uses the same raw-edlib primitive (``calculate_similarity``)
+        and threshold as the clustering edges, so "passes the screen" is exactly
+        "has at least one edge to a primary read". Note this is marginally more
+        aggressive than the Phase-12 filter: an augmented read connected to a
+        primary cluster only transitively (via another augmented read) is dropped
+        here. In practice clusters are far tighter than --min-identity, so this is
+        negligible. Skipped entirely when augmented-only clusters are being kept.
+        """
+        if not self.augment_input or self.keep_augmented_only_clusters:
+            return
+        if not self.augmented_read_ids:
+            return
+
+        aug_ids = sorted(self.augmented_read_ids)
+        primary_ids = sorted(self.primary_read_ids)
+
+        if not primary_ids:
+            # No primary reads: every cluster would be augmented-only and dropped.
+            logging.warning(f"No primary reads present; discarding all {len(aug_ids)} augmented reads")
+            kept = set()
+        else:
+            kept = self._find_augmented_near_primary(aug_ids, primary_ids)
+
+        dropped = self.augmented_read_ids - kept
+        for rid in dropped:
+            self.discarded_read_ids.add(rid)
+            # Remove from the clustering pool but keep the SeqRecord so the read
+            # can still be emitted to the discards file. Downstream phases that
+            # work on discards (e.g. discard recovery) look reads up in
+            # self.sequences and skip anything missing, so dropping it here keeps
+            # screened reads out of clustering without re-admission.
+            self.sequences.pop(rid, None)
+        self.augmented_read_ids = kept
+        self.total_input_reads = len(self.sequences)
+
+        logging.info(f"Augment screen: kept {len(kept)}/{len(aug_ids)} augmented reads "
+                     f"within {self.min_identity:.0%} identity of a primary read "
+                     f"(dropped {len(dropped)})")
+
+    def _find_augmented_near_primary(self, aug_ids: List[str],
+                                     primary_ids: List[str]) -> Set[str]:
+        """Return the augmented IDs within --min-identity of any primary read.
+
+        Uses the vsearch candidate finder when scalability mode is active (DB =
+        primary reads, queries = augmented reads), otherwise a brute-force scan.
+        Both paths confirm hits with ``calculate_similarity`` at the exact
+        --min-identity threshold, so the decision matches the clustering edges.
+        """
+        use_vsearch = (
+            self._candidate_finder is not None
+            and self.scale_threshold > 0
+            and len(self.sequences) >= self.scale_threshold
+        )
+        if use_vsearch:
+            try:
+                return self._screen_augmented_vsearch(aug_ids, primary_ids)
+            except Exception as e:
+                logging.warning(f"vsearch augment screen failed ({e}); falling back to brute force")
+        return self._screen_augmented_bruteforce(aug_ids, primary_ids)
+
+    def _screen_augmented_bruteforce(self, aug_ids: List[str],
+                                     primary_ids: List[str]) -> Set[str]:
+        """Brute-force augment screen: O(|augmented| x |primary|) with early exit."""
+        primary_seqs = [self.sequences[pid] for pid in primary_ids]
+        kept = set()
+        for aid in aug_ids:
+            aseq = self.sequences[aid]
+            for pseq in primary_seqs:
+                if self.calculate_similarity(aseq, pseq) >= self.min_identity:
+                    kept.add(aid)
+                    break
+        return kept
+
+    def _screen_augmented_vsearch(self, aug_ids: List[str],
+                                  primary_ids: List[str]) -> Set[str]:
+        """vsearch augment screen: query augmented reads against a primary-read DB.
+
+        Candidates are gathered at the relaxed identity used elsewhere for vsearch
+        candidate finding, then confirmed exactly with ``calculate_similarity`` so
+        vsearch's identity definition cannot drop a read the clustering edges keep.
+        """
+        finder = self._candidate_finder
+        primary_seqs = {pid: self.sequences[pid] for pid in primary_ids}
+        finder.build_index(primary_seqs, self.output_dir,
+                           cache_id=f"{self.sample_name}-augscreen")
+        try:
+            relaxed = self.min_identity * self.scalability_config.relaxed_identity_factor
+            candidates = finder.find_candidates(aug_ids, self.sequences, relaxed, max_candidates=8)
+        finally:
+            finder.cleanup()
+
+        kept = set()
+        for aid in aug_ids:
+            aseq = self.sequences[aid]
+            for pid in candidates.get(aid, []):
+                pseq = self.sequences.get(pid)
+                if pseq is not None and self.calculate_similarity(aseq, pseq) >= self.min_identity:
+                    kept.add(aid)
+                    break
+        return kept
+
     def cluster(self, algorithm: str = "graph") -> None:
         """Perform complete clustering process with variant phasing and write output files.
 
@@ -2916,6 +3027,10 @@ class SpecimenClusterer:
         Args:
             algorithm: Clustering algorithm to use ('graph' for MCL or 'greedy')
         """
+        # Pre-screen augmented reads against primary reads before building the
+        # similarity matrix, so off-target augmented reads never enter clustering.
+        self._screen_augmented_reads()
+
         with tempfile.TemporaryDirectory() as temp_dir:
             # Phase 1: Initial clustering
             initial_clusters = self._run_initial_clustering(temp_dir, algorithm)

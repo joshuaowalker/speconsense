@@ -120,6 +120,8 @@ Read in `SpecimenClusterer.cluster()` (`speconsense/core/clusterer.py`); 14 sequ
 
 Orientation (when `--orient-mode` ≠ skip) and primer trimming run during input processing and final consensus respectively, outside the numbered phases. Reads that fail clustering or are dropped by any filter accumulate in `self.discarded_read_ids`; phase 7 attempts to recover concordant ones.
 
+When `--augment-input` is used (and `--keep-augmented-only-clusters` is not), `cluster()` first runs `_screen_augmented_reads()` *before* Phase 1: augmented reads not within `--min-identity` of any primary read are discarded up front, so off-target augmented reads never enter the similarity matrix. The screen uses the same raw-edlib `calculate_similarity` and threshold as the clustering edges (vsearch primary-DB query when scalability mode is active, brute force otherwise), recomputes `total_input_reads`, and routes drops to `discarded_read_ids`. It is marginally more aggressive than the Phase-12 augmented-only filter (drops reads connected to a primary cluster only transitively via another augmented read), which is negligible in practice since clusters are far tighter than `--min-identity`.
+
 ### Post-Processing Pipeline (speconsense-summarize)
 
 1. Load sequences with RiC filtering

@@ -248,7 +248,12 @@ class TestAugmentInput:
         assert 'augmented_2' in debug_content, "Second augment file's read should be clustered"
 
     def test_augmented_only_cluster_dropped(self, temp_dir, core_module, test_data):
-        """A cluster with no primary read is discarded by default."""
+        """Off-target augmented reads (no primary within --min-identity) never form a cluster.
+
+        They are removed by the pre-clustering augment screen; the end result is the
+        same as the Phase-12 augmented-only filter would produce (absent from output,
+        present in discards).
+        """
         self.create_test_files(test_data)
 
         # Augment file forming its own cluster (distinct from every primary)
@@ -269,7 +274,7 @@ class TestAugmentInput:
         ], capture_output=True, text=True)
 
         assert result.returncode == 0, f"Speconsense should succeed: {result.stderr}"
-        assert "Augmented-only filter: dropped" in result.stderr
+        assert "Augment screen: kept 0/3" in result.stderr
 
         # The augmented-only consensus must not reach the final FASTA
         with open('clusters/test_main-all.fasta') as f:
@@ -329,6 +334,33 @@ class TestAugmentInput:
 
         assert result.returncode == 0, f"Speconsense should succeed: {result.stderr}"
         assert "Skipped 1 read(s) with duplicate IDs" in result.stderr
+
+    def test_augment_screen_keeps_matching(self, temp_dir, core_module, test_data):
+        """Augmented reads within --min-identity of a primary survive the screen."""
+        self.create_test_files(test_data)  # test_augment.fasta is identical to the primaries
+
+        result = subprocess.run([
+            sys.executable, '-m', core_module,
+            'test_main.fastq', '--augment-input', 'test_augment.fasta',
+            '--min-size', '2', '--algorithm', 'greedy', '--log-level', 'INFO'
+        ], capture_output=True, text=True)
+
+        assert result.returncode == 0, f"Speconsense should succeed: {result.stderr}"
+        assert "Augment screen: kept 1/1" in result.stderr, "Matching read should pass the screen"
+
+    def test_augment_screen_skipped_when_keeping(self, temp_dir, core_module, test_data):
+        """The screen is skipped under --keep-augmented-only-clusters."""
+        self.create_test_files(test_data)
+
+        result = subprocess.run([
+            sys.executable, '-m', core_module,
+            'test_main.fastq', '--augment-input', 'test_augment.fasta',
+            '--min-size', '2', '--algorithm', 'greedy',
+            '--keep-augmented-only-clusters', '--log-level', 'INFO'
+        ], capture_output=True, text=True)
+
+        assert result.returncode == 0, f"Speconsense should succeed: {result.stderr}"
+        assert "Augment screen" not in result.stderr, "Screen must not run when keeping augmented-only clusters"
 
     def test_empty_augment_file_warning(self, temp_dir, core_module):
         """Test warning for empty augment input file."""
