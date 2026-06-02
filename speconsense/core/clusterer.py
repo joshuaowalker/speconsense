@@ -2942,15 +2942,23 @@ class SpecimenClusterer:
                                      primary_ids: List[str]) -> Set[str]:
         """Return the augmented IDs within --min-identity of any primary read.
 
-        Uses the vsearch candidate finder when scalability mode is active (DB =
-        primary reads, queries = augmented reads), otherwise a brute-force scan.
-        Both paths confirm hits with ``calculate_similarity`` at the exact
-        --min-identity threshold, so the decision matches the clustering edges.
+        Uses the vsearch candidate finder when the primary (DB) set is large
+        enough to benefit (DB = primary reads, queries = augmented reads),
+        otherwise a brute-force scan. Both paths confirm hits with
+        ``calculate_similarity`` at the exact --min-identity threshold, so the
+        decision matches the clustering edges.
+
+        The screen costs O(|augmented| x |primary|). vsearch's k-mer prefilter
+        only pays off when the primary DB is large — with a small primary set
+        every query still aligns against ~all targets, so vsearch's per-batch
+        subprocess overhead makes it slower than brute-force edlib (which early-
+        exits as soon as one primary clears the threshold). So the choice is
+        gated on the primary count, not the total dataset size.
         """
         use_vsearch = (
             self._candidate_finder is not None
             and self.scale_threshold > 0
-            and len(self.sequences) >= self.scale_threshold
+            and len(primary_ids) >= self.scale_threshold
         )
         if use_vsearch:
             try:
