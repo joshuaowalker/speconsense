@@ -35,19 +35,26 @@ class ClusterProcessingConfig:
 
     Passed to worker processes to avoid needing to pickle the entire SpecimenClusterer.
     """
-    __slots__ = ['outlier_identity_threshold', 'enable_secondpass_phasing',
-                 'disable_homopolymer_equivalence', 'min_variant_frequency', 'min_variant_count']
+    __slots__ = ['enable_secondpass_phasing',
+                 'disable_homopolymer_equivalence', 'min_variant_frequency', 'min_variant_count',
+                 'significance_level', 'min_hp_length',
+                 'max_sample_size']
 
-    def __init__(self, outlier_identity_threshold: Optional[float],
+    def __init__(self,
                  enable_secondpass_phasing: bool,
                  disable_homopolymer_equivalence: bool,
                  min_variant_frequency: float,
-                 min_variant_count: int):
-        self.outlier_identity_threshold = outlier_identity_threshold
+                 min_variant_count: int,
+                 significance_level: float = 1e-5,
+                 min_hp_length: int = 6,
+                 max_sample_size: Optional[int] = None):
         self.enable_secondpass_phasing = enable_secondpass_phasing
         self.disable_homopolymer_equivalence = disable_homopolymer_equivalence
         self.min_variant_frequency = min_variant_frequency
         self.min_variant_count = min_variant_count
+        self.significance_level = significance_level
+        self.min_hp_length = min_hp_length
+        self.max_sample_size = max_sample_size
 
 
 class ConsensusGenerationConfig:
@@ -56,56 +63,78 @@ class ConsensusGenerationConfig:
     Passed to worker processes to avoid needing to pickle the entire SpecimenClusterer.
     """
     __slots__ = ['max_sample_size', 'enable_iupac_calling', 'min_ambiguity_frequency',
-                 'min_ambiguity_count', 'disable_homopolymer_equivalence', 'primers']
+                 'min_ambiguity_count', 'disable_homopolymer_equivalence', 'primers',
+                 'enable_mad_outlier_removal', 'mad_z_threshold', 'mad_gap_factor',
+                 'mad_min_mad', 'mad_min_drop_from_median']
 
     def __init__(self, max_sample_size: int,
                  enable_iupac_calling: bool,
                  min_ambiguity_frequency: float,
                  min_ambiguity_count: int,
                  disable_homopolymer_equivalence: bool,
-                 primers: Optional[List[Tuple[str, str]]] = None):
+                 primers: Optional[List[Tuple[str, str]]] = None,
+                 enable_mad_outlier_removal: bool = True,
+                 mad_z_threshold: float = 1.5,
+                 mad_gap_factor: float = 2.5,
+                 mad_min_mad: float = 0.002,
+                 mad_min_drop_from_median: float = 0.02):
         self.max_sample_size = max_sample_size
         self.enable_iupac_calling = enable_iupac_calling
         self.min_ambiguity_frequency = min_ambiguity_frequency
         self.min_ambiguity_count = min_ambiguity_count
         self.disable_homopolymer_equivalence = disable_homopolymer_equivalence
         self.primers = primers
+        self.enable_mad_outlier_removal = enable_mad_outlier_removal
+        self.mad_z_threshold = mad_z_threshold
+        self.mad_gap_factor = mad_gap_factor
+        self.mad_min_mad = mad_min_mad
+        self.mad_min_drop_from_median = mad_min_drop_from_median
 
 
 # Worker functions
 
-def _run_spoa_worker(args: Tuple[int, Dict[str, str], bool]) -> Tuple[int, Optional[MSAResult]]:
+def _run_spoa_worker(args: Tuple) -> Tuple[int, Optional[MSAResult]]:
     """Worker function for parallel SPOA execution.
 
     Must be at module level for ProcessPoolExecutor pickling.
 
     Args:
         args: Tuple of (cluster_idx, sampled_seqs, disable_homopolymer_equivalence)
+            or (cluster_idx, sampled_seqs, disable_homopolymer_equivalence,
+            min_hp_length). The 4-element form is preferred; the 3-element
+            form is accepted for backward compatibility and uses
+            min_hp_length=6 (the shipped default).
 
     Returns:
         Tuple of (cluster_idx, MSAResult or None)
     """
-    cluster_idx, sampled_seqs, disable_homopolymer_equivalence = args
+    if len(args) == 4:
+        cluster_idx, sampled_seqs, disable_homopolymer_equivalence, min_hp_length = args
+    else:
+        cluster_idx, sampled_seqs, disable_homopolymer_equivalence = args
+        min_hp_length = 6
 
     if not sampled_seqs:
         return cluster_idx, None
 
     try:
         with tempfile.NamedTemporaryFile(mode='w', delete=False, suffix='.fasta') as f:
-            for read_id, seq in sorted(sampled_seqs.items()):
+            for read_id, seq in sampled_seqs.items():
                 f.write(f">{read_id}\n{seq}\n")
             temp_input = f.name
 
         cmd = [
             "spoa", temp_input,
-            "-r", "2", "-l", "1", "-m", "5", "-n", "-4", "-g", "-8", "-e", "-6",
+            "-r", "2", "-l", "1", "-m", "1", "-n", "-1", "-g", "-1", "-e", "-1",
         ]
         result = subprocess.run(cmd, capture_output=True, text=True, check=True)
         os.unlink(temp_input)
 
         enable_normalization = not disable_homopolymer_equivalence
         alignments, consensus, msa_to_consensus_pos = extract_alignments_from_msa(
-            result.stdout, enable_homopolymer_normalization=enable_normalization
+            result.stdout,
+            enable_homopolymer_normalization=enable_normalization,
+            min_hp_length=min_hp_length,
         )
 
         if not consensus:
@@ -126,27 +155,30 @@ def _run_spoa_worker(args: Tuple[int, Dict[str, str], bool]) -> Tuple[int, Optio
 
 
 def _run_spoa_for_cluster_worker(sequences: Dict[str, str],
-                                  disable_homopolymer_equivalence: bool) -> Optional[MSAResult]:
+                                  disable_homopolymer_equivalence: bool,
+                                  min_hp_length: int = 6) -> Optional[MSAResult]:
     """Run SPOA for a set of sequences. Used by cluster processing worker."""
     if not sequences:
         return None
 
     try:
         with tempfile.NamedTemporaryFile(mode='w', delete=False, suffix='.fasta') as f:
-            for read_id, seq in sorted(sequences.items()):
+            for read_id, seq in sequences.items():
                 f.write(f">{read_id}\n{seq}\n")
             temp_input = f.name
 
         cmd = [
             "spoa", temp_input,
-            "-r", "2", "-l", "1", "-m", "5", "-n", "-4", "-g", "-8", "-e", "-6",
+            "-r", "2", "-l", "1", "-m", "1", "-n", "-1", "-g", "-1", "-e", "-1",
         ]
         result = subprocess.run(cmd, capture_output=True, text=True, check=True)
         os.unlink(temp_input)
 
         enable_normalization = not disable_homopolymer_equivalence
         alignments, consensus, msa_to_consensus_pos = extract_alignments_from_msa(
-            result.stdout, enable_homopolymer_normalization=enable_normalization
+            result.stdout,
+            enable_homopolymer_normalization=enable_normalization,
+            min_hp_length=min_hp_length,
         )
 
         if not consensus:
@@ -162,30 +194,46 @@ def _run_spoa_for_cluster_worker(sequences: Dict[str, str],
         return None
 
 
-def _identify_outlier_reads_standalone(alignments: List[ReadAlignment], consensus_seq: str,
-                                        sampled_ids: Set[str], threshold: float) -> Tuple[Set[str], Set[str]]:
-    """Identify outlier reads below identity threshold. Standalone version for workers."""
+def _identify_mad_outlier_reads_standalone(
+    alignments: List[ReadAlignment],
+    consensus_seq: str,
+    modified_z_threshold: float = 1.5,
+    gap_factor: float = 2.5,
+    min_mad: float = 0.002,
+    min_drop_from_median: float = 0.02,
+) -> Set[str]:
+    """Identify low-rid outlier reads using MAD-based detection.
+
+    Computes per-read identity against the consensus, then applies the shared
+    ``detect_rid_outliers`` helper (MAD modified Z-score + gap rule). Returns
+    the set of read IDs flagged as outliers.
+
+    The four tuning parameters are forwarded to ``detect_rid_outliers``; see
+    its docstring for semantics. Defaults match the helper's own defaults.
+    """
+    from speconsense.outliers import detect_rid_outliers
+
     if not alignments or not consensus_seq:
-        return sampled_ids, set()
+        return set()
+    consensus_length = len(consensus_seq)
+    if consensus_length == 0:
+        return set()
 
-    try:
-        keep_ids = set()
-        outlier_ids = set()
-        consensus_length = len(consensus_seq)
-        if consensus_length == 0:
-            return sampled_ids, set()
+    read_ids = []
+    rids = []
+    for alignment in alignments:
+        error_rate = alignment.normalized_edit_distance / consensus_length
+        read_ids.append(alignment.read_id)
+        rids.append(1.0 - error_rate)
 
-        for alignment in alignments:
-            error_rate = alignment.normalized_edit_distance / consensus_length
-            identity = 1.0 - error_rate
-            if identity >= threshold:
-                keep_ids.add(alignment.read_id)
-            else:
-                outlier_ids.add(alignment.read_id)
-
-        return keep_ids, outlier_ids
-    except Exception:
-        return sampled_ids, set()
+    outlier_indices = detect_rid_outliers(
+        rids,
+        modified_z_threshold=modified_z_threshold,
+        gap_factor=gap_factor,
+        min_mad=min_mad,
+        min_drop_from_median=min_drop_from_median,
+    )
+    return {read_ids[i] for i in outlier_indices}
 
 
 def _calculate_read_identity_standalone(alignments: List[ReadAlignment],
@@ -216,10 +264,42 @@ def _calculate_read_identity_standalone(alignments: List[ReadAlignment],
 def _detect_variant_positions_standalone(alignments: List[ReadAlignment], consensus_seq: str,
                                           msa_to_consensus_pos: Dict[int, Optional[int]],
                                           min_variant_frequency: float,
-                                          min_variant_count: int) -> List[Dict]:
-    """Detect variant positions in MSA. Standalone version for workers."""
+                                          min_variant_count: int,
+                                          sample_read_ids: Optional[Set[str]] = None) -> List[Dict]:
+    """Detect variant positions in MSA. Standalone version for workers.
+
+    If sample_read_ids is provided and is a strict subset of the alignment set,
+    detection runs twice: once on the full alignments and once on the sample-only
+    alignments. Variant positions from both passes are unioned by msa_position.
+    This aligns phasing eligibility with the IUPAC ambiguity pass, which sees the
+    top-N-by-quality sample.
+    """
     if not alignments or not consensus_seq:
         return []
+
+    def _detect(align_set: List[ReadAlignment]) -> List[Dict]:
+        if not align_set:
+            return []
+        position_stats = analyze_positional_variation(align_set, consensus_aligned, msa_to_consensus_pos)
+        out: List[Dict] = []
+        for pos_stat in position_stats:
+            is_variant, variant_bases, reason = is_variant_position_with_composition(
+                pos_stat,
+                min_variant_frequency=min_variant_frequency,
+                min_variant_count=min_variant_count
+            )
+            if is_variant:
+                out.append({
+                    'msa_position': pos_stat.msa_position,
+                    'consensus_position': pos_stat.consensus_position,
+                    'coverage': pos_stat.coverage,
+                    'variant_bases': variant_bases,
+                    'base_composition': pos_stat.base_composition,
+                    'homopolymer_composition': pos_stat.homopolymer_composition,
+                    'error_rate': pos_stat.error_rate,
+                    'reason': reason
+                })
+        return out
 
     try:
         msa_length = len(alignments[0].aligned_sequence)
@@ -232,35 +312,137 @@ def _detect_variant_positions_standalone(alignments: List[ReadAlignment], consen
                 consensus_aligned.append('-')
         consensus_aligned = ''.join(consensus_aligned)
 
-        position_stats = analyze_positional_variation(alignments, consensus_aligned, msa_to_consensus_pos)
+        full_positions = _detect(alignments)
 
-        variant_positions = []
-        for pos_stat in position_stats:
-            is_variant, variant_bases, reason = is_variant_position_with_composition(
-                pos_stat,
-                min_variant_frequency=min_variant_frequency,
-                min_variant_count=min_variant_count
-            )
-            if is_variant:
-                variant_positions.append({
-                    'msa_position': pos_stat.msa_position,
-                    'consensus_position': pos_stat.consensus_position,
-                    'coverage': pos_stat.coverage,
-                    'variant_bases': variant_bases,
-                    'base_composition': pos_stat.base_composition,
-                    'homopolymer_composition': pos_stat.homopolymer_composition,
-                    'error_rate': pos_stat.error_rate,
-                    'reason': reason
-                })
+        use_sample = (
+            sample_read_ids is not None
+            and len(sample_read_ids) < len({a.read_id for a in alignments})
+        )
+        if not use_sample:
+            return full_positions
 
-        return variant_positions
+        sample_alignments = [a for a in alignments if a.read_id in sample_read_ids]
+        sample_positions = _detect(sample_alignments)
+
+        seen = {v['msa_position'] for v in full_positions}
+        merged = list(full_positions)
+        for v in sample_positions:
+            if v['msa_position'] not in seen:
+                merged.append(v)
+                seen.add(v['msa_position'])
+        merged.sort(key=lambda v: v['msa_position'])
+        return merged
     except Exception:
         return []
+
+
+def _refine_groups(
+    current_groups: Dict[tuple, Set[str]],
+    position: int,
+    read_to_position_alleles: Dict[str, Dict[int, str]],
+) -> Dict[tuple, Set[str]]:
+    """Split each allele-tuple group by allele at a new position."""
+    new_groups: Dict[tuple, Set[str]] = {}
+    for allele_key, read_ids in current_groups.items():
+        for rid in read_ids:
+            allele = read_to_position_alleles.get(rid, {}).get(position, '-')
+            new_key = allele_key + (allele,)
+            if new_key in new_groups:
+                new_groups[new_key].add(rid)
+            else:
+                new_groups[new_key] = {rid}
+    return new_groups
+
+
+def _find_best_phasing_subset(
+    variant_msa_positions: List[int],
+    msa_to_consensus_pos: Dict[int, Optional[int]],
+    read_to_position_alleles: Dict[str, Dict[int, str]],
+    all_read_ids: Set[str],
+    total_reads: int,
+    consensus_length: int,
+    config: 'ClusterProcessingConfig',
+    sample_read_ids: Optional[Set[str]] = None,
+) -> Optional[Tuple[List[int], Dict, Dict, float, Optional[float]]]:
+    """Find the best single variant position for phasing.
+
+    Evaluates each variant position at K=1, selecting the position with the
+    lowest within-cluster error among those with >= 2 qualifying alleles
+    (meeting count and frequency thresholds).
+
+    If sample_read_ids is provided and is a strict subset of all_read_ids,
+    a haplotype combo qualifies when it meets thresholds on EITHER the full
+    set OR the sample-restricted subset. This aligns phasing with the IUPAC
+    ambiguity pass, which sees the top-N-by-quality sample. Qualifying combos
+    still carry their full-cluster read membership so phasing does not discard
+    reads that already pass the full-cluster test.
+
+    CER significance is NOT evaluated here — it is applied post-phasing
+    by the validation pass in the pipeline.
+
+    Returns:
+        (positions, qualifying, non_qualifying, error, None) or None.
+    """
+    all_positions = set(variant_msa_positions)
+    initial_groups = {(): all_read_ids.copy()}
+
+    use_sample = (
+        sample_read_ids is not None
+        and 0 < len(sample_read_ids) < len(all_read_ids)
+    )
+    sample_total = len(sample_read_ids) if use_sample else 0
+
+    best = None  # (error, positions, qualifying, non_qualifying)
+
+    for pos in variant_msa_positions:
+        groups = _refine_groups(initial_groups, pos, read_to_position_alleles)
+        qualifying_full, non_qualifying_full = filter_qualifying_haplotypes(
+            groups, total_reads, config.min_variant_count, config.min_variant_frequency
+        )
+
+        if use_sample:
+            sample_groups = {
+                combo: (reads & sample_read_ids)
+                for combo, reads in groups.items()
+            }
+            qualifying_sample, _ = filter_qualifying_haplotypes(
+                sample_groups, sample_total, config.min_variant_count, config.min_variant_frequency
+            )
+            # Union by combo key; keep full-cluster read sets so phasing
+            # doesn't discard full-set-qualifying reads routed through the
+            # sample-qualifying branch.
+            qualifying = dict(qualifying_full)
+            for combo in qualifying_sample:
+                if combo not in qualifying:
+                    qualifying[combo] = groups[combo]
+            non_qualifying = {
+                combo: reads for combo, reads in groups.items()
+                if combo not in qualifying
+            }
+        else:
+            qualifying = qualifying_full
+            non_qualifying = non_qualifying_full
+
+        if len(qualifying) < 2:
+            continue
+
+        error = calculate_within_cluster_error(
+            qualifying, read_to_position_alleles, {pos}, all_positions
+        )
+        if best is None or error < best[0]:
+            best = (error, [pos], qualifying, non_qualifying)
+
+    if best is None:
+        return None
+
+    error, positions, qualifying, non_qualifying = best
+    return (positions, qualifying, non_qualifying, error, None)
 
 
 def _recursive_phase_cluster_standalone(
     read_ids: Set[str],
     read_sequences: Dict[str, str],
+    qualities: Dict[str, float],
     path: List[str],
     depth: int,
     config: ClusterProcessingConfig
@@ -268,15 +450,29 @@ def _recursive_phase_cluster_standalone(
     """Recursively phase a cluster. Standalone version for workers."""
     total_reads = len(read_ids)
 
+    def _quality_sorted_seqs(rids):
+        """Build quality-sorted dict of sequences for SPOA input."""
+        sorted_rids = sorted(rids, key=lambda x: (-qualities.get(x, 0), x))
+        return {rid: read_sequences[rid] for rid in sorted_rids}
+
+    # Sample = top-N-by-quality of the current subcluster. Used so phasing
+    # eligibility considers what the final IUPAC ambiguity pass will see.
+    # When subcluster <= max_sample_size, sample == full set and the OR is a no-op.
+    if config.max_sample_size is not None and total_reads > config.max_sample_size:
+        sorted_by_quality = sorted(read_ids, key=lambda x: (-qualities.get(x, 0), x))
+        sample_read_ids: Optional[Set[str]] = set(sorted_by_quality[:config.max_sample_size])
+    else:
+        sample_read_ids = None
+
     # Base case: cluster too small
     if total_reads < config.min_variant_count * 2:
-        leaf_seqs = {rid: read_sequences[rid] for rid in read_ids}
+        leaf_seqs = _quality_sorted_seqs(read_ids)
         result = _run_spoa_for_cluster_worker(leaf_seqs, config.disable_homopolymer_equivalence)
         consensus = result.consensus if result else ""
         return [(path, consensus, read_ids)], set()
 
     # Generate MSA
-    cluster_seqs = {rid: read_sequences[rid] for rid in read_ids}
+    cluster_seqs = _quality_sorted_seqs(read_ids)
     result = _run_spoa_for_cluster_worker(cluster_seqs, config.disable_homopolymer_equivalence)
 
     if result is None:
@@ -286,14 +482,18 @@ def _recursive_phase_cluster_standalone(
     alignments = result.alignments
     msa_to_consensus_pos = result.msa_to_consensus_pos
 
-    # Detect variants
+    # Detect variants (OR across full subcluster and quality-biased sample)
     variant_positions = _detect_variant_positions_standalone(
         alignments, consensus, msa_to_consensus_pos,
-        config.min_variant_frequency, config.min_variant_count
+        config.min_variant_frequency, config.min_variant_count,
+        sample_read_ids=sample_read_ids,
     )
 
     if not variant_positions:
+        logging.debug(f"Recursive phasing depth={depth}: leaf(n={total_reads}) — no variants")
         return [(path, consensus, read_ids)], set()
+
+    logging.debug(f"Recursive phasing depth={depth}: node(n={total_reads}) — {len(variant_positions)} variants, splitting")
 
     # Parse MSA for consensus_aligned
     msa_handle = StringIO(result.msa_string)
@@ -336,29 +536,26 @@ def _recursive_phase_cluster_standalone(
 
         read_to_position_alleles[read_id] = position_alleles
 
-    # Find best split
-    best_pos = None
-    best_error = float('inf')
-    best_qualifying = None
-    best_non_qualifying = None
-    all_positions = set(variant_msa_positions)
+    # Find best split via unified branch-and-bound search over all (K, M) combinations
+    all_read_ids = set(read_to_position_alleles.keys())
 
-    for pos in variant_msa_positions:
-        allele_groups = group_reads_by_single_position(
-            read_to_position_alleles, pos, set(read_to_position_alleles.keys())
-        )
-        qualifying, non_qualifying = filter_qualifying_haplotypes(
-            allele_groups, total_reads, config.min_variant_count, config.min_variant_frequency
-        )
-        if len(qualifying) < 2:
-            continue
+    # Restrict sample to aligned reads so the sample-frequency denominator
+    # matches what can actually contribute to variant-combo groups.
+    sample_for_split: Optional[Set[str]] = (
+        sample_read_ids & all_read_ids if sample_read_ids is not None else None
+    )
 
-        error = calculate_within_cluster_error(qualifying, read_to_position_alleles, {pos}, all_positions)
-        if error < best_error:
-            best_error = error
-            best_pos = pos
-            best_qualifying = qualifying
-            best_non_qualifying = non_qualifying
+    result = _find_best_phasing_subset(
+        variant_msa_positions, msa_to_consensus_pos, read_to_position_alleles,
+        all_read_ids, total_reads, len(consensus), config,
+        sample_read_ids=sample_for_split,
+    )
+
+    if result is not None:
+        best_positions, best_qualifying, best_non_qualifying, best_error, best_p_star = result
+        best_pos = best_positions[0]
+    else:
+        best_pos = None
 
     if best_pos is None:
         return [(path, consensus, read_ids)], set()
@@ -371,9 +568,11 @@ def _recursive_phase_cluster_standalone(
     # Recurse
     all_leaves = []
     for allele, sub_read_ids in sorted(best_qualifying.items()):
-        new_path = path + [allele]
+        # K>1 alleles are tuples (e.g. ('A', 'G', 'T')); convert to string for path
+        allele_str = ''.join(allele) if isinstance(allele, tuple) else allele
+        new_path = path + [allele_str]
         sub_leaves, sub_deferred = _recursive_phase_cluster_standalone(
-            sub_read_ids, read_sequences, new_path, depth + 1, config
+            sub_read_ids, read_sequences, qualities, new_path, depth + 1, config
         )
         all_leaves.extend(sub_leaves)
         all_deferred.update(sub_deferred)
@@ -384,6 +583,7 @@ def _recursive_phase_cluster_standalone(
 def _phase_reads_by_variants_standalone(
     cluster_read_ids: Set[str],
     sequences: Dict[str, str],
+    qualities: Dict[str, float],
     variant_positions: List[Dict],
     config: ClusterProcessingConfig
 ) -> List[Tuple[str, Set[str]]]:
@@ -399,57 +599,20 @@ def _phase_reads_by_variants_standalone(
         logging.debug(f"Recursive phasing with MSA regeneration: {len(variant_positions)} initial variants, {len(read_sequences)} reads")
 
         leaves, deferred = _recursive_phase_cluster_standalone(
-            set(read_sequences.keys()), read_sequences, [], 0, config
+            set(read_sequences.keys()), read_sequences, qualities, [], 0, config
         )
 
-        if len(leaves) <= 1 and not deferred:
-            if leaves:
-                path, consensus, reads = leaves[0]
-                if not path:
-                    return [(None, cluster_read_ids)]
+        if len(leaves) <= 1:
             return [(None, cluster_read_ids)]
 
-        if len(leaves) == 1:
-            return [(None, cluster_read_ids)]
+        logging.debug(f"Recursive phasing: {len(leaves)} leaf haplotypes, {len(deferred)} deferred to discards")
 
-        logging.debug(f"Recursive phasing: {len(leaves)} leaf haplotypes, {len(deferred)} deferred reads")
-
-        # Reassign deferred reads
-        if deferred:
-            leaf_reads_updated = {tuple(path): set(reads) for path, consensus, reads in leaves}
-            leaf_consensuses = {tuple(path): consensus for path, consensus, reads in leaves}
-
-            for read_id in deferred:
-                if read_id not in read_sequences:
-                    continue
-
-                read_seq = read_sequences[read_id]
-                min_distance = float('inf')
-                nearest_path = None
-
-                for path_tuple, consensus in leaf_consensuses.items():
-                    if not consensus:
-                        continue
-                    result = edlib.align(read_seq, consensus)
-                    distance = result['editDistance']
-                    if distance < min_distance:
-                        min_distance = distance
-                        nearest_path = path_tuple
-
-                if nearest_path is not None:
-                    leaf_reads_updated[nearest_path].add(read_id)
-
-            # Log and decide on phasing
-            total_phased = sum(len(reads) for reads in leaf_reads_updated.values())
-            if total_phased < 2:
-                return [(None, cluster_read_ids)]
-
-            logging.debug(f"Phasing decision: SPLITTING cluster into {len(leaf_reads_updated)} haplotypes")
-
-            return [('-'.join(path), reads) for path, reads in sorted(leaf_reads_updated.items(), key=lambda x: -len(x[1]))]
-        else:
-            logging.debug(f"Phasing decision: SPLITTING cluster into {len(leaves)} haplotypes")
-            return [('-'.join(path), reads) for path, consensus, reads in sorted(leaves, key=lambda x: -len(x[2]))]
+        # Deferred reads (non-qualifying at split positions) are excluded from
+        # haplotypes. Callers track lost reads and route them to discards.
+        # For initial phasing, the subsequent discard reassignment pass has
+        # global visibility and can place them in the correct cluster.
+        logging.debug(f"Phasing decision: SPLITTING cluster into {len(leaves)} haplotypes")
+        return [('-'.join(path), reads) for path, consensus, reads in sorted(leaves, key=lambda x: -len(x[2]))]
 
     except Exception as e:
         logging.warning(f"Failed to phase reads: {e}")
@@ -494,47 +657,32 @@ def _process_cluster_worker(args) -> Tuple[List[Dict], Set[str]]:
 
     cluster = set(cluster_ids)
 
-    # Outlier removal
-    if config.outlier_identity_threshold is not None:
-        keep_ids, outlier_ids = _identify_outlier_reads_standalone(
-            alignments, consensus, cluster, config.outlier_identity_threshold
-        )
+    # Note: a first-pass absolute-identity outlier filter used to run here
+    # (see ``--outlier-identity``, removed). Outlier screening is now done
+    # via MAD-based detection in Phase 9 cluster consensus generation
+    # (_generate_cluster_consensus_worker), which is sensitive to cluster-
+    # relative spread rather than an absolute threshold. Contaminant reads
+    # from a different organism are handled by cross-cluster reassignment
+    # (Phase 6); low-quality reads from the correct organism are handled
+    # by MAD in Phase 9. If initial-consensus quality turns out to degrade
+    # phasing meaningfully, revisit adding a MAD pass here too.
 
-        if outlier_ids:
-            if len(cluster) == 2 and len(outlier_ids) == 1:
-                logging.debug(f"Initial cluster {initial_idx}: Split 2-read cluster due to 1 outlier")
-                for read_id in cluster:
-                    subclusters.append({
-                        'read_ids': {read_id},
-                        'initial_cluster_num': initial_idx,
-                        'allele_combo': 'single-read-split'
-                    })
-                return subclusters, discarded_ids
-
-            logging.debug(f"Initial cluster {initial_idx}: Removing {len(outlier_ids)}/{len(cluster)} outlier reads, "
-                         f"regenerating consensus")
-
-            discarded_ids.update(outlier_ids)
-            cluster = cluster - outlier_ids
-
-            # Regenerate consensus
-            sorted_ids_filtered = sorted(cluster, key=lambda x: (-qualities.get(x, 0), x))
-            cluster_seqs = {seq_id: sequences[seq_id] for seq_id in sorted_ids_filtered}
-            result = _run_spoa_for_cluster_worker(cluster_seqs, config.disable_homopolymer_equivalence)
-
-            if result is not None:
-                consensus = result.consensus
-                msa = result.msa_string
-                alignments = result.alignments
-                msa_to_consensus_pos = result.msa_to_consensus_pos
-                _calculate_read_identity_standalone(alignments, consensus)
-
-    # Detect variants
+    # Detect variants (OR across full cluster and quality-biased sample).
+    # The sample mirrors what the final IUPAC ambiguity pass will see; without
+    # this, a variant sitting below threshold on the full cluster but above
+    # threshold on the sample would short-circuit the phasing gate here and
+    # then resurface as an IUPAC code in the final consensus.
     variant_positions = []
     if consensus and alignments and config.enable_secondpass_phasing:
+        sample_for_detect: Optional[Set[str]] = None
+        if config.max_sample_size is not None and len(cluster) > config.max_sample_size:
+            sorted_by_quality = sorted(cluster, key=lambda x: (-qualities.get(x, 0), x))
+            sample_for_detect = set(sorted_by_quality[:config.max_sample_size])
+
         variant_positions = _detect_variant_positions_standalone(
             alignments, consensus, msa_to_consensus_pos,
-            config.min_variant_frequency, config.min_variant_count
+            config.min_variant_frequency, config.min_variant_count,
+            sample_read_ids=sample_for_detect,
         )
 
         if variant_positions:
@@ -542,15 +690,23 @@ def _process_cluster_worker(args) -> Tuple[List[Dict], Set[str]]:
 
     # Phase reads
     phased_haplotypes = _phase_reads_by_variants_standalone(
-        cluster, sequences, variant_positions, config
+        cluster, sequences, qualities, variant_positions, config
     )
 
+    phased_reads = set()
     for haplotype_idx, (allele_combo, haplotype_reads) in enumerate(phased_haplotypes):
+        phased_reads.update(haplotype_reads)
         subclusters.append({
             'read_ids': haplotype_reads,
             'initial_cluster_num': initial_idx,
             'allele_combo': allele_combo
         })
+
+    # Track reads lost during phasing (e.g. SPOA didn't produce alignment)
+    lost = cluster - phased_reads
+    if lost:
+        logging.debug(f"Initial cluster {initial_idx}: {len(lost)} reads lost during phasing, adding to discards")
+        discarded_ids.update(lost)
 
     return subclusters, discarded_ids
 
@@ -612,24 +768,38 @@ def _trim_primers_standalone(sequence: str, primers: Optional[List[Tuple[str, st
 
 
 def _generate_cluster_consensus_worker(args) -> Dict:
-    """Worker function for parallel final consensus generation.
+    """Worker function for parallel cluster consensus generation (Phase 9).
+
+    Runs SPOA → MAD outlier detection → re-SPOA on cleaned reads → IUPAC
+    ambiguity calling → primer trimming. The outputs are stamped onto each
+    cluster_dict by the Phase 9 orchestrator so that the post-refinement
+    merge (Phase 10), CER (Phase 11), size filtering (Phase 12), and output
+    emission (Phase 13) all observe the same post-MAD cluster state. The
+    Phase 10 orchestrator re-invokes this worker on the union of read_ids
+    when it merges clusters; the outputs are identical in shape and are
+    re-stamped onto the survivor cluster_dict.
 
     Must be at module level for ProcessPoolExecutor pickling.
 
     Args:
         args: Tuple of (final_idx, cluster_read_ids, sequences, qualities, config)
-              - final_idx: 1-based cluster index
+              - final_idx: cluster index (used to correlate results back to
+                the originating cluster_dict; not an output rank)
               - cluster_read_ids: Set of read IDs in this cluster
               - sequences: Dict mapping read_id -> sequence
               - qualities: Dict mapping read_id -> mean quality score
               - config: ConsensusGenerationConfig
 
     Returns:
-        Dict with all computed results for this cluster
+        Dict with all computed results for this cluster. Key fields:
+            consensus, trimmed_consensus, msa, rid, rid_min, iupac_count,
+            cluster (post-MAD set), actual_size (post-MAD), sampled_ids,
+            sorted_cluster_ids, sorted_sampled_ids, mad_outlier_ids,
+            dropped_by_min_reads, found_primers.
     """
     final_idx, cluster_read_ids, sequences, qualities, config = args
 
-    cluster = cluster_read_ids
+    cluster = set(cluster_read_ids)
     actual_size = len(cluster)
 
     # Sort all cluster reads by quality for consistent output ordering
@@ -643,12 +813,47 @@ def _generate_cluster_consensus_worker(args) -> Dict:
         sorted_sampled_ids = sorted_cluster_ids[:config.max_sample_size]
         sampled_ids = set(sorted_sampled_ids)
     else:
-        sorted_sampled_ids = sorted_cluster_ids
-        sampled_ids = cluster
+        sorted_sampled_ids = list(sorted_cluster_ids)
+        sampled_ids = set(cluster)
 
     # Generate final consensus and MSA
     sampled_seqs = {seq_id: sequences[seq_id] for seq_id in sorted_sampled_ids}
     result = _run_spoa_for_cluster_worker(sampled_seqs, config.disable_homopolymer_equivalence)
+
+    # MAD-based outlier detection: remove reads whose rid is anomalously low
+    # vs. their clustermates, then re-run SPOA on the remaining reads. Bounded
+    # to one iteration to cap SPOA cost. Flagged reads are reported back so the
+    # caller can add them to the specimen-level discard pool.
+    mad_outlier_ids: Set[str] = set()
+    dropped_by_min_reads = False
+    if result is not None and result.consensus and config.enable_mad_outlier_removal:
+        flagged = _identify_mad_outlier_reads_standalone(
+            result.alignments, result.consensus,
+            modified_z_threshold=config.mad_z_threshold,
+            gap_factor=config.mad_gap_factor,
+            min_mad=config.mad_min_mad,
+            min_drop_from_median=config.mad_min_drop_from_median,
+        )
+        if flagged:
+            remaining_ids = [rid for rid in sorted_sampled_ids if rid not in flagged]
+            if len(remaining_ids) < 3:
+                # Hard floor: cluster cannot produce a reliable consensus. Drop
+                # it entirely; all original sampled reads go to discards.
+                dropped_by_min_reads = True
+                mad_outlier_ids = set(sorted_sampled_ids)
+                result = None
+            else:
+                mad_outlier_ids = flagged
+                sorted_sampled_ids = remaining_ids
+                sampled_ids = set(remaining_ids)
+                cluster = cluster - flagged
+                actual_size = len(cluster)
+                sorted_cluster_ids = [c for c in sorted_cluster_ids if c not in flagged]
+                # Regenerate consensus on outlier-free sample
+                sampled_seqs = {sid: sequences[sid] for sid in sorted_sampled_ids}
+                result = _run_spoa_for_cluster_worker(
+                    sampled_seqs, config.disable_homopolymer_equivalence
+                )
 
     # Calculate final identity metrics
     rid, rid_min = None, None
@@ -692,5 +897,7 @@ def _generate_cluster_consensus_worker(args) -> Dict:
         'sampled_ids': sampled_ids,
         'sorted_cluster_ids': sorted_cluster_ids,
         'sorted_sampled_ids': sorted_sampled_ids,
+        'mad_outlier_ids': mad_outlier_ids,
+        'dropped_by_min_reads': dropped_by_min_reads,
         'iupac_count': iupac_count
     }

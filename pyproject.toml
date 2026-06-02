@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "speconsense"
-version = "0.7.7"
+version = "0.8.1"
 description = "High-quality clustering and consensus generation for Oxford Nanopore amplicon reads"
 readme = "README.md"
 requires-python = ">=3.8"
@@ -31,7 +31,7 @@ dependencies = [
     "biopython>=1.79",
     "tqdm>=4.62.0",
     "scipy>=1.7.0",
-    "adjusted-identity>=0.2.4",
+    "adjusted-identity>=0.2.7",
     "pyyaml>=5.0",
 ]
 
@@ -50,6 +50,7 @@ Issues = "https://github.com/joshuaowalker/speconsense/issues"
 speconsense = "speconsense.cli:main"
 speconsense-summarize = "speconsense.summarize:main"
 speconsense-synth = "speconsense.synth:main"
+speconsense-fit-error-model = "speconsense.fit_error_model:main"
 
 [tool.setuptools.packages.find]
 where = ["."]
@@ -57,3 +58,4 @@ include = ["speconsense*"]
 
 [tool.setuptools.package-data]
 "speconsense.profiles" = ["*.yaml"]
+"speconsense.error_models" = ["*.yaml"]

@@ -1,30 +1,20 @@
-"""MSA analysis and quality assessment for speconsense-summarize.
+"""MSA analysis support for speconsense-summarize.
 
-Provides functions for analyzing multiple sequence alignments, detecting outliers,
-identifying indel events, and assessing cluster quality.
+Provides functions for running SPOA, identifying indel events, and analyzing
+MSA columns (homopolymer / structural classification, overlap-aware spans).
 """
 
-import os
-import re
 import logging
+import os
 import subprocess
 import tempfile
-from typing import List, Dict, Optional, Tuple, NamedTuple
-from io import StringIO
+from typing import Dict, List, Optional, Tuple
 
-import edlib
-import numpy as np
 from Bio import SeqIO
 from Bio.SeqRecord import SeqRecord
 from Bio.Seq import Seq
 
-from speconsense.types import ConsensusInfo
-from speconsense.msa import (
-    extract_alignments_from_msa,
-    analyze_positional_variation,
-)
-
-from .iupac import IUPAC_EQUIV
+from speconsense.msa import MSAResult, extract_alignments_from_msa
 
 
 # Maximum number of variants to evaluate for MSA-based merging (legacy constant)
@@ -61,204 +51,82 @@ def compute_merge_batch_size(group_size: int, effort: int) -> int:
     return max(MIN_MERGE_BATCH, min(MAX_MERGE_BATCH, batch))
 
 
-class ClusterQualityData(NamedTuple):
-    """Quality metrics for a cluster (no visualization matrix)."""
-    consensus_seq: str
-    position_error_rates: List[float]  # Per-position error rates (0-1) in consensus space
-    position_error_counts: List[int]  # Per-position error counts in consensus space
-    read_identities: List[float]  # Per-read identity scores (0-1)
-    position_stats: Optional[List] = None  # Detailed PositionStats for debugging (optional)
+def run_spoa_for_cluster_metrics(
+    sequences: Dict[str, str],
+    disable_homopolymer_equivalence: bool = False,
+    min_hp_length: int = 6,
+    alignment_mode: int = 1,
+) -> Optional[MSAResult]:
+    """Run SPOA over a cluster's read set and return the parsed MSAResult.
 
-
-def identify_outliers(final_consensus: List, all_raw_consensuses: List, source_folder: str) -> Dict:
-    """Identify sequences with low read identity using statistical outlier detection.
-
-    Flags sequences with mean read identity (rid) below (mean - 2*std) for the dataset.
-    This identifies the ~2.5% lowest values that may warrant review.
-
-    Note: rid_min (minimum read identity) is not used because single outlier reads
-    don't significantly impact consensus quality. Positional analysis better captures
-    systematic issues like mixed clusters or variants.
+    Mirrors core's ``_run_spoa_for_cluster_worker`` invocation (linear gap
+    scoring ``-m1 -n-1 -g-1 -e-1`` which reduces ambiguous columns ~4× vs
+    SPOA defaults) so that summarize-side metrics recomputed from the same
+    reads are comparable to core's. Used to refresh ``rid``, ``rid_min``,
+    and ``err_factor`` on merged clusters whose contributors come from
+    multiple pre-merge clusters.
 
     Args:
-        final_consensus: List of final consensus sequences
-        all_raw_consensuses: List of all raw consensus sequences (unused, kept for API compatibility)
-        source_folder: Source directory (unused, kept for API compatibility)
+        sequences: Mapping of read_id -> raw read sequence (ungapped).
+        disable_homopolymer_equivalence: Pass through to
+            ``extract_alignments_from_msa``. When True the per-read
+            normalized edit distance is just the raw edit distance.
+        min_hp_length: Minimum consensus HP run length for HP normalization
+            in ``extract_alignments_from_msa``. Matches the
+            ``--hp-normalization-length`` semantics shared across core and
+            summarize.
+        alignment_mode: SPOA alignment mode (0=local SW, 1=global NW,
+            2=semi-global). Default 1 matches core's per-cluster consensus.
+            The ``-full`` builder passes 0 for cross-primer-conflated groups
+            whose reads span overlapping-but-different regions.
 
     Returns:
-        Dictionary with:
-        {
-            'statistical_outliers': List of (cons, rid),
-            'no_issues': List of consensus sequences with good quality,
-            'global_stats': {'mean_rid', 'std_rid', 'stat_threshold_rid'}
-        }
+        ``MSAResult`` with the SPOA consensus, raw MSA string (suitable for
+        ``compute_cluster_err_factor``), parsed read alignments, and the
+        MSA-to-consensus position map. Returns ``None`` if SPOA fails or
+        the consensus can't be extracted.
     """
-    # Calculate global statistics for all sequences with identity metrics
-    all_rids = []
-
-    for cons in final_consensus:
-        if cons.rid is not None:
-            all_rids.append(cons.rid)
-
-    # Calculate mean and std for statistical outlier detection
-    mean_rid = np.mean(all_rids) if all_rids else 1.0
-    std_rid = np.std(all_rids) if len(all_rids) > 1 else 0.0
-
-    # Threshold for statistical outliers (2 standard deviations below mean)
-    stat_threshold_rid = mean_rid - 2 * std_rid
-
-    # Categorize sequences
-    statistical = []
-    no_issues = []
-
-    for cons in final_consensus:
-        rid = cons.rid if cons.rid is not None else 1.0
-
-        if rid < stat_threshold_rid:
-            statistical.append((cons, rid))
-        else:
-            no_issues.append(cons)
-
-    return {
-        'statistical_outliers': statistical,
-        'no_issues': no_issues,
-        'global_stats': {
-            'mean_rid': mean_rid,
-            'std_rid': std_rid,
-            'stat_threshold_rid': stat_threshold_rid
-        }
-    }
-
-
-def analyze_positional_identity_outliers(
-    consensus_info,
-    source_folder: str,
-    min_variant_frequency: float,
-    min_variant_count: int
-) -> Optional[Dict]:
-    """Analyze positional error rates and identify high-error positions.
-
-    Args:
-        consensus_info: ConsensusInfo object for the sequence
-        source_folder: Source directory containing cluster_debug folder
-        min_variant_frequency: Global threshold for flagging positions (from metadata)
-        min_variant_count: Minimum variant count for phasing (from metadata)
-
-    Returns:
-        Dictionary with positional analysis:
-        {
-            'num_outlier_positions': int,
-            'mean_outlier_error_rate': float,  # Mean error rate across outlier positions only
-            'total_nucleotide_errors': int,    # Sum of error counts at outlier positions
-            'outlier_threshold': float,
-            'outlier_positions': List of (position, error_rate, error_count) tuples
-        }
-        Returns None if MSA file not found or analysis fails
-
-        Note: Error rates already exclude homopolymer length differences due to
-        homopolymer normalization in analyze_positional_variation()
-    """
-    # Skip analysis for low-RiC sequences (insufficient data for meaningful statistics)
-    # Need at least 2 * min_variant_count to confidently phase two variants
-    min_ric_threshold = 2 * min_variant_count
-    if consensus_info.ric < min_ric_threshold:
-        logging.debug(f"Skipping positional analysis for {consensus_info.sample_name}: "
-                     f"RiC {consensus_info.ric} < {min_ric_threshold}")
+    if not sequences:
         return None
 
-    # Construct path to MSA file
-    debug_dir = os.path.join(source_folder, "cluster_debug")
+    temp_input = None
+    try:
+        with tempfile.NamedTemporaryFile(mode='w', delete=False, suffix='.fasta') as f:
+            for read_id, seq in sequences.items():
+                f.write(f">{read_id}\n{seq}\n")
+            temp_input = f.name
 
-    # Try to find the MSA file
-    # MSA files use the original cluster naming (e.g., "specimen-c1")
-    # not the summarized naming (e.g., "specimen-1.v1")
-    msa_file = None
+        cmd = [
+            "spoa", temp_input,
+            "-r", "2", "-l", str(alignment_mode),
+            "-m", "1", "-n", "-1", "-g", "-1", "-e", "-1",
+        ]
+        result = subprocess.run(cmd, capture_output=True, text=True, check=True)
 
-    # Extract specimen name and cluster ID
-    # consensus_info.sample_name might be "specimen-1.v1" (summarized)
-    # consensus_info.cluster_id should be "-c1" (original cluster)
+        enable_normalization = not disable_homopolymer_equivalence
+        alignments, consensus, msa_to_consensus_pos = extract_alignments_from_msa(
+            result.stdout,
+            enable_homopolymer_normalization=enable_normalization,
+            min_hp_length=min_hp_length,
+        )
+        if not consensus:
+            return None
 
-    # Build the base name from specimen + cluster_id
-    # If sample_name is "ONT01.23-...-1.v1" and cluster_id is "-c1"
-    # we need to reconstruct "ONT01.23-...-c1"
-
-    sample_name = consensus_info.sample_name
-    cluster_id = consensus_info.cluster_id
-
-    # Remove any HAC group/variant suffix from sample_name to get specimen base
-    # Pattern: "-\d+\.v\d+" (e.g., "-1.v1")
-    specimen_base = re.sub(r'-\d+\.v\d+$', '', sample_name)
-
-    # Reconstruct original cluster name
-    original_cluster_name = f"{specimen_base}{cluster_id}"
-
-    # Look for the MSA file with correct extension
-    msa_fasta = os.path.join(debug_dir, f"{original_cluster_name}-RiC{consensus_info.ric}-msa.fasta")
-    if os.path.exists(msa_fasta):
-        msa_file = msa_fasta
-
-    if not msa_file:
-        logging.debug(f"No MSA file found for {original_cluster_name}")
+        return MSAResult(
+            consensus=consensus,
+            msa_string=result.stdout,
+            alignments=alignments,
+            msa_to_consensus_pos=msa_to_consensus_pos,
+        )
+    except subprocess.CalledProcessError as e:
+        logging.debug(f"SPOA failed during merge-metric recompute: rc={e.returncode}")
         return None
-
-    # Analyze cluster quality using core.py's positional analysis
-    quality_data = analyze_cluster_quality(msa_file, consensus_info.sequence)
-
-    if not quality_data or not quality_data.position_error_rates:
-        logging.debug(f"Failed to analyze cluster quality for {original_cluster_name}")
+    except Exception as e:
+        logging.debug(f"Merge-metric recompute failed: {e}")
         return None
-
-    position_error_rates = quality_data.position_error_rates
-    position_error_counts = quality_data.position_error_counts
-    position_stats = quality_data.position_stats
-
-    # Use global min_variant_frequency as threshold
-    # Positions above this could be undetected/unphased variants
-    threshold = min_variant_frequency
-    outlier_positions = [
-        (i, rate, count)
-        for i, (rate, count) in enumerate(zip(position_error_rates, position_error_counts))
-        if rate > threshold
-    ]
-
-    # Build detailed outlier info including base composition
-    outlier_details = []
-    if position_stats:
-        for i, rate, count in outlier_positions:
-            if i < len(position_stats):
-                ps = position_stats[i]
-                outlier_details.append({
-                    'consensus_position': ps.consensus_position,
-                    'msa_position': ps.msa_position,
-                    'error_rate': rate,
-                    'error_count': count,
-                    'coverage': ps.coverage,
-                    'consensus_nucleotide': ps.consensus_nucleotide,
-                    'base_composition': dict(ps.base_composition),
-                    'homopolymer_composition': dict(ps.homopolymer_composition) if ps.homopolymer_composition else {},
-                    'sub_count': ps.sub_count,
-                    'ins_count': ps.ins_count,
-                    'del_count': ps.del_count,
-                })
-
-    # Calculate statistics for outlier positions only
-    if outlier_positions:
-        mean_outlier_error = np.mean([rate for _, rate, _ in outlier_positions])
-        total_nucleotide_errors = sum(count for _, _, count in outlier_positions)
-    else:
-        mean_outlier_error = 0.0
-        total_nucleotide_errors = 0
-
-    return {
-        'num_outlier_positions': len(outlier_positions),
-        'mean_outlier_error_rate': mean_outlier_error,
-        'total_nucleotide_errors': total_nucleotide_errors,
-        'outlier_threshold': threshold,
-        'outlier_positions': outlier_positions,
-        'outlier_details': outlier_details,
-        'consensus_seq': quality_data.consensus_seq,
-        'ric': consensus_info.ric,
-    }
+    finally:
+        if temp_input and os.path.exists(temp_input):
+            os.unlink(temp_input)
 
 
 def run_spoa_msa(sequences: List[str], alignment_mode: int = 1) -> List:
@@ -372,15 +240,72 @@ def identify_indel_events(aligned_seqs: List, alignment_length: int) -> List[Tup
     return events
 
 
-def is_homopolymer_event(aligned_seqs: List, start_col: int, end_col: int) -> bool:
+def _aligned_hp_run_length(seq_str: str, start_col: int, end_col: int, base: str) -> int:
+    """Measure the full HP run of ``base`` in an aligned sequence that touches
+    the column span [start_col, end_col] (inclusive).
+
+    Walks left from ``start_col-1``, across the span, and right from
+    ``end_col+1``. Gap columns are skipped; non-gap columns matching ``base``
+    are counted; any other non-gap base ends the walk on that side.
+
+    Mirrors the measurement used by adjusted-identity's ``_hp_run_length``
+    so that MSA-side HP classification uses the same MIN-of-runs semantics
+    as the distance-side.
+    """
+    base_upper = base.upper()
+    n = len(seq_str)
+    count = 0
+
+    # Walk left from just before start_col
+    pos = start_col - 1
+    while pos >= 0:
+        c = seq_str[pos]
+        if c == '-':
+            pos -= 1
+            continue
+        if c.upper() == base_upper:
+            count += 1
+            pos -= 1
+        else:
+            break
+
+    # Count base occurrences inside the span (gaps skipped)
+    for pos in range(start_col, end_col + 1):
+        c = seq_str[pos]
+        if c == '-':
+            continue
+        if c.upper() == base_upper:
+            count += 1
+
+    # Walk right from just after end_col
+    pos = end_col + 1
+    while pos < n:
+        c = seq_str[pos]
+        if c == '-':
+            pos += 1
+            continue
+        if c.upper() == base_upper:
+            count += 1
+            pos += 1
+        else:
+            break
+
+    return count
+
+
+def is_homopolymer_event(aligned_seqs: List, start_col: int, end_col: int,
+                         min_hp_length: int = 1) -> bool:
     """
     Classify a complete indel event as homopolymer or structural.
 
     An event is homopolymer if:
     1. All bases in the event region (across all sequences, all columns) are identical
     2. At least one flanking solid column has all sequences showing the same base
+    3. The shortest aligned HP run (min across sequences) is >= ``min_hp_length``.
 
-    This matches adjusted-identity semantics where AAA ~ AAAA.
+    Default ``min_hp_length=1`` preserves the original binary classification.
+    Higher thresholds demote short-HP length diffs back to structural indels,
+    matching adjusted-identity's ``hp_normalize_min_length`` semantics.
 
     Examples:
         Homopolymer:  ATAAA--GC vs ATAAAAGC  (event has all A's, flanked by A)
@@ -391,6 +316,9 @@ def is_homopolymer_event(aligned_seqs: List, start_col: int, end_col: int) -> bo
         aligned_seqs: List of aligned sequences from SPOA
         start_col: First column of the indel event (inclusive)
         end_col: Last column of the indel event (inclusive)
+        min_hp_length: Minimum HP run length (per-sequence, MIN across sequences)
+            required to keep the event classified as homopolymer. 1 disables
+            the check.
 
     Returns:
         True if homopolymer event, False if structural
@@ -412,6 +340,7 @@ def is_homopolymer_event(aligned_seqs: List, start_col: int, end_col: int) -> bo
     # A valid flanking column must:
     # 1. Not be an indel column (all sequences have bases, no gaps)
     # 2. All bases match the event base
+    has_matching_flank = False
 
     # Check left flank
     if start_col > 0:
@@ -421,23 +350,35 @@ def is_homopolymer_event(aligned_seqs: List, start_col: int, end_col: int) -> bo
         left_has_gap = '-' in left_column
 
         if not left_has_gap and left_bases == {event_base}:
-            return True
+            has_matching_flank = True
 
     # Check right flank
-    if end_col < alignment_length - 1:
+    if not has_matching_flank and end_col < alignment_length - 1:
         right_col = end_col + 1
         right_column = [str(seq.seq[right_col]) for seq in aligned_seqs]
         right_bases = set(c for c in right_column if c != '-')
         right_has_gap = '-' in right_column
 
         if not right_has_gap and right_bases == {event_base}:
-            return True
+            has_matching_flank = True
 
-    # No valid homopolymer flanking found
-    return False
+    if not has_matching_flank:
+        return False
+
+    # Short-HP demotion: if the shortest per-sequence HP run is below the
+    # threshold, the length diff carries short-HP signal — treat as structural.
+    if min_hp_length > 1:
+        run_lengths = [
+            _aligned_hp_run_length(str(seq.seq), start_col, end_col, event_base)
+            for seq in aligned_seqs
+        ]
+        if run_lengths and min(run_lengths) < min_hp_length:
+            return False
+
+    return True
 
 
-def analyze_msa_columns(aligned_seqs: List) -> dict:
+def analyze_msa_columns(aligned_seqs: List, min_hp_length: int = 1) -> dict:
     """
     Analyze aligned sequences to count SNPs and indels.
 
@@ -449,6 +390,13 @@ def analyze_msa_columns(aligned_seqs: List) -> dict:
 
     Important: All gaps (including terminal gaps) count as variant positions
     since variants within a group share the same primers.
+
+    Args:
+        aligned_seqs: SPOA MSA sequences
+        min_hp_length: Minimum HP run length to classify an event as
+            homopolymer. Events whose shortest per-sequence run is below this
+            threshold are demoted to structural. Default 1 disables the check
+            and preserves pre-threshold behavior.
 
     Returns dict with:
         'snp_count': number of positions with >1 non-gap base
@@ -481,7 +429,7 @@ def analyze_msa_columns(aligned_seqs: List) -> dict:
     homopolymer_events = []
 
     for start_col, end_col in indel_events:
-        if is_homopolymer_event(aligned_seqs, start_col, end_col):
+        if is_homopolymer_event(aligned_seqs, start_col, end_col, min_hp_length=min_hp_length):
             homopolymer_events.append((start_col, end_col))
         else:
             structural_events.append((start_col, end_col))
@@ -511,7 +459,8 @@ def analyze_msa_columns(aligned_seqs: List) -> dict:
 
 
 def analyze_msa_columns_overlap_aware(aligned_seqs: List, min_overlap_bp: int,
-                                       original_lengths: List[int]) -> dict:
+                                       original_lengths: List[int],
+                                       min_hp_length: int = 1) -> dict:
     """
     Analyze MSA columns, distinguishing terminal gaps from structural indels.
 
@@ -620,7 +569,7 @@ def analyze_msa_columns_overlap_aware(aligned_seqs: List, min_overlap_bp: int,
         if is_terminal and overlap_bp >= effective_threshold:
             # Terminal gap from length difference - don't count as structural
             terminal_gap_columns += (end_col - start_col + 1)
-        elif is_homopolymer_event(aligned_seqs, start_col, end_col):
+        elif is_homopolymer_event(aligned_seqs, start_col, end_col, min_hp_length=min_hp_length):
             homopolymer_events.append((start_col, end_col))
         else:
             # Only count as structural if within overlap region
@@ -655,126 +604,3 @@ def analyze_msa_columns_overlap_aware(aligned_seqs: List, min_overlap_bp: int,
         'indel_count': total_indel_count,  # Backward compatibility
         'max_indel_length': max_indel_length  # Backward compatibility
     }
-
-
-def analyze_cluster_quality(
-    msa_file: str,
-    consensus_seq: str,
-    max_reads: Optional[int] = None
-) -> Optional[ClusterQualityData]:
-    """
-    Analyze cluster quality using core.py's analyze_positional_variation().
-
-    Uses the canonical positional analysis from core.py to ensure consistent
-    treatment of homopolymer length differences across the pipeline.
-
-    Args:
-        msa_file: Path to MSA FASTA file
-        consensus_seq: Ungapped consensus sequence
-        max_reads: Maximum reads to include (for downsampling large clusters)
-
-    Returns:
-        ClusterQualityData with position error rates and read identities, or None if failed
-    """
-    if not os.path.exists(msa_file):
-        logging.debug(f"MSA file not found: {msa_file}")
-        return None
-
-    # Load MSA file content
-    try:
-        with open(msa_file, 'r') as f:
-            msa_string = f.read()
-    except Exception as e:
-        logging.debug(f"Failed to read MSA file {msa_file}: {e}")
-        return None
-
-    # Extract alignments from MSA using core.py function with homopolymer normalization
-    # This returns ReadAlignment objects with score_aligned field
-    alignments, msa_consensus, msa_to_consensus_pos = extract_alignments_from_msa(
-        msa_string,
-        enable_homopolymer_normalization=True
-    )
-
-    if not alignments:
-        logging.debug(f"No alignments found in MSA: {msa_file}")
-        return None
-
-    # Verify consensus matches: the passed-in consensus_seq may be trimmed (shorter) with IUPAC codes
-    # The MSA consensus is untrimmed (longer) without IUPAC codes
-    # Use edlib in HW mode to check if trimmed consensus is contained within MSA consensus
-    if msa_consensus and msa_consensus != consensus_seq:
-        # Use edlib HW mode (semi-global) to find consensus_seq within msa_consensus
-        # This handles primer trimming (length difference) and IUPAC codes (via equivalencies)
-        result = edlib.align(consensus_seq, msa_consensus, mode="HW", task="distance",
-                             additionalEqualities=IUPAC_EQUIV)
-        edit_distance = result["editDistance"]
-        if edit_distance > 0:  # Any edits indicate a real mismatch
-            logging.warning(f"Consensus mismatch in MSA file: {msa_file}")
-            logging.warning(f"  MSA length: {len(msa_consensus)}, consensus length: {len(consensus_seq)}, edit distance: {edit_distance}")
-
-    # Use the passed-in consensus (with IUPAC codes) as authoritative for quality analysis
-    # This reflects the actual output sequence
-    consensus_length = len(consensus_seq)
-
-    if consensus_length == 0:
-        logging.debug(f"Empty consensus sequence: {msa_file}")
-        return None
-
-    # Get consensus aligned sequence by parsing MSA string
-    msa_handle = StringIO(msa_string)
-    records = list(SeqIO.parse(msa_handle, 'fasta'))
-    consensus_aligned = None
-    for record in records:
-        if 'Consensus' in record.description or 'Consensus' in record.id:
-            consensus_aligned = str(record.seq).upper()
-            break
-
-    if consensus_aligned is None:
-        logging.debug(f"No consensus found in MSA: {msa_file}")
-        return None
-
-    # Downsample reads if needed
-    if max_reads and len(alignments) > max_reads:
-        # Sort by read identity (using normalized edit distance) and take worst reads first, then best
-        # This gives us a representative sample showing the quality range
-        read_identities_temp = []
-        for alignment in alignments:
-            # Use normalized edit distance for identity calculation
-            identity = 1.0 - (alignment.normalized_edit_distance / consensus_length) if consensus_length > 0 else 0.0
-            read_identities_temp.append((identity, alignment))
-
-        # Sort by identity
-        read_identities_temp.sort(key=lambda x: x[0])
-
-        # Take worst half and best half
-        n_worst = max_reads // 2
-        n_best = max_reads - n_worst
-        sampled = read_identities_temp[:n_worst] + read_identities_temp[-n_best:]
-
-        alignments = [alignment for _, alignment in sampled]
-        logging.debug(f"Downsampled {len(read_identities_temp)} reads to {len(alignments)} for analysis")
-
-    # Use core.py's canonical positional analysis
-    position_stats = analyze_positional_variation(alignments, consensus_aligned, msa_to_consensus_pos)
-
-    # Extract position error rates and counts for consensus positions only (skip insertion columns)
-    consensus_position_stats = [ps for ps in position_stats if ps.consensus_position is not None]
-    # Sort by consensus position to ensure correct order
-    consensus_position_stats.sort(key=lambda ps: ps.consensus_position)
-    position_error_rates = [ps.error_rate for ps in consensus_position_stats]
-    position_error_counts = [ps.error_count for ps in consensus_position_stats]
-
-    # Calculate per-read identities from alignments
-    read_identities = []
-    for alignment in alignments:
-        # Use normalized edit distance for identity calculation
-        identity = 1.0 - (alignment.normalized_edit_distance / consensus_length) if consensus_length > 0 else 0.0
-        read_identities.append(identity)
-
-    return ClusterQualityData(
-        consensus_seq=consensus_seq,
-        position_error_rates=position_error_rates,
-        position_error_counts=position_error_counts,
-        read_identities=read_identities,
-        position_stats=consensus_position_stats
-    )

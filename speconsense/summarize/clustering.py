@@ -1,22 +1,23 @@
-"""HAC clustering and variant selection for speconsense-summarize.
+"""Grouping and variant selection for speconsense-summarize.
 
-Provides hierarchical agglomerative clustering to separate specimens from variants
-and variant selection strategies.
+Core is authoritative for within-specimen identity grouping (emitted as
+``gid=`` / ``vid=`` header fields). This module bridges that into summarize's
+output pipeline:
+
+- ``group_by_core_identity`` buckets consensuses by ``group_rank``.
+- ``merge_groups_by_anchor_overlap`` conflates cross-primer groups via
+  overlap-aware distance (primer-pool use case).
+- ``select_variants`` picks representative variants per group for output.
 """
 
 import itertools
 import logging
-from typing import List, Dict, Set, Tuple, Optional
+from typing import List, Dict, Optional
 from collections import defaultdict
 
 from tqdm import tqdm
 
 from speconsense.types import ConsensusInfo
-from speconsense.scalability import (
-    VsearchCandidateFinder,
-    ScalablePairwiseOperation,
-    ScalabilityConfig,
-)
 
 from .iupac import (
     primers_are_same,
@@ -26,563 +27,127 @@ from .iupac import (
 )
 
 
-def _complete_linkage_subset(
-    indices: List[int],
-    seq_distances: Dict[Tuple[int, int], float],
-    distance_threshold: float,
-    seq_adjacency: Dict[int, Set[int]]
-) -> List[List[int]]:
-    """Run complete linkage HAC on a subset of sequences.
+def merge_groups_by_anchor_overlap(
+    groups: Dict[int, List[ConsensusInfo]],
+    min_overlap_bp: int,
+    group_identity: float,
+    max_iterations: int = 10,
+    hp_normalization_length: int = 1,
+) -> Dict[int, List[ConsensusInfo]]:
+    """Merge cross-primer core-assigned groups whose members overlap well.
 
-    First partitions the subset into connected components (based on seq_adjacency),
-    then runs HAC within each component. This matches the behavior of the original
-    complete linkage code.
+    Core groups clusters within a specimen at the `--group-identity` threshold
+    via complete linkage. Sequences from different primer pools (e.g., full
+    ITS vs ITS2) naturally fall into distinct core groups because length
+    mismatch tanks global identity. This function conflates such groups in
+    summarize by comparing representative members via the overlap-aware
+    distance and merging when any cross-primer pair passes threshold.
 
-    Args:
-        indices: List of sequence indices to cluster
-        seq_distances: Precomputed distances between sequence pairs
-        distance_threshold: Maximum distance for merging (1.0 - identity)
-        seq_adjacency: Adjacency dict showing which sequences have edges
-
-    Returns:
-        List of clusters, where each cluster is a list of original indices
+    Rules:
+    - Only *cross-primer* member pairs are considered (same-primer pairs were
+      already evaluated by core). A single cross-primer pair passing the
+      overlap threshold triggers a group merge (single linkage over groups),
+      which is what enables prefix → full → suffix chains to collapse.
+    - The larger-anchor group absorbs the smaller. Absorbed-group members
+      append to the survivor's member list; downstream positional renumbering
+      handles re-ranking by size.
+    - Iterates until no more merges fire.
     """
-    if len(indices) <= 1:
-        return [indices]
+    if len(groups) < 2 or min_overlap_bp <= 0:
+        return groups
 
-    component_set = set(indices)
-
-    # First, partition into connected components using union-find
-    # This matches the original complete linkage behavior
-    parent: Dict[int, int] = {i: i for i in indices}
-
-    def find(x: int) -> int:
-        if parent[x] != x:
-            parent[x] = find(parent[x])
-        return parent[x]
-
-    def union(x: int, y: int) -> None:
-        px, py = find(x), find(y)
-        if px != py:
-            parent[px] = py
-
-    for i in indices:
-        for j in seq_adjacency.get(i, set()):
-            if j in component_set and i < j:
-                union(i, j)
-
-    # Group indices by component
-    components: Dict[int, List[int]] = defaultdict(list)
-    for i in indices:
-        components[find(i)].append(i)
-
-    # Run HAC within each connected component
-    all_clusters: List[List[int]] = []
-    for component_indices in components.values():
-        if len(component_indices) == 1:
-            all_clusters.append(component_indices)
-            continue
-
-        # Run HAC on this component
-        component_clusters = _run_hac_on_component(
-            component_indices, seq_distances, distance_threshold, seq_adjacency
-        )
-        all_clusters.extend(component_clusters)
-
-    return all_clusters
-
-
-def _run_hac_on_component(
-    indices: List[int],
-    seq_distances: Dict[Tuple[int, int], float],
-    distance_threshold: float,
-    seq_adjacency: Dict[int, Set[int]]
-) -> List[List[int]]:
-    """Run HAC on a single connected component.
-
-    This is the inner HAC loop, separated from component partitioning.
-    """
-    if len(indices) <= 1:
-        return [indices]
-
-    component_set = set(indices)
-
-    # Build local adjacency for this subset
-    local_adjacency: Dict[int, Set[int]] = defaultdict(set)
-    for i in indices:
-        for j in seq_adjacency.get(i, set()):
-            if j in component_set:
-                local_adjacency[i].add(j)
-
-    # Initialize each sequence as its own cluster
-    seq_to_cluster: Dict[int, int] = {i: i for i in indices}
-    cluster_map: Dict[int, List[int]] = {i: [i] for i in indices}
-
-    def get_cluster_adjacency() -> Set[Tuple[int, int]]:
-        adjacent_pairs: Set[Tuple[int, int]] = set()
-        for seq_i in indices:
-            cluster_i = seq_to_cluster[seq_i]
-            for seq_j in local_adjacency[seq_i]:
-                cluster_j = seq_to_cluster[seq_j]
-                if cluster_i != cluster_j:
-                    pair = (min(cluster_i, cluster_j), max(cluster_i, cluster_j))
-                    adjacent_pairs.add(pair)
-        return adjacent_pairs
-
-    def cluster_distance(cluster1: List[int], cluster2: List[int]) -> float:
-        # Complete linkage: max distance, early exit on missing edge or threshold
-        max_dist = 0.0
-        for i in cluster1:
-            for j in cluster2:
-                if i == j:
+    threshold = 1.0 - group_identity
+    for _ in range(max_iterations):
+        ranks = sorted(groups, key=lambda g: max(v.size for v in groups[g]),
+                       reverse=True)
+        merged_this_round = False
+        for outer_idx, i in enumerate(ranks):
+            for j in ranks[outer_idx + 1:]:
+                if i not in groups or j not in groups:
                     continue
-                if j not in local_adjacency[i]:
-                    return 1.0  # Missing edge = max distance
-                key = (i, j) if (i, j) in seq_distances else (j, i)
-                dist = seq_distances.get(key, 1.0)
-                if dist >= distance_threshold:
-                    return 1.0  # Early exit
-                max_dist = max(max_dist, dist)
-        return max_dist
-
-    # HAC merging loop
-    while len(cluster_map) > 1:
-        adjacent_pairs = get_cluster_adjacency()
-        if not adjacent_pairs:
-            break
-
-        min_distance = float('inf')
-        merge_pair = None
-
-        for cluster_i, cluster_j in adjacent_pairs:
-            if cluster_i not in cluster_map or cluster_j not in cluster_map:
-                continue
-            dist = cluster_distance(cluster_map[cluster_i], cluster_map[cluster_j])
-            if dist < min_distance:
-                min_distance = dist
-                merge_pair = (cluster_i, cluster_j)
-
-        if min_distance >= distance_threshold or merge_pair is None:
-            break
-
-        ci, cj = merge_pair
-        merged = cluster_map[ci] + cluster_map[cj]
-        for seq_idx in cluster_map[cj]:
-            seq_to_cluster[seq_idx] = ci
-        cluster_map[ci] = merged
-        del cluster_map[cj]
-
-    return list(cluster_map.values())
-
-
-def perform_hac_clustering(consensus_list: List[ConsensusInfo],
-                          variant_group_identity: float,
-                          min_overlap_bp: int = 0,
-                          scalability_config: Optional[ScalabilityConfig] = None,
-                          output_dir: str = ".") -> Dict[int, List[ConsensusInfo]]:
-    """
-    Perform Hierarchical Agglomerative Clustering.
-    Separates specimens from variants based on identity threshold.
-    Returns groups of consensus sequences.
-
-    Linkage strategy:
-    - When min_overlap_bp > 0 (overlap mode): Uses HYBRID linkage:
-      - Phase 1: COMPLETE linkage within each primer set (prevents chaining)
-      - Phase 2: SINGLE linkage across primer sets (allows ITS1+full+ITS2 merging)
-      This prevents sequences with the same primers from chaining through
-      intermediates while still allowing different-primer sequences to merge
-      via overlap regions.
-    - When min_overlap_bp == 0 (standard mode): Uses COMPLETE linkage, which
-      requires ALL pairs to be within threshold. More conservative for same-length
-      sequences.
-
-    When min_overlap_bp > 0, also uses overlap-aware distance calculation that
-    allows sequences of different lengths to be grouped together if they
-    share sufficient overlap with good identity.
-    """
-    if len(consensus_list) <= 1:
-        return {0: consensus_list}
-
-    # Determine linkage strategy based on overlap mode
-    use_hybrid_linkage = min_overlap_bp > 0
-    linkage_type = "hybrid" if use_hybrid_linkage else "complete"
-
-    if min_overlap_bp > 0:
-        logging.debug(f"Performing HAC clustering with {variant_group_identity} identity threshold "
-                     f"({linkage_type} linkage, overlap-aware mode, min_overlap={min_overlap_bp}bp)")
-    else:
-        logging.debug(f"Performing HAC clustering with {variant_group_identity} identity threshold "
-                     f"({linkage_type} linkage)")
-
-    n = len(consensus_list)
-    logging.debug(f"perform_hac_clustering: {n} sequences, threshold={variant_group_identity}")
-    distance_threshold = 1.0 - variant_group_identity
-
-    # Initialize each sequence as its own cluster
-    clusters = [[i] for i in range(n)]
-
-    # Build initial distance matrix between individual sequences
-    seq_distances = {}
-
-    # Use scalability if enabled and we have enough sequences
-    use_scalable = (
-        scalability_config is not None and
-        scalability_config.enabled and
-        n >= scalability_config.activation_threshold and
-        n > 50
-    )
-    logging.debug(f"perform_hac_clustering: use_scalable={use_scalable}")
-
-    if use_scalable:
-        # Build sequence dict with index keys
-        sequences = {str(i): consensus_list[i].sequence for i in range(n)}
-
-        # Build primers lookup by ID for the scoring function
-        primers_lookup = {str(i): consensus_list[i].primers for i in range(n)}
-
-        # Create scoring function that returns similarity (1 - distance)
-        # Use overlap-aware distance when min_overlap_bp > 0
-        if min_overlap_bp > 0:
-            def score_func(seq1: str, seq2: str, id1: str, id2: str) -> float:
-                # Check if primers match - same primers require global distance
-                p1, p2 = primers_lookup.get(id1), primers_lookup.get(id2)
-                if primers_are_same(p1, p2):
-                    # Same primers -> global distance (no overlap merging)
-                    return 1.0 - calculate_adjusted_identity_distance(seq1, seq2)
-                else:
-                    # Different primers -> overlap-aware distance
-                    return 1.0 - calculate_overlap_aware_distance(seq1, seq2, min_overlap_bp)
-        else:
-            def score_func(seq1: str, seq2: str, id1: str, id2: str) -> float:
-                return 1.0 - calculate_adjusted_identity_distance(seq1, seq2)
-
-        candidate_finder = VsearchCandidateFinder(num_threads=scalability_config.max_threads)
-        if candidate_finder.is_available:
-            try:
-                operation = ScalablePairwiseOperation(
-                    candidate_finder=candidate_finder,
-                    scoring_function=score_func,
-                    config=scalability_config
-                )
-                distances = operation.compute_distance_matrix(sequences, output_dir, variant_group_identity)
-
-                # Convert to integer-keyed distances
-                for (id1, id2), dist in distances.items():
-                    i, j = int(id1), int(id2)
-                    seq_distances[(i, j)] = dist
-                    seq_distances[(j, i)] = dist
-            finally:
-                candidate_finder.cleanup()
-        else:
-            logging.warning("Scalability enabled but vsearch not available. Using brute-force.")
-            use_scalable = False
-
-    if not use_scalable:
-        # Standard brute-force calculation
-        for i, j in itertools.combinations(range(n), 2):
-            if min_overlap_bp > 0:
-                # Check if primers match - same primers require global distance
-                p1, p2 = consensus_list[i].primers, consensus_list[j].primers
-                if primers_are_same(p1, p2):
-                    # Same primers -> global distance (no overlap merging)
-                    dist = calculate_adjusted_identity_distance(
-                        consensus_list[i].sequence,
-                        consensus_list[j].sequence
-                    )
-                else:
-                    # Different primers -> overlap-aware distance for primer pool scenarios
-                    dist = calculate_overlap_aware_distance(
-                        consensus_list[i].sequence,
-                        consensus_list[j].sequence,
-                        min_overlap_bp
-                    )
-            else:
-                # Use standard global distance
-                dist = calculate_adjusted_identity_distance(
-                    consensus_list[i].sequence,
-                    consensus_list[j].sequence
-                )
-            seq_distances[(i, j)] = dist
-            seq_distances[(j, i)] = dist
-
-    # Build sequence adjacency from computed distances (works for both paths)
-    # Only include edges where distance < 1.0 (excludes failed alignments and non-candidates)
-    seq_adjacency: Dict[int, Set[int]] = defaultdict(set)
-    for (i, j), dist in seq_distances.items():
-        if dist < 1.0 and i != j:
-            seq_adjacency[i].add(j)
-            seq_adjacency[j].add(i)
-
-    logging.debug(f"Built adjacency: {len(seq_adjacency)} sequences with edges, "
-                  f"{sum(len(v) for v in seq_adjacency.values()) // 2} unique edges")
-
-    # Union-find helper functions
-    parent: Dict[int, int] = {i: i for i in range(n)}
-
-    def find(x: int) -> int:
-        if parent[x] != x:
-            parent[x] = find(parent[x])  # Path compression
-        return parent[x]
-
-    def union(x: int, y: int) -> None:
-        px, py = find(x), find(y)
-        if px != py:
-            parent[px] = py
-
-    if use_hybrid_linkage:
-        # HYBRID LINKAGE: Complete within primer sets, single across primer sets
-        # This prevents chaining within same-primer sequences while allowing
-        # different-primer sequences (e.g., ITS1 + full ITS + ITS2) to merge.
-        logging.debug("Hybrid linkage: complete within primer sets, single across")
-
-        # Phase 1: Group sequences by primer set
-        primer_groups: Dict[Tuple[str, ...], List[int]] = defaultdict(list)
-        for i, cons in enumerate(consensus_list):
-            primer_key = tuple(sorted(cons.primers)) if cons.primers else ('_none_',)
-            primer_groups[primer_key].append(i)
-
-        logging.debug(f"Found {len(primer_groups)} distinct primer sets")
-
-        # Run complete linkage HAC within each primer group
-        primer_coherent_clusters: List[Tuple[Tuple[str, ...], List[int]]] = []
-
-        # Log info about the work to be done
-        max_group_size = max(len(indices) for indices in primer_groups.values())
-        if max_group_size > 1000:
-            logging.info(f"Running HAC on {len(primer_groups)} primer groups "
-                        f"(largest has {max_group_size} sequences, this may take several minutes)")
-
-        for primer_key, indices in primer_groups.items():
-            if len(indices) == 1:
-                primer_coherent_clusters.append((primer_key, indices))
-            else:
-                # Run complete linkage on this primer subset
-                sub_clusters = _complete_linkage_subset(
-                    indices, seq_distances, distance_threshold, seq_adjacency
-                )
-                for cluster in sub_clusters:
-                    primer_coherent_clusters.append((primer_key, cluster))
-
-        logging.debug(f"Phase 1 complete: {len(primer_coherent_clusters)} primer-coherent clusters")
-
-        # Phase 2: Connect clusters with different primers using single linkage
-        # BUT: prevent transitive chaining that would connect same-primer clusters
-        # via different-primer intermediates
-        n_clusters = len(primer_coherent_clusters)
-
-        # Track which clusters are in each group (list of cluster indices per group)
-        groups: List[Set[int]] = [set([i]) for i in range(n_clusters)]
-        cluster_to_group: Dict[int, int] = {i: i for i in range(n_clusters)}
-
-        def get_group_primers(group_idx: int) -> Dict[Tuple[str, ...], List[int]]:
-            """Get all primer keys and their cluster indices in a group."""
-            result: Dict[Tuple[str, ...], List[int]] = defaultdict(list)
-            for cluster_idx in groups[group_idx]:
-                primer_key = primer_coherent_clusters[cluster_idx][0]
-                result[primer_key].append(cluster_idx)
-            return result
-
-        def can_merge_groups(group_a: int, group_b: int) -> bool:
-            """Check if merging would violate complete linkage for same-primer clusters."""
-            # Get all primer->clusters mappings for the merged group
-            primers_a = get_group_primers(group_a)
-            primers_b = get_group_primers(group_b)
-
-            # Check each primer key that appears in both groups
-            for primer_key in primers_a:
-                if primer_key in primers_b:
-                    # Same primer key in both groups - need complete linkage check
-                    clusters_a = [primer_coherent_clusters[i][1] for i in primers_a[primer_key]]
-                    clusters_b = [primer_coherent_clusters[i][1] for i in primers_b[primer_key]]
-
-                    # All pairs between clusters_a and clusters_b must satisfy complete linkage
-                    for ca in clusters_a:
-                        for cb in clusters_b:
-                            # Complete linkage: max distance must be < threshold
-                            max_dist = 0.0
-                            for si in ca:
-                                for sj in cb:
-                                    dist = seq_distances.get((si, sj), seq_distances.get((sj, si), 1.0))
-                                    max_dist = max(max_dist, dist)
-                                    if max_dist >= distance_threshold:
-                                        return False  # Would violate complete linkage
-                            if max_dist >= distance_threshold:
-                                return False
-            return True
-
-        def merge_groups(group_a: int, group_b: int) -> None:
-            """Merge group_b into group_a."""
-            if group_a == group_b:
-                return
-            for cluster_idx in groups[group_b]:
-                cluster_to_group[cluster_idx] = group_a
-                groups[group_a].add(cluster_idx)
-            groups[group_b] = set()
-
-        cross_primer_edges = 0
-        cross_primer_blocked = 0
-        for i in range(n_clusters):
-            for j in range(i + 1, n_clusters):
-                primer_i, cluster_i = primer_coherent_clusters[i]
-                primer_j, cluster_j = primer_coherent_clusters[j]
-
-                # Skip same-primer pairs (already handled in phase 1)
-                if primer_i == primer_j:
+                merge_pair_dist = _best_cross_primer_overlap(
+                    groups[i], groups[j], min_overlap_bp, hp_normalization_length)
+                if merge_pair_dist is None or merge_pair_dist >= threshold:
                     continue
-
-                # Different primers: check single linkage distance
-                min_dist = 1.0
-                for si in cluster_i:
-                    for sj in cluster_j:
-                        dist = seq_distances.get((si, sj), seq_distances.get((sj, si), 1.0))
-                        min_dist = min(min_dist, dist)
-                        if min_dist < distance_threshold:
-                            break
-                    if min_dist < distance_threshold:
-                        break
-
-                if min_dist < distance_threshold:
-                    group_i = cluster_to_group[i]
-                    group_j = cluster_to_group[j]
-                    if group_i != group_j:
-                        # Check if merge would create invalid same-primer connections
-                        if can_merge_groups(group_i, group_j):
-                            merge_groups(group_i, group_j)
-                            cross_primer_edges += 1
-                        else:
-                            cross_primer_blocked += 1
-
-        logging.debug(f"Phase 2: {cross_primer_edges} cross-primer connections, "
-                     f"{cross_primer_blocked} blocked by complete linkage constraint")
-
-        # Collect final groups using the new group structure
-        final_groups: Dict[int, List[int]] = defaultdict(list)
-        for i, (_, cluster) in enumerate(primer_coherent_clusters):
-            group_idx = cluster_to_group[i]
-            final_groups[group_idx].extend(cluster)
-
-        clusters = list(final_groups.values())
-        logging.info(f"Found {len(clusters)} sequence groups (hybrid linkage)")
-
-    else:
-        # Complete linkage: partition by connected components first
-        # Clusters from different components can never merge (missing edge = dist 1.0)
-        logging.debug("Complete linkage: partitioning into connected components")
-
-        for i in range(n):
-            for j in seq_adjacency[i]:
-                if i < j:
-                    union(i, j)
-
-        # Group sequences by component
-        components: Dict[int, List[int]] = defaultdict(list)
-        for i in range(n):
-            components[find(i)].append(i)
-
-        # Count singletons vs multi-sequence components
-        singletons = sum(1 for c in components.values() if len(c) == 1)
-        multi_seq = len(components) - singletons
-        logging.info(f"Found {len(components)} sequence groups "
-                     f"({singletons} single-sequence, {multi_seq} multi-sequence)")
-
-        # Run HAC within each component
-        clusters: List[List[int]] = []
-
-        for component_seqs in tqdm(components.values(), desc="HAC per component"):
-            if len(component_seqs) == 1:
-                clusters.append(component_seqs)
-                continue
-
-            # Convert to set for O(1) membership lookup
-            component_set = set(component_seqs)
-
-            # Build local adjacency for this component
-            local_adjacency: Dict[int, Set[int]] = defaultdict(set)
-            for i in component_seqs:
-                for j in seq_adjacency[i]:
-                    if j in component_set:
-                        local_adjacency[i].add(j)
-
-            # Initialize clusters for this component
-            seq_to_cluster: Dict[int, int] = {i: i for i in component_seqs}
-            cluster_map: Dict[int, List[int]] = {i: [i] for i in component_seqs}
-
-            def get_cluster_adjacency() -> Set[Tuple[int, int]]:
-                adjacent_pairs: Set[Tuple[int, int]] = set()
-                for seq_i in component_seqs:
-                    cluster_i = seq_to_cluster[seq_i]
-                    for seq_j in local_adjacency[seq_i]:
-                        cluster_j = seq_to_cluster[seq_j]
-                        if cluster_i != cluster_j:
-                            pair = (min(cluster_i, cluster_j), max(cluster_i, cluster_j))
-                            adjacent_pairs.add(pair)
-                return adjacent_pairs
-
-            def cluster_distance(cluster1: List[int], cluster2: List[int]) -> float:
-                # Complete linkage: max distance, early exit on missing edge or threshold
-                max_dist = 0.0
-                for i in cluster1:
-                    for j in cluster2:
-                        if i == j:
-                            continue
-                        if j not in local_adjacency[i]:
-                            return 1.0  # Missing edge = max distance
-                        key = (i, j) if (i, j) in seq_distances else (j, i)
-                        dist = seq_distances.get(key, 1.0)
-                        if dist >= distance_threshold:
-                            return 1.0  # Early exit
-                        max_dist = max(max_dist, dist)
-                return max_dist
-
-            # HAC within component
-            while len(cluster_map) > 1:
-                adjacent_pairs = get_cluster_adjacency()
-                if not adjacent_pairs:
-                    break
-
-                min_distance = float('inf')
-                merge_pair = None
-
-                for cluster_i, cluster_j in adjacent_pairs:
-                    if cluster_i not in cluster_map or cluster_j not in cluster_map:
-                        continue
-                    dist = cluster_distance(cluster_map[cluster_i], cluster_map[cluster_j])
-                    if dist < min_distance:
-                        min_distance = dist
-                        merge_pair = (cluster_i, cluster_j)
-
-                if min_distance >= distance_threshold or merge_pair is None:
-                    break
-
-                ci, cj = merge_pair
-                merged = cluster_map[ci] + cluster_map[cj]
-                for seq_idx in cluster_map[cj]:
-                    seq_to_cluster[seq_idx] = ci
-                cluster_map[ci] = merged
-                del cluster_map[cj]
-
-            clusters.extend(cluster_map.values())
-
-    # Convert clusters to groups of ConsensusInfo
-    groups = {}
-    for group_id, cluster_indices in enumerate(clusters):
-        group_members = [consensus_list[idx] for idx in cluster_indices]
-        groups[group_id] = group_members
-
-    logging.debug(f"HAC clustering created {len(groups)} groups")
-    for group_id, group_members in groups.items():
-        member_names = [m.sample_name for m in group_members]
-        # Convert group_id to final naming (group 0 -> 1, group 1 -> 2, etc.)
-        final_group_name = group_id + 1
-        logging.debug(f"Group {final_group_name}: {member_names}")
-
+                anchor_i = max(groups[i], key=lambda v: v.size)
+                anchor_j = max(groups[j], key=lambda v: v.size)
+                if anchor_i.size >= anchor_j.size:
+                    survivor, absorbed = i, j
+                else:
+                    survivor, absorbed = j, i
+                groups[survivor].extend(groups[absorbed])
+                del groups[absorbed]
+                merged_this_round = True
+                logging.info(
+                    f"Cross-primer merge: group {absorbed} absorbed into "
+                    f"group {survivor} (best cross-primer distance="
+                    f"{merge_pair_dist:.4f})"
+                )
+                break
+            if merged_this_round:
+                break
+        if not merged_this_round:
+            break
     return groups
+
+
+def _best_cross_primer_overlap(
+    group_a: List[ConsensusInfo],
+    group_b: List[ConsensusInfo],
+    min_overlap_bp: int,
+    hp_normalization_length: int = 1,
+) -> Optional[float]:
+    """Return the minimum overlap-aware distance across cross-primer pairs.
+
+    Only pairs with different primer sets contribute. Returns ``None`` when
+    every pair has identical primers (no cross-primer comparison possible).
+    """
+    best: Optional[float] = None
+    for a in group_a:
+        for b in group_b:
+            if primers_are_same(a.primers, b.primers):
+                continue
+            dist = calculate_overlap_aware_distance(
+                a.sequence, b.sequence, min_overlap_bp, hp_normalization_length)
+            if best is None or dist < best:
+                best = dist
+    return best
+
+
+def group_by_core_identity(
+    consensus_list: List[ConsensusInfo],
+) -> Dict[int, List[ConsensusInfo]]:
+    """Bucket consensuses by core-assigned ``group_rank`` (gid=) from headers.
+
+    Core is authoritative for within-specimen identity grouping. Every member
+    must have ``group_rank`` populated; if any lack it (e.g., FASTA emitted by
+    an older core version), raise ``ValueError`` pointing the user to rerun.
+    Cross-primer overlap conflation is handled separately downstream.
+    """
+    if not consensus_list:
+        return {}
+
+    missing = [c.sample_name for c in consensus_list if c.group_rank is None]
+    if missing:
+        example = missing[0]
+        raise ValueError(
+            f"Input FASTA is missing the gid= header field required by the "
+            f"current summarize pipeline (first example: {example!r}). "
+            f"Regenerate the consensus with the current version of "
+            f"speconsense core, which emits gid=/vid= identity ranks."
+        )
+
+    groups: Dict[int, List[ConsensusInfo]] = defaultdict(list)
+    for consensus in consensus_list:
+        groups[consensus.group_rank].append(consensus)
+    return dict(groups)
 
 
 def select_variants(group: List[ConsensusInfo],
                    max_variants: int,
                    variant_selection: str,
-                   group_number: int = None) -> List[ConsensusInfo]:
+                   group_number: int = None,
+                   hp_normalization_length: int = 1) -> List[ConsensusInfo]:
     """
     Select variants from a group based on the specified strategy.
     Always includes the largest variant first.
@@ -596,6 +161,8 @@ def select_variants(group: List[ConsensusInfo],
         max_variants: Maximum total variants per group (0 or -1 for no limit)
         variant_selection: Selection strategy ("size" or "diversity")
         group_number: Group number for logging prefix (optional)
+        hp_normalization_length: HP threshold forwarded to distance calc
+            (diversity strategy only).
     """
     # Sort by size, largest first
     sorted_group = sorted(group, key=lambda x: x.size, reverse=True)
@@ -635,7 +202,8 @@ def select_variants(group: List[ConsensusInfo],
                 for candidate in candidates:
                     # Calculate minimum distance to all selected variants
                     min_distance = min(
-                        calculate_adjusted_identity_distance(candidate.sequence, sel.sequence)
+                        calculate_adjusted_identity_distance(
+                            candidate.sequence, sel.sequence, hp_normalization_length)
                         for sel in selected
                     )
 

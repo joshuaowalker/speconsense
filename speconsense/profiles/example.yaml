@@ -18,7 +18,7 @@
 # to:
 #   min-size: 10
 
-speconsense-version: "0.7.*"
+speconsense-version: "0.8.*"
 description: "My custom workflow"
 
 # =============================================================================
@@ -33,9 +33,8 @@ speconsense:
   # k-nearest-neighbors: 10       # K-NN graph construction parameter
 
   # --- Cluster Filtering ---
-  # min-size: 5                   # Minimum reads per cluster (0 to disable)
-  # min-cluster-ratio: 0.01       # Minimum cluster size as ratio of total reads
-  # outlier-identity: 0.85        # Identity threshold for outlier detection
+  # min-size: 3                   # Minimum reads per cluster (0 to disable)
+  # min-cluster-ratio: 0          # Minimum cluster size as ratio of largest (0 to disable)
 
   # --- Read Sampling ---
   # presample: 1000               # Initial random sampling of input reads
@@ -45,23 +44,30 @@ speconsense:
   # min-variant-frequency: 0.10   # Min frequency to call a variant (0.0-1.0)
   # min-variant-count: 3          # Min read count to call a variant
   # disable-position-phasing: false  # Set true to disable variant detection
+  # disable-read-reassignment: false # Set true to skip phase 6 (cross-cluster reassignment)
+  # disable-discard-recovery: false  # Set true to skip phase 7 (re-admit discarded reads)
 
   # --- Ambiguity Calling (IUPAC codes) ---
-  # min-ambiguity-frequency: 0.25 # Min frequency for IUPAC ambiguity codes
+  # min-ambiguity-frequency: 0.10 # Min frequency for IUPAC ambiguity codes
   # min-ambiguity-count: 3        # Min read count for ambiguity codes
   # disable-ambiguity-calling: false  # Set true to disable IUPAC codes
+
+  # --- Identity Grouping & CER ---
+  # group-identity: 0.85          # Complete-linkage identity for read reassignment, discard recovery, CER
+  # significance-level: 0.00001   # Alpha for variant significance (CER) testing
+  # error-model: dorado-v5.0      # Per-basecaller error model (--list-error-models for installed)
+  # hp-normalization-length: 6    # HP runs of length >= this are blanket-normalized; shorter surface for CER
 
   # --- Cluster Merging ---
   # disable-cluster-merging: false     # Set true to skip merging similar clusters
   # disable-homopolymer-equivalence: false  # Set true for strict homopolymer comparison
 
   # --- Primer Orientation ---
-  # orient-mode: filter-failed    # skip, keep-all, or filter-failed
+  # orient-mode: skip             # skip, keep-all, or filter-failed
 
   # --- Processing ---
-  # threads: 0                    # Max threads (0 = auto-detect)
-  # scale-threshold: 500          # Read count threshold for scaled processing
-  # enable-early-filter: false    # Enable early filtering optimization
+  # threads: 1                    # Max threads (0 = auto-detect, 1 = safe for parallel workflows)
+  # scale-threshold: 1001         # Read count threshold for scaled processing (vsearch-backed)
   # collect-discards: false       # Write discarded reads to separate file
 
 # =============================================================================
@@ -74,25 +80,30 @@ speconsense-summarize:
   # min-len: 0                    # Minimum sequence length (0 = disabled)
   # max-len: 0                    # Maximum sequence length (0 = disabled)
 
-  # --- Variant Grouping (HAC clustering) ---
-  # group-identity: 0.95          # Identity threshold for grouping variants
+  # --- CER and err_factor Filtering ---
+  # min-cer-factor: 1.0           # Min CER factor (route below to .ns; 0 to disable)
+  # max-err-factor: 1.5           # Max cluster err_factor (route above to .lq; 0 to disable)
+
+  # --- Cross-Primer Overlap Merging ---
+  # group-identity: 0.85          # Anchor identity for merging across core groups (matches core default)
+  # min-merge-overlap: 200        # Min overlap (bp) for cross-length sequence merging (0 = disabled)
 
   # --- MSA-based Merging ---
   # disable-merging: false        # Set true to skip all merging (fastest)
   # merge-effort: balanced        # Effort level: fast, balanced, thorough, or 6-14
   # merge-snp: true               # Enable SNP-based merging
-  # merge-indel-length: 3         # Max indel length to merge (0 = disabled)
-  # merge-position-count: 1       # Max variant positions to merge
+  # merge-indel-length: 0         # Max indel length to merge (0 = disabled)
+  # merge-position-count: 2       # Max total SNP+indel positions per merge
   # merge-min-size-ratio: 0.1     # Min size ratio for merge candidate
-  # min-merge-overlap: 0.9        # Min alignment overlap for merging
   # disable-homopolymer-equivalence: false  # Set true for strict comparison
+  # hp-normalization-length: 6    # HP runs of length >= this are blanket-normalized in merging
 
   # --- Variant Selection ---
   # select-max-groups: -1         # Max groups to output (-1 = no limit)
   # select-max-variants: -1       # Max variants per group (-1 = no limit)
   # select-strategy: size         # Selection strategy: size or diversity
-  # select-min-size-ratio: 0    # Min size ratio to include variant (0 = disabled)
+  # select-min-size-ratio: 0      # Min size ratio (variant/largest in group) to include (0 = disabled)
 
   # --- Processing ---
-  # threads: 0                    # Max threads (0 = auto-detect)
-  # scale-threshold: 500          # Read count threshold for scaled processing
+  # threads: 0                    # Max threads (0 = auto-detect, default for summarize)
+  # scale-threshold: 1001         # Read count threshold for scaled processing (vsearch-backed)

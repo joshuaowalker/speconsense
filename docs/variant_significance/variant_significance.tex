@@ -1,0 +1,646 @@
+\documentclass[11pt]{article}
+
+\usepackage[margin=1in]{geometry}
+\usepackage{amsmath,amssymb}
+\usepackage{graphicx}
+\usepackage{booktabs}
+\usepackage{hyperref}
+\usepackage[numbers]{natbib}
+\usepackage{lineno}
+
+\title{Critical error rate analysis for MSA-based variant phasing\\in nanopore amplicon sequencing}
+\author{Josh Walker}
+\date{Internal review draft, May 2026 (commit 5d33d1d)}
+
+\begin{document}
+\maketitle
+\linenumbers
+
+\begin{abstract}
+Amplicon consensus tools that detect intra-specimen sequence variants must
+distinguish real biological variation from sequencing error. We present a
+statistical framework for evaluating the significance of variants detected by
+MSA-based position phasing in Oxford Nanopore amplicon data. Rather than
+computing $p$-values against a fixed error rate, we derive the \emph{critical
+error rate} $p^*$: the per-position sequencing error rate at which an observed
+variant pattern would become plausible under a null hypothesis of independent
+errors. Using conservative assumptions---total input reads as the sample
+denominator and Bonferroni correction over all amplicon positions---we show that
+variants with moderate read support require per-position error rates exceeding
+those of current nanopore chemistry to be explained as artifacts. We present
+results under both a conservative error model ($q = p$, maximally biased
+substitution) and a uniform model ($q = p/3$), and examine the effect of
+significance level on variant confidence across a range of operating conditions.
+We additionally provide minimum read-support thresholds at assumed error rates,
+enabling direct lookup of the evidence required for variant confidence.
+\end{abstract}
+
+\section{Introduction}
+
+Oxford Nanopore sequencing of PCR amplicons is widely used for taxonomic
+identification, particularly in fungal DNA barcoding of the internal transcribed
+spacer (ITS) region~\cite{schoch2012}. After demultiplexing, reads from a single
+specimen are clustered and consensus sequences are generated to produce
+high-accuracy reference sequences suitable for database matching. The analysis
+in this report is motivated by deployment of speconsense within the high-
+throughput fungal barcoding workflow of Russell~\cite{russell2023}, which
+prepares pooled, dual-indexed ITS amplicons for ONT MinION/Flongle sequencing
+and downstream consensus generation.
+
+When a specimen contains multiple sequence variants---arising from heterozygosity,
+paralogous loci, mixed templates, or multi-copy rDNA polymorphism~\cite{bradshaw2023}---the clustering
+and consensus pipeline must resolve these into separate consensus sequences rather
+than collapsing them into a single ambiguous output. Speconsense~\cite{speconsense} addresses this
+through MSA-based variant phasing: after initial clustering, it examines the
+partial order alignment~\cite{lee2003,vaser2017} within each cluster to identify
+positions where a substantial fraction of reads consistently differ from the
+consensus, then recursively splits the cluster into haplotype groups based on
+allele patterns at these positions.
+
+A natural concern is whether detected variants represent real biological
+sequences or artifacts of sequencing error. If nanopore errors at a particular
+position happened to affect the same base in enough reads, the phasing algorithm
+could mistake this for a genuine variant. We address this concern by deriving the
+per-position error rate required to make each variant plausible as an artifact,
+and showing that this critical rate exceeds realistic nanopore error for variants
+with sufficient read support.
+
+\section{Methods}
+
+\subsection{Null model}
+
+Under the null hypothesis, all reads in a cluster originate from a single true
+sequence, and observed base differences are independent sequencing errors. At
+each position, each read independently has probability $p$ of containing an
+error.
+
+We present results under two substitution models:
+
+\begin{itemize}
+\item \textbf{Conservative} ($q = p$): All errors at a position produce the same
+alternative base. This represents the worst case, accounting for nanopore
+substitution biases that favor certain error types~\cite{delahaye2021,wick2023}. If errors are
+concentrated toward one alternative base, the probability of multiple reads
+independently producing the same incorrect base is maximized.
+
+\item \textbf{Uniform} ($q = p/3$): Errors are spread equally across the three
+alternative bases. This is more realistic for positions without strong substitution
+bias, and provides a less conservative bound.
+\end{itemize}
+
+\subsection{Parameter definitions}
+
+\begin{itemize}
+\item $N$: Total input read count for the specimen, before clustering. This is
+conservative because it represents the full pool from which a biased subsample
+could be drawn. In practice, speconsense uniformly presamples to $N \leq 1000$
+reads, so this is bounded.
+
+\item $M$: Number of reads supporting the variant allele at a position. For
+$K > 1$, $M$ is the number of reads supporting the variant allele at all $K$
+positions simultaneously (Section~\ref{sec:multiposition}).
+
+\item $L$: Amplicon length in base pairs. For the ITS region, $L \approx 700$~bp.
+This determines the multiple testing correction.
+
+\item $K$: Number of variant positions distinguishing a given variant from all
+other variants produced from the same specimen. Results below focus on
+$K = 1$ (single-position variants) as the conservative case; the multi-position
+generalization is developed in Section~\ref{sec:multiposition}.
+
+\item $\alpha$: Significance level. We examine $\alpha = 0.05$ (per-variant),
+$\alpha = 10^{-3}$, and $\alpha = 10^{-5}$ (appropriate when correcting for
+thousands of variant calls across a sequencing run).
+\end{itemize}
+
+\subsection{Critical error rate for single-position variants ($K = 1$)}
+
+For a single position where $M$ of $N$ reads share the same alternative base,
+the probability under the null model is given by the binomial survival function:
+\begin{equation}
+P(\text{position is artifact}) = P\bigl(\text{Binom}(N,\, q) \geq M\bigr)
+\end{equation}
+where $q = p$ (conservative) or $q = p/3$ (uniform).
+
+With Bonferroni correction over $L$ independent positions, the probability that
+\emph{any} position exhibits a variant-like pattern is bounded by:
+\begin{equation}
+P(\text{any artifact variant}) \leq L \cdot P\bigl(\text{Binom}(N,\, q) \geq M\bigr)
+\end{equation}
+
+The critical error rate $p^*$ is defined as the value of $p$ satisfying:
+\begin{equation}
+\label{eq:critical}
+L \cdot P\bigl(\text{Binom}(N,\, q^*) \geq M\bigr) = \alpha
+\end{equation}
+where $q^* = p^*$ under the conservative model or $q^* = p^*/3$ under the
+uniform model. This is a single-variable equation solved numerically via root-finding on the
+log-scale survival function. If $p^*$ substantially exceeds the actual
+per-position error rate of the sequencing platform, the variant cannot plausibly
+be explained by error.
+
+\subsection{Choice of significance level}
+
+A single variant call at $\alpha = 0.05$ has a 5\% false positive probability
+under the null. In a typical sequencing run producing thousands of variant calls
+across hundreds of specimens, the run-level false positive rate can be
+substantial. For a run of $S$ specimens producing an average of $V$ variants
+each, the expected number of false positives is $\alpha \cdot S \cdot V$.
+
+With $S = 1000$ and $V \approx 3$, $\alpha = 0.05$ yields ${\sim}150$ expected
+false positives per run. A Bonferroni correction to the run level suggests
+$\alpha \approx 0.05 / 3000 \approx 1.7 \times 10^{-5}$. We therefore present
+results at $\alpha = 10^{-5}$ as a practical run-corrected threshold alongside
+the per-variant $\alpha = 0.05$.
+
+\subsection{Multi-position variants ($K > 1$)}
+\label{sec:multiposition}
+
+When a variant is distinguished from other variants at $K > 1$ positions, we
+define $M$ as the number of reads that support the variant allele at all $K$
+positions simultaneously. Under the null hypothesis, these $M$ reads must each
+independently produce the matching error at all $K$ positions. With independent
+errors across positions, the probability that a single read matches the variant
+allele at all $K$ positions is $q^K$, where $q$ is the per-position error
+probability. The critical error rate equation becomes:
+\begin{equation}
+\label{eq:critical_multiK}
+\binom{L}{K} \cdot P\bigl(\mathrm{Binom}(N,\, (q^*)^K) \geq M\bigr) = \alpha
+\end{equation}
+where $(q^*)^K$ is the joint per-read probability of matching the variant at all
+$K$ positions, and the Bonferroni correction is over $\binom{L}{K}$ possible
+position combinations.
+
+The effect is dramatic. At $N = 1000$, $M = 100$, $\alpha = 0.05$ (conservative
+model): $K = 1$ gives $p^* = 6.75\%$, while $K = 2$ gives $p^* = 24.19\%$---a
+$3.6{\times}$ increase. The combinatorial correction grows from $L = 700$ to
+$\binom{700}{2} = 244{,}650$ (a $350{\times}$ increase), but the joint error
+probability $q^2$ shrinks so rapidly that it overwhelmingly dominates. Under
+production settings ($p = 1.5\%$ assumed error, uniform model, $\alpha = 10^{-5}$,
+$N = 1000$), the minimum $M$ for significance drops from 23 at $K = 1$ to 6 at
+$K = 2$ and 4 at $K = 3$.
+
+The thresholds derived from this model are sensitive to the cross-position
+independence assumption. At the production operating point ($N = 1000$, $K = 2$,
+uniform model, $\alpha = 10^{-5}$, $p = 1.5\%$), the minimum $M = 6$ tolerates
+only a $2.2{\times}$ increase in the joint error probability relative to the
+independent value $q^2$. Equivalently, if the conditional probability of error at
+one position given an error at another rises from the independent expectation of
+$0.5\%$ to ${\sim}1.1\%$, the $M = 6$ threshold loses significance.
+Nanopore errors exhibit sequence-context dependencies~\cite{delahaye2021}:
+positions within the same k-mer context may share correlated error profiles, and
+a single problematic translocation event can affect multiple nearby bases.
+For variants whose distinguishing positions are distant in the amplicon (tens of
+bases or more apart), independence is reasonable and the joint model is
+well-supported. For positions clustered within a few bases, the effective
+exponent may be less than $K$, and the $K = 1$ analysis provides the safer bound.
+
+The analysis that follows uses $K = 1$ throughout as the conservative bound.
+Multi-position variants are substantially more significant than this bound
+suggests.
+
+\section{Results}
+
+\subsection{Critical error rates at fixed $N$}
+
+Figure~\ref{fig:vs_M} shows the critical error rate $p^*$ as a function of
+variant read count $M$ at $N = 1000$ (the standard presample size) for $K = 1$.
+Curves are shown for three significance levels under the conservative model
+($q = p$), with the uniform model ($q = p/3$) overlaid at $\alpha = 0.05$ and
+$\alpha = 10^{-5}$ for comparison.
+
+Under the conservative model at $\alpha = 0.05$, the critical error rate crosses
+the 5\% reference line at approximately $M = 80$, and $M = 100$ yields
+$p^* = 6.75\%$. Even at the stringent run-corrected $\alpha = 10^{-5}$, $M = 100$
+gives $p^* = 5.5\%$---still well above realistic nanopore error rates. The
+difference between significance levels is modest at high $M$, reflecting the
+exponential sensitivity of the binomial test.
+
+Under the uniform model, the same cases yield $p^* = 20.3\%$ and $16.6\%$
+respectively, providing comfortable margins.
+
+At low $M$, the test's power drops rapidly. The boundary where variants become
+questionable depends on $N$, but for typical coverage ($N = 100$--$1000$),
+variants with fewer than ${\sim}20$--$30$ supporting reads under the conservative
+model yield $p^*$ values in the range of realistic nanopore error rates (1--5\%),
+making them difficult to distinguish from artifacts.
+
+\begin{figure}[htbp]
+\centering
+\includegraphics[width=\textwidth]{figures/fig1_critical_rate_vs_M.pdf}
+\caption{Critical error rate $p^*$ vs.\ variant read count $M$ at $N = 1000$,
+$K = 1$, $L = 700$. Solid lines: conservative model ($q = p$) at three
+significance levels. Dashed lines: uniform model ($q = p/3$) at $\alpha = 0.05$
+and $\alpha = 10^{-5}$.}
+\label{fig:vs_M}
+\end{figure}
+
+\subsection{Effect of total read count}
+
+Figure~\ref{fig:by_N} shows $p^*$ as a function of $M$ for several values of $N$
+under both error models ($\alpha = 0.05$). For a given $M$, larger $N$ yields
+lower $p^*$ because the same absolute count represents a smaller fraction of the
+total pool.
+
+The side-by-side comparison illustrates the roughly threefold difference between
+error models. Under the uniform model, even relatively modest support ($M = 20$
+at $N = 1000$) yields $p^*$ above 1\%. Under the conservative model, $M \approx
+30$ is needed to reach the same threshold.
+
+\begin{figure}[htbp]
+\centering
+\includegraphics[width=\textwidth]{figures/fig2_critical_rate_by_N.pdf}
+\caption{Critical error rate $p^*$ vs.\ variant read count $M$ for several total
+read counts $N$ ($K = 1$, $L = 700$, $\alpha = 0.05$). Left: conservative model
+($q = p$). Right: uniform model ($q = p/3$).}
+\label{fig:by_N}
+\end{figure}
+
+\subsection{Summary of key values}
+
+Table~\ref{tab:key_values} summarizes critical error rates for representative
+parameter combinations under both error models.
+
+\begin{table}[htbp]
+\centering
+\caption{Critical error rates $p^*$ for representative parameter combinations
+($K = 1$, $L = 700$). Values shown for both conservative ($q = p$) and uniform
+($q = p/3$) error models.}
+\label{tab:key_values}
+\begin{tabular}{rrrrrr}
+\toprule
+ & & & \multicolumn{2}{c}{$p^*$} & \\
+\cmidrule(lr){4-5}
+$N$ & $M$ & $\alpha$ & $q = p$ & $q = p/3$ & Note \\
+\midrule
+1000 & 100 & 0.05     & 6.75\%  & 20.25\% & Standard operating point \\
+1000 & 100 & $10^{-5}$ & 5.53\%  & 16.59\% & Run-corrected \\
+100  & 10  & 0.05     & 2.18\%  & 6.55\%  & Moderate coverage \\
+100  & 10  & $10^{-5}$ & 0.83\%  & 2.50\%  & Run-corrected, moderate coverage \\
+50   & 5   & 0.05     & 0.86\%  & 2.57\%  & Boundary case \\
+50   & 5   & $10^{-5}$ & 0.15\%  & 0.44\%  & Run-corrected boundary \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\subsection{Minimum read support at assumed error rates}
+
+While Table~\ref{tab:key_values} shows the error rate required to explain a given
+variant as artifact, practitioners often need the converse: given an assumed
+platform error rate, how many reads must support a variant for it to be
+considered trustworthy? Table~\ref{tab:min_M} inverts the analysis to answer this
+directly.
+
+\begin{table}[htbp]
+\centering
+\caption{Minimum variant read count $M$ required for significance at assumed
+per-position error rates ($K = 1$, $L = 700$). Upper panel: conservative model
+($q = p$). Lower panel: uniform model ($q = p/3$).}
+\label{tab:min_M}
+\small
+\begin{tabular}{r rrr rrr rrr}
+\toprule
+ & \multicolumn{3}{c}{$p = 1\%$}
+ & \multicolumn{3}{c}{$p = 3\%$}
+ & \multicolumn{3}{c}{$p = 5\%$} \\
+\cmidrule(lr){2-4} \cmidrule(lr){5-7} \cmidrule(lr){8-10}
+$N$ & 0.05 & $10^{-3}$ & $10^{-5}$
+    & 0.05 & $10^{-3}$ & $10^{-5}$
+    & 0.05 & $10^{-3}$ & $10^{-5}$ \\
+\midrule
+\multicolumn{10}{l}{\emph{Conservative ($q = p$)}} \\[2pt]
+10   &  4 &  5 &  6$^\dagger$ &  5 &  6$^\dagger$ &  7$^\dagger$ &  5 &  7$^\dagger$ &  8$^\dagger$ \\
+20   &  4 &  5 &  7 &  6 &  7 &  9 &  7 &  9 & 10 \\
+50   &  6 &  7 &  9 &  9 & 11 & 13 & 11 & 13 & 15 \\
+100  &  7 &  9 & 11 & 12 & 15 & 17 & 16 & 19 & 22 \\
+200  & 10 & 12 & 15 & 18 & 21 & 24 & 25 & 28 & 32 \\
+500  & 16 & 19 & 22 & 32 & 37 & 41 & 46 & 52 & 57 \\
+1000 & 25 & 29 & 33 & 53 & 59 & 65 & 79 & 86 & 93 \\
+\midrule
+\multicolumn{10}{l}{\emph{Uniform ($q = p/3$)}} \\[2pt]
+10   &  3 &  4 &  5 &  4 &  5 &  6$^\dagger$ &  4 &  5 &  6$^\dagger$ \\
+20   &  3 &  4 &  5 &  4 &  5 &  7 &  5 &  6 &  8 \\
+50   &  4 &  5 &  7 &  6 &  7 &  9 &  7 &  9 & 10 \\
+100  &  5 &  6 &  8 &  7 &  9 & 11 &  9 & 11 & 13 \\
+200  &  6 &  8 & 10 & 10 & 12 & 15 & 13 & 16 & 18 \\
+500  &  9 & 11 & 14 & 16 & 19 & 22 & 22 & 26 & 29 \\
+1000 & 13 & 16 & 19 & 25 & 29 & 33 & 35 & 40 & 44 \\
+\bottomrule
+\end{tabular}
+
+\smallskip
+\noindent$^\dagger$\small{$M > N/2$: the required read support exceeds half the
+total reads, making detection of multiple variants impossible at this sample
+size.}
+\end{table}
+
+At the standard operating point ($N = 1000$) under the conservative model, a
+variant needs $M \geq 93$ reads to be significant at the run-corrected
+$\alpha = 10^{-5}$ when the assumed error rate is 5\%, but only $M \geq 33$ at
+1\% assumed error. Under the uniform model, these thresholds drop to 44 and 19
+respectively. At moderate coverage ($N = 100$), even the most stringent
+combination (5\% error, $\alpha = 10^{-5}$, conservative) requires only
+$M \geq 22$, representing 22\% of total reads.
+
+\subsection{Effect of multi-position evidence on minimum read support}
+
+Table~\ref{tab:min_M_K} shows how the minimum $M$ for significance changes when
+the variant is distinguished at $K > 1$ positions. Under the joint model
+(Section~\ref{sec:multiposition}), requiring the same reads to error at all $K$
+positions dramatically reduces the evidence needed.
+
+\begin{table}[htbp]
+\centering
+\caption{Minimum variant read count $M$ at $K = 1$, $2$, and $3$ variant
+positions (uniform model $q = p/3$, $\alpha = 10^{-5}$, $p = 1.5\%$, $L = 700$).}
+\label{tab:min_M_K}
+\begin{tabular}{rrrr}
+\toprule
+$N$ & $K = 1$ & $K = 2$ & $K = 3$ \\
+\midrule
+10   &  5 &  3 &  3 \\
+20   &  6 &  3 &  3 \\
+50   &  7 &  4 &  3 \\
+100  &  9 &  4 &  3 \\
+200  & 11 &  4 &  3 \\
+500  & 16 &  5 &  3 \\
+1000 & 23 &  6 &  4 \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+At $K = 2$, the minimum $M$ drops to 3--6 reads across the full range of $N$; at
+$K = 3$, it is 3--4 reads regardless of sample size. Under the independence
+assumption, these thresholds are at or below the minimum count filters typically
+applied in practice (e.g., \texttt{--min-size~5}). However, as noted in
+Section~\ref{sec:multiposition}, the $K > 1$ thresholds are sensitive to
+cross-position error correlation: at $K = 2$, $N = 1000$, the $M = 6$ threshold
+tolerates only a ${\sim}2{\times}$ increase in joint error probability. For
+variants whose distinguishing positions are well-separated in the amplicon,
+the independence assumption is reasonable and these low thresholds apply. For
+nearby positions where error correlation is plausible, the $K = 1$ thresholds
+from Table~\ref{tab:min_M} provide the conservative bound.
+
+\section{Discussion}
+
+\subsection{Interpreting the critical error rate}
+
+The critical error rate $p^*$ represents the per-position error rate at which a
+given variant pattern becomes statistically plausible as an artifact. When the
+conservative model is used ($q = p$), $p^*$ can be interpreted as the rate of
+maximally biased error at a single position---the worst case where all errors
+produce the same incorrect base. When the uniform model is used ($q = p/3$),
+$p^*$ represents the overall per-position error rate under the assumption that
+errors are unbiased across alternative bases.
+
+For Oxford Nanopore reads, per-position substitution error rates typically
+range from 1--5\% for simplex reads (Q13--Q20) and below 1\% for duplex or
+consensus-corrected reads. Modern R10.4.1 chemistry achieves raw read accuracy of
+98.7--99.4\% (Q20+), corresponding to per-position error rates of
+0.6--1.3\%~\cite{wang2023}, making the margins above even more comfortable for
+well-supported variants. Variants with $p^*$ substantially above these ranges
+are robust; variants with $p^*$ near or below these ranges warrant caution.
+
+\subsection{Conservative framing}
+
+Several deliberate conservatisms ensure that critical error rates represent lower
+bounds on variant significance:
+
+\begin{enumerate}
+\item \textbf{Denominator choice.} Using the total input read count $N$ rather
+than the cluster size assumes the worst case: the clustering algorithm could have
+drawn any subset from the full pool. In practice, coarse clustering first
+separates clearly unrelated sequences (e.g., different loci or contaminant
+reads), reducing the effective pool. However, finer-grained cluster boundaries
+are themselves determined by the variant signal under evaluation, so using
+cluster size as the denominator would be circular. The analysis uses total input
+reads to avoid this dependency.
+
+\item \textbf{Maximally biased substitution.} The conservative model ($q = p$)
+assumes all errors at a position produce the same alternative base. If errors
+were spread across multiple alternatives ($q = p/3$), coherent error patterns
+would be less likely.
+
+\item \textbf{Bonferroni correction.} Treating all $L$ positions as independent
+tests is conservative; nearby positions in amplicon sequences are not truly
+independent, so the effective number of tests is smaller than $L$.
+
+\item \textbf{Minimum $K$.} Using $K = 1$ represents the weakest case; most
+variants are distinguished at multiple positions. Because the same reads must
+error at all $K$ positions independently, significance increases dramatically
+with $K$ (Section~\ref{sec:multiposition}).
+\end{enumerate}
+
+\subsection{Homopolymer normalization}
+
+The variant detection algorithm includes homopolymer normalization, which
+subtracts homopolymer length variation from the base composition at each position
+before evaluating variant thresholds. This removes the largest source of
+systematic, position-correlated nanopore error from consideration---approximately
+47\% of nanopore errors are homopolymer-related, with deletions dominating over
+mismatches and insertions~\cite{delahaye2021}. The null model
+presented here does not account for this additional filtering, making the analysis
+further conservative: the effective error rate after homopolymer normalization is
+lower than the raw per-position rate.
+
+This approach is conservative but lossy: it treats all homopolymer length
+differences as potential artifacts, even at short hp lengths (1--4~bases) where
+published accuracy exceeds 95\%~\cite{sereika2022} and the error rate may be
+comparable to non-hp positions. A variant that differs from the consensus only by
+a single-base insertion within a dinucleotide repeat is discarded identically to
+one within a length-10 poly-G run, despite the former being far more likely to
+reflect real biology.
+
+Extending the CER framework to evaluate hp-position variants statistically---rather
+than discarding them unconditionally---would require quantitative characterization
+of hp error rates by base and run length under current chemistry and basecaller
+versions. No published study provides this data for the R10.4.1 chemistry and
+Dorado basecallers used in our pipeline. With such data, the critical error rate
+analysis developed here could be applied to hp positions using empirical
+per-position error rates parameterized by hp context, enabling recovery of
+biological hp-length variants that the current blanket normalization discards.
+We characterize these rates empirically in a companion report~\cite{hp_paper},
+and integrate the resulting context-aware rates into the CER framework
+in~\cite{cer_practice}, which generalizes the analysis here to context-dependent
+per-position rates $q_\text{ctx}$ and introduces a dimensionless CER factor
+as the practical cross-variant decision metric.
+
+\subsection{Relationship to existing variant calling frameworks}
+
+Prior work on low-frequency variant detection has used binomial and
+Poisson-binomial models to test whether an observed allele count is consistent
+with sequencing error at an assumed rate. LoFreq~\cite{wilm2012} uses per-read
+Phred quality scores to construct a position-specific Poisson-binomial null
+distribution, applying Bonferroni correction across genomic positions.
+SNVer~\cite{wei2011} uses an aggregate binomial model with Simes' procedure for
+multiplicity control. Our framework inverts the question: rather than testing
+significance at a fixed error rate, we derive the critical error rate $p^*$ at
+which a variant becomes plausible as artifact. This inversion is both more
+conservative---it does not depend on the accuracy of per-read quality score
+calibration, which can be systematically overestimated for nanopore
+data~\cite{delahaye2021}---and more interpretable for practitioners, who can
+directly compare $p^*$ against known platform error rates.
+
+\subsection{Environmental and mixed specimens}
+
+The analysis assumes that $N$ reads originate from sequencing a single organism,
+as is typical in specimen-based amplicon barcoding. For environmental DNA samples
+or specimens containing multiple organisms, the interpretation of $N$ requires
+modification. When the read pool contains sequences from multiple distinct
+organisms, the relevant $N$ for evaluating intra-organism variants is the number
+of reads from the target organism, not the total. The upstream clustering step
+partially addresses this by separating reads from different organisms into
+distinct clusters, but the formal guarantee applies within the assumption that
+the initial cluster contains reads from a single source.
+
+\subsection{Limitations}
+
+The null model assumes independence of errors across reads at each position.
+Nanopore errors exhibit well-documented sequence-context dependencies---certain
+k-mer contexts systematically produce higher error rates and biased substitution
+patterns~\cite{delahaye2021}. The homopolymer normalization step addresses the
+largest class of such correlation, and the conservative model ($q = p$) accounts
+for substitution directionality by assuming all errors at a position produce the
+same alternative base. However, neither addresses the possibility that
+context-dependent effects elevate the per-position error rate at specific sites
+substantially above the platform average. The critical error rate framework is
+designed to accommodate this uncertainty: rather than assuming a fixed error
+rate, it reports $p^*$ and leaves the reader to judge whether that rate is
+plausible given their platform, chemistry, and sequence context. A variant with
+$p^* = 6.8\%$ is robust if the worst-case positional error rate is 2\%, but not
+if context effects at that position could plausibly reach 7\%. As nanopore
+chemistry continues to improve, both mean error rates and context-dependent
+profiles change, making fixed thresholds unreliable; $p^*$ remains interpretable
+against whatever platform characterization is current.
+
+This framework addresses bioinformatic artifacts---sequences that never
+physically existed in the sequenced library. PCR errors introduced early in
+amplification produce sequences that physically exist in the library, and are
+therefore out of scope by design: passing the critical error rate test
+establishes physical presence in the library, not biological reality. For
+taxonomic identification, the primary mitigation against PCR artifacts and other
+non-biological sequences is robust reference databases where variants have been
+replicated across independent specimens.
+
+\section{Conclusion}
+
+The critical error rate framework provides a transparent basis for evaluating
+confidence in detected variants. Under typical operating conditions ($N = 1000$,
+$M = 100$), critical rates of 5.5--6.8\% (conservative) or 16.6--20.3\%
+(uniform) are well above realistic nanopore error, even at run-corrected
+significance levels. At lower coverage ($N = 100$, $M = 10$), the conservative
+model yields $p^* = 0.8$--$2.2\%$, approaching the boundary of
+distinguishability for lower-quality reads. The framework distinguishes physical
+library presence from bioinformatic hallucination; biological significance of
+detected variants requires downstream validation against reference databases.
+Table~\ref{tab:min_M} provides direct lookup of the minimum read support needed
+at assumed error rates of 1--5\%, enabling practitioners to assess variant
+confidence without computation. An important next step---taken up in companion
+reports---is extending this framework to homopolymer positions, where blanket
+normalization currently discards variants that may be biological. The required
+empirical characterization of hp error rates by base and run length is reported
+in~\cite{hp_paper}, and the context-aware CER framework that integrates this
+data into the significance analysis developed here is presented
+in~\cite{cer_practice}.
+
+\subsection*{Acknowledgments}
+
+Substantial portions of the text were drafted with the assistance of Claude
+(Anthropic, Opus~4.6). The core ideas, analytical framing, and mathematical
+approach were provided by the author; the AI contributed to exposition, \LaTeX{}
+formatting, and iterative drafting under human direction. The author takes full
+responsibility for the content.
+
+\begin{thebibliography}{99}
+
+\bibitem[Bradshaw et~al., 2023]{bradshaw2023}
+M.~J. Bradshaw, U.~Braun, B.~Castlebury, and D.~L. Hawksworth.
+\newblock Extensive intragenomic variation in the internal transcribed spacer
+region of fungi.
+\newblock \emph{iScience}, 26(8):107317, 2023.
+
+\bibitem[Delahaye and Nicolas, 2021]{delahaye2021}
+C.~Delahaye and J.~Nicolas.
+\newblock Sequencing {DNA} with nanopores: Troubles and biases.
+\newblock \emph{PLoS ONE}, 16(10):e0257521, 2021.
+
+\bibitem[Lee, 2003]{lee2003}
+C.~Lee.
+\newblock Generating consensus sequences from partial order multiple sequence
+alignment graphs.
+\newblock \emph{Bioinformatics}, 19(8):999--1008, 2003.
+
+\bibitem[Russell, 2023]{russell2023}
+S.~D. Russell.
+\newblock {ONT DNA} barcoding fungal amplicons w/ {MinION \& Flongle V.3}.
+\newblock \emph{protocols.io}, March 2023.
+\newblock \url{https://dx.doi.org/10.17504/protocols.io.36wgq7qykvk5/v3}.
+
+\bibitem[Schoch et~al., 2012]{schoch2012}
+C.~L. Schoch, K.~A. Seifert, S.~Huhndorf, V.~Robert, J.~L. Spouge, C.~A.
+Levesque, W.~Chen, and Fungal Barcoding Consortium.
+\newblock Nuclear ribosomal internal transcribed spacer ({ITS}) region as a
+universal {DNA} barcode marker for fungi.
+\newblock \emph{Proceedings of the National Academy of Sciences},
+109(16):6241--6246, 2012.
+
+\bibitem[Walker, 2024]{speconsense}
+J.~Walker.
+\newblock Speconsense: High-quality clustering and consensus generation for
+{Oxford Nanopore} amplicon reads.
+\newblock \url{https://github.com/joshuaowalker/speconsense}, 2024.
+
+\bibitem[Walker, 2026a]{hp_paper}
+J.~Walker.
+\newblock Homopolymer error rate analysis for nanopore amplicon sequencing.
+\newblock Technical report, 2026.
+
+\bibitem[Walker, 2026b]{cer_practice}
+J.~Walker.
+\newblock Critical error rate in practice: context-aware variant significance
+for nanopore amplicon pipelines.
+\newblock Technical report, 2026.
+
+\bibitem[Sereika et~al., 2022]{sereika2022}
+M.~Sereika, R.~H. Kirkegaard, S.~M. Karst, T.~Y. Michaelsen, E.~A.
+S{\o}rensen, R.~D. Wollenberg, and M.~Albertsen.
+\newblock {Oxford Nanopore R10.4} long-read sequencing enables the generation of
+near-finished bacterial genomes from pure cultures and metagenomes without
+short-read or reference polishing.
+\newblock \emph{Nature Methods}, 19:482--488, 2022.
+
+\bibitem[Vaser et~al., 2017]{vaser2017}
+R.~Vaser, I.~Sovi\'{c}, N.~Nagarajan, and M.~\v{S}iki\'{c}.
+\newblock Fast and accurate de novo genome assembly from long uncorrected reads.
+\newblock \emph{Genome Research}, 27(5):737--746, 2017.
+
+\bibitem[Wang et~al., 2023]{wang2023}
+Y.~Wang, Y.~Zhao, A.~Bollas, Y.~Wang, and K.~F. Au.
+\newblock The newest {Oxford Nanopore} {R10.4.1} full-length {16S} {rRNA}
+sequencing enables the accurate resolution of species-level microbial community
+profiling.
+\newblock \emph{Applied and Environmental Microbiology}, 89(10):e0060523, 2023.
+
+\bibitem[Wei et~al., 2011]{wei2011}
+Z.~Wei, W.~Wang, P.~Hu, G.~J. Lyon, and H.~Hakonarson.
+\newblock {SNVer}: a statistical tool for variant calling in analysis of pooled
+or individual next-generation sequencing data.
+\newblock \emph{Nucleic Acids Research}, 39(19):e132, 2011.
+
+\bibitem[Wick et~al., 2023]{wick2023}
+R.~R. Wick, L.~M. Judd, and K.~E. Holt.
+\newblock Assembling the perfect bacterial genome using {Oxford Nanopore} and
+{Illumina} sequencing.
+\newblock \emph{PLOS Computational Biology}, 19(3):e1010905, 2023.
+
+\bibitem[Wilm et~al., 2012]{wilm2012}
+A.~Wilm, P.~P.~K. Aw, D.~Bertrand, G.~H.~T. Yeo, T.~Ong, C.~H. Wong,
+C.~C. Khor, R.~Petric, M.~L. Hibberd, and N.~Nagarajan.
+\newblock {LoFreq}: a sequence-quality aware, ultra-sensitive variant caller for
+uncovering cell-population heterogeneity from high-throughput sequencing
+datasets.
+\newblock \emph{Nucleic Acids Research}, 40(22):11189--11201, 2012.
+
+\end{thebibliography}
+
+\end{document}

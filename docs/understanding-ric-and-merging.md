@@ -6,9 +6,11 @@ This guide explains how Speconsense handles read counts and variant merging, par
 
 Before diving in, let's clarify the header fields you'll see in output:
 
-- **`size=N`** - Total number of reads clustered together for this variant (clustering happens before sampling)
-- **`ric=N`** - Reads in Consensus - actual reads used by SPOA to generate the consensus (may be less than size due to `--max-sample-size` sampling)
-- **`rawric=N+N+...`** - RiC values of the raw variants that were merged to create this consensus (only present when variants were merged)
+- **`size=N`** — Total number of reads clustered together for this variant (clustering happens before sampling)
+- **`ric=N`** — Reads in Consensus — actual reads used by SPOA to generate the consensus (may be less than size due to `--max-sample-size` sampling)
+- **`rawric=N+N+...`** — RiC values of the raw variants that were merged to create this consensus (only present when variants were merged in summarize)
+- **`gid=N`** — Identity group rank (assigned by core via complete-linkage HAC)
+- **`vid=N`** — Variant rank within the identity group (1 = anchor / largest)
 
 For example: `size=347 ric=100` means the cluster had 347 reads, but we sampled 100 of them to generate the consensus (because `--max-sample-size=100`).
 
@@ -21,7 +23,7 @@ You may observe consensus sequences in your `__Summary__/` output that have `ric
 speconsense input.fastq --max-sample-size 100
 
 # But in __Summary__/summary.fasta you see:
->specimen-A-1 size=497 ric=250 rawric=100+89+61 snp=2 primers=ITS1F,ITS4
+>specimen-A-1.v1 size=497 ric=250 rawric=100+89+61 snp=2 primers=ITS1F,ITS4
 ```
 
 **Question**: Why does `ric=250` when the maximum should be 100?
@@ -44,12 +46,12 @@ speconsense input.fastq --max-sample-size=100
 
 **Output example:**
 ```
->specimen-A-c1 size=347 ric=100 primers=ITS1F,ITS4
->specimen-A-c2 size=89 ric=89 primers=ITS1F,ITS4
->specimen-A-c3 size=61 ric=61 primers=ITS1F,ITS4
+>specimen-A-1.v1 size=347 ric=100 gid=1 vid=1 primers=ITS1F,ITS4
+>specimen-A-1.v2 size=89  ric=89  gid=1 vid=2 cer_factor=14.2 primers=ITS1F,ITS4
+>specimen-A-1.v3 size=61  ric=61  gid=1 vid=3 cer_factor=8.4  primers=ITS1F,ITS4
 ```
 
-Each consensus was generated from its own set of reads. All `ric` values are ≤100 ✓
+Each consensus was generated from its own set of reads. All `ric` values are ≤100 ✓. The three variants share `gid=1` because core's complete-linkage identity grouping placed them together (`--group-identity` 0.85 by default).
 
 ### Stage 2: speconsense-summarize (Post-Processing)
 
@@ -58,17 +60,19 @@ speconsense-summarize
 ```
 
 **What it does:**
-- **HAC variant grouping**: Groups similar variants together (separates contaminants from primary targets)
-- **MSA-based variant merging**: Combines variants within each group that differ by only a few SNPs/indels into a single consensus with IUPAC ambiguity codes
-- **Variant selection**: Chooses which variants to output based on size or diversity
+- **Honor core identity groups**: parses `gid=`/`vid=` from input FASTA headers — no re-clustering
+- **Cross-primer overlap merging**: across identity groups, merges variants whose anchors overlap above the identity threshold (for primer-pool workflows)
+- **MSA-based variant merging**: within each identity group, combines variants that differ by only a few SNPs/indels into a single consensus with IUPAC ambiguity codes
+- **CER and err_factor filtering**: routes statistically-implausible or internally-heterogeneous variants to `__Summary__/variants/{name}.ns-` / `.lq-` files
+- **Variant selection**: chooses which surviving variants to output based on size or diversity
 - Outputs: `__Summary__/` with final consensus sequences and consolidated FASTQ files
 
 **Output example:**
 ```
->specimen-A-1 size=497 ric=250 rawric=100+89+61 snp=2 primers=ITS1F,ITS4
+>specimen-A-1.v1 size=497 ric=250 rawric=100+89+61 snp=2 primers=ITS1F,ITS4
 ```
 
-This consensus was created by merging the three clusters above (c1+c2+c3) because they differed by only 2 SNP positions. The total ric (250 = 100+89+61) exceeds `--max-sample-size` (100).
+This consensus was created by merging the three variants above (c1+c2+c3 in the old naming, all in `gid=1`) because they differed by only 2 SNP positions. The total ric (250 = 100+89+61) exceeds `--max-sample-size` (100).
 
 ## Why This Design?
 

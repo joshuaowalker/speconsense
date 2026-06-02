@@ -17,6 +17,7 @@ from speconsense.profiles import (
     ProfileError,
     print_profiles_list,
 )
+from speconsense._help import install_advanced_help, add_advanced_argument
 
 from .clusterer import SpecimenClusterer
 
@@ -25,6 +26,7 @@ def main():
     parser = argparse.ArgumentParser(
         description="MCL-based clustering of nanopore amplicon reads"
     )
+    install_advanced_help(parser)
 
     # Input/Output group
     io_group = parser.add_argument_group("Input/Output")
@@ -40,64 +42,48 @@ def main():
                                   help="Clustering algorithm to use (default: graph)")
     clustering_group.add_argument("--min-identity", type=float, default=0.9,
                                   help="Minimum sequence identity threshold for clustering (default: 0.9)")
-    clustering_group.add_argument("--inflation", type=float, default=4.0,
-                                  help="MCL inflation parameter (default: 4.0)")
-    clustering_group.add_argument("--k-nearest-neighbors", type=int, default=5,
-                                  help="Number of nearest neighbors for graph construction (default: 5)")
 
     # Filtering group
     filtering_group = parser.add_argument_group("Filtering")
-    filtering_group.add_argument("--min-size", type=int, default=5,
-                                 help="Minimum cluster size (default: 5, 0 to disable)")
-    filtering_group.add_argument("--min-cluster-ratio", type=float, default=0.01,
-                                 help="Minimum size ratio between a cluster and the largest cluster (default: 0.01, 0 to disable)")
+    filtering_group.add_argument("--min-size", type=int, default=3,
+                                 help="Minimum cluster size (default: 3, 0 to disable)")
+    filtering_group.add_argument("--min-cluster-ratio", type=float, default=0,
+                                 help="Minimum size ratio between a cluster and the largest cluster (default: 0, 0 to disable)")
     filtering_group.add_argument("--max-sample-size", type=int, default=100,
                                  help="Maximum cluster size for consensus (default: 100)")
-    filtering_group.add_argument("--outlier-identity", type=float, default=None,
-                                 help="Minimum read-to-consensus identity to keep a read (default: auto). "
-                                      "Reads below this threshold are removed as outliers before final "
-                                      "consensus generation. Auto-calculated as (1 + min_identity) / 2. "
-                                      "This threshold is typically higher than --min-identity because "
-                                      "the consensus is error-corrected through averaging.")
 
-    # Variant Phasing group
-    phasing_group = parser.add_argument_group("Variant Phasing")
-    phasing_group.add_argument("--disable-position-phasing", action="store_true",
-                               help="Disable position-based variant phasing (enabled by default). "
-                                    "MCL graph clustering already separates most variants; this "
-                                    "second pass analyzes MSA positions to phase remaining variants.")
-    phasing_group.add_argument("--enable-position-phasing", action="store_false",
-                               dest="disable_position_phasing",
-                               help="Override --disable-position-phasing or profile setting")
+    # Variant Phasing & Validation group
+    phasing_group = parser.add_argument_group("Variant Phasing & Validation")
     phasing_group.add_argument("--min-variant-frequency", type=float, default=0.10,
                                help="Minimum alternative allele frequency to call variant (default: 0.10 for 10%%)")
-    phasing_group.add_argument("--min-variant-count", type=int, default=5,
-                               help="Minimum alternative allele read count to call variant (default: 5)")
+    phasing_group.add_argument("--min-variant-count", type=int, default=3,
+                               help="Minimum alternative allele read count to call variant (default: 3)")
+    phasing_group.add_argument("--significance-level", type=float, default=1e-5,
+                               help="Significance level (alpha) for variant significance testing (default: 1e-5)")
+    phasing_group.add_argument("--group-identity", type=float, default=0.85,
+                               help="Minimum pairwise identity to group clusters for read reassignment, "
+                                    "discard recovery, and CER validation. Grouping uses complete linkage: "
+                                    "every pair within a group must meet this threshold. (default: 0.85)")
+    phasing_group.add_argument("--hp-normalization-length", type=int, default=6,
+                               help="Minimum homopolymer run length at/above which HP length variants "
+                                    "are blanket-normalized (treated as noise). Runs of length >= this "
+                                    "value have their length variants suppressed in MSA variant "
+                                    "detection; runs shorter than this surface as candidates and are "
+                                    "evaluated by context-aware CER. Default 6 matches the HP paper "
+                                    "recommendation of CER-evaluating L <= 5 HP variants. (default: 6)")
+    phasing_group.add_argument("--error-model", type=str, default="dorado-v5.0",
+                               help="Per-basecaller error model used for context-aware variant "
+                                    "validation. Either a shipped model name (use "
+                                    "--list-error-models to see available), a user model in "
+                                    "~/.config/speconsense/error_models/, or a filesystem path to "
+                                    "a YAML file with a 'rates' mapping. (default: dorado-v5.0)")
 
     # Ambiguity Calling group
     ambiguity_group = parser.add_argument_group("Ambiguity Calling")
-    ambiguity_group.add_argument("--disable-ambiguity-calling", action="store_true",
-                                 help="Disable IUPAC ambiguity code calling for unphased variant positions")
-    ambiguity_group.add_argument("--enable-ambiguity-calling", action="store_false",
-                                 dest="disable_ambiguity_calling",
-                                 help="Override --disable-ambiguity-calling or profile setting")
     ambiguity_group.add_argument("--min-ambiguity-frequency", type=float, default=0.10,
                                  help="Minimum alternative allele frequency for IUPAC ambiguity calling (default: 0.10 for 10%%)")
     ambiguity_group.add_argument("--min-ambiguity-count", type=int, default=3,
                                  help="Minimum alternative allele read count for IUPAC ambiguity calling (default: 3)")
-
-    # Cluster Merging group
-    merging_group = parser.add_argument_group("Cluster Merging")
-    merging_group.add_argument("--disable-cluster-merging", action="store_true",
-                               help="Disable merging of clusters with identical consensus sequences")
-    merging_group.add_argument("--enable-cluster-merging", action="store_false",
-                               dest="disable_cluster_merging",
-                               help="Override --disable-cluster-merging or profile setting")
-    merging_group.add_argument("--disable-homopolymer-equivalence", action="store_true",
-                               help="Disable homopolymer equivalence in cluster merging (only merge identical sequences)")
-    merging_group.add_argument("--enable-homopolymer-equivalence", action="store_false",
-                               dest="disable_homopolymer_equivalence",
-                               help="Override --disable-homopolymer-equivalence or profile setting")
 
     # Orientation group
     orient_group = parser.add_argument_group("Orientation")
@@ -114,11 +100,6 @@ def main():
     perf_group.add_argument("--threads", type=int, default=1, metavar="N",
                             help="Max threads for internal parallelism (vsearch, SPOA). "
                                  "0=auto-detect, default=1 (safe for parallel workflows).")
-    perf_group.add_argument("--enable-early-filter", action="store_true",
-                            help="Enable early filtering to skip small clusters before variant phasing (improves performance for large datasets)")
-    perf_group.add_argument("--disable-early-filter", action="store_false",
-                            dest="enable_early_filter",
-                            help="Override --enable-early-filter or profile setting")
 
     # Debugging group
     debug_group = parser.add_argument_group("Debugging")
@@ -130,6 +111,103 @@ def main():
     debug_group.add_argument("--log-level", default="INFO",
                              choices=["DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL"])
 
+    # Advanced group (pre-tuned / experimental). Hidden from --help; users
+    # discover via --help-advanced. Most of these existed to support paper-
+    # side empirical analysis or expose pre-tuned algorithm internals.
+    advanced_group = parser.add_argument_group(
+        "Advanced (pre-tuned — rarely needed)",
+        "Hidden from --help; view with --help-advanced. Pre-tuned algorithm "
+        "internals, MAD knobs, and phase-disable flags retained primarily "
+        "for empirical analysis.",
+    )
+    # MCL internals
+    add_advanced_argument(advanced_group, "--inflation", type=float, default=4.0,
+                          help="MCL inflation parameter (default: 4.0)")
+    add_advanced_argument(advanced_group, "--k-nearest-neighbors", type=int, default=5,
+                          help="Number of nearest neighbors for graph construction (default: 5)")
+    # Phase disable flags (integral phases — disabling is for ablation studies)
+    add_advanced_argument(advanced_group, "--disable-position-phasing", action="store_true",
+                          help="Disable position-based variant phasing (enabled by default). "
+                               "MCL graph clustering already separates most variants; this "
+                               "second pass analyzes MSA positions to phase remaining variants.")
+    add_advanced_argument(advanced_group, "--enable-position-phasing", action="store_false",
+                          dest="disable_position_phasing",
+                          help="Override --disable-position-phasing or profile setting")
+    add_advanced_argument(advanced_group, "--disable-read-reassignment", action="store_true",
+                          help="Disable post-phasing read reassignment within identity groups. "
+                               "Reassignment moves reads between clusters based on consensus "
+                               "concordance; disable to preserve original phasing-time membership.")
+    add_advanced_argument(advanced_group, "--enable-read-reassignment", action="store_false",
+                          dest="disable_read_reassignment",
+                          help="Override --disable-read-reassignment or profile setting")
+    add_advanced_argument(advanced_group, "--disable-discard-recovery", action="store_true",
+                          help="Disable recovery of previously discarded reads into existing "
+                               "clusters. Has no effect if --disable-read-reassignment is also "
+                               "set (recovery requires reassignment).")
+    add_advanced_argument(advanced_group, "--enable-discard-recovery", action="store_false",
+                          dest="disable_discard_recovery",
+                          help="Override --disable-discard-recovery or profile setting")
+    add_advanced_argument(advanced_group, "--disable-second-phasing", action="store_true",
+                          help="Disable the Phase 8 second phasing pass without disabling "
+                               "the Phase 3 first pass. Has no effect if --disable-position-phasing "
+                               "or --disable-read-reassignment is also set (Phase 8 is gated on both).")
+    add_advanced_argument(advanced_group, "--enable-second-phasing", action="store_false",
+                          dest="disable_second_phasing",
+                          help="Override --disable-second-phasing or profile setting")
+    add_advanced_argument(advanced_group, "--disable-noise-filter", action="store_true",
+                          help="Disable the Phase 5 noise filter. Small clusters whose MSA "
+                               "has no-majority columns are normally disbanded; this flag "
+                               "preserves them and lets them flow through to final consensus.")
+    add_advanced_argument(advanced_group, "--enable-noise-filter", action="store_false",
+                          dest="disable_noise_filter",
+                          help="Override --disable-noise-filter or profile setting")
+    add_advanced_argument(advanced_group, "--disable-mad-outlier-removal", action="store_true",
+                          help="Disable MAD-based outlier removal at final consensus generation. "
+                               "Reads whose identity to the cluster consensus is more than n*MAD "
+                               "from the median are normally dropped; this flag preserves them.")
+    add_advanced_argument(advanced_group, "--enable-mad-outlier-removal", action="store_false",
+                          dest="disable_mad_outlier_removal",
+                          help="Override --disable-mad-outlier-removal or profile setting")
+    add_advanced_argument(advanced_group, "--disable-ambiguity-calling", action="store_true",
+                          help="Disable IUPAC ambiguity code calling for unphased variant positions")
+    add_advanced_argument(advanced_group, "--enable-ambiguity-calling", action="store_false",
+                          dest="disable_ambiguity_calling",
+                          help="Override --disable-ambiguity-calling or profile setting")
+    add_advanced_argument(advanced_group, "--disable-cluster-merging", action="store_true",
+                          help="Disable merging of clusters with identical consensus sequences")
+    add_advanced_argument(advanced_group, "--enable-cluster-merging", action="store_false",
+                          dest="disable_cluster_merging",
+                          help="Override --disable-cluster-merging or profile setting")
+    add_advanced_argument(advanced_group, "--disable-homopolymer-equivalence", action="store_true",
+                          help="Disable homopolymer equivalence in cluster merging (only merge identical sequences)")
+    add_advanced_argument(advanced_group, "--enable-homopolymer-equivalence", action="store_false",
+                          dest="disable_homopolymer_equivalence",
+                          help="Override --disable-homopolymer-equivalence or profile setting")
+    # MAD outlier removal tuning. Defaults mirror
+    # ``speconsense.outliers.detect_rid_outliers``; once calibrated for the
+    # release, end users shouldn't need to touch these.
+    add_advanced_argument(advanced_group, "--mad-z-threshold", type=float, default=1.5,
+                          help="Modified Z-score cutoff for the MAD rule. A read with "
+                               "(0.6745 * (rid - median) / MAD) below -threshold is flagged. "
+                               "Lower values flag more aggressively. The 0.8.1 default of 1.5 "
+                               "is empirically tuned for speconsense's 3-10-read clusters; the "
+                               "literature-standard 3.0 is too conservative for that regime "
+                               "(see speconsense.outliers.detect_rid_outliers docstring). "
+                               "(default: 1.5)")
+    add_advanced_argument(advanced_group, "--mad-gap-factor", type=float, default=2.5,
+                          help="Gap-rule multiplier. The worst read is flagged if "
+                               "(r_second - r_worst) > gap_factor * (r_best - r_second). "
+                               "Lower values flag more aggressively. (default: 2.5)")
+    add_advanced_argument(advanced_group, "--mad-min-mad", type=float, default=0.002,
+                          help="Floor for the MAD value to avoid divide-by-zero when most "
+                               "reads have near-identical rid. Expressed on the 0..1 rid "
+                               "scale (0.002 = 0.2pp). (default: 0.002)")
+    add_advanced_argument(advanced_group, "--mad-min-drop-from-median", type=float, default=0.02,
+                          help="Safety floor on the absolute drop below the cluster's median "
+                               "rid. A statistically-unusual read is only flagged when its "
+                               "rid is at least this far below the median. Expressed on the "
+                               "0..1 rid scale (0.02 = 2pp). (default: 0.02)")
+
     # Version and profile options (default group)
     parser.add_argument("--version", action="version",
                         version=f"Speconsense {__version__}",
@@ -138,10 +216,18 @@ def main():
                         help="Load parameter profile (use --list-profiles to see available)")
     parser.add_argument("--list-profiles", action="store_true",
                         help="List available profiles and exit")
+    parser.add_argument("--list-error-models", action="store_true",
+                        help="List available error models and exit")
 
     # Handle --list-profiles early (before requiring input_file)
     if '--list-profiles' in sys.argv:
         print_profiles_list('speconsense')
+        sys.exit(0)
+
+    # Handle --list-error-models early (before requiring input_file)
+    if '--list-error-models' in sys.argv:
+        from speconsense.qctx import print_models_list
+        print_models_list()
         sys.exit(0)
 
     # First pass: get profile name if specified
@@ -204,8 +290,16 @@ def main():
         disable_homopolymer_equivalence=args.disable_homopolymer_equivalence,
         disable_cluster_merging=args.disable_cluster_merging,
         output_dir=args.output_dir,
-        outlier_identity_threshold=args.outlier_identity,
         enable_secondpass_phasing=not args.disable_position_phasing,
+        enable_read_reassignment=not args.disable_read_reassignment,
+        enable_discard_recovery=not args.disable_discard_recovery,
+        enable_phase8=not args.disable_second_phasing,
+        enable_noise_filter=not args.disable_noise_filter,
+        enable_mad_outlier_removal=not args.disable_mad_outlier_removal,
+        mad_z_threshold=args.mad_z_threshold,
+        mad_gap_factor=args.mad_gap_factor,
+        mad_min_mad=args.mad_min_mad,
+        mad_min_drop_from_median=args.mad_min_drop_from_median,
         min_variant_frequency=args.min_variant_frequency,
         min_variant_count=args.min_variant_count,
         min_ambiguity_frequency=args.min_ambiguity_frequency,
@@ -213,21 +307,17 @@ def main():
         enable_iupac_calling=not args.disable_ambiguity_calling,
         scale_threshold=args.scale_threshold,
         max_threads=threads,
-        early_filter=args.enable_early_filter,
-        collect_discards=args.collect_discards
+        collect_discards=args.collect_discards,
+        significance_level=args.significance_level,
+        group_identity=args.group_identity,
+        min_hp_length=args.hp_normalization_length,
+        error_model=args.error_model,
     )
 
     # Log configuration
-    if args.outlier_identity is not None:
-        logging.info(f"Outlier removal enabled: outlier_identity={args.outlier_identity*100:.1f}% (user-specified)")
-    else:
-        # Auto-calculated threshold
-        auto_threshold = (1.0 + args.min_identity) / 2.0
-        logging.info(f"Outlier removal enabled: outlier_identity={auto_threshold*100:.1f}% (auto-calculated from min_identity={args.min_identity*100:.1f}%)")
-
     if not args.disable_position_phasing:
-        logging.info(f"Position-based variant phasing enabled: min_freq={args.min_variant_frequency:.0%}, "
-                    f"min_count={args.min_variant_count}")
+        logging.debug(f"Position-based variant phasing enabled: min_freq={args.min_variant_frequency:.0%}, "
+                     f"min_count={args.min_variant_count}")
 
     # Set additional attributes for metadata
     clusterer.input_file = os.path.abspath(args.input_file)
@@ -239,10 +329,14 @@ def main():
     logging.info(f"Reading sequences from {args.input_file}")
     format = "fasta" if args.input_file.endswith(".fasta") else "fastq"
     records = list(SeqIO.parse(args.input_file, format))
-    logging.info(f"Loaded {len(records)} primary sequences")
+    duplicate_ids = len(records) - len({r.id for r in records})
+    if duplicate_ids:
+        logging.info(f"Loaded {len(records)} primary reads ({len(records) - duplicate_ids} unique; {duplicate_ids} duplicate ID(s) will be deduplicated)")
+    else:
+        logging.info(f"Loaded {len(records)} primary reads")
 
     if len(records) == 0:
-        logging.warning("No sequences found in input file. Nothing to cluster.")
+        logging.warning("No reads found in input file. Nothing to cluster.")
         sys.exit(0)
 
     # Load augmented sequences if specified
@@ -253,17 +347,17 @@ def main():
             logging.error(f"Augment input file not found: {args.augment_input}")
             sys.exit(1)
 
-        logging.info(f"Reading augmented sequences from {args.augment_input}")
+        logging.info(f"Reading augmented reads from {args.augment_input}")
 
         # Auto-detect format like main input
         augment_format = "fasta" if args.augment_input.endswith(".fasta") else "fastq"
 
         try:
             augment_records = list(SeqIO.parse(args.augment_input, augment_format))
-            logging.info(f"Loaded {len(augment_records)} augmented sequences")
+            logging.info(f"Loaded {len(augment_records)} augmented reads")
 
             if len(augment_records) == 0:
-                logging.warning(f"No sequences found in augment input file: {args.augment_input}")
+                logging.warning(f"No reads found in augment input file: {args.augment_input}")
 
             # Add dummy quality scores to FASTA sequences so they can be written as FASTQ later
             if augment_format == "fasta":
@@ -303,7 +397,7 @@ def main():
 
             # Filter failed sequences if requested
             if args.orient_mode == "filter-failed" and failed_sequences:
-                logging.info(f"Filtering out {len(failed_sequences)} sequences with failed orientation")
+                logging.info(f"Filtering out {len(failed_sequences)} reads with failed orientation")
 
                 # Track as discarded and remove from clustering (but keep records for discards file)
                 clusterer.discarded_read_ids.update(failed_sequences)
@@ -312,14 +406,15 @@ def main():
                     # Keep records so they can be written to discards file
 
                 remaining = len(clusterer.sequences)
-                logging.info(f"Continuing with {remaining} successfully oriented sequences")
+                logging.info(f"Continuing with {remaining} successfully oriented reads")
         else:
             logging.warning(f"--orient-mode={args.orient_mode} specified but no primers with position information loaded")
 
-    # Write metadata file for use by post-processing tools
-    clusterer.write_metadata()
-
     clusterer.cluster(algorithm=args.algorithm)
+
+    # Write metadata file (after clustering so per-cluster CER reproduction
+    # data can be included for downstream tools).
+    clusterer.write_metadata()
     print()
 
 if __name__ == "__main__":

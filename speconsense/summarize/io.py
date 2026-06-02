@@ -20,23 +20,46 @@ from Bio import SeqIO
 from speconsense.types import ConsensusInfo
 
 from .fields import FastaField, format_fasta_header
-from .clustering import select_variants
+
+
+_CLUSTER_SUFFIX_RE = re.compile(r'-\d+(?:\.v\d+|-full)(?:\.raw\d+)?$')
+
+
+def strip_cluster_suffix(sample_name: str) -> str:
+    """Return ``sample_name`` with the core/summarize cluster suffix removed.
+
+    Handles the end-to-end gid.vid naming conventions:
+    - ``specimen-1.v2`` → ``specimen``
+    - ``specimen-1.v2.raw3`` → ``specimen``
+    - ``specimen-1-full`` → ``specimen``
+
+    Returns the input unchanged when no suffix is present.
+    """
+    return _CLUSTER_SUFFIX_RE.sub('', sample_name)
 
 
 def parse_consensus_header(header: str) -> Tuple[Optional[str], Optional[int], Optional[int],
                                                    Optional[List[str]], Optional[float], Optional[float],
-                                                   Optional[List[int]], Optional[List[int]], Optional[int]]:
+                                                   Optional[List[int]], Optional[List[int]], Optional[int],
+                                                   Optional[float], Optional[float],
+                                                   Optional[int], Optional[int]]:
     """
     Extract information from Speconsense consensus FASTA header.
 
-    Parses read identity metrics and merge metadata.
+    Parses read identity metrics, merge metadata, quality metrics
+    (``cer_factor`` CER decision metric and ``err_factor`` cluster-homogeneity
+    metric), and the core-assigned identity ranks (``group_rank`` / ``variant_rank``
+    emitted as ``gid=`` / ``vid=``). Full per-position CER detail (p*, K, context
+    tags, q_ctx values) lives only in the metadata JSON.
 
     Returns:
-        Tuple of (sample_name, ric, size, primers, rid, rid_min, raw_ric, raw_len, snp_count)
+        Tuple of (sample_name, ric, size, primers, rid, rid_min, raw_ric,
+        raw_len, snp_count, cer_factor, err_factor, group_rank, variant_rank).
     """
     sample_match = re.match(r'>([^ ]+) (.+)', header)
     if not sample_match:
-        return None, None, None, None, None, None, None, None, None
+        return (None, None, None, None, None, None, None, None, None,
+                None, None, None, None)
 
     sample_name = sample_match.group(1)
     info_string = sample_match.group(2)
@@ -70,7 +93,26 @@ def parse_consensus_header(header: str) -> Tuple[Optional[str], Optional[int], O
     snp_match = re.search(r'snp=(\d+)', info_string)
     snp_count = int(snp_match.group(1)) if snp_match else None
 
-    return sample_name, ric, size, primers, rid, rid_min, raw_ric, raw_len, snp_count
+    # CER fields
+    cer_factor_match = re.search(r'\bcer_factor=(inf|[\d.]+)', info_string)
+    if cer_factor_match:
+        token = cer_factor_match.group(1)
+        cer_factor = float('inf') if token == 'inf' else float(token)
+    else:
+        cer_factor = None
+
+    err_factor_match = re.search(r'\berr_factor=([\d.]+)', info_string)
+    err_factor = float(err_factor_match.group(1)) if err_factor_match else None
+
+    gid_match = re.search(r'\bgid=(\d+)', info_string)
+    group_rank = int(gid_match.group(1)) if gid_match else None
+
+    vid_match = re.search(r'\bvid=(\d+)', info_string)
+    variant_rank = int(vid_match.group(1)) if vid_match else None
+
+    return (sample_name, ric, size, primers, rid, rid_min,
+            raw_ric, raw_len, snp_count, cer_factor, err_factor,
+            group_rank, variant_rank)
 
 
 def load_consensus_sequences(
@@ -78,8 +120,10 @@ def load_consensus_sequences(
     min_ric: int,
     min_len: int = 0,
     max_len: int = 0,
-    specimen_id: str = None
-) -> List[ConsensusInfo]:
+    specimen_id: str = None,
+    min_cer_factor: float = 1.0,
+    max_err_factor: float = 1.5,
+) -> Tuple[List[ConsensusInfo], List[ConsensusInfo], List[ConsensusInfo]]:
     """Load consensus sequences from speconsense output files.
 
     Args:
@@ -88,13 +132,30 @@ def load_consensus_sequences(
         min_len: Minimum sequence length (0 = disabled)
         max_len: Maximum sequence length (0 = disabled)
         specimen_id: If set, load only {specimen_id}-all.fasta instead of all
+        min_cer_factor: Minimum per-position CER factor for primary output.
+            Variants with cer_factor below this threshold are returned
+            separately as ns records. Variants with cer_factor=None (anchors,
+            no valid pairwise comparison, or legacy pre-CER output) always
+            pass. Set to 0 to disable CER filtering.
+        max_err_factor: Maximum cluster err_factor (observed/q_ctx-expected
+            disagreement ratio). Variants above this threshold are returned
+            separately as lq (low-quality) records. Variants with
+            err_factor=None (legacy output missing the field) always pass.
+            Set to 0 to disable err_factor filtering. When both filters fire
+            on the same record, lq takes precedence over ns.
 
     Returns:
-        List of ConsensusInfo objects passing all filters
+        Tuple of (passing, ns, lq) lists of ConsensusInfo. All lists have
+        already passed the RiC and length filters.
     """
-    consensus_list = []
+    consensus_list: List[ConsensusInfo] = []
+    ns_list: List[ConsensusInfo] = []
+    lq_list: List[ConsensusInfo] = []
     filtered_by_ric = 0
     filtered_by_len = 0
+
+    cer_filter_enabled = min_cer_factor > 0
+    err_filter_enabled = max_err_factor > 0
 
     # Find consensus FASTA files — narrow to single specimen if requested
     if specimen_id:
@@ -106,9 +167,29 @@ def load_consensus_sequences(
     for fasta_file in fasta_files:
         logging.debug(f"Processing consensus file: {fasta_file}")
 
+        # Pre-load per-specimen metadata JSON once (best effort) so each
+        # ConsensusInfo can carry the raw err_factor sums needed for the
+        # run-scale q_ctx calibration check in quality_report.
+        specimen_base = os.path.basename(fasta_file)
+        if specimen_base.endswith('-all.fasta'):
+            specimen_base = specimen_base[:-len('-all.fasta')]
+        metadata = load_metadata_from_json(source_folder, specimen_base)
+        ef_lookup: Dict[str, Tuple[Optional[float], Optional[float], Optional[int]]] = {}
+        if metadata:
+            for variant in metadata.get('variants', []) or []:
+                cid = variant.get('cluster_id')
+                if cid:
+                    ef_lookup[cid] = (
+                        variant.get('err_factor_obs_sum'),
+                        variant.get('err_factor_exp_sum'),
+                        variant.get('err_factor_cols'),
+                    )
+
         with open(fasta_file, 'r') as f:
             for record in SeqIO.parse(f, "fasta"):
-                sample_name, ric, size, primers, rid, rid_min, _, _, _ = \
+                (sample_name, ric, size, primers, rid, rid_min,
+                 _, _, _, cer_factor, err_factor,
+                 group_rank, variant_rank) = \
                     parse_consensus_header(f">{record.description}")
 
                 if not sample_name:
@@ -130,9 +211,13 @@ def load_consensus_sequences(
                     filtered_by_len += 1
                     continue
 
-                # Extract cluster ID from sample name (e.g., "sample-c1" -> "c1")
-                cluster_match = re.search(r'-c(\d+)$', sample_name)
-                cluster_id = cluster_match.group(0) if cluster_match else sample_name
+                # Extract cluster ID from sample name (e.g., "sample-1.v2" -> "1.v2").
+                # Core emits the gid.vid designator directly; preserve it verbatim
+                # so summarize can round-trip the identifier.
+                cluster_match = re.search(r'-(\d+\.v\d+)$', sample_name)
+                cluster_id = cluster_match.group(1) if cluster_match else sample_name
+
+                ef_obs, ef_exp, ef_cols = ef_lookup.get(cluster_id, (None, None, None))
 
                 consensus_info = ConsensusInfo(
                     sample_name=sample_name,
@@ -146,18 +231,40 @@ def load_consensus_sequences(
                     raw_ric=None,  # Not available in original speconsense output
                     rid=rid,  # Mean read identity if available
                     rid_min=rid_min,  # Minimum read identity if available
+                    cer_factor=cer_factor,
+                    err_factor=err_factor,
+                    err_factor_obs_sum=ef_obs,
+                    err_factor_exp_sum=ef_exp,
+                    err_factor_cols=ef_cols,
+                    group_rank=group_rank,
+                    variant_rank=variant_rank,
                 )
-                consensus_list.append(consensus_info)
+
+                # Routing priority: lq (low quality) takes precedence over ns
+                # (CER not significant). A cluster whose reads are internally
+                # incoherent isn't worth evaluating for peer-artifact status.
+                if (err_filter_enabled and err_factor is not None
+                        and err_factor > max_err_factor):
+                    lq_list.append(consensus_info)
+                elif (cer_filter_enabled and cer_factor is not None
+                        and cer_factor < min_cer_factor):
+                    ns_list.append(consensus_info)
+                else:
+                    consensus_list.append(consensus_info)
 
     # Log loading summary
     filter_parts = [f"Loaded {len(consensus_list)} consensus sequences from {len(fasta_files)} files"]
+    if lq_list:
+        filter_parts.append(f"routed {len(lq_list)} to lq (err_factor > {max_err_factor})")
+    if ns_list:
+        filter_parts.append(f"routed {len(ns_list)} to ns (CER factor < {min_cer_factor})")
     if filtered_by_ric > 0:
         filter_parts.append(f"filtered {filtered_by_ric} by RiC")
     if filtered_by_len > 0:
         filter_parts.append(f"filtered {filtered_by_len} by length")
     logging.info(", ".join(filter_parts))
 
-    return consensus_list
+    return consensus_list, ns_list, lq_list
 
 
 def load_metadata_from_json(source_folder: str, sample_name: str) -> Optional[Dict]:
@@ -185,51 +292,6 @@ def load_metadata_from_json(source_folder: str, sample_name: str) -> Optional[Di
     except Exception as e:
         logging.warning(f"Failed to load metadata from {metadata_file}: {e}")
         return None
-
-
-def create_output_structure(groups: Dict[int, List[ConsensusInfo]],
-                           max_variants: int,
-                           variant_selection: str,
-                           summary_folder: str) -> Tuple[List[ConsensusInfo], Dict]:
-    """
-    Create the final output structure with proper naming.
-    Returns final consensus list and naming information.
-    """
-    os.makedirs(summary_folder, exist_ok=True)
-    os.makedirs(os.path.join(summary_folder, 'FASTQ Files'), exist_ok=True)
-    os.makedirs(os.path.join(summary_folder, 'variants'), exist_ok=True)
-    os.makedirs(os.path.join(summary_folder, 'variants', 'FASTQ Files'), exist_ok=True)
-
-    final_consensus = []
-    naming_info = {}
-
-    # Sort groups by size of largest member (descending)
-    sorted_groups = sorted(groups.items(),
-                          key=lambda x: max(m.size for m in x[1]),
-                          reverse=True)
-
-    for group_idx, (_, group_members) in enumerate(sorted_groups, 1):
-        # Select variants for this group
-        selected_variants = select_variants(group_members, max_variants, variant_selection, group_number=group_idx)
-
-        # Create naming for this group
-        group_naming = []
-
-        for variant_idx, variant in enumerate(selected_variants):
-            # All variants get .v suffix (primary is .v1, additional are .v2, .v3, etc.)
-            # Use rsplit to split on the LAST '-c' (specimen names may contain '-c')
-            specimen_base = variant.sample_name.rsplit('-c', 1)[0]
-            new_name = f"{specimen_base}-{group_idx}.v{variant_idx + 1}"
-
-            # Use _replace to preserve all fields while updating sample_name
-            renamed_variant = variant._replace(sample_name=new_name)
-
-            final_consensus.append(renamed_variant)
-            group_naming.append((variant.sample_name, new_name))
-
-        naming_info[group_idx] = group_naming
-
-    return final_consensus, naming_info
 
 
 def write_consensus_fastq(consensus: ConsensusInfo,
@@ -263,9 +325,11 @@ def write_consensus_fastq(consensus: ConsensusInfo,
     cluster_files = []
 
     for cluster_name in original_clusters:
-        # Look for specimen name from cluster name (e.g., "sample-c1" -> "sample")
-        if '-c' in cluster_name:
-            specimen_name = cluster_name.rsplit('-c', 1)[0]
+        # Extract specimen name from cluster name. Core emits the gid.vid suffix
+        # format (e.g., "sample-1.v2"), so trim on the last "-{digits}.v{digits}".
+        specimen_match = re.match(r'^(.+)-\d+\.v\d+$', cluster_name)
+        if specimen_match:
+            specimen_name = specimen_match.group(1)
             debug_files = fastq_lookup.get(specimen_name, [])
 
             # Get the original RiC value for this cluster
@@ -275,8 +339,9 @@ def write_consensus_fastq(consensus: ConsensusInfo,
                 continue
 
             # Filter files that match this specific cluster with exact RiC value
-            # Match the full pattern: {specimen}-c{cluster}-RiC{exact_ric}-{stage}.fastq
-            # This prevents matching multiple RiC values for the same cluster
+            # Match: {specimen}-{gid}.v{vid}-RiC{exact_ric}-{stage}.fastq.
+            # The exact RiC filter prevents matching multiple RiC values for the
+            # same cluster id.
             cluster_ric_pattern = f"{cluster_name}-RiC{original_ric.ric}-"
             matching_files = [f for f in debug_files if cluster_ric_pattern in f]
 
@@ -359,7 +424,8 @@ def write_specimen_data_files(specimen_consensus: List[ConsensusInfo],
                                fastq_dir: str,
                                fastq_lookup: Dict[str, List[str]],
                                original_consensus_lookup: Dict[str, ConsensusInfo],
-                               fasta_fields: List[FastaField]
+                               fasta_fields: List[FastaField],
+                               full_reads_by_name: Optional[Dict[str, List]] = None,
                                ) -> List[Tuple[ConsensusInfo, str]]:
     """
     Write individual FASTA and FASTQ files for a single specimen.
@@ -367,16 +433,19 @@ def write_specimen_data_files(specimen_consensus: List[ConsensusInfo],
 
     Args:
         fasta_fields: List of FastaField objects defining header format
+        full_reads_by_name: Optional map of ``-full`` sample_name -> list
+            of sampled SeqRecord reads. When present, the matching
+            ``-full`` records emit a FASTQ of these reads in place of the
+            usual cluster_debug lookup (which has no matching files for
+            the synthetic ``-full`` record).
 
     Returns:
         List of (raw_consensus, original_cluster_name) tuples for later use in summary.fasta
     """
+    full_reads_by_name = full_reads_by_name or {}
     # Generate .raw file consensuses for merged variants
     raw_file_consensuses = []
     for consensus in specimen_consensus:
-        # Skip .raw generation for .full consensus (synthetic/derived)
-        if consensus.sample_name.endswith('.full'):
-            continue
         # Only create .raw files if this consensus was actually merged
         if consensus.raw_ric and len(consensus.raw_ric) > 1:
             # Find the original cluster name from naming_info
@@ -405,19 +474,20 @@ def write_specimen_data_files(specimen_consensus: List[ConsensusInfo],
                 for raw_idx, raw_info in enumerate(contributing_infos, 1):
                     raw_name = f"{consensus.sample_name}.raw{raw_idx}"
 
-                    # Create new ConsensusInfo with .raw name but original sequence/metadata
-                    raw_consensus = ConsensusInfo(
+                    # Build .raw ConsensusInfo from the pre-merge cluster's full
+                    # field set. Mirrors the .ns/.lq pass-through treatment so
+                    # every per-cluster metric core emitted (cer_factor,
+                    # err_factor, gid/vid, err_factor raw sums for the quality
+                    # report's calibration check) is preserved on the .raw
+                    # output. Only the merge-only fields (snp_count, raw_ric,
+                    # raw_len, merge_indel_count) are reset since the .raw
+                    # represents a single pre-merge cluster.
+                    raw_consensus = raw_info._replace(
                         sample_name=raw_name,
-                        cluster_id=raw_info.cluster_id,
-                        sequence=raw_info.sequence,
-                        ric=raw_info.ric,
-                        size=raw_info.size,
-                        file_path=raw_info.file_path,
-                        snp_count=None,  # Pre-merge, no SNPs from merging
-                        primers=raw_info.primers,
-                        raw_ric=None,  # Pre-merge, not merged
-                        rid=raw_info.rid,  # Preserve read identity metrics
-                        rid_min=raw_info.rid_min,
+                        snp_count=None,
+                        raw_ric=None,
+                        raw_len=None,
+                        merge_indel_count=None,
                     )
                     raw_file_consensuses.append((raw_consensus, raw_info.sample_name))
 
@@ -429,10 +499,22 @@ def write_specimen_data_files(specimen_consensus: List[ConsensusInfo],
             f.write(f">{header}\n")
             f.write(f"{consensus.sequence}\n")
 
-    # Write FASTQ files for each final consensus containing all contributing reads
+    # Write FASTQ files for each final consensus containing all contributing reads.
+    # -full records are synthetic (no single source cluster_debug FASTQ); their
+    # sampled reads come in via full_reads_by_name and we write them directly.
     for consensus in specimen_consensus:
-        # Skip FASTQ for .full consensus (synthetic/derived, no traceable cluster reads)
-        if consensus.sample_name.endswith('.full'):
+        if consensus.sample_name in full_reads_by_name:
+            os.makedirs(fastq_dir, exist_ok=True)
+            fastq_output_path = os.path.join(
+                fastq_dir,
+                f"{consensus.sample_name}-RiC{consensus.ric}.fastq",
+            )
+            try:
+                with open(fastq_output_path, 'w') as outf:
+                    SeqIO.write(full_reads_by_name[consensus.sample_name], outf, "fastq")
+                logging.debug(f"Wrote -full FASTQ: {os.path.basename(fastq_output_path)}")
+            except Exception as e:
+                logging.warning(f"Could not write -full FASTQ for {consensus.sample_name}: {e}")
             continue
         write_consensus_fastq(consensus, merge_traceability, naming_info, fastq_dir, fastq_lookup, original_consensus_lookup)
 
@@ -447,8 +529,8 @@ def write_specimen_data_files(specimen_consensus: List[ConsensusInfo],
 
         # Write FASTQ file by finding the original cluster's FASTQ
         # Look for specimen name from original cluster name
-        if '-c' in original_cluster_name:
-            specimen_name = original_cluster_name.rsplit('-c', 1)[0]
+        specimen_name = strip_cluster_suffix(original_cluster_name)
+        if specimen_name != original_cluster_name:
             debug_files = fastq_lookup.get(specimen_name, []) if fastq_lookup else []
 
             # Filter files that match this specific cluster with exact RiC value
@@ -469,6 +551,76 @@ def write_specimen_data_files(specimen_consensus: List[ConsensusInfo],
                     logging.debug(f"Could not write .raw FASTQ for {raw_consensus.sample_name}: {e}")
 
     return raw_file_consensuses
+
+
+def _write_filtered_variant_files(
+    consensuses: List[ConsensusInfo],
+    summary_folder: str,
+    fastq_lookup: Dict[str, List[str]],
+    fasta_fields: List[FastaField],
+    marker: str,
+) -> None:
+    """Emit filtered variants to ``variants/`` using the raw-variant layout.
+
+    Writes one FASTA per record to
+    ``variants/{sample_name}.{marker}-RiC{ric}.fasta`` and a matching FASTQ
+    when the source cluster's debug FASTQ is available.
+    """
+    for consensus in consensuses:
+        tagged_name = f"{consensus.sample_name}.{marker}"
+        tagged_info = consensus._replace(sample_name=tagged_name)
+
+        output_file = os.path.join(
+            summary_folder, 'variants', f"{tagged_name}-RiC{consensus.ric}.fasta"
+        )
+        with open(output_file, 'w') as f:
+            header = format_fasta_header(tagged_info, fasta_fields)
+            f.write(f">{header}\n")
+            f.write(f"{consensus.sequence}\n")
+
+        original_cluster_name = consensus.sample_name
+        specimen_name = strip_cluster_suffix(original_cluster_name)
+        if specimen_name == original_cluster_name:
+            continue
+        debug_files = fastq_lookup.get(specimen_name, []) if fastq_lookup else []
+        cluster_ric_pattern = f"{original_cluster_name}-RiC{consensus.ric}-"
+        matching_files = [f for f in debug_files if cluster_ric_pattern in f]
+        if not matching_files:
+            continue
+
+        fastq_output_path = os.path.join(
+            summary_folder, 'variants', 'FASTQ Files',
+            f"{tagged_name}-RiC{consensus.ric}.fastq"
+        )
+        try:
+            with open(fastq_output_path, 'wb') as outf:
+                for input_file in matching_files:
+                    if os.path.exists(input_file) and os.path.getsize(input_file) > 0:
+                        with open(input_file, 'rb') as inf:
+                            shutil.copyfileobj(inf, outf)
+            logging.debug(f"Wrote {marker} FASTQ: {os.path.basename(fastq_output_path)}")
+        except Exception as e:
+            logging.debug(f"Could not write {marker} FASTQ for {tagged_name}: {e}")
+
+
+def write_ns_variant_files(ns_consensuses: List[ConsensusInfo],
+                           summary_folder: str,
+                           fastq_lookup: Dict[str, List[str]],
+                           fasta_fields: List[FastaField]) -> None:
+    """Emit CER-filtered (ns) variants to variants/ using the raw-variant layout."""
+    _write_filtered_variant_files(
+        ns_consensuses, summary_folder, fastq_lookup, fasta_fields, marker='ns'
+    )
+
+
+def write_lq_variant_files(lq_consensuses: List[ConsensusInfo],
+                           summary_folder: str,
+                           fastq_lookup: Dict[str, List[str]],
+                           fasta_fields: List[FastaField]) -> None:
+    """Emit err_factor-filtered (lq) variants to variants/ using the raw-variant layout."""
+    _write_filtered_variant_files(
+        lq_consensuses, summary_folder, fastq_lookup, fasta_fields, marker='lq'
+    )
 
 
 def build_fastq_lookup_table(source_dir: str = ".") -> Dict[str, List[str]]:
@@ -502,9 +654,9 @@ def build_fastq_lookup_table(source_dir: str = ".") -> Dict[str, List[str]]:
             selected_stage = "unknown"
 
         # Use regex to robustly parse the filename pattern
-        # Pattern: {specimen}-c{cluster}-RiC{size}-{stage}.fastq
+        # Pattern: {specimen}-{gid}.v{vid}-RiC{size}-{stage}.fastq
         # Where stage can be: sampled, reads, untrimmed, or other variants
-        pattern = re.compile(r'^(.+)-c(\d+)-RiC(\d+)-([a-z]+)\.fastq$')
+        pattern = re.compile(r'^(.+)-(\d+\.v\d+)-RiC(\d+)-([a-z]+)\.fastq$')
 
         for fastq_path in debug_files:
             filename = os.path.basename(fastq_path)
@@ -697,14 +849,16 @@ def load_existing_specimen_outputs(summary_dir: str) -> List[ConsensusInfo]:
 
         with open(fasta_file, 'r') as f:
             for record in SeqIO.parse(f, "fasta"):
-                sample_name, ric, size, primers, rid, rid_min, raw_ric, raw_len, snp_count = \
+                (sample_name, ric, size, primers, rid, rid_min,
+                 raw_ric, raw_len, snp_count, cer_factor, err_factor,
+                 group_rank, variant_rank) = \
                     parse_consensus_header(f">{record.description}")
 
                 if not sample_name:
                     continue
 
-                cluster_match = re.search(r'-c(\d+)$', sample_name)
-                cluster_id = cluster_match.group(0) if cluster_match else sample_name
+                cluster_match = re.search(r'-(\d+\.v\d+)$', sample_name)
+                cluster_id = cluster_match.group(1) if cluster_match else sample_name
 
                 consensus_info = ConsensusInfo(
                     sample_name=sample_name,
@@ -719,6 +873,10 @@ def load_existing_specimen_outputs(summary_dir: str) -> List[ConsensusInfo]:
                     raw_len=raw_len,
                     rid=rid,
                     rid_min=rid_min,
+                    cer_factor=cer_factor,
+                    err_factor=err_factor,
+                    group_rank=group_rank,
+                    variant_rank=variant_rank,
                 )
                 consensus_list.append(consensus_info)
 
@@ -775,10 +933,7 @@ def write_output_files(final_consensus: List[ConsensusInfo],
             multiple_id = specimen_counters[base_name]
             writer.writerow([consensus.sample_name, len(consensus.sequence), consensus.ric, multiple_id])
             unique_samples.add(base_name)
-            # Exclude .full from total RiC to avoid double-counting
-            # (.full aggregates reads already counted in merged variants)
-            if not consensus.sample_name.endswith('.full'):
-                total_ric += consensus.ric
+            total_ric += consensus.ric
 
         writer.writerow([])
         writer.writerow(['Total Unique Samples', len(unique_samples)])

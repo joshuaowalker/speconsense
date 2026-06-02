@@ -9,12 +9,11 @@
 # The settings prioritize keeping all potential biological signal for
 # manual review, at the cost of more output variants.
 
-speconsense-version: "0.7.*"
+speconsense-version: "0.8.*"
 description: "High-recall settings for herbarium specimens with degraded DNA"
 
 speconsense:
   min-identity: 0.85            # Lower threshold for degraded DNA
-  # outlier-identity: auto      # Auto-calculated as 0.925 from min-identity
   min-cluster-ratio: 0          # Keep all clusters
   min-size: 3                   # Lower minimum for degraded samples
   min-variant-frequency: 0.05   # More sensitive variant detection (5%)
@@ -23,3 +22,5 @@ speconsense:
 
 speconsense-summarize:
   min-ric: 3                    # Accept lower-support consensus
+  min-cer-factor: 0             # Disable CER filter; keep all variants for review
+  max-err-factor: 0             # Disable err_factor filter; degraded DNA inflates it

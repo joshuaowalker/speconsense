@@ -119,13 +119,71 @@ class RidMinField(FastaField):
         return None
 
 
+class CerFactorField(FastaField):
+    def __init__(self):
+        super().__init__('cer_factor', 'Per-position CER factor (q*/q_ctx)')
+
+    def format_value(self, consensus: ConsensusInfo) -> Optional[str]:
+        if consensus.cer_factor is None:
+            return None
+        if consensus.cer_factor == float('inf'):
+            return "cer_factor=inf"
+        return f"cer_factor={consensus.cer_factor:.3f}"
+
+
+class ErrFactorField(FastaField):
+    def __init__(self):
+        super().__init__('err_factor', 'Cluster-wide observed/q_ctx-expected disagreement ratio')
+
+    def format_value(self, consensus: ConsensusInfo) -> Optional[str]:
+        if consensus.err_factor is None:
+            return None
+        return f"err_factor={consensus.err_factor:.3f}"
+
+
+class GroupFrequencyField(FastaField):
+    """Variant size as a percentage of the conflation-aware identity bucket.
+
+    Denominator is the sum of ``size`` over every record (passed + ``.ns`` +
+    ``.lq``) in the same post-conflation bucket — i.e., for cross-primer-
+    conflated groups, the merged variant is measured "in the context of the
+    merged groups." Suppressed when the denominator is unknown (legacy
+    inputs lacking ``gid=`` headers).
+    """
+
+    def __init__(self):
+        super().__init__('group_frequency', 'Variant size as % of identity bucket total')
+
+    def format_value(self, consensus: ConsensusInfo) -> Optional[str]:
+        if not consensus.group_size_total:
+            return None
+        return f"group_frequency={consensus.size / consensus.group_size_total * 100:.1f}"
+
+
+class GlobalFrequencyField(FastaField):
+    """Variant size as a percentage of the specimen's total presampled reads.
+
+    Denominator is ``total_input_reads`` from the per-specimen metadata JSON
+    — the post-presample-cap count actually fed into clustering. Suppressed
+    when the metadata is missing or doesn't carry that field.
+    """
+
+    def __init__(self):
+        super().__init__('global_frequency', 'Variant size as % of presampled specimen total')
+
+    def format_value(self, consensus: ConsensusInfo) -> Optional[str]:
+        if not consensus.global_size_total:
+            return None
+        return f"global_frequency={consensus.size / consensus.global_size_total * 100:.1f}"
+
+
 class GroupField(FastaField):
     def __init__(self):
         super().__init__('group', 'Variant group number')
 
     def format_value(self, consensus: ConsensusInfo) -> Optional[str]:
-        # Extract from sample_name (e.g., "...-1.v1", "...-2.v1.raw1", or "...-1.full")
-        match = re.search(r'-(\d+)(?:\.v\d+(?:\.raw\d+)?|\.full)$', consensus.sample_name)
+        # Extract from sample_name (e.g., "...-1.v1", "...-2.v1.raw1")
+        match = re.search(r'-(\d+)\.v\d+(?:\.raw\d+)?$', consensus.sample_name)
         if match:
             return f"group={match.group(1)}"
         return None
@@ -136,10 +194,8 @@ class VariantField(FastaField):
         super().__init__('variant', 'Variant identifier within group')
 
     def format_value(self, consensus: ConsensusInfo) -> Optional[str]:
-        # Extract from sample_name (e.g., "...-1.v1" -> "v1", "...-1.v1.raw1" -> "v1", "...-1.full" -> "full")
+        # Extract from sample_name (e.g., "...-1.v1" -> "v1", "...-1.v1.raw1" -> "v1")
         match = re.search(r'\.(v\d+)(?:\.raw\d+)?$', consensus.sample_name)
-        if not match:
-            match = re.search(r'\.(full)$', consensus.sample_name)
         if match:
             return f"variant={match.group(1)}"
         return None
@@ -156,17 +212,21 @@ FASTA_FIELDS = {
     'ambig': AmbigField(),
     'rid': RidField(),
     'rid_min': RidMinField(),
+    'cer_factor': CerFactorField(),
+    'err_factor': ErrFactorField(),
     'primers': PrimersField(),
     'group': GroupField(),
     'variant': VariantField(),
+    'group_frequency': GroupFrequencyField(),
+    'global_frequency': GlobalFrequencyField(),
 }
 
 # Preset definitions
 FASTA_FIELD_PRESETS = {
     'default': ['size', 'ric', 'rawric', 'rawlen', 'snp', 'ambig', 'primers'],
     'minimal': ['size', 'ric'],
-    'qc': ['size', 'ric', 'length', 'rid', 'ambig'],
-    'full': ['size', 'ric', 'length', 'rawric', 'rawlen', 'snp', 'ambig', 'rid', 'primers'],
+    'qc': ['size', 'ric', 'length', 'rid', 'ambig', 'cer_factor', 'err_factor'],
+    'full': ['size', 'ric', 'length', 'rawric', 'rawlen', 'snp', 'ambig', 'rid', 'cer_factor', 'err_factor', 'primers', 'group_frequency', 'global_frequency'],
     'id-only': [],
 }
 

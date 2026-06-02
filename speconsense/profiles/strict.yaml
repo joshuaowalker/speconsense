@@ -9,13 +9,11 @@
 # The settings prioritize quality over completeness, filtering out
 # low-support variants and limiting output to well-supported sequences.
 
-speconsense-version: "0.7.*"
+speconsense-version: "0.8.*"
 description: "High-precision settings for confident results"
 
 speconsense:
   min-identity: 0.95           # High initial clustering identity
-  outlier-identity: 0.98       # Discard reads with high mismatch
-  min-cluster-ratio: 0.05      # Filter more aggressively (5% minimum)
   min-size: 10                 # Require strong cluster support
   min-variant-frequency: 0.25  # Less sensitive to variants (25%)
   disable-ambiguity-calling: true  # Don't call ambiguities
@@ -25,3 +23,5 @@ speconsense:
 speconsense-summarize:
   min-ric: 5                   # Higher consensus threshold
   disable-merging: true        # Skip merging entirely - preserve all variants
+  select-min-size-ratio: 0.05  # Drop weak minor variants per identity group
+                               # (per-group; doesn't suppress secondary primer pairs)

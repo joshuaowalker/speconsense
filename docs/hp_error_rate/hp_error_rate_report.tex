@@ -1,0 +1,1386 @@
+% Upstream source: ~/mm/analysis/hp_error_rate/hp_error_rate_report.tex
+% This copy is distributed alongside speconsense for convenient access; edits
+% should be made upstream and synced here, not the other way around.
+\documentclass[11pt]{article}
+
+\usepackage[margin=1in]{geometry}
+\usepackage{amsmath,amssymb}
+\usepackage{graphicx}
+\usepackage{booktabs}
+\usepackage{hyperref}
+\usepackage[numbers]{natbib}
+\usepackage{textcomp}
+\usepackage{multirow}
+\usepackage{lineno}
+
+\title{Homopolymer error rate analysis for nanopore amplicon sequencing}
+\author{Josh Walker}
+\date{Internal review draft, May 2026 (commit 5d33d1d)}
+
+\begin{document}
+\maketitle
+\linenumbers
+
+\begin{abstract}
+We quantify homopolymer (hp) length error rates in Oxford Nanopore amplicon
+sequencing by base and run length, using two independent sequencing runs of
+fungal ITS amplicons spanning two basecaller generations (Dorado SUP v3.5 and
+v5.0) on R10.4.1 chemistry. After filtering biological variants via
+statistical outlier and bimodal distribution detection, we find that implied
+per-position error rates at hp lengths 1--5 are consistently below 1.4\% for
+Dorado v5.0 and below 2.3\% for v3.5---comparable to the non-hp substitution
+baseline. Error rates rise steeply at lengths 6+, with G/C 2--4$\times$ worse
+than A/T. We also investigate substitution errors at hp boundaries (interface
+positions) and find no evidence of excess artifactual variation: well-supported
+variants at interface positions occur at or below the rate of non-hp variants
+(rate ratios of 1.03 [95\% CI: 0.88--1.19] for v3.5 and 0.88 [0.79--0.99] for
+v5.0). These results support extending
+speconsense's critical error rate (CER) framework to evaluate hp-position
+variants at lengths 1--5 statistically, rather than discarding them
+unconditionally via blanket homopolymer normalization. The CER extension should
+operate at the run level, using empirical error distributions by (base, length)
+context; the per-position rate serves as a compact parameterization for
+cross-length comparison, not a mechanistic model of per-base independence.
+\end{abstract}
+
+\section{Introduction}
+
+\subsection{Homopolymer errors in nanopore sequencing}
+
+Homopolymer (hp) length errors are the dominant systematic error mode in
+nanopore sequencing. Approximately 47\% of all nanopore sequencing errors
+originate in homopolymer regions~\cite{delahaye2021}, and even with the latest
+chemistry and basecalling, homopolymer-length indels account for 56\% of
+remaining errors in state-of-the-art genome assemblies~\cite{wick2025}. The
+underlying mechanism is well understood: nanopore sequencing infers base
+identity from ionic current changes as DNA translocates through the pore, but
+consecutive identical bases produce no current change, making the length of a
+homopolymer run difficult to determine from signal alone.
+
+While the qualitative understanding that nanopore sequencing struggles with
+homopolymers is widespread, quantitative characterization of error rates by
+homopolymer length and base has been limited. The most comprehensive published
+data comes from two studies:
+
+\begin{itemize}
+\item \textbf{Sereika et al.\ (2022)}~\cite{sereika2022} characterized
+  per-length, per-base hp accuracy at both read and assembly level using a Zymo
+  mock community, with Illumina-polished PacBio HiFi assemblies as ground
+  truth. Their comparison of R9.4.1 and R10.4 chemistry demonstrated a
+  20--30~percentage point improvement in read-level accuracy at hp lengths 7--9
+  with the newer dual reader head.
+
+\item \textbf{Ni et al.\ (2023)}~\cite{ni2023} independently confirmed these
+  trends on human whole genome data, benchmarking R9.4.1 and R10.4 against a
+  T2T reference genome.
+\end{itemize}
+
+Both studies focused primarily on hp lengths $\geq 5$, where errors are
+dramatic and consequential for genome assembly. Short homopolymers (lengths
+1--4) were noted to be highly accurate ({>}95\% at read level) but were not
+characterized in detail, as they were not considered problematic for typical
+applications.
+
+The rapid pace of improvement in nanopore basecalling further limits the
+applicability of published data. Sereika's R10.4 results used Guppy SUP
+basecalling; our data spans two basecaller generations (Dorado SUP v3.5.x and
+v5.0.0) on R10.4.1 chemistry. No published study provides per-length hp error
+rates for either configuration.
+
+\subsection{The speconsense problem}
+
+This gap in quantitative understanding has practical consequences for nanopore
+amplicon analysis. Speconsense's variant phasing pipeline uses homopolymer
+normalization to avoid calling false variants caused by hp length errors.
+Currently, \emph{all} homopolymer length differences are treated as
+insignificant---a difference between \texttt{ATC} and \texttt{ATTC} is treated
+identically to a difference between \texttt{AAAAAAAAA} and
+\texttt{AAAAAAAAAA}. This is conservative but lossy: it discards variants that
+differ only at homopolymer positions, even when those differences are very
+likely to be biological.
+
+The loss is not merely theoretical. At short hp lengths (1--4), the published
+literature suggests read-level accuracy exceeds 95\%, meaning that a length
+difference at these positions is far more likely to reflect real biology than
+sequencing error. Yet speconsense discards this information.
+
+Speconsense's critical error rate (CER) framework~\cite{walker2026} provides a
+statistical approach for evaluating whether an observed variant is plausibly
+explained by sequencing error, but it currently applies only to non-hp
+positions. Extending the CER framework to hp positions requires quantitative
+error rate estimates by hp length and base---exactly the data that is missing
+from the published literature for current chemistry. The companion
+report~\cite{cer_practice} integrates the rates derived in this analysis into
+a context-aware CER framework and its implementation in speconsense; the
+present report provides the empirical foundation.
+
+\subsection{This analysis}
+
+This analysis quantifies nanopore hp error rates by homopolymer length and
+base, using real amplicon data from two independent sequencing runs spanning
+two basecaller generations (Dorado SUP v3.5 and v5.0), to determine whether
+the CER framework can be extended to evaluate hp-position variants
+statistically rather than discarding them unconditionally. We also investigate
+whether substitution errors at homopolymer boundaries (interface positions)
+require special treatment, or can be evaluated using the same framework as
+non-hp positions.
+
+
+\section{Methods}
+
+\subsection{Data}
+
+We analyzed specimens from sequencing runs of fungal ITS amplicons
+(${\sim}700$~bp), all produced by Mycota Lab (Hoosier Mushroom Society)
+following the protocol of Russell~\cite{russell2023} and sequenced on
+Oxford Nanopore R10.4.1 E8.2 chemistry. Reads were demultiplexed with
+specimux and clustered with speconsense using
+\texttt{-{}-presample~0 -{}-max-sample-size~10000} to avoid quality-sorted
+presampling bias.
+
+\begin{itemize}
+\item \textbf{ont37}: 94 qualifying specimens from 651 with c1 MSAs
+  (environmental specimens). Basecalled with Dorado SUP v3.5.1 (70\% of reads)
+  and v3.5.2 260bps (30\%), sequenced February 2024. Two sample IDs (ONT037
+  and ONT37B) were combined; both contain reads from both basecaller models.
+\item \textbf{ont98}: 245 qualifying specimens from 837 total (environmental
+  specimens). Basecalled with Dorado SUP v5.0.0, sequenced August 2025.
+\end{itemize}
+
+For ont98, qualifying specimens had a primary cluster with $\geq 200$ reads
+representing $\geq 70\%$ of total reads. For ont37, thresholds were relaxed
+to $\geq 100$ reads and $\geq 50\%$ dominance due to lower overall sequencing
+depth (median c1 read count of 59 vs 200+ for ont98).
+
+\subsection{HP length extraction}
+
+For each specimen, the SPOA multiple sequence alignment (MSA) was parsed to
+extract called hp lengths at each hp run in the consensus. The extraction
+algorithm:
+
+\begin{enumerate}
+\item Identify maximal hp runs in the ungapped consensus sequence.
+\item For each run, locate the flanking non-hp bases (``anchors'') in the MSA.
+\item For each read, count consecutive instances of the hp base between the
+  anchors in the gapped alignment. This gives the read's called hp length for
+  that run.
+\end{enumerate}
+
+\subsection{Ground truth determination}
+
+Rather than using the SPOA consensus hp length as ground truth (which can be
+biased by SPOA's heaviest-bundle algorithm), we used the \textbf{empirical
+mode} of called hp lengths across all reads at each position. At depths of
+200+ reads on R10.4.1 SUP, the mode is the correct length for hp $\leq
+{\sim}9$~\cite{sereika2022}.
+
+\subsection{Error classification}
+
+At each hp run, reads were classified as:
+
+\begin{itemize}
+\item \textbf{Correct}: called length equals the mode
+\item \textbf{HP deletion ($-k$)}: called length is $k$ bases shorter than the mode
+\item \textbf{HP insertion ($+k$)}: called length is $k$ bases longer than the mode
+\item \textbf{Interface substitution}: a base within the hp region is replaced
+  by an adjacent flanking base (see Section~\ref{sec:interface})
+\item \textbf{Other substitution}: a non-flanking base appears within the hp region
+\item \textbf{Complex}: multiple error types within the hp region
+\end{itemize}
+
+Non-hp positions (singletons not adjacent to any run) were analyzed separately
+as a calibration baseline.
+
+\subsection{Scope of measurement}
+
+The error rates reported here are not raw nanopore sequencing error rates.
+They are \textbf{effective error rates at the post-clustering stage} of the
+speconsense pipeline: reads have been demultiplexed, clustered by MCL, and
+aligned with SPOA before analysis. Speconsense's \texttt{-{}-min-identity}
+parameter controls a quality filter during clustering that excludes reads
+below a pairwise identity threshold to the cluster consensus. Reads that fail
+this filter are never included in the MSA and therefore do not contribute to
+the error rates we measure.
+
+This is the correct quantity for parameterizing the CER framework, which
+operates on the same post-clustering MSA. The effective error rate is what
+determines whether an observed variant in a speconsense cluster is plausibly
+explained by sequencing error. However, it means that our error rates are
+conditioned on speconsense's clustering parameters and are not directly
+comparable to raw read-level error rates reported in the literature.
+
+To assess the sensitivity of our results to this filtering, we repeated the
+analysis on ont37 and ont98 with \texttt{-{}-min-identity~0.85} (vs the
+default of 0.90), which admits more divergent reads into clusters. Results are
+reported in Section~\ref{sec:identity_sensitivity}.
+
+
+\section{Results (ont98)}
+
+\subsection{Dataset summary}
+
+\begin{table}[h]
+\centering
+\begin{tabular}{lr}
+\toprule
+Metric & Value \\
+\midrule
+Specimens analyzed & 245 \\
+Total HP runs & 129,673 \\
+Total read-level HP observations & 83,429,870 \\
+Non-HP position observations & 60,059,474 \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\subsection{Non-HP error rates (calibration)}
+
+\begin{table}[h]
+\centering
+\begin{tabular}{lr}
+\toprule
+Error Type & Rate \\
+\midrule
+Substitution & 0.59\% \\
+Deletion & 0.40\% \\
+Insertion & 0.68\% \\
+\textbf{Total (sub + del)} & \textbf{0.99\%} \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+These rates are consistent with R10.4.1 SUP read accuracy of ${\sim}99\%$,
+confirming the calibration baseline.
+
+\subsection{HP error rates by base and length}
+
+Table~\ref{tab:hp_error} shows the fraction of reads calling the correct hp
+length (mode), and the fraction with $\pm 1$ or larger deviations. Only
+contexts with $\geq 100$ observations are shown.
+
+\begin{table}[h]
+\centering
+\small
+\caption{HP error rates by base and length (ont98, raw).}
+\label{tab:hp_error}
+\begin{tabular}{llrrrrrr}
+\toprule
+Base & Length & N runs & N obs & Correct & Del ($-1$) & Ins ($+1$) & $\pm 2{+}$ \\
+\midrule
+\multirow{5}{*}{A}
+  & 1 & 20,114 & 12,930,648 & 99.32\% & 0.55\% & 0.12\% & 0.01\% \\
+  & 2 & 8,479 & 5,487,156 & 98.25\% & 1.45\% & 0.21\% & 0.10\% \\
+  & 3 & 1,644 & 1,067,803 & 97.26\% & 2.13\% & 0.29\% & 0.32\% \\
+  & 4 & 595 & 378,225 & 96.15\% & 2.44\% & 0.41\% & 1.00\% \\
+  & 5 & 93 & 56,312 & 92.92\% & 4.57\% & 1.03\% & 1.48\% \\
+\midrule
+\multirow{5}{*}{T}
+  & 1 & 24,719 & 15,845,528 & 99.30\% & 0.54\% & 0.15\% & 0.01\% \\
+  & 2 & 7,337 & 4,770,094 & 98.05\% & 1.60\% & 0.24\% & 0.10\% \\
+  & 3 & 2,927 & 1,852,010 & 96.74\% & 2.53\% & 0.37\% & 0.37\% \\
+  & 4 & 657 & 430,793 & 95.60\% & 3.03\% & 0.60\% & 0.77\% \\
+  & 5 & 248 & 163,547 & 93.70\% & 3.89\% & 0.99\% & 1.42\% \\
+\midrule
+\multirow{5}{*}{C}
+  & 1 & 24,848 & 15,986,540 & 99.21\% & 0.69\% & 0.09\% & 0.00\% \\
+  & 2 & 4,770 & 3,053,272 & 98.44\% & 1.16\% & 0.26\% & 0.14\% \\
+  & 3 & 999 & 647,920 & 96.92\% & 2.15\% & 0.53\% & 0.40\% \\
+  & 4 & 309 & 189,751 & 95.47\% & 3.00\% & 0.85\% & 0.68\% \\
+  & 5 & 55 & 36,493 & 90.54\% & 5.60\% & 1.87\% & 1.99\% \\
+\midrule
+\multirow{5}{*}{G}
+  & 1 & 23,491 & 15,095,593 & 99.31\% & 0.60\% & 0.08\% & 0.01\% \\
+  & 2 & 6,858 & 4,476,352 & 98.38\% & 1.25\% & 0.21\% & 0.16\% \\
+  & 3 & 923 & 576,762 & 96.74\% & 2.26\% & 0.50\% & 0.50\% \\
+  & 4 & 245 & 147,437 & 93.99\% & 4.25\% & 0.81\% & 0.96\% \\
+  & 5 & 132 & 86,883 & 91.01\% & 5.58\% & 1.73\% & 1.68\% \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+Extended results for hp lengths 6--14 (all bases) are provided in the
+supplementary tables. Key trends at longer lengths: accuracy drops to
+67--91\% at length~7, 63--86\% at length~8, and below 62\% at length~10.
+
+\subsection{Implied per-position error rate}
+
+The run-level fraction correct compounds over the length of the hp run. To
+compare error rates across different hp lengths and against the non-hp
+baseline, we compute the implied per-position error rate $p$ such that
+$(1-p)^L$ equals the observed fraction correct. This decomposition is a
+convenience for cross-length comparison, not a mechanistic model: hp length
+errors are signal-level events affecting the entire run at once, not
+independent per-position errors. The per-position rate should be understood as
+a compact parameterization of the run-level error probability, useful for
+normalizing out the trivial effect of run length on aggregate accuracy.
+
+\begin{table}[h]
+\centering
+\caption{Pooled per-position error rates by HP length (ont98, raw).}
+\label{tab:per_pos}
+\begin{tabular}{rrrr}
+\toprule
+Length & Run Error & Per-pos Rate & vs Non-HP (0.99\%) \\
+\midrule
+1 & 0.72\% & 0.72\% & $0.72\times$ \\
+2 & 1.74\% & 0.87\% & $0.88\times$ \\
+3 & 3.10\% & 1.04\% & $1.05\times$ \\
+4 & 4.45\% & 1.13\% & $1.14\times$ \\
+5 & 7.45\% & 1.54\% & $1.55\times$ \\
+6 & 11.03\% & 1.93\% & $1.95\times$ \\
+7 & 19.22\% & 3.00\% & $3.03\times$ \\
+8 & 28.92\% & 4.18\% & $4.22\times$ \\
+9 & 33.01\% & 4.35\% & $4.40\times$ \\
+10 & 38.13\% & 4.69\% & $4.73\times$ \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\textbf{Key finding}: At hp lengths 1--4, the implied per-position error rate
+is comparable to or below the non-hp baseline (0.7--1.1\% vs 0.99\%). This
+means that the run-level error probability at these lengths is within the range
+that would be expected if the per-position error rate were similar to the
+non-hp baseline---i.e., short hp runs are not inherently noisier than non-hp
+positions, once the effect of run length is accounted for. At lengths 5+, the
+implied per-position rate rises above the baseline, reaching
+2--5$\times$ at lengths 7--9, reflecting the increasing difficulty of
+signal-level hp length estimation. (This per-position decomposition is a
+comparison metric, not a claim about the error mechanism; the full run-level
+error distributions are in Table~\ref{tab:hp_error} and in the supplementary
+\texttt{hp\_distributions.tsv} tables.)
+
+\subsection{Qualitative observations}
+
+\begin{enumerate}
+\item \textbf{Short hp runs (length 1--4) have very low error rates.} At
+  length~1 (singletons), the hp ``error'' rate of 0.55--0.69\% is comparable to
+  the non-hp baseline of 0.99\%. At length~4, accuracy is still 94--96\%. These
+  positions are strong candidates for CER-based variant recovery.
+
+\item \textbf{Accuracy degrades monotonically with length, with a steep drop at
+  length 7--8.} At length~7, accuracy ranges from 67\% (G) to 91\% (T). By
+  length~10, accuracy is 54--62\%---below the threshold where the mode is
+  reliably the correct length.
+
+\item \textbf{G/C homopolymers are harder than A/T.} G is consistently worst
+  across all lengths. At length~5: A~92.9\%, T~93.7\%, C~90.5\%, G~91.0\%.
+  The gap widens at longer lengths.
+
+\item \textbf{Deletions dominate over insertions at all lengths.} The
+  deletion\,:\,insertion ratio is 3--5\,:\,1 for moderate hp lengths (4--7),
+  consistent with the known nanopore bias toward underestimating hp length.
+
+\item \textbf{Our error rates are substantially better than Sereika et
+  al.~(2022).} At length~8, Sereika reported ${\sim}$45--55\% correct for
+  R10.4 A/T reads; we observe 68--86\%. This improvement likely reflects the
+  newer basecaller (Dorado SUP v5.0.0 vs Guppy SUP) and possibly chemistry
+  refinements (R10.4.1 vs R10.4), though the comparison is not exact: our
+  effective error rates are conditioned on speconsense's post-clustering MSA
+  (Section~2.5), whereas Sereika measured raw read-level accuracy against a
+  known reference.
+\end{enumerate}
+
+\subsection{SPOA consensus bias}
+
+Only 9 out of 129,673 hp runs (0.007\%) showed a discrepancy between the SPOA
+consensus hp length and the empirical mode. The heaviest-bundle bias is
+negligible in this dataset, likely because the read depths are high enough that
+the mode strongly dominates.
+
+\subsection{Candidate biological hp variants}
+
+The bimodal distribution detector flagged 106 positions (0.08\% of all hp runs)
+where a second hp length was present at rates significantly above the error
+model prediction. Many of these show approximately 50:50 splits consistent with
+heterozygous positions---variants that speconsense currently discards.
+
+
+\section{Interface Homopolymers}
+\label{sec:interface}
+
+\subsection{Definition}
+
+An ``interface homopolymer'' substitution occurs at the boundary between a
+homopolymer run and an adjacent base, where the substitution produces a
+sequence that can be reinterpreted as a hp length change on both adjacent runs.
+For example:
+
+\begin{verbatim}
+    Consensus: ...TT|CC|TT...
+    Variant:   ...TT|CT|TT...  (C->T at position 2 of the CC run)
+\end{verbatim}
+
+This can equivalently be read as: the T-run extended from 2 to 3, and the
+C-run shortened from 2 to 1. The adjusted-identity library treats this as
+hp-equivalent (0~edits), so speconsense does not detect it as a variant.
+
+\subsection{Prevalence}
+
+We classified every read observation at hp runs (length $\geq 2$) by error
+type:
+
+\begin{table}[h]
+\centering
+\begin{tabular}{lrr}
+\toprule
+Error Type & Read Observations & Rate \\
+\midrule
+Correct & 22,585,613 & 95.77\% \\
+Pure HP deletion & 249,385 & 1.06\% \\
+Pure HP insertion & ${\sim}$100,000 & 0.42\% \\
+\textbf{Interface substitution} & \textbf{228,035} & \textbf{0.97\%} \\
+Other substitution & 122,236 & 0.52\% \\
+Complex & 47,000 & 0.20\% \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+Interface hp substitutions occur at \textbf{nearly the same rate as pure hp
+length errors} (0.97\% vs 1.06\%).
+
+\subsection{Expanded analysis: interface variant rate vs non-HP baseline}
+
+To determine whether interface hp substitutions are primarily signal-level
+artifacts or biological variants, we conducted an expanded analysis across 663
+specimens (all specimens with $\geq 100$ total reads, removing the original
+selection bias toward low-variation specimens).
+
+\textbf{Methodology}: For each specimen, reads from all same-organism clusters
+($\geq 90\%$ pairwise identity to the primary cluster consensus) were merged
+and re-aligned with SPOA to produce a combined MSA. This ensures that
+biological non-HP substitutions---which speconsense phases into separate
+clusters---are visible alongside interface HP substitutions, enabling a fair
+comparison. Each consensus position was classified as non-HP, HP interface
+(first or last base of a run of length $\geq 2$ adjacent to a different base),
+or HP interior.
+
+The key metric is the \textbf{fraction of positions showing a well-supported
+variant} (minor allele frequency $\geq$ threshold), compared across position
+classes. If interface positions produce artifactual variants due to
+signal-level boundary confusion, they should show an excess of well-supported
+variants relative to non-HP positions.
+
+\begin{table}[h]
+\centering
+\caption{Variant position rates by position class (ont98, 663 specimens).}
+\label{tab:interface_ont98}
+\begin{tabular}{lrrrl}
+\toprule
+MAF Threshold & Non-HP & HP Interface & HP Interior & Ratio \\
+\midrule
+$\geq 10\%$ & 0.319\% & 0.276\% & 0.328\% & 0.87 \\
+$\geq 20\%$ & 0.265\% & 0.231\% & 0.259\% & 0.87 \\
+$\geq 30\%$ & 0.219\% & 0.184\% & 0.199\% & 0.84 \\
+$\geq 40\%$ & 0.158\% & 0.133\% & 0.132\% & 0.84 \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+The rate ratio of interface to non-HP variant positions at MAF $\geq 20\%$ is
+\textbf{0.880 [95\% bootstrap CI: 0.785--0.988]}, with the confidence interval
+entirely below 1.0. Interface positions produce well-supported variants at a
+slightly \emph{lower} rate than non-HP positions.
+
+Of the 457 interface positions with MAF $\geq 20\%$, only 173 (38\%) had an
+interface-compatible top allele (i.e., the variant base matched the adjacent
+run's base). This is close to the 33\% expected by chance when there are three
+possible alternative bases, indicating no enrichment of boundary-confusion
+substitutions among well-supported variants.
+
+\textbf{Conclusion}: There is no evidence that HP interface positions generate
+artifactual well-supported variants at rates above the non-HP baseline.
+
+
+\section{Biological variant filtering}
+\label{sec:bio_filtering}
+
+The raw error rates above include HP positions where the observed variation is
+biological (genuine length polymorphisms) rather than sequencing error. The
+filtered analyses in subsequent sections (and the re-estimation in
+Section~\ref{sec:reestimation}) identify and exclude these positions using two
+detectors:
+
+\begin{itemize}
+\item \textbf{Statistical outliers}: HP positions where the error rate
+  significantly exceeds the pooled average for that context (one-sided binomial
+  test, Bonferroni-corrected $\alpha = 0.01$).
+\item \textbf{Bimodal positions}: HP positions where a second allele is present
+  at ${>}\,2\times$ the expected error rate and ${>}\,10\%$ of reads.
+\end{itemize}
+
+For ont98, the detectors flag 1,656 outlier positions and 106 bimodal positions
+(1,657 total excluded, 1.3\% of HP runs). The filtered per-position rates are
+referenced as ``ont98 filtered'' in the cross-basecaller comparison
+(Section~\ref{sec:older_basecaller}) and as the input distribution for
+re-estimation (Section~\ref{sec:reestimation}).
+
+
+\section{Older Basecaller Comparison (ont37)}
+\label{sec:older_basecaller}
+
+\subsection{Dataset}
+
+To assess the effect of basecaller version on HP error rates, we analyzed
+ont37, a sequencing run from February~2024 basecalled with Dorado SUP v3.5.x
+(vs v5.0.0 for ont98). The data was combined from two sample IDs (ONT037 and
+ONT37B), with 70\% of reads basecalled using the standard SUP v3.5.1 model
+and 30\% using the 260bps SUP v3.5.2 model. Both datasets use R10.4.1 E8.2
+chemistry.
+
+Due to lower sequencing depth (median c1 read count of 59), qualifying
+thresholds were relaxed to $\geq 100$ primary reads and $\geq 50\%$ dominance,
+yielding 94 qualifying specimens from 651 with c1 MSAs. Total filtered HP
+observations: 10.2~million (vs 82.0~million for ont98).
+
+\subsection{Non-HP error rates}
+
+\begin{table}[h]
+\centering
+\caption{Non-HP error rates across both datasets.}
+\label{tab:nonhp_all}
+\begin{tabular}{lrrrr}
+\toprule
+Dataset & Substitution & Deletion & Insertion & Total \\
+\midrule
+ont37 (v3.5) & 1.44\% & 0.99\% & 1.54\% & 3.97\% \\
+ont98 (v5.0) & 0.59\% & 0.40\% & 0.68\% & 1.67\% \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+The ont37 non-HP total error rate of 3.97\% is 2.4$\times$ higher than ont98.
+All error classes are elevated: substitutions 2.4$\times$, deletions
+2.5$\times$, and insertions 2.3$\times$.
+
+\subsection{HP error rates and biological variant filtering}
+
+After biological variant filtering (817 outlier positions, 664 bimodal
+positions, 1,092 total excluded = 2.2\%), the filtered per-position HP error
+rates across both datasets are:
+
+\begin{table}[h]
+\centering
+\caption{Filtered per-position HP error rates: cross-basecaller comparison.}
+\label{tab:three_run}
+\begin{tabular}{rrrr}
+\toprule
+HP Len & ont37 (v3.5) & ont98 (v5.0) & ont37/ont98 \\
+\midrule
+1 & 1.56\% & 0.67\% & 2.32 \\
+2 & 1.84\% & 0.83\% & 2.21 \\
+3 & 2.17\% & 0.97\% & 2.23 \\
+4 & 2.27\% & 0.99\% & 2.30 \\
+5 & 2.13\% & 1.13\% & 1.89 \\
+6 & 2.90\% & 1.57\% & 1.85 \\
+7 & 4.21\% & 2.23\% & 1.89 \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+At L=1--5, ont37 error rates are consistently ${\sim}$2.2$\times$ those of
+ont98, demonstrating substantial improvement from Dorado v3.5 to v5.0.
+Run-to-run variation within a basecaller version (independent of this
+v3.5$\to$v5.0 effect) is expected but not characterized in this report.
+
+\subsection{Whole-run accuracy by HP length}
+
+\begin{table}[h]
+\centering
+\caption{Whole-run accuracy (fraction correct) across datasets (filtered).}
+\label{tab:frac_correct_all}
+\begin{tabular}{rrr}
+\toprule
+HP Length & ont37 (v3.5) & ont98 (v5.0) \\
+\midrule
+1 & 98.4\% & 99.3\% \\
+2 & 96.4\% & 98.3\% \\
+3 & 93.6\% & 97.1\% \\
+4 & 91.2\% & 96.1\% \\
+5 & 89.8\% & 94.5\% \\
+6 & 83.8\% & 91.0\% \\
+7 & 74.0\% & 85.4\% \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+Even with the older v3.5 basecaller, short HP accuracy remains high: 98.4\% at
+L=1 and 91.2\% at L=4. The CER framework can be applied to short HPs across
+basecaller versions, with the per-position error rate parameterized
+appropriately for each.
+
+\subsection{Base composition (ont37)}
+
+\begin{table}[h]
+\centering
+\caption{Per-base variation in filtered HP error rates (ont37).}
+\label{tab:base_ont37}
+\begin{tabular}{rlllr}
+\toprule
+HP Length & A & C & G & T \\
+\midrule
+1 & 1.26\% & 1.95\% & 1.71\% & 1.31\% \\
+2 & 1.79\% & 1.63\% & 1.82\% & 2.02\% \\
+3 & 1.61\% & 3.00\% & 2.35\% & 2.23\% \\
+4 & 2.32\% & 3.11\% & 3.17\% & 1.92\% \\
+5 & 2.11\% & 3.76\% & 2.37\% & 1.88\% \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+The base composition pattern in ont37 shows larger C/G vs A/T divergence at
+shorter lengths compared to the v5.0 dataset (max/min ratio of 1.54 at L=1
+and 2.00 at L=5, vs 1.14 and 1.39 for ont98). This is consistent with the
+older basecaller having more difficulty with G/C homopolymers, a pattern that
+Dorado v5.0 substantially ameliorates.
+
+\subsection{Interface variant rate across basecaller versions}
+
+The expanded interface analysis (Section~\ref{sec:interface}) repeated on
+ont37 (651 specimens evaluated, with cluster recombination):
+
+\begin{table}[h]
+\centering
+\caption{Interface vs non-HP variant rate ratio across both datasets.}
+\label{tab:interface_all}
+\begin{tabular}{lrlrl}
+\toprule
+Dataset & Specimens & Rate ratio & 95\% CI & Wilcoxon $p$ \\
+\midrule
+ont37 & 651 & 1.026 & 0.880--1.193 & 0.589 \\
+ont98 & 663 & 0.880 & 0.785--0.988 & 0.042 \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+Both datasets are consistent: interface HP positions do not show excess
+variant rates relative to the non-HP baseline. The ont37 ratio of 1.026 has a
+confidence interval spanning 1.0, indicating no detectable effect even with the
+noisier v3.5 basecaller. The conclusion that interface positions require no
+special CER treatment holds across basecaller generations.
+
+\subsection{Base composition effects (ont98)}
+
+We examined whether error rates need to be segmented by base (A/T/C/G) at each
+HP length, using the ont98 filtered data:
+
+\begin{table}[h]
+\centering
+\caption{Per-base variation in filtered HP error rates (ont98).}
+\label{tab:base_effects}
+\begin{tabular}{rlll}
+\toprule
+HP Length & Max base & Min base & Max/Min \\
+\midrule
+1 & 0.74\% (C) & 0.65\% (A) & 1.14 \\
+2 & 0.94\% (T) & 0.72\% (C) & 1.31 \\
+3 & 1.04\% (T) & 0.84\% (A) & 1.25 \\
+4 & 1.19\% (G) & 0.94\% (A) & 1.26 \\
+5 & 1.40\% (G) & 1.00\% (A) & 1.39 \\
+6 & 2.30\% (G) & 0.89\% (A) & 2.57 \\
+7 & 4.14\% (C) & 1.05\% (T) & 3.94 \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+At L=1--5, the worst-case base is at most 1.4$\times$ the best---a modest
+penalty for using a single rate. Importantly, the ``worst'' base is not
+consistent (T at L=2--3, G at L=4--5), so there is no stable A/T vs C/G split
+in this range. At L~$\geq 6$, C/G diverges sharply from A/T (the
+well-established nanopore pattern), but sample sizes are small and these
+lengths are approaching the limit of reliable variant calling regardless.
+
+
+\section{Sensitivity to clustering identity threshold}
+\label{sec:identity_sensitivity}
+
+Speconsense's \texttt{-{}-min-identity} parameter controls which reads are
+included in a cluster's MSA. At the default value of 0.90, reads with $<90\%$
+pairwise identity to the cluster consensus are excluded. To test whether this
+quality filter materially affects our error rate estimates, we repeated the
+ont37 and ont98 analyses with \texttt{-{}-min-identity~0.85}.
+
+\begin{table}[h]
+\centering
+\caption{Effect of \texttt{-{}-min-identity} on filtered per-position HP error
+rates and non-HP error rates.}
+\label{tab:identity_sensitivity}
+\begin{tabular}{rrrrrcc}
+\toprule
+ & \multicolumn{2}{c}{ont37 (v3.5)} & \multicolumn{2}{c}{ont98 (v5.0)} & \multicolumn{2}{c}{085/default} \\
+\cmidrule(lr){2-3} \cmidrule(lr){4-5} \cmidrule(lr){6-7}
+HP Len & default & 0.85 & default & 0.85 & ont37 & ont98 \\
+\midrule
+1 & 1.56\% & 1.75\% & 0.67\% & 0.75\% & 1.12 & 1.11 \\
+2 & 1.84\% & 2.05\% & 0.83\% & 0.92\% & 1.11 & 1.10 \\
+3 & 2.17\% & 2.37\% & 0.97\% & 1.05\% & 1.10 & 1.08 \\
+4 & 2.27\% & 2.52\% & 0.99\% & 1.06\% & 1.11 & 1.08 \\
+5 & 2.13\% & 2.35\% & 1.13\% & 1.21\% & 1.10 & 1.07 \\
+\midrule
+\multicolumn{7}{l}{Non-HP total error rate} \\
+ & 3.97\% & 4.67\% & 1.67\% & 1.88\% & 1.18 & 1.13 \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+Relaxing the identity threshold inflates error rates by ${\sim}$10--12\% at
+L=1--5, with a slightly larger effect on ont37 (where the older basecaller
+produces more reads near the identity boundary). The inflation is uniform
+across HP lengths, indicating that the additional reads are generally noisier
+rather than selectively worse at homopolymers.
+
+Crucially, the basecaller scaling factor is unaffected: the ont37/ont98 ratio
+at \texttt{-{}-min-identity~0.85} is 2.33 at L=1 and 2.37 at L=4, compared to
+2.32 and 2.30 at the default threshold. The identity filter and basecaller
+version act as independent, multiplicative effects on the effective error rate.
+
+For CER parameterization, the error rate should be estimated from data
+processed with the same \texttt{-{}-min-identity} setting that will be used in
+production. The results in this report use the default value of 0.90 unless
+otherwise noted.
+
+
+\section{Re-estimation under updated pipeline}
+\label{sec:reestimation}
+
+The original analysis (Sections~\ref{sec:interface}--\ref{sec:identity_sensitivity})
+parameterized the shipped \texttt{dorado-v5.0.yaml} $q_\text{ctx}$ table used by
+the context-aware CER framework in production~\cite{cer_practice}. The
+speconsense pipeline has since gained several mechanisms---context-aware
+variant phasing at $L \leq 5$ HP positions, cross-cluster read
+reassignment, discard recovery, identity-group structure, and
+\texttt{err\_factor}-based cluster homogeneity gating---each of which could
+shift measured error rates. We re-estimated rates under the current pipeline
+(speconsense 0.7.7, 2026-04-21) on the same ont98 input data to validate or
+update the shipped values.
+
+\subsection{Pipeline changes and expected directional effects}
+\label{sec:pipeline_changes}
+
+Table~\ref{tab:pipeline_changes} summarizes the relevant changes and their
+expected effect on measured error rates. The changes fall into three classes:
+cluster-cleaning (which should \emph{lower} apparent rates by producing
+cleaner single-template primaries), noise-admitting (which should \emph{raise}
+rates by bringing in reads that used to be rejected), and selection-redefining
+(which change which specimens qualify for analysis without directly changing
+rates).
+
+\begin{table}[h]
+\centering
+\caption{Pipeline changes and their expected effect on measured HP/non-HP
+error rates. ``$\downarrow$'' = expected to lower rates, ``$\uparrow$'' = raise,
+``$\circ$'' = neutral.}
+\label{tab:pipeline_changes}
+\small
+\begin{tabular}{lcl}
+\toprule
+Change & Direction & Mechanism \\
+\midrule
+Context-aware HP phasing ($L\leq5$) & $\downarrow$ & Splits HP-only paralogs into siblings \\
+Cross-cluster read reassignment & $\downarrow$ & Reads move to best-matching cluster at variants \\
+Tighter \texttt{-{}-min-variant-count}\ (5$\to$3) & $\downarrow$ & More aggressive non-HP phasing \\
+Linear SPOA scoring (match~$+1$, else~$-1$) & $\downarrow$ & Unbiased alignment improves variant phasing \\
+\texttt{err\_factor} cluster gating & $\downarrow$ & Selects self-consistent clusters \\
+\midrule
+Discard recovery & $\uparrow$ & Re-admits initially-discarded reads \\
+\midrule
+Identity group / complete linkage & $\circ$ & Affects CER decisions, not $q_\text{ctx}$ \\
+Ambiguity calling (IUPAC) & $\circ$ & Few positions affected in practice \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\subsection{Methods}
+
+ont98 (955 specimens) was re-processed with the current pipeline defaults,
+preserving only the sampling configuration that matches the original
+analysis:
+\texttt{-{}-presample~0 -{}-max-sample-size~10000 -{}-collect-discards
+-{}-error-model~dorado-v5.0}. All other parameters took current defaults
+(\texttt{-{}-min-identity~0.9}, \texttt{-{}-group-identity~0.85},
+\texttt{-{}-hp-normalization-length~6}, \texttt{-{}-min-variant-count~3},
+\texttt{-{}-significance-level~1e-5}). The pipeline also uses a linear
+SPOA scoring scheme (match~$+1$, mismatch~$-1$, gap~open~$-1$,
+gap~extend~$-1$) in place of SPOA's defaults, which bias toward
+substitutions over gaps. No failures.
+
+\paragraph{Selection criterion evolution.} The original analysis selected
+specimens whose primary cluster had $\geq 200$ reads and represented
+$\geq 70\%$ of total reads (``primary\_frac'' criterion). Under the more
+aggressive phasing of the current pipeline, this criterion becomes unworkable:
+on ont98 it drops from 245 to 157 qualifying specimens because cluster
+counts rise (median 10 clusters per specimen, with many small siblings
+pulling the primary fraction below 0.70). We therefore switched to an
+\texttt{err\_factor}-based criterion: the primary anchor cluster must have
+\texttt{err\_factor}~$<~1.0$ and \texttt{RiC}~$\geq~200$. This yields 445
+qualifying specimens on ont98. The criterion is peer-independent (does not
+depend on sibling structure), directly measures single-template plausibility,
+and is stable under the current pipeline.
+
+In practice the \texttt{err\_factor} gate is non-binding at
+\texttt{RiC}~$\geq~200$: all 445 qualifying ont98 specimens already
+satisfy \texttt{err\_factor}~$<~1.0$ (maximum observed value 0.929).
+\texttt{RiC} is therefore the effective selection criterion;
+\texttt{err\_factor} serves here as a backup guarantee rather than an
+active filter. This distinction matters for the circularity argument:
+because $q_\text{ctx}$ enters the selection only through
+\texttt{err\_factor}, and \texttt{err\_factor} is not constraining our pool,
+the rate estimates are not circularly dependent on the $q_\text{ctx}$ value
+used to compute them. Section~\ref{sec:revised_qctx} confirms this
+analytically under the proposed table revision.
+
+\paragraph{Approach 2: all-cluster non-HP analysis.} To characterize the
+operational non-HP rate CER evaluates against in production (which includes
+candidate clusters of all sizes), we additionally ran a weighted analysis
+across all clusters with \texttt{RiC}~$\geq~5$, using each cluster's own
+consensus as its local scaffold. Results are stratified by \texttt{RiC} bin.
+
+\subsection{Results: rate reduction under the updated pipeline}
+
+Table~\ref{tab:reestimation_summary} compares the original filtered rates
+(primary\_frac~$\geq~0.70$ criterion on old-pipeline clusters) to the re-
+estimated rates (\texttt{err\_factor}~$<~1.0$ criterion on new-pipeline
+clusters). Across all contexts, measured rates are consistently lower under
+the current pipeline, by a factor of approximately 0.70--0.80.
+
+\begin{table}[h]
+\centering
+\caption{Filtered per-position error rates on ont98: original analysis vs.\
+re-estimation under the current pipeline. ``v2\_ef'' denotes the current-
+pipeline rate under the \texttt{err\_factor}~$<~1.0$ selection.}
+\label{tab:reestimation_summary}
+\begin{tabular}{lrr}
+\toprule
+Context & original & v2\_ef \\
+\midrule
+non-HP sub          & 0.0059 & 0.0039 \\
+non-HP del          & 0.0040 & 0.0028 \\
+non-HP ins          & 0.0068 & 0.0046 \\
+\midrule
+hp-l1               & 0.0067 & 0.0047 \\
+hp-l2               & 0.0083 & 0.0062 \\
+hp-l3               & 0.0097 & 0.0076 \\
+hp-l4               & 0.0099 & 0.0081 \\
+hp-l5               & 0.0113 & 0.0087 \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\paragraph{Framing observation.} The current pipeline admits \emph{more}
+reads into clusters than the original (via discard recovery and cross-
+cluster read reassignment). The a priori expectation under such additions
+is that per-cluster error rates should \emph{rise}: more reads means
+more chances to admit noisier reads into any given cluster. The observed
+direction is the opposite---rates fall by 0.70--0.80$\times$. The most
+parsimonious explanation is that the new cluster-composition mechanisms
+(reassignment and recovery placing reads into their best-matching clusters
+based on variant positions) produce cleaner per-cluster read populations
+than the original simpler MCL-only assignment, and that this cleaning
+effect dominates any noise admitted by expanding the read pool.
+
+\subsection{All-cluster non-HP rates by RiC bin}
+
+Table~\ref{tab:approach2} reports the all-cluster pooled non-HP rates
+stratified by \texttt{RiC}. On ont98, rates are essentially flat across the
+\texttt{RiC} 20--1000+ range (substitution rate varies from 0.0036 to 0.0039).
+The \texttt{RiC} 5--20 bin is slightly elevated ($\sim$20\%). The pooled
+non-HP rate (0.0039) is within 3\% of the primary-anchor-only rate (0.0038),
+indicating that admitting small clusters does not materially shift the
+aggregate estimate.
+
+\begin{table}[h]
+\centering
+\caption{All-cluster non-HP error rates by \texttt{RiC} bin (ont98). Each row
+pools reads across all MSAs (\texttt{RiC}~$\geq~5$) in the specimen, using
+per-cluster consensus as the ground-truth scaffold.}
+\label{tab:approach2}
+\small
+\begin{tabular}{lrrr}
+\toprule
+Bin (\texttt{RiC}) & Clusters & Sub & Sub+Del \\
+\midrule
+5--20             & 5,472 & 0.0046 & 0.0078 \\
+20--50              & 632 & 0.0036 & 0.0058 \\
+50--100             & 324 & 0.0039 & 0.0063 \\
+100--200            & 289 & 0.0037 & 0.0062 \\
+200--500            & 408 & 0.0039 & 0.0066 \\
+500--1000           & 203 & 0.0038 & 0.0066 \\
+1000--$\infty$        & 29 & 0.0037 & 0.0065 \\
+\midrule
+POOLED           & 7,357 & 0.0039 & 0.0066 \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\subsection{Mechanism: isolating HP phasing contribution (Test A)}
+\label{sec:test_a}
+
+A natural concern is that the more aggressive HP phasing at $L \leq 5$ in
+the current pipeline could produce \emph{artifactual} splits---cutting noise
+from signal and leaving a cleaner-than-reality primary cluster, thereby
+biasing apparent rates downward. To test this, we re-ran ont98 with
+\texttt{-{}-hp-normalization-length~0}, which reverts to the old behavior of blanket-
+normalizing all HP variants (no HP-driven splits).
+
+Table~\ref{tab:test_a} compares HP rates between the current-pipeline run
+(\texttt{v2\_ef}) and the blanket-normalization variant (Test~A). Rates
+shift by at most 0.0003 at $L \leq 5$. If HP phasing were producing
+substantial artifactual splits, disabling it would recover a large fraction
+of the gap to the original-pipeline rates; the observed gap recovery is
+only 2--11\%.
+
+\begin{table}[h]
+\centering
+\caption{Effect of disabling HP phasing (\texttt{-{}-hp-normalization-length~0}) on
+measured HP rates. Gap recovery is the fraction of the v2\_ef$\to$original
+gap closed by Test~A.}
+\label{tab:test_a}
+\begin{tabular}{lrrrrr}
+\toprule
+L & v2\_ef & Test~A raw & Test~A filt & filt delta & gap recovery \\
+\midrule
+1 & 0.0047 & 0.0049 & 0.0048 & +0.0000 & 2\% \\
+2 & 0.0062 & 0.0064 & 0.0062 & +0.0000 & 2\% \\
+3 & 0.0076 & 0.0080 & 0.0076 & +0.0001 & 3\% \\
+4 & 0.0081 & 0.0087 & 0.0082 & +0.0001 & 6\% \\
+5 & 0.0087 & 0.0096 & 0.0090 & +0.0003 & 11\% \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+Two side-channel measurements confirm that HP phasing \emph{is} doing real
+work, but that its output is absorbed by downstream filters:
+
+\begin{itemize}
+\item Cluster counts shifted under Test~A: 387/955 specimens produced fewer
+clusters (HP-only splits now merged), 521 unchanged, 47 produced more. HP
+phasing is not inert; it is doing real partitioning.
+\item Bimodal flag counts (Step~6b of the biological-variant filter)
+doubled under Test~A (22$\to$46). When HP variants are merged back into the
+primary, they surface as bimodal length distributions, which the filter
+excludes from the filtered rate. The outlier-detection filter also caught an
+additional 122 positions.
+\end{itemize}
+
+The \emph{filtered} rate aggregation is therefore robust to HP phasing
+behavior: merging HP variants back in doubles the bimodal flag count, the
+filter catches them, and the resulting per-context rates are nearly
+unchanged. This establishes that the bimodal and outlier filters
+(Section~\ref{sec:interface}, \emph{Biological variant filtering}) are a
+structural safety net for rate measurement, not a cosmetic post-hoc
+adjustment.
+
+\paragraph{Implication for the rate drop.} HP phasing accounts for
+approximately 2--11\% of the measured rate reduction between the original
+and current pipelines. The remainder (${\sim}90\%$) comes from other
+changes, principally:
+
+\begin{itemize}
+\item \textbf{Cross-cluster read reassignment} (likely dominant): reads that
+were initially placed in a suboptimal cluster are moved to the cluster whose
+consensus they actually match at variant positions. Apparent per-read
+disagreement within each cluster falls accordingly. This mechanism changes
+cluster \emph{membership}, not structure, so it is not isolated by Test~A.
+\item \textbf{Linear SPOA scoring} (match~$+1$, mismatch~$-1$,
+gap~open~$-1$, gap~extend~$-1$) in place of SPOA's defaults. The
+defaults bias toward substitutions over gaps, which forces reads with
+real indels into substitution-heavy alignments against the consensus
+and blurs the signal that variant phasing uses to separate paralogs.
+The linear scheme treats substitutions and indels equivalently, so
+indel-distinguished haplotypes phase cleanly and the resulting
+primary clusters are more homogeneous.
+\item More aggressive non-HP phasing (\texttt{-{}-min-variant-count}\ 5$\to$3)
+separating non-HP paralogs into siblings.
+\item Selection criterion change (\texttt{primary\_frac} to
+\texttt{err\_factor}) admitting a different specimen population.
+\end{itemize}
+
+Distinguishing among these contributions would require further test runs
+with individual flags reverted. For the purpose of this re-estimation, the
+relevant conclusion is that the observed rates are \emph{not} inflated by
+artifactual HP splitting.
+
+\subsection{Revised shipped $q_\text{ctx}$ table}
+\label{sec:revised_qctx}
+
+Table~\ref{tab:revised_qctx} gives the proposed update to
+\texttt{dorado-v5.0.yaml}. HP rates use the \texttt{v2\_ef} primary-anchor
+values (approach-1 regime, where mode-based ground truth is most reliable).
+Non-HP rates use the all-cluster pooled values from approach 2, which match
+the operational distribution CER evaluates against.
+
+\begin{table}[h]
+\centering
+\caption{Proposed revised $q_\text{ctx}$ values for
+\texttt{dorado-v5.0.yaml}. ``Original'' values are the current shipped
+table (from the original analysis); ``Revised'' are the re-estimated values
+from this section.}
+\label{tab:revised_qctx}
+\begin{tabular}{lrrc}
+\toprule
+Context & Original & Revised & Basis \\
+\midrule
+\texttt{non-hp-sub}   & 0.0059 & 0.0039 & approach 2 pooled (ont98) \\
+\texttt{non-hp-indel} & 0.0108 & 0.0074 & approach 2 pooled (ont98) \\
+\midrule
+\texttt{hp-l1}        & 0.0067 & 0.0047 & v2\_ef primary (ont98) \\
+\texttt{hp-l2}        & 0.0083 & 0.0062 & " \\
+\texttt{hp-l3}        & 0.0097 & 0.0076 & " \\
+\texttt{hp-l4}        & 0.0099 & 0.0081 & " \\
+\texttt{hp-l5}        & 0.0113 & 0.0087 & " \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+The revised values shift \texttt{cer\_factor} outputs upward by
+approximately $1/0.72 \approx 1.39\times$ on existing data. No upstream
+re-runs are required to adopt the new table; per the metadata-2.0 schema
+design~\cite{cer_practice}~\S6, stored output can be recomputed from the
+retained $N$, $M$, $K$, and context tags.
+
+We confirmed analytically that the revised table does not induce a selection
+shift at our analysis tier: \texttt{err\_factor} values scale approximately
+as $1/q_\text{ctx}$, so the revision inflates primaries'
+\texttt{err\_factor} by ${\sim}1.39\times$. The maximum observed primary
+\texttt{err\_factor} in the current re-estimation (0.929) rises to
+$\approx 1.29$ under the revised table---still below the default
+\texttt{-{}-max-err-factor~1.5} filter threshold. Selection is therefore
+stable; no bootstrap iteration is required.
+
+\subsection{ont37 retune (Dorado v3.5)}
+\label{sec:reestimation_ont37}
+
+The same procedure was applied to ont37 to refresh
+\texttt{dorado-v3.5.yaml}. Re-clustering was performed under speconsense
+0.8.1 (released after the v5.0 retune) with
+\texttt{-{}-error-model~dorado-v3.5} (chemistry-matched to avoid
+underestimating the noise floor).
+
+\paragraph{Selection criterion.} ont37's lower per-specimen depth (median
+primary RiC was 59 in the original analysis) interacts with the more
+aggressive context-aware phasing of 0.8.x: primaries shrink further, and
+\texttt{RiC}~$\geq~200$ yields only 10 specimens. We relaxed the floor to
+\texttt{RiC}~$\geq~50$, yielding 80 qualifying specimens (vs.\ 94 under the
+original \texttt{RiC}~$\geq~100$, \texttt{primary\_frac}~$\geq~0.50$
+criterion). The \texttt{err\_factor}~$<~1.0$ gate is empirically
+\emph{fully} non-binding at this threshold (maximum observed value 0.737),
+preserving the circularity defense for the q\_ctx-driven selection. The
+revised table inflates this maximum to $\approx 1.32$ under
+$1/q_\text{ctx}$ scaling---still below the \texttt{-{}-max-err-factor~1.5}
+cap---so selection remains stable after the table refresh.
+
+\paragraph{Results.} Table~\ref{tab:reestimation_ont37} compares the
+original ont37 rates to the v2\_ef re-estimation. Rate ratios are broadly
+similar to ont98's (0.56--0.74$\times$ on ont37 vs.\ 0.66--0.82$\times$ on
+ont98), confirming that the pipeline mechanisms responsible for the v5.0
+rate drop apply to v3.5 data as well. The v3.5/v5.0 ratio narrows somewhat
+at higher $L$ under the new pipeline (2.23$\times$ at $L=1$ down to
+1.41$\times$ at $L=5$, vs.\ a more uniform $\sim 2.2\times$ under the
+original) but remains well above unity at every short HP length.
+
+\begin{table}[h]
+\centering
+\caption{Filtered per-position error rates on ont37: original analysis vs.\
+re-estimation under speconsense 0.8.1 (80 qualifying specimens at
+\texttt{RiC}~$\geq~50$, \texttt{err\_factor}~$<~1.0$). Non-HP rates from
+approach 2 (all-cluster pooled, \texttt{RiC}~$\geq~20$, 184 clusters).}
+\label{tab:reestimation_ont37}
+\begin{tabular}{lrrr}
+\toprule
+Context & Original & v2\_ef & Ratio \\
+\midrule
+\texttt{non-hp-sub}   & 0.0144 & 0.0081 & 0.56 \\
+\texttt{non-hp-indel} & 0.0222 & 0.0158 & 0.71 \\
+\midrule
+\texttt{hp-l1}        & 0.0156 & 0.0105 & 0.67 \\
+\texttt{hp-l2}        & 0.0184 & 0.0137 & 0.74 \\
+\texttt{hp-l3}        & 0.0217 & 0.0150 & 0.69 \\
+\texttt{hp-l4}        & 0.0227 & 0.0142 & 0.63 \\
+\texttt{hp-l5}        & 0.0213 & 0.0123 & 0.58 \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\paragraph{Caveats specific to ont37.} The qualifying pool is smaller than
+ont98's (80 vs.\ 445 specimens) and has lower per-specimen depth
+(\texttt{RiC} range 51--396 vs.\ ont98's $\geq 200$). HP run counts at
+$L=4$--$5$ are correspondingly limited (526 and 154 runs respectively),
+producing slight non-monotonicity in the rate-vs-length curve at high $L$.
+The bimodal/outlier filter exclusion rate is low (0.5\%, 217/43,276 runs),
+indicating the filter's biological-variant cleanup is operating
+conservatively at this specimen count. These values should therefore be
+treated as the best current estimates rather than as tightly constrained
+measurements; the test in
+\texttt{tests/test\_qctx.py:test\_v3\_5\_rates\_higher\_than\_v5\_0\_at\_short\_lengths}
+remains satisfied (v3.5 rates exceed v5.0 by 1.75$\times$--2.23$\times$ at
+$L=1$--$4$).
+
+\paragraph{Convergence (fixed-point check).} Because the shipped table
+participates in the clustering step via the CER significance gate
+(through \texttt{err\_factor} and variant phasing decisions), we verified
+that ont37 has converged to a fixed point of the bootstrap. ont37 was
+re-clustered a second time under the revised \texttt{dorado-v3.5.yaml}
+and the analysis re-run. Selection was highly stable (80 specimens both
+passes, 77 shared), and measured rates drifted by at most 2.5\%
+relative: \texttt{hp-l1}~$-2.40\%$, \texttt{hp-l2}~$-2.49\%$,
+\texttt{hp-l3}~$-1.46\%$, \texttt{hp-l4}~$+0.41\%$, \texttt{hp-l5}~$+0.36\%$;
+\texttt{non-hp-sub}~$-0.61\%$, \texttt{non-hp-indel}~$-0.66\%$. The mild
+downward direction at $L=1$--$3$ is mechanistic: under the lower q\_ctx
+expectations, the CER gate is more permissive at HP positions, so a few
+additional variants phase out into siblings and primaries are
+infinitesimally cleaner. All drifts sit within the sampling noise of the
+80-specimen pool, so the shipped values are retained without further
+iteration. Median primary \texttt{err\_factor} inflated from 0.541 to
+0.731 between passes (less than the $1/q_\text{ctx}$-only prediction of
+$\sim 1.78\times$, because cluster cleanup under the new yaml partially
+offsets the denominator drop); maximum observed value 1.092 remains well
+below the \texttt{-{}-max-err-factor~1.5} cap.
+
+\subsection{Limitations}
+
+\begin{itemize}
+\item \textbf{ITS-specific.} The re-estimation inherits the amplicon-specific
+limitation of the original analysis. Other amplicons or organism contexts
+may produce different values.
+\item \textbf{iNat input distribution.} The measurements reflect specimen
+quality distributions typical of iNaturalist uploads (ont98). Environmental
+DNA or specimen sources with substantially different input-quality variance
+could produce different all-cluster rates.
+\item \textbf{Run-to-run variation is not characterized in this report.}
+The shipped table is derived from a single ont98 run; runs of different
+provenance (other Mycota Lab batches, other operators) may produce
+systematically different rates. The CER factor's linear sensitivity to
+$q_\text{ctx}$~\cite{cer_practice}~\S3 handles this by design.
+\item \textbf{Mechanism attribution is not fully resolved.} Test~A
+eliminates HP phasing as the dominant contributor. Definitive identification
+of the dominant mechanism (cross-cluster reassignment vs.\ non-HP phasing
+refinements vs.\ selection criterion) would require additional test runs
+with individual changes reverted; these are future work.
+\item \textbf{Phase-2 per-run estimation} (\cite{cer_practice}~\S4.2) would
+eventually replace the shipped table entirely, eliminating the
+basecaller/chemistry-update dependency. The revised values are an interim
+update pending that work.
+\end{itemize}
+
+\section{Discussion}
+
+\subsection{Recommended approach for speconsense}
+
+The combined results from two sequencing runs spanning two basecaller
+generations support a simple two-tier approach:
+
+\textbf{Short homopolymers (length 1--5):} Implied per-position error rates
+are consistently below 2.3\% (filtered) across both datasets, all bases, and
+both basecaller versions. For the current Dorado v5.0 basecaller, rates are
+below 1.4\%. These positions can be brought into the CER framework---no
+special segmentation by base is needed (max/min ratio across bases is only
+1.1--1.4$\times$ at these lengths for v5.0, and 1.2--2.0$\times$ for v3.5).
+The CER implementation should evaluate hp variants at the run level (i.e.,
+``what is the probability of observing hp length $k$ when the true length is
+$L$?'') using the empirical error distributions from this analysis, rather than
+treating each position in the run as an independent trial. The per-position
+rate serves as a compact parameterization of the run-level error probability
+for a given (base, length) context, but the significance test itself operates
+on the run as a unit. The companion report~\cite{cer_practice} develops this
+into a deployed framework: per-basecaller tables of $q_\text{ctx}(\text{base},
+\text{length})$ derived from this analysis feed the binomial survival test, and
+significance is reported as a dimensionless \texttt{cer\_factor} (the
+ratio of the critical joint error rate to the product of empirical $q_\text{ctx}$
+values) that remains comparable across contexts and re-scales linearly as tables
+are refreshed for new chemistry or basecaller generations. The initial production
+deployment uses shipped per-basecaller tables pooled across base and direction;
+per-run estimation to account for flow-cell variation
+(\cite{cer_practice}~\S 4.2) is left as future work.
+
+\textbf{Long homopolymers (length 6+):} Error rates rise steeply and diverge
+significantly by base (C/G 2--4$\times$ worse than A/T at L=6--7). Sample
+sizes are small, and the error rates are high enough that variant calling
+becomes unreliable. The current blanket normalization approach (treating all HP
+length differences as insignificant) remains appropriate for these lengths.
+Enhanced positional error reporting in the quality report could flag positions
+where the observed HP length distribution suggests a potential variant, even if
+the CER framework cannot confidently evaluate it.
+
+\textbf{Interface positions:} No special treatment required. Well-supported
+variants at HP interface positions occur at or below the rate of non-HP
+variants, confirmed across both datasets (rate ratio 1.03 in ont37, 0.88
+in ont98).
+
+\subsection{Interface homopolymers}
+
+The finding that interface hp substitutions are nearly as prevalent as pure hp
+length errors (0.97\% vs 1.06\%) initially raised the question of whether
+interface substitutions might be signal-level artifacts (boundary confusion in
+the nanopore signal). The expanded analysis resolves this question decisively
+across both datasets:
+
+\begin{enumerate}
+\item Well-supported variants at HP interface positions occur at or below the
+  rate of non-HP variants (ont37 ratio 1.03 [95\% CI: 0.88--1.19]; ont98 ratio
+  0.88 [95\% CI: 0.79--0.99]). There is no excess that would indicate a
+  signal-level artifact, even with the noisier v3.5 basecaller.
+
+\item Among interface variant positions, the fraction with an
+  interface-compatible top allele is close to the 33\% expected by chance.
+  Boundary-confusion substitutions are not enriched.
+
+\item No published study has specifically analyzed substitution error rates at
+  HP boundaries in nanopore data. Apparent boundary effects reported in the
+  literature (e.g., Liu-Wei et al.~\cite{liuwei2024}, Dunn et
+  al.~\cite{dunn2023}) are alignment artifacts from minimap2 representing HP
+  length errors as SNPs at run boundaries, not signal-level errors.
+\end{enumerate}
+
+\subsection{Comparison to literature}
+
+Both datasets show substantially better HP accuracy than published R10.4
+/ Guppy SUP values~\cite{sereika2022}, with progressive improvement across
+basecaller versions. Note that this comparison is approximate: Sereika measured
+raw read-level accuracy against a known reference genome, whereas our rates are
+effective error rates conditioned on speconsense's post-clustering MSA
+(Section~2.5). The quality filtering inherent in clustering excludes the
+noisiest reads, so our effective rates are expected to be somewhat lower than
+raw read-level rates for the same chemistry and basecaller. The magnitude of
+the difference attributable to this methodological difference vs.\ genuine
+basecaller improvement cannot be separated without matched raw-read
+measurements on our data.
+
+\begin{table}[h]
+\centering
+\caption{Whole-run accuracy progression from Sereika (Guppy) through our
+datasets (Dorado v3.5 and v5.0). Our values are effective post-clustering
+rates (Section~2.5), not directly comparable to Sereika's raw read-level
+measurements.}
+\begin{tabular}{rrrr}
+\toprule
+HP Len & Sereika R10.4 & ont37 (v3.5) & ont98 (v5.0) \\
+\midrule
+1 & ${\sim}$99.2\% & 98.4\% & 99.3\% \\
+3 & ${\sim}$94.5\% & 93.6\% & 97.1\% \\
+5 & ${\sim}$86.0\% & 89.8\% & 94.5\% \\
+7 & ${\sim}$60.0\% & 74.0\% & 85.4\% \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+The ont37 data (Dorado v3.5) provides an intermediate point between the
+published Guppy results and our v5.0 data, demonstrating a clear trajectory
+of improvement. Even at the v3.5 level, short HP accuracy is sufficient for
+CER analysis. The cross-basecaller comparison reveals a substantial
+version-level effect (${\sim}$2.2$\times$ from v3.5 to v5.0). Run-to-run
+variation within a basecaller version is plausible (flow cell quality,
+library preparation, basecaller calibration drift) but is not characterized
+in this report; per-run error rate estimation in production is left as
+future work.
+
+\subsection{Limitations and open questions}
+
+\begin{enumerate}
+\item \textbf{Pipeline-conditioned measurement}: Our error rates are effective
+  rates at the post-clustering stage, conditioned on speconsense's identity
+  threshold and clustering parameters (Section~2.5). They are not directly
+  comparable to raw read-level error rates in the literature. The
+  ${\sim}$10--12\% sensitivity to the identity threshold
+  (Section~\ref{sec:identity_sensitivity}) is modest but means that CER
+  parameters should be estimated from data processed with the same settings
+  used in production.
+
+\item \textbf{Run-specific error rates}: The ${\sim}$2.2$\times$ scaling
+  factor between basecaller versions (v3.5 to v5.0) suggests that HP error
+  rates should be estimated per-basecaller rather than assumed universal.
+  Within-basecaller run-to-run variation (flow cell quality, library
+  preparation, basecaller calibration drift) is expected but is not
+  characterized in this report.
+
+\item \textbf{Ground truth}: We use the empirical mode as ground truth, which
+  is reliable for hp $\leq {\sim}9$ at our read depths but may be incorrect for
+  longer runs. Cross-platform validation with PacBio HiFi data would address
+  this.
+
+\item \textbf{PCR artifacts}: PCR can introduce hp length errors that are
+  physically present in the library. These are indistinguishable from sequencing
+  errors in our analysis and are out of scope for the CER framework (which
+  establishes physical library presence, not biological reality).
+
+\item \textbf{Sample composition}: Our data is exclusively ITS amplicons from
+  fungi. The hp length distribution and context effects may differ for other
+  loci or organisms, though the physical error mechanism should be universal.
+
+\item \textbf{Biological variant filtering}: The outlier/bimodal detection
+  thresholds are heuristic. A more sophisticated approach (e.g., cross-specimen
+  consistency checks) could improve filtering, though the current approach is
+  sufficient for the cross-basecaller comparison.
+\end{enumerate}
+
+
+\section*{Acknowledgments}
+
+All sequencing data analyzed in this report were produced by Mycota Lab
+(Hoosier Mushroom Society) under the protocol of
+Russell~\cite{russell2023}. The author thanks Stephen D.~Russell for sharing
+the run-level outputs that made this analysis possible.
+
+Substantial portions of the text were drafted with the assistance of Claude
+(Anthropic, Opus 4.6). The core ideas, analytical framing, and mathematical
+approach were provided by the author; the AI contributed to exposition,
+\LaTeX{} formatting, and iterative drafting under human direction. The author
+takes full responsibility for the content.
+
+
+\begin{thebibliography}{99}
+
+\bibitem{delahaye2021}
+C.~Delahaye and J.~Nicolas.
+\newblock Sequencing {DNA} with nanopores: Troubles and biases.
+\newblock \emph{PLoS ONE}, 16(10):e0257521, 2021.
+
+\bibitem{dunn2023}
+T.~Dunn, E.~Berry, C.~M. Bergman.
+\newblock {nPoRe}: $n$-polymer read correction for improved nanopore
+homopolymer accuracy.
+\newblock \emph{BMC Bioinformatics}, 24:292, 2023.
+
+\bibitem{liuwei2024}
+W.~Liu-Wei, W.~Trzaskowski, et~al.
+\newblock Benchmarking {Oxford Nanopore} long-read {RNA} sequencing for
+transcript quantification.
+\newblock \emph{BMC Genomics}, 25:219, 2024.
+
+\bibitem{russell2023}
+S.~D. Russell.
+\newblock {ONT DNA} barcoding fungal amplicons w/ {MinION \& Flongle V.3}.
+\newblock \emph{protocols.io}, March 2023.
+\newblock \url{https://dx.doi.org/10.17504/protocols.io.36wgq7qykvk5/v3}.
+
+\bibitem{ni2023}
+Y.~Ni, G.~Liu, H.~Peng, et~al.
+\newblock Benchmarking of {Nanopore} {R10.4} and {R9.4.1} flow cells in
+single-cell whole-genome amplification and whole-genome shotgun sequencing.
+\newblock \emph{Computational and Structural Biotechnology Journal}, 21:2352--2363, 2023.
+
+\bibitem{sereika2022}
+M.~Sereika, R.~H. Kirkegaard, S.~M. Karst, et~al.
+\newblock Oxford {Nanopore} {R10.4} long-read sequencing enables the generation
+of near-finished bacterial genomes from pure cultures and metagenomes without
+short-read or reference polishing.
+\newblock \emph{Nature Methods}, 19:482--488, 2022.
+
+\bibitem{walker2026}
+J.~Walker.
+\newblock Critical error rate analysis for {MSA}-based variant phasing in
+nanopore amplicon sequencing.
+\newblock Technical report, 2026.
+
+\bibitem{cer_practice}
+J.~Walker.
+\newblock Critical error rate in practice: context-aware variant significance
+for nanopore amplicon pipelines.
+\newblock Technical report, 2026.
+
+\bibitem{wick2025}
+R.~R. Wick.
+\newblock Benchmarking {Oxford Nanopore} bacterial genome assembly.
+\newblock \emph{Microbial Genomics}, 2025.
+
+\end{thebibliography}
+
+\end{document}

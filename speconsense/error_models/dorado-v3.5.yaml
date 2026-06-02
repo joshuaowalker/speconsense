@@ -1,0 +1,38 @@
+# Context-specific error rate table for Dorado v3.5 / R10.4.1 E8.2 chemistry.
+#
+# Values are filtered post-clustering per-position error rates re-estimated
+# under the current speconsense pipeline (0.8.1) on the ont37 dataset; see
+# Walker 2026b §8 (Re-estimation under updated pipeline). The filter excludes
+# biological variants via outlier and bimodal distribution detection so the
+# remaining rate reflects sequencing error, not real variation.
+#
+# HP rates use the v2_ef primary-anchor values (approach 1), where mode-based
+# ground truth is most reliable. Non-HP rates use the all-cluster pooled
+# values (approach 2), which match the operational distribution CER evaluates
+# against in production.
+#
+# v3.5 rates are approximately 1.4-2.2x the v5.0 rates across HP lengths,
+# consistent with the basecaller-version effect documented in that analysis.
+#
+# Selection criterion for ont37 differs from ont98's (RiC≥200): the more
+# aggressive context-aware phasing under 0.8.x splits ont37's lower-depth
+# primaries more, so RiC≥50 was used. err_factor<1.0 is fully non-binding
+# at this threshold (max observed 0.737), so the circularity defense for
+# the q_ctx-driven selection holds.
+#
+# Intended for users on legacy data; for current chemistry use dorado-v5.0.
+
+name: dorado-v3.5
+chemistry: R10.4.1
+basecaller: Dorado SUP v3.5.x
+source: Walker 2026b (HP error rate analysis, §8 re-estimation)
+dataset: ont37
+
+rates:
+  non-hp-sub:  0.0081    # Walker 2026b §8 (approach 2 pooled, ont37)
+  non-hp-indel: 0.0158   # approach 2 pooled (del + ins), ont37
+  hp-l1: 0.0105          # Walker 2026b §8 (v2_ef primary, ont37)
+  hp-l2: 0.0137
+  hp-l3: 0.0150
+  hp-l4: 0.0142
+  hp-l5: 0.0123

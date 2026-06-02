@@ -89,7 +89,8 @@ class TestProfileLoading:
         assert "not found" in str(exc_info.value)
 
     def test_load_with_version_check(self):
-        # Bundled profiles require 0.7.*, which should match current version
+        # Bundled profiles' speconsense-version field tracks the current major
+        # version line, so the version check should pass for the running build.
         profile = Profile.load("herbarium", check_version=True)
         assert profile.name == "herbarium"
 
@@ -197,6 +198,42 @@ speconsense-summarize:
                 with pytest.raises(ProfileValidationError) as exc_info:
                     Profile.load("bad", check_version=False)
                 assert "invalid-key" in str(exc_info.value)
+
+    def test_hp_normalization_length_key_accepted_in_both_sections(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            user_dir = Path(tmpdir) / "profiles"
+            user_dir.mkdir()
+
+            (user_dir / "hp.yaml").write_text("""
+speconsense-version: "*"
+description: "HP threshold profile"
+speconsense:
+  hp-normalization-length: 6
+speconsense-summarize:
+  hp-normalization-length: 4
+""")
+
+            with patch("speconsense.profiles.PROFILES_DIR", user_dir):
+                profile = Profile.load("hp", check_version=False)
+                assert profile.speconsense["hp-normalization-length"] == 6
+                assert profile.speconsense_summarize["hp-normalization-length"] == 4
+
+    def test_legacy_hp_min_length_key_rejected(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            user_dir = Path(tmpdir) / "profiles"
+            user_dir.mkdir()
+
+            (user_dir / "legacy.yaml").write_text("""
+speconsense-version: "*"
+description: "Legacy HP key profile"
+speconsense:
+  hp-min-length: 6
+""")
+
+            with patch("speconsense.profiles.PROFILES_DIR", user_dir):
+                with pytest.raises(ProfileValidationError) as exc_info:
+                    Profile.load("legacy", check_version=False)
+                assert "hp-min-length" in str(exc_info.value)
 
 
 class TestProfileApplication:

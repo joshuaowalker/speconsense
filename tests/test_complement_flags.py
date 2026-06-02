@@ -39,30 +39,11 @@ class TestSummarizeComplementFlags:
         args = self._parse(['--enable-homopolymer-equivalence'])
         assert args.disable_homopolymer_equivalence is False
 
-    def test_enable_full_consensus_default(self):
-        args = self._parse([])
-        assert args.enable_full_consensus is False
-
-    def test_enable_full_consensus_flag(self):
-        args = self._parse(['--enable-full-consensus'])
-        assert args.enable_full_consensus is True
-
-    def test_disable_full_consensus_complement(self):
-        args = self._parse(['--disable-full-consensus'])
-        assert args.enable_full_consensus is False
-
     def test_complement_overrides_profile_disable_merging(self):
         """--enable-merging should override profile that sets disable-merging: true."""
         args = self._parse(['-p', 'nostalgia', '--enable-merging'])
         # Regardless of what nostalgia sets, the explicit complement should win
         assert args.disable_merging is False
-
-    def test_complement_overrides_profile_enable_full_consensus(self):
-        """--disable-full-consensus should override profile that sets enable-full-consensus: true."""
-        # Use a profile that sets enable-full-consensus: true
-        # We test the mechanism: even if profile sets it, CLI complement wins
-        args = self._parse(['-p', 'herbarium', '--disable-full-consensus'])
-        assert args.enable_full_consensus is False
 
 
 class TestCoreComplementFlags:
@@ -83,6 +64,14 @@ class TestCoreComplementFlags:
         parser.add_argument("--enable-position-phasing", action="store_false",
                             dest="disable_position_phasing")
 
+        parser.add_argument("--disable-read-reassignment", action="store_true")
+        parser.add_argument("--enable-read-reassignment", action="store_false",
+                            dest="disable_read_reassignment")
+
+        parser.add_argument("--disable-discard-recovery", action="store_true")
+        parser.add_argument("--enable-discard-recovery", action="store_false",
+                            dest="disable_discard_recovery")
+
         parser.add_argument("--disable-ambiguity-calling", action="store_true")
         parser.add_argument("--enable-ambiguity-calling", action="store_false",
                             dest="disable_ambiguity_calling")
@@ -95,10 +84,6 @@ class TestCoreComplementFlags:
         parser.add_argument("--enable-homopolymer-equivalence", action="store_false",
                             dest="disable_homopolymer_equivalence")
 
-        parser.add_argument("--enable-early-filter", action="store_true")
-        parser.add_argument("--disable-early-filter", action="store_false",
-                            dest="enable_early_filter")
-
         parser.add_argument("--collect-discards", action="store_true")
         parser.add_argument("--no-collect-discards", action="store_false",
                             dest="collect_discards")
@@ -108,42 +93,47 @@ class TestCoreComplementFlags:
     def test_defaults_all_false(self):
         args = self.parser.parse_args([])
         assert args.disable_position_phasing is False
+        assert args.disable_read_reassignment is False
+        assert args.disable_discard_recovery is False
         assert args.disable_ambiguity_calling is False
         assert args.disable_cluster_merging is False
         assert args.disable_homopolymer_equivalence is False
-        assert args.enable_early_filter is False
         assert args.collect_discards is False
 
     def test_primary_flags_set_true(self):
         args = self.parser.parse_args([
             '--disable-position-phasing',
+            '--disable-read-reassignment',
+            '--disable-discard-recovery',
             '--disable-ambiguity-calling',
             '--disable-cluster-merging',
             '--disable-homopolymer-equivalence',
-            '--enable-early-filter',
             '--collect-discards',
         ])
         assert args.disable_position_phasing is True
+        assert args.disable_read_reassignment is True
+        assert args.disable_discard_recovery is True
         assert args.disable_ambiguity_calling is True
         assert args.disable_cluster_merging is True
         assert args.disable_homopolymer_equivalence is True
-        assert args.enable_early_filter is True
         assert args.collect_discards is True
 
     def test_complement_flags_set_false(self):
         args = self.parser.parse_args([
             '--enable-position-phasing',
+            '--enable-read-reassignment',
+            '--enable-discard-recovery',
             '--enable-ambiguity-calling',
             '--enable-cluster-merging',
             '--enable-homopolymer-equivalence',
-            '--disable-early-filter',
             '--no-collect-discards',
         ])
         assert args.disable_position_phasing is False
+        assert args.disable_read_reassignment is False
+        assert args.disable_discard_recovery is False
         assert args.disable_ambiguity_calling is False
         assert args.disable_cluster_merging is False
         assert args.disable_homopolymer_equivalence is False
-        assert args.enable_early_filter is False
         assert args.collect_discards is False
 
     def test_complement_overrides_profile_default(self):
@@ -152,12 +142,6 @@ class TestCoreComplementFlags:
         self.parser.set_defaults(disable_position_phasing=True)
         args = self.parser.parse_args(['--enable-position-phasing'])
         assert args.disable_position_phasing is False
-
-    def test_complement_overrides_profile_enable_early_filter(self):
-        """--disable-early-filter should override profile that sets enable_early_filter=True."""
-        self.parser.set_defaults(enable_early_filter=True)
-        args = self.parser.parse_args(['--disable-early-filter'])
-        assert args.enable_early_filter is False
 
     def test_complement_overrides_profile_collect_discards(self):
         """--no-collect-discards should override profile that sets collect_discards=True."""
@@ -178,3 +162,29 @@ class TestCoreComplementFlags:
             '--disable-position-phasing',
         ])
         assert args.disable_position_phasing is True
+
+
+class TestReassignmentAttrs:
+    """Verify the new reassignment/recovery flags propagate into SpecimenClusterer attrs."""
+
+    def _make(self, **overrides):
+        import tempfile
+        from speconsense.core.clusterer import SpecimenClusterer
+        kwargs = dict(output_dir=tempfile.mkdtemp(prefix='speconsense_attrs_'))
+        kwargs.update(overrides)
+        return SpecimenClusterer(**kwargs)
+
+    def test_defaults_enabled(self):
+        clusterer = self._make()
+        assert clusterer.enable_read_reassignment is True
+        assert clusterer.enable_discard_recovery is True
+
+    def test_disable_read_reassignment(self):
+        clusterer = self._make(enable_read_reassignment=False)
+        assert clusterer.enable_read_reassignment is False
+        assert clusterer.enable_discard_recovery is True  # independent attr
+
+    def test_disable_discard_recovery(self):
+        clusterer = self._make(enable_discard_recovery=False)
+        assert clusterer.enable_read_reassignment is True
+        assert clusterer.enable_discard_recovery is False

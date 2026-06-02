@@ -59,7 +59,6 @@ VALID_SPECONSENSE_KEYS = {
     # Cluster filtering
     "min-size",
     "min-cluster-ratio",
-    "outlier-identity",
     # Sampling
     "max-sample-size",
     "presample",
@@ -67,6 +66,20 @@ VALID_SPECONSENSE_KEYS = {
     "min-variant-frequency",
     "min-variant-count",
     "disable-position-phasing",
+    "disable-read-reassignment",
+    "disable-discard-recovery",
+    "disable-second-phasing",
+    "disable-noise-filter",
+    "disable-mad-outlier-removal",
+    "significance-level",
+    "group-identity",
+    "hp-normalization-length",
+    "error-model",
+    # MAD outlier removal tuning (internal)
+    "mad-z-threshold",
+    "mad-gap-factor",
+    "mad-min-mad",
+    "mad-min-drop-from-median",
     # Ambiguity calling
     "min-ambiguity-frequency",
     "min-ambiguity-count",
@@ -79,7 +92,6 @@ VALID_SPECONSENSE_KEYS = {
     # Processing
     "scale-threshold",
     "threads",
-    "enable-early-filter",
     "collect-discards",
 }
 
@@ -88,6 +100,8 @@ VALID_SUMMARIZE_KEYS = {
     "min-ric",
     "min-len",
     "max-len",
+    "min-cer-factor",
+    "max-err-factor",
     # Grouping
     "group-identity",
     # Merging
@@ -99,6 +113,7 @@ VALID_SUMMARIZE_KEYS = {
     "merge-min-size-ratio",
     "min-merge-overlap",
     "disable-homopolymer-equivalence",
+    "hp-normalization-length",
     # Selection
     "select-max-groups",
     "select-max-variants",
