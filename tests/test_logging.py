@@ -6,6 +6,8 @@ emitted (i.e. it lands after the outlier-filter step, reflecting actual
 post-MAD totals).
 """
 
+from __future__ import annotations
+
 import os
 import re
 import shutil
