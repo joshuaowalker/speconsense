@@ -114,7 +114,7 @@ Read in `SpecimenClusterer.cluster()` (`speconsense/core/clusterer.py`); 14 sequ
 9. **Cluster consensus generation** — SPOA → MAD outlier removal → re-SPOA → IUPAC ambiguity calling → primer trimming; stamps post-MAD MSA and consensus on each cluster_dict
 10. **Post-refinement merge** — combine clusters whose post-MAD consensuses are identical or HP-equivalent; reruns Phase 9 worker on each merge survivor
 11. **CER validation** — annotate each non-anchor candidate with its `cer_factor`
-12. **Size filtering** — drop clusters below `--min-size` and `--min-cluster-ratio`
+12. **Size filtering** — drop clusters below `--min-size`
 13. **Output emission** — write FASTA/FASTQ/MSA; compute `err_factor` on stamped MSA
 14. **Discard reads written** (optional, `--collect-discards`)
 
@@ -219,13 +219,14 @@ Parameters are controlled via CLI arguments, optionally pre-set via YAML profile
 - Identity thresholds (`--min-identity`)
 - Clustering algorithm choice (`--algorithm`)
 - Sample size limits (`--max-sample-size`, `--presample`)
-- Cluster size filtering (`--min-size`, `--min-cluster-ratio`)
+- Cluster size filtering (`--min-size`)
 - Primer handling (`--primers`, `--orient-mode`)
 - Variant phasing (`--disable-position-phasing`, `--min-variant-frequency`, `--significance-level`)
 - Post-phasing refinement: `--disable-read-reassignment` (concordance-based reassignment within identity groups), `--disable-discard-recovery` (re-admit dropped reads; auto-skipped if read reassignment is disabled). The second phasing pass is gated by `--disable-position-phasing` AND `--disable-read-reassignment` — disabling either skips it.
 - Error model selection (`--error-model`, `--hp-normalization-length`)
 - Summarize CER filter (`--min-cer-factor`, default `1.0`, `0` disables)
 - Summarize err_factor filter (`--max-err-factor`, default `1.5`; `0` disables)
+- Summarize secondary group pruning (`--prune-group-frac`, default `0.10`; `--prune-group-abs`, default `15`; both `0` disables)
 - Summarize HP threshold (`--hp-normalization-length`, default `6`; matches core; `1` restores legacy blanket-normalize-all behavior)
 
 ## Integration with specimux-suite

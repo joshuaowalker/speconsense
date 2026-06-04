@@ -34,7 +34,6 @@ speconsense:
 
   # --- Cluster Filtering ---
   # min-size: 3                   # Minimum reads per cluster (0 to disable)
-  # min-cluster-ratio: 0          # Minimum cluster size as ratio of largest (0 to disable)
 
   # --- Read Sampling ---
   # presample: 1000               # Initial random sampling of input reads
@@ -101,7 +100,6 @@ speconsense-summarize:
   # --- Variant Selection ---
   # select-max-groups: -1         # Max groups to output (-1 = no limit)
   # select-max-variants: -1       # Max variants per group (-1 = no limit)
-  # select-strategy: size         # Selection strategy: size or diversity
   # select-min-size-ratio: 0      # Min size ratio (variant/largest in group) to include (0 = disabled)
 
   # --- Processing ---

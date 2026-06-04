@@ -26,7 +26,6 @@ Parameters for the main clustering and consensus tool.
 | `inflation` | MCL inflation parameter (higher = more clusters) | 4.0 | — | — | — | — | — |
 | `k-nearest-neighbors` | Number of nearest neighbors for graph construction | 5 | — | — | — | — | — |
 | `min-size` | Minimum cluster size to output (0 = disabled) | 3 | — | 3 | — | 5 | 10 |
-| `min-cluster-ratio` | Minimum size relative to largest cluster (0 = disabled) | 0 | — | 0 | 0 | 0.2 | — |
 | `max-sample-size` | Maximum reads sampled for consensus generation | 100 | — | 100 | — | 500 | 100 |
 | `presample` | Presample size for initial reads (0 = use all) | 1000 | — | 0 | 0 | 500 | 0 |
 | `disable-position-phasing` | Disable variant phasing within clusters (also disables the second phasing pass) | false | — | — | — | true | — |
@@ -76,7 +75,6 @@ Parameters for the post-processing and summarization tool.
 | `disable-homopolymer-equivalence` | Treat homopolymer length differences as structural | false | — | — | — | — | — |
 | `select-max-groups` | Max groups to output per specimen (-1 = all) | -1 | — | — | — | — | — |
 | `select-max-variants` | Max variants per group (-1 = no limit) | -1 | — | — | — | — | — |
-| `select-strategy` | Variant selection: `size` or `diversity` | size | — | — | — | — | — |
 | `select-min-size-ratio` | Min size ratio (variant/largest) to include in output (0 = disabled) | 0 | 0.2 | — | — | — | 0.05 |
 | `fasta-fields` | Header fields: preset or comma-separated list | default | — | — | — | — | — |
 | `scale-threshold` | Sequence count to enable vsearch acceleration (0 = disabled) | 1001 | — | — | — | — | — |
@@ -153,4 +151,4 @@ Profiles specify a `speconsense-version` field (e.g., `"0.8.*"`) indicating comp
 
 ---
 
-*Document generated for speconsense 0.8.2*
+*Document generated for speconsense 0.8.3*

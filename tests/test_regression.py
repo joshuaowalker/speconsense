@@ -846,67 +846,6 @@ class TestDiscardTrackingCompleteness:
         assert small_ids.issubset(discarded_ids), \
             f"Small cluster reads should be in discards: expected {small_ids}, got discards={discarded_ids}"
 
-    def test_read_accounting_with_ratio_filtering(self, temp_dir, core_module):
-        """Verify reads filtered by --min-cluster-ratio appear in discards.
-
-        Creates a large cluster (100 reads) and small cluster (5 reads).
-        With --min-cluster-ratio 0.1, the small cluster (5% of large) should be filtered.
-        """
-        main_seq = "ACGTACGTACGTACGTACGTACGTACGTACGTACGTACGT"
-        small_seq = "GGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGG"
-
-        records = []
-        # Large cluster: 100 reads
-        for i in range(100):
-            records.append(
-                SeqRecord(
-                    Seq(main_seq),
-                    id=f"large_{i:03d}",
-                    letter_annotations={'phred_quality': [30] * len(main_seq)}
-                )
-            )
-        # Small cluster: 5 reads (5% of large, below 10% ratio threshold)
-        for i in range(5):
-            records.append(
-                SeqRecord(
-                    Seq(small_seq),
-                    id=f"ratio_filtered_{i:02d}",
-                    letter_annotations={'phred_quality': [30] * len(small_seq)}
-                )
-            )
-
-        input_count = len(records)
-        input_ids = {r.id for r in records}
-
-        fastq_path = os.path.join(temp_dir, 'ratio_filter_test.fastq')
-        with open(fastq_path, 'w') as f:
-            SeqIO.write(records, f, 'fastq')
-
-        result = subprocess.run([
-            sys.executable, '-m', core_module,
-            fastq_path,
-            '--min-size', '3',
-            '--min-cluster-ratio', '0.10',  # Clusters < 10% of largest are filtered
-            '--algorithm', 'greedy',
-            '--collect-discards'
-        ], capture_output=True, text=True)
-
-        assert result.returncode == 0, f"Command failed: {result.stderr}"
-
-        output_ids = self.count_reads_in_cluster_files('clusters')
-        discarded_ids = self.count_discarded_reads('clusters', 'ratio_filter_test')
-
-        accounted_ids = output_ids | discarded_ids
-        missing_ids = input_ids - accounted_ids
-
-        assert len(missing_ids) == 0, \
-            f"Missing reads not in output or discards: {missing_ids}"
-
-        # The ratio-filtered reads should be in discards
-        ratio_filtered_ids = {f"ratio_filtered_{i:02d}" for i in range(5)}
-        assert ratio_filtered_ids.issubset(discarded_ids), \
-            f"Ratio-filtered reads should be in discards: expected {ratio_filtered_ids}, got discards={discarded_ids}"
-
     def test_read_accounting_with_orientation_filtering(self, temp_dir, core_module):
         """Verify reads filtered by orientation appear in discards.
 

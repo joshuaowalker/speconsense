@@ -7,7 +7,6 @@ description: "Large Input (experimental)"
 # Parameters for speconsense (clustering and consensus)
 # =============================================================================
 speconsense:
-  min-cluster-ratio: 0            # Do not filter by relative size
   presample: 0                    # Process all reads
   threads: 0                      # Max threads (0 = auto-detect)
   group-identity: 0.95            # Tighter identity groups for eDNA-style mixtures

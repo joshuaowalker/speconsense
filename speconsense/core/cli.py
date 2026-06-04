@@ -34,7 +34,6 @@ def main():
     io_group.add_argument("-O", "--output-dir", default="clusters",
                           help="Output directory for all files (default: clusters)")
     io_group.add_argument("--primers", help="FASTA file containing primer sequences (default: looks for primers.fasta in input file directory)")
-    io_group.add_argument("--augment-input", help="Additional FASTQ/FASTA file with sequences recovered after primary demultiplexing (e.g., from specimine)")
 
     # Clustering group
     clustering_group = parser.add_argument_group("Clustering")
@@ -47,8 +46,6 @@ def main():
     filtering_group = parser.add_argument_group("Filtering")
     filtering_group.add_argument("--min-size", type=int, default=3,
                                  help="Minimum cluster size (default: 3, 0 to disable)")
-    filtering_group.add_argument("--min-cluster-ratio", type=float, default=0,
-                                 help="Minimum size ratio between a cluster and the largest cluster (default: 0, 0 to disable)")
     filtering_group.add_argument("--max-sample-size", type=int, default=100,
                                  help="Maximum cluster size for consensus (default: 100)")
 
@@ -282,7 +279,6 @@ def main():
         min_identity=args.min_identity,
         inflation=args.inflation,
         min_size=args.min_size,
-        min_cluster_ratio=args.min_cluster_ratio,
         max_sample_size=args.max_sample_size,
         presample_size=args.presample,
         k_nearest_neighbors=args.k_nearest_neighbors,
@@ -321,7 +317,6 @@ def main():
 
     # Set additional attributes for metadata
     clusterer.input_file = os.path.abspath(args.input_file)
-    clusterer.augment_input = os.path.abspath(args.augment_input) if args.augment_input else None
     clusterer.algorithm = args.algorithm
     clusterer.orient_mode = args.orient_mode
 
@@ -339,40 +334,7 @@ def main():
         logging.warning("No reads found in input file. Nothing to cluster.")
         sys.exit(0)
 
-    # Load augmented sequences if specified
-    augment_records = None
-    if args.augment_input:
-        # Check if augment input file exists
-        if not os.path.exists(args.augment_input):
-            logging.error(f"Augment input file not found: {args.augment_input}")
-            sys.exit(1)
-
-        logging.info(f"Reading augmented reads from {args.augment_input}")
-
-        # Auto-detect format like main input
-        augment_format = "fasta" if args.augment_input.endswith(".fasta") else "fastq"
-
-        try:
-            augment_records = list(SeqIO.parse(args.augment_input, augment_format))
-            logging.info(f"Loaded {len(augment_records)} augmented reads")
-
-            if len(augment_records) == 0:
-                logging.warning(f"No reads found in augment input file: {args.augment_input}")
-
-            # Add dummy quality scores to FASTA sequences so they can be written as FASTQ later
-            if augment_format == "fasta":
-                for record in augment_records:
-                    if not hasattr(record, 'letter_annotations') or 'phred_quality' not in record.letter_annotations:
-                        # Add dummy quality scores (quality 30 = '?' in FASTQ)
-                        record.letter_annotations = {'phred_quality': [30] * len(record.seq)}
-                logging.debug(f"Added quality scores to {len(augment_records)} FASTA sequences for downstream compatibility")
-
-        except Exception as e:
-            logging.error(f"Failed to read augment input file '{args.augment_input}': {e}")
-            sys.exit(1)
-
-    # Add sequences to clusterer (both primary and augmented)
-    clusterer.add_sequences(records, augment_records)
+    clusterer.add_sequences(records)
 
     if args.primers:
         clusterer.primers_file = os.path.abspath(args.primers)

@@ -204,7 +204,6 @@ class SpecimenClusterer:
     def __init__(self, min_identity: float = 0.9,
                  inflation: float = 4.0,
                  min_size: int = 5,
-                 min_cluster_ratio: float = 0.2,
                  max_sample_size: int = 100,
                  presample_size: int = 1000,
                  k_nearest_neighbors: int = 20,
@@ -237,7 +236,6 @@ class SpecimenClusterer:
         self.min_identity = min_identity
         self.inflation = inflation
         self.min_size = min_size
-        self.min_cluster_ratio = min_cluster_ratio
         self.max_sample_size = max_sample_size
         self.presample_size = presample_size
         self.k_nearest_neighbors = k_nearest_neighbors
@@ -309,7 +307,6 @@ class SpecimenClusterer:
 
         # Initialize attributes that may be set later
         self.input_file = None
-        self.augment_input = None
         self.algorithm = None
         self.orient_mode = None
         self.primers_file = None
@@ -358,7 +355,6 @@ class SpecimenClusterer:
                 "min_identity": self.min_identity,
                 "inflation": self.inflation,
                 "min_size": self.min_size,
-                "min_cluster_ratio": self.min_cluster_ratio,
                 "max_sample_size": self.max_sample_size,
                 "presample_size": self.presample_size,
                 "k_nearest_neighbors": self.k_nearest_neighbors,
@@ -380,7 +376,6 @@ class SpecimenClusterer:
                 "error_model": self.error_model,
             },
             "input_file": self.input_file,
-            "augment_input": self.augment_input,
             "total_input_reads": self.total_input_reads,
         }
 
@@ -529,49 +524,17 @@ class SpecimenClusterer:
 
         logging.debug(f"Wrote phasing statistics to {stats_file}")
 
-    def add_sequences(self, records: List[SeqIO.SeqRecord],
-                      augment_records: Optional[List[SeqIO.SeqRecord]] = None) -> None:
+    def add_sequences(self, records: List[SeqIO.SeqRecord]) -> None:
         """Add sequences to be clustered, with optional presampling."""
-        all_records = records.copy()  # Start with primary records
-
-        # Track the source of each record for potential logging/debugging
-        primary_count = len(records)
-        augment_count = 0
-
-        # Add augmented records if provided
-        if augment_records:
-            augment_count = len(augment_records)
-            all_records.extend(augment_records)
-
-        if self.presample_size and len(all_records) > self.presample_size:
-            logging.info(f"Presampling {self.presample_size} reads from {len(all_records)} total "
-                         f"({primary_count} primary, {augment_count} augmented)")
-
-            # First, sort primary sequences by quality and take as many as possible
-            primary_sorted = sorted(
+        if self.presample_size and len(records) > self.presample_size:
+            logging.info(f"Presampling {self.presample_size} reads from {len(records)} total")
+            records = sorted(
                 records,
                 key=lambda r: -statistics.mean(r.letter_annotations["phred_quality"])
-            )
+            )[:self.presample_size]
+            logging.info(f"Presampled {len(records)} highest-quality reads")
 
-            # Determine how many primary sequences to include (all if possible)
-            primary_to_include = min(len(primary_sorted), self.presample_size)
-            presampled = primary_sorted[:primary_to_include]
-
-            # If we still have room, add augmented sequences sorted by quality
-            remaining_slots = self.presample_size - primary_to_include
-            if remaining_slots > 0 and augment_records:
-                augment_sorted = sorted(
-                    augment_records,
-                    key=lambda r: -statistics.mean(r.letter_annotations["phred_quality"])
-                )
-                presampled.extend(augment_sorted[:remaining_slots])
-
-            logging.info(f"Presampled {len(presampled)} reads "
-                         f"({primary_to_include} primary, {len(presampled) - primary_to_include} augmented)")
-            all_records = presampled
-
-        # Add all selected records to internal storage
-        for record in all_records:
+        for record in records:
             self.sequences[record.id] = str(record.seq)
             self.records[record.id] = record
 
@@ -2686,7 +2649,7 @@ class SpecimenClusterer:
         return best
 
     def _run_size_filtering(self, subclusters: List[Dict]) -> List[Dict]:
-        """Phase 12: Size filtering — drop clusters by size and ratio thresholds.
+        """Phase 12: Size filtering — drop clusters below --min-size.
 
         Args:
             subclusters: List of subclusters from Phase 11 (CER-annotated, post-MAD,
@@ -2695,13 +2658,11 @@ class SpecimenClusterer:
         Returns:
             List of filtered clusters, sorted by size (largest first)
         """
-        # Filter by absolute size
         large_clusters = [c for c in subclusters if len(c['read_ids']) >= self.min_size]
         small_clusters = [c for c in subclusters if len(c['read_ids']) < self.min_size]
 
         if small_clusters:
             filtered_count = len(small_clusters)
-            # Track discarded reads from size-filtered clusters
             for cluster in small_clusters:
                 self.discarded_read_ids.update(cluster['read_ids'])
             self._log_stage(
@@ -2709,27 +2670,6 @@ class SpecimenClusterer:
                 large_clusters,
             )
 
-        # Filter by relative size ratio
-        if large_clusters and self.min_cluster_ratio > 0:
-            largest_size = max(len(c['read_ids']) for c in large_clusters)
-            passing_ratio = [c for c in large_clusters
-                            if len(c['read_ids']) / largest_size >= self.min_cluster_ratio]
-            failing_ratio = [c for c in large_clusters
-                            if len(c['read_ids']) / largest_size < self.min_cluster_ratio]
-
-            if failing_ratio:
-                filtered_count = len(failing_ratio)
-                # Track discarded reads from ratio-filtered clusters
-                for cluster in failing_ratio:
-                    self.discarded_read_ids.update(cluster['read_ids'])
-                self._log_stage(
-                    f"Min-ratio filter: dropped {filtered_count} cluster(s) below {self.min_cluster_ratio}",
-                    passing_ratio,
-                )
-
-            large_clusters = passing_ratio
-
-        # Sort by size and renumber as c1, c2, c3...
         large_clusters.sort(key=lambda c: len(c['read_ids']), reverse=True)
 
         return large_clusters
