@@ -226,6 +226,7 @@ Parameters are controlled via CLI arguments, optionally pre-set via YAML profile
 - Error model selection (`--error-model`, `--hp-normalization-length`)
 - Summarize CER filter (`--min-cer-factor`, default `1.0`, `0` disables)
 - Summarize err_factor filter (`--max-err-factor`, default `1.5`; `0` disables)
+- Summarize secondary group pruning (`--prune-group-frac`, default `0.10`; `--prune-group-abs`, default `15`; both `0` disables)
 - Summarize HP threshold (`--hp-normalization-length`, default `6`; matches core; `1` restores legacy blanket-normalize-all behavior)
 
 ## Integration with specimux-suite

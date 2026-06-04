@@ -5,6 +5,38 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.8.3] - 2026-06-04
+
+Quality-gate refinement: a new secondary group pruning filter in summarize, and removal of two superseded options.
+
+### Added
+
+- **Secondary identity group pruning** (summarize) — New `--prune-group-frac` (default `0.10`) and `--prune-group-abs` (default `15`) options prune small secondary identity groups (gid >= 2) that are both proportionally small relative to the largest group and small in absolute read count. Targets residual chimeric fragments, cross-sample bleed, and spurious clusters that survive CER and err_factor filtering. Both conditions must be met to prune — the relative threshold catches proportionally insignificant groups while the absolute threshold preserves legitimate low-abundance organisms with meaningful read depth. Pruned variants route to the `.lq` track for traceability. Group 1 is always exempt. Validated against 831 specimens: the conservative defaults remove 56.5% of pass-track noise with 0.7% primary variant loss and zero specimen-level primary casualties. Both keys are profile-loadable (`prune-group-frac`, `prune-group-abs`). Set either to `0` to disable.
+
+### Removed
+
+- **`--min-cluster-ratio` removed** (core) — The global specimen-wide ratio filter compared every cluster against the single largest cluster, ignoring identity groups entirely. Its function is now precisely covered by three summarize-side filters: `--min-cer-factor` (per-variant statistical significance), `--max-err-factor` (cluster homogeneity), and the new `--prune-group-frac`/`--prune-group-abs` (group-level abundance). The option was already disabled by default (0) since 0.8.0. Profiles that still reference `min-cluster-ratio` will fail validation.
+- **`--select-strategy diversity` removed** (summarize) — The diversity selection mode was never used in any bundled profile or known workflow; it required `--select-max-variants` to be active, which was also unused in practice. Size-based selection is now the only strategy. The `--select-strategy` CLI argument is retained as a hidden no-op for backward compatibility, but is no longer a valid profile key. Profiles referencing `select-strategy` will fail validation.
+
+### Migration notes (0.8.2 → 0.8.3)
+
+- **Profiles referencing `min-cluster-ratio`** (speconsense section) or `select-strategy` (speconsense-summarize section) must remove those keys. Both are now rejected by profile validation.
+- **Scripts passing `--min-cluster-ratio`** to `speconsense` will get an unrecognized-argument error. Remove the flag; the default behavior (no ratio filtering) was already equivalent to `--min-cluster-ratio 0`.
+- **Scripts passing `--select-strategy size`** to `speconsense-summarize` will continue to work (hidden arg). `--select-strategy diversity` will be silently accepted but behaves as `size`.
+- **The new group pruning filter is on by default.** To disable it, pass `--prune-group-frac 0` or `--prune-group-abs 0`. Existing outputs will change: small secondary groups that previously passed will now route to `.lq`.
+
+## [0.8.2] - 2026-05-25
+
+### Added
+
+- **`speconsense-fit-error-model` CLI** — Offline q_ctx re-estimation from a finished output tree. Deposits user error models to `~/.config/speconsense/error_models/{name}.yaml`, loadable by `--error-model {name}` in subsequent runs. Implements approach-1 (HP rates from primary-anchor MSAs) and approach-2 (non-HP rates pooled across all-cluster MSAs).
+- **Duplicate read ID warning** (core) — `speconsense` now logs a warning during input loading when duplicate read IDs are detected in the input FASTQ.
+
+### Changed
+
+- **Dorado v3.5 error model refreshed** — Re-estimated q_ctx values for the `dorado-v3.5` bundled error model using the fit-error-model pipeline.
+- **py3.8 test collection fix** — Resolved test collection failure on Python 3.8.
+
 ## [0.8.1] - 2026-05-18
 
 Correctness pass on the pipeline + significant summarize-side improvements. Headlines:
