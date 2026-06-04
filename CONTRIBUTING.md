@@ -52,7 +52,7 @@ pip install pytest pytest-cov
 python -m pytest tests/ -v
 
 # Run specific test file
-python -m pytest tests/test_augment_input.py -v
+python -m pytest tests/test_orientation.py -v
 
 # Run with coverage
 python -m pytest tests/ --cov=speconsense --cov-report=html
@@ -60,7 +60,6 @@ python -m pytest tests/ --cov=speconsense --cov-report=html
 
 ### Available Tests
 
-- `tests/test_augment_input.py`: Integration tests for --augment-input functionality
 - `tests/test_orientation.py`: Tests for sequence orientation feature
 
 ## Code Style

@@ -59,7 +59,6 @@ VALID_SPECONSENSE_KEYS = {
     # Cluster filtering
     "min-size",
     "min-cluster-ratio",
-    "keep-augmented-only-clusters",
     # Sampling
     "max-sample-size",
     "presample",

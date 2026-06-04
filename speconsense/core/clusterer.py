@@ -309,10 +309,6 @@ class SpecimenClusterer:
 
         # Initialize attributes that may be set later
         self.input_file = None
-        self.augment_input = None
-        self.keep_augmented_only_clusters = False
-        self.primary_read_ids: Set[str] = set()
-        self.augmented_read_ids: Set[str] = set()
         self.algorithm = None
         self.orient_mode = None
         self.primers_file = None
@@ -383,10 +379,7 @@ class SpecimenClusterer:
                 "error_model": self.error_model,
             },
             "input_file": self.input_file,
-            "augment_inputs": self.augment_input,
             "total_input_reads": self.total_input_reads,
-            "total_primary_reads": len(self.primary_read_ids),
-            "total_augmented_reads": len(self.augmented_read_ids),
         }
 
         # Add primer information if loaded
@@ -534,70 +527,19 @@ class SpecimenClusterer:
 
         logging.debug(f"Wrote phasing statistics to {stats_file}")
 
-    def add_sequences(self, records: List[SeqIO.SeqRecord],
-                      augment_records: Optional[List[SeqIO.SeqRecord]] = None) -> None:
+    def add_sequences(self, records: List[SeqIO.SeqRecord]) -> None:
         """Add sequences to be clustered, with optional presampling."""
-        all_records = records.copy()  # Start with primary records
-
-        # Track the source of each record for potential logging/debugging
-        primary_count = len(records)
-        augment_count = 0
-
-        # Add augmented records if provided
-        if augment_records:
-            augment_count = len(augment_records)
-            all_records.extend(augment_records)
-
-        if self.presample_size and len(all_records) > self.presample_size:
-            logging.info(f"Presampling {self.presample_size} reads from {len(all_records)} total "
-                         f"({primary_count} primary, {augment_count} augmented)")
-
-            # First, sort primary sequences by quality and take as many as possible
-            primary_sorted = sorted(
+        if self.presample_size and len(records) > self.presample_size:
+            logging.info(f"Presampling {self.presample_size} reads from {len(records)} total")
+            records = sorted(
                 records,
                 key=lambda r: -statistics.mean(r.letter_annotations["phred_quality"])
-            )
+            )[:self.presample_size]
+            logging.info(f"Presampled {len(records)} highest-quality reads")
 
-            # Determine how many primary sequences to include (all if possible)
-            primary_to_include = min(len(primary_sorted), self.presample_size)
-            presampled = primary_sorted[:primary_to_include]
-
-            # If we still have room, add augmented sequences sorted by quality
-            remaining_slots = self.presample_size - primary_to_include
-            if remaining_slots > 0 and augment_records:
-                augment_sorted = sorted(
-                    augment_records,
-                    key=lambda r: -statistics.mean(r.letter_annotations["phred_quality"])
-                )
-                presampled.extend(augment_sorted[:remaining_slots])
-
-            logging.info(f"Presampled {len(presampled)} reads "
-                         f"({primary_to_include} primary, {len(presampled) - primary_to_include} augmented)")
-            all_records = presampled
-
-        # Add all selected records to internal storage, deduplicating by read ID.
-        # all_records lists primary records before augmented ones (both in the
-        # presample and non-presample paths), so keeping the first occurrence of
-        # each ID means primary wins over augment, and earlier augment files win
-        # over later ones.
-        seen = set()
-        collisions = 0
-        for record in all_records:
-            if record.id in seen:
-                collisions += 1
-                continue
-            seen.add(record.id)
+        for record in records:
             self.sequences[record.id] = str(record.seq)
             self.records[record.id] = record
-
-        if collisions:
-            logging.warning(f"Skipped {collisions} read(s) with duplicate IDs across "
-                            "primary/augment inputs (kept first occurrence)")
-
-        # Record per-read origin so augmented-only clusters can be filtered later.
-        primary_ids = {r.id for r in records}
-        self.primary_read_ids = set(self.records) & primary_ids
-        self.augmented_read_ids = set(self.records) - primary_ids
 
         # Log scalability mode status for large datasets
         if len(self.sequences) >= self.scale_threshold and self.scale_threshold > 0:
@@ -2719,27 +2661,6 @@ class SpecimenClusterer:
         Returns:
             List of filtered clusters, sorted by size (largest first)
         """
-        # Discard clusters with no primary-input read. Augmented reads are only
-        # meant to reinforce real specimen clusters; a cluster built entirely
-        # from augmented reads has no primary-demultiplex support. This runs
-        # before the size/ratio checks so the min-cluster-ratio denominator is
-        # computed only over primary-supported clusters, and after all merging
-        # and read recovery (phases 6-10) so augmented reads that legitimately
-        # join a primary cluster are retained.
-        if self.augment_input and not self.keep_augmented_only_clusters:
-            primary_clusters = [c for c in subclusters
-                                if c['read_ids'] & self.primary_read_ids]
-            augmented_only = [c for c in subclusters
-                              if not (c['read_ids'] & self.primary_read_ids)]
-            if augmented_only:
-                for cluster in augmented_only:
-                    self.discarded_read_ids.update(cluster['read_ids'])
-                self._log_stage(
-                    f"Augmented-only filter: dropped {len(augmented_only)} cluster(s) with no primary read",
-                    primary_clusters,
-                )
-            subclusters = primary_clusters
-
         # Filter by absolute size
         large_clusters = [c for c in subclusters if len(c['read_ids']) >= self.min_size]
         small_clusters = [c for c in subclusters if len(c['read_ids']) < self.min_size]
@@ -2889,125 +2810,6 @@ class SpecimenClusterer:
 
         logging.info(f"Wrote {len(self.discarded_read_ids)} discarded reads to {discards_file}")
 
-    def _screen_augmented_reads(self) -> None:
-        """Discard augmented reads not within --min-identity of any primary read.
-
-        Every final cluster must contain at least one primary read (enforced in
-        Phase 12), so an augmented read can only contribute if it shares an edge
-        with a primary read in the initial similarity graph. Screening such reads
-        out before the matrix is built avoids paying O(n^2) / K-NN cost on
-        augmented reads that can never join a primary-supported cluster — a large
-        saving when augmented reads greatly outnumber primary reads.
-
-        The screen uses the same raw-edlib primitive (``calculate_similarity``)
-        and threshold as the clustering edges, so "passes the screen" is exactly
-        "has at least one edge to a primary read". Note this is marginally more
-        aggressive than the Phase-12 filter: an augmented read connected to a
-        primary cluster only transitively (via another augmented read) is dropped
-        here. In practice clusters are far tighter than --min-identity, so this is
-        negligible. Skipped entirely when augmented-only clusters are being kept.
-        """
-        if not self.augment_input or self.keep_augmented_only_clusters:
-            return
-        if not self.augmented_read_ids:
-            return
-
-        aug_ids = sorted(self.augmented_read_ids)
-        primary_ids = sorted(self.primary_read_ids)
-
-        if not primary_ids:
-            # No primary reads: every cluster would be augmented-only and dropped.
-            logging.warning(f"No primary reads present; discarding all {len(aug_ids)} augmented reads")
-            kept = set()
-        else:
-            kept = self._find_augmented_near_primary(aug_ids, primary_ids)
-
-        dropped = self.augmented_read_ids - kept
-        for rid in dropped:
-            self.discarded_read_ids.add(rid)
-            # Remove from the clustering pool but keep the SeqRecord so the read
-            # can still be emitted to the discards file. Downstream phases that
-            # work on discards (e.g. discard recovery) look reads up in
-            # self.sequences and skip anything missing, so dropping it here keeps
-            # screened reads out of clustering without re-admission.
-            self.sequences.pop(rid, None)
-        self.augmented_read_ids = kept
-        self.total_input_reads = len(self.sequences)
-
-        logging.info(f"Augment screen: kept {len(kept)}/{len(aug_ids)} augmented reads "
-                     f"within {self.min_identity:.0%} identity of a primary read "
-                     f"(dropped {len(dropped)})")
-
-    def _find_augmented_near_primary(self, aug_ids: List[str],
-                                     primary_ids: List[str]) -> Set[str]:
-        """Return the augmented IDs within --min-identity of any primary read.
-
-        Uses the vsearch candidate finder when the primary (DB) set is large
-        enough to benefit (DB = primary reads, queries = augmented reads),
-        otherwise a brute-force scan. Both paths confirm hits with
-        ``calculate_similarity`` at the exact --min-identity threshold, so the
-        decision matches the clustering edges.
-
-        The screen costs O(|augmented| x |primary|). vsearch's k-mer prefilter
-        only pays off when the primary DB is large — with a small primary set
-        every query still aligns against ~all targets, so vsearch's per-batch
-        subprocess overhead makes it slower than brute-force edlib (which early-
-        exits as soon as one primary clears the threshold). So the choice is
-        gated on the primary count, not the total dataset size.
-        """
-        use_vsearch = (
-            self._candidate_finder is not None
-            and self.scale_threshold > 0
-            and len(primary_ids) >= self.scale_threshold
-        )
-        if use_vsearch:
-            try:
-                return self._screen_augmented_vsearch(aug_ids, primary_ids)
-            except Exception as e:
-                logging.warning(f"vsearch augment screen failed ({e}); falling back to brute force")
-        return self._screen_augmented_bruteforce(aug_ids, primary_ids)
-
-    def _screen_augmented_bruteforce(self, aug_ids: List[str],
-                                     primary_ids: List[str]) -> Set[str]:
-        """Brute-force augment screen: O(|augmented| x |primary|) with early exit."""
-        primary_seqs = [self.sequences[pid] for pid in primary_ids]
-        kept = set()
-        for aid in aug_ids:
-            aseq = self.sequences[aid]
-            for pseq in primary_seqs:
-                if self.calculate_similarity(aseq, pseq) >= self.min_identity:
-                    kept.add(aid)
-                    break
-        return kept
-
-    def _screen_augmented_vsearch(self, aug_ids: List[str],
-                                  primary_ids: List[str]) -> Set[str]:
-        """vsearch augment screen: query augmented reads against a primary-read DB.
-
-        Candidates are gathered at the relaxed identity used elsewhere for vsearch
-        candidate finding, then confirmed exactly with ``calculate_similarity`` so
-        vsearch's identity definition cannot drop a read the clustering edges keep.
-        """
-        finder = self._candidate_finder
-        primary_seqs = {pid: self.sequences[pid] for pid in primary_ids}
-        finder.build_index(primary_seqs, self.output_dir,
-                           cache_id=f"{self.sample_name}-augscreen")
-        try:
-            relaxed = self.min_identity * self.scalability_config.relaxed_identity_factor
-            candidates = finder.find_candidates(aug_ids, self.sequences, relaxed, max_candidates=8)
-        finally:
-            finder.cleanup()
-
-        kept = set()
-        for aid in aug_ids:
-            aseq = self.sequences[aid]
-            for pid in candidates.get(aid, []):
-                pseq = self.sequences.get(pid)
-                if pseq is not None and self.calculate_similarity(aseq, pseq) >= self.min_identity:
-                    kept.add(aid)
-                    break
-        return kept
-
     def cluster(self, algorithm: str = "graph") -> None:
         """Perform complete clustering process with variant phasing and write output files.
 
@@ -3035,10 +2837,6 @@ class SpecimenClusterer:
         Args:
             algorithm: Clustering algorithm to use ('graph' for MCL or 'greedy')
         """
-        # Pre-screen augmented reads against primary reads before building the
-        # similarity matrix, so off-target augmented reads never enter clustering.
-        self._screen_augmented_reads()
-
         with tempfile.TemporaryDirectory() as temp_dir:
             # Phase 1: Initial clustering
             initial_clusters = self._run_initial_clustering(temp_dir, algorithm)

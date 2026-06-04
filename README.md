@@ -1215,7 +1215,6 @@ This comprehensive logging allows users to understand exactly how the pipeline p
 
 ```
 usage: speconsense [-h] [-O OUTPUT_DIR] [--primers PRIMERS]
-                   [--augment-input FILE] [--keep-augmented-only-clusters]
                    [--algorithm {graph,greedy}] [--min-identity MIN_IDENTITY]
                    [--inflation INFLATION]
                    [--k-nearest-neighbors K_NEAREST_NEIGHBORS]
@@ -1263,16 +1262,6 @@ Input/Output:
                         Output directory for all files (default: clusters)
   --primers PRIMERS     FASTA file containing primer sequences (default: looks
                         for primers.fasta in input file directory)
-  --augment-input FILE  Additional FASTQ/FASTA file with sequences recovered
-                        after primary demultiplexing (e.g., from specimine, or
-                        specimux partial forward/reverse barcode matches).
-                        Repeat the flag to supply multiple files. Clusters
-                        built entirely from augmented reads are discarded
-                        unless --keep-augmented-only-clusters is given.
-  --keep-augmented-only-clusters
-                        Keep clusters that contain no primary-input reads (by
-                        default, augmented-only clusters are discarded when
-                        --augment-input is used).
 
 Clustering:
   --algorithm {graph,greedy}
@@ -1655,43 +1644,6 @@ speconsense input.fastq --primers primers.fasta
 - Orientation occurs before clustering, ensuring all sequences are in the same direction
 - Failed orientations typically indicate: no primers found, chimeric sequences, or degraded primers
 - Quality scores are reversed when sequences are reverse-complemented
-
-### Augmenting Clusters with Recovered Sequences
-
-**Use Case:** Increasing cluster abundance by including sequences that were partially demultiplexed or recovered through mining tools like `specimine`.
-
-The `--augment-input` parameter allows you to supplement primary demultiplexing results with additional sequences recovered from unmatched reads. Repeat the flag to supply several files — for example, the separate partial forward-barcode and reverse-barcode match files that specimux writes:
-
-```bash
-# 1. Run primary demultiplexing with specimux
-specimux primers.fasta specimens.txt input.fastq -O results/
-
-# 2. Recover additional sequences from unmatched reads
-specimine results/unknown/ specimen_name --output recovered.fastq
-
-# 3. Cluster with both primary and recovered sequences (one or more augment files)
-speconsense results/full/specimen_name.fastq \
-    --augment-input recovered_fwd.fastq \
-    --augment-input recovered_rev.fastq
-```
-
-**How it works:**
-- Augmented sequences participate equally in clustering with primary sequences
-- During presampling, primary sequences are prioritized to ensure representative sampling
-- All sequences (primary + augmented) contribute to final consensus generation
-- Final output headers show total read counts including augmented sequences
-- **Clusters built entirely from augmented reads are discarded** — augmented reads only reinforce clusters that have at least one primary-input read. Pass `--keep-augmented-only-clusters` to retain them.
-- If a read ID appears in more than one input (primary or augment), the first occurrence wins (primary over augment, earlier augment file over later) and a warning reports how many duplicates were skipped
-
-**Key features:**
-- Accepts one or more files via repeated `--augment-input`, each FASTQ or FASTA (auto-detected by file extension)
-- Augmented sequences fully traceable through the entire pipeline
-- Sequences only cluster together if they meet the similarity threshold
-- Recovered sequences contribute only when they cluster with primary reads (augmented-only clusters are dropped by default)
-- Maximizes data utilization by including sequences that would otherwise be discarded
-
-**Typical workflow:**
-After primary demultiplexing, some sequences may remain unmatched due to sequencing errors, primer degradation, or edge cases in barcode detection. Mining tools like `specimine` can recover these sequences based on sequence composition or other characteristics, allowing them to be included in consensus generation and increase cluster support.
 
 ### Testing with Synthetic Data
 
