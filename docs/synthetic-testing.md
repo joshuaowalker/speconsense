@@ -193,14 +193,10 @@ speconsense-synth two_variants.fasta -n 400 -e 0.05 --ratios 50,50 --seed 42 -o 
 speconsense-synth two_variants.fasta -n 400 -e 0.10 --ratios 50,50 --seed 42 -o mixed_10pct.fastq
 
 # Cluster with both algorithms
-# Note: Use --min-cluster-ratio 0 to see ALL clusters including small artifacts
-speconsense mixed_2pct.fastq --algorithm graph -o mcl_2pct --min-size 0 --min-cluster-ratio 0
-speconsense mixed_2pct.fastq --algorithm greedy -o greedy_2pct --min-size 0 --min-cluster-ratio 0
-
+# Note: Use --min-size 0 to see ALL clusters including small artifacts
+speconsense mixed_2pct.fastq --algorithm graph -o mcl_2pct --min-size 0speconsense mixed_2pct.fastq --algorithm greedy -o greedy_2pct --min-size 0
 # Test higher error rates with MCL
-speconsense mixed_5pct.fastq --algorithm graph -o mcl_5pct --min-size 0 --min-cluster-ratio 0
-speconsense mixed_10pct.fastq --algorithm graph -o mcl_10pct --min-size 0 --min-cluster-ratio 0
-
+speconsense mixed_5pct.fastq --algorithm graph -o mcl_5pct --min-size 0speconsense mixed_10pct.fastq --algorithm graph -o mcl_10pct --min-size 0
 # Examine the output
 grep "^>" mcl_2pct/mixed_2pct-all.fasta
 
@@ -221,13 +217,13 @@ Testing with closely-related *Amanita* variants (99.5% identity, 3 SNPs apart) a
   - 50/50 mix: Creates a franken-consensus (see Example 4 for details)
   - Unequal ratios: May separate or merge depending on distance threshold
 
-**Key finding on artifacts**: When examining clusters with `--min-cluster-ratio 0` in our in silico testing, all small clusters (≤4 reads) were sequencing error artifacts, clearly matching one parent variant or the other (~99% to one, ~92% to the other). None showed intermediate identity suggesting biological mixing.
+**Key finding on artifacts**: When examining clusters with `--min-size 0` in our in silico testing, all small clusters (≤4 reads) were sequencing error artifacts, clearly matching one parent variant or the other (~99% to one, ~92% to the other). None showed intermediate identity suggesting biological mixing.
 
 **Interpretation**:
 - Intermediate variants with small size (RiC <20) are likely artifacts from error-driven mixing
 - Intermediate variants with large size suggest real heterogeneity or contamination
 - Higher error rates increase artifact formation
-- Use `--min-size` and `--min-cluster-ratio` to filter small artifact clusters
+- Use `--min-size` to filter small artifact clusters
 - Check merged sequences in summary output: if variants A and B merge into one IUPAC consensus, this represents the phasing loss discussed in [Understanding RiC and Merging](understanding-ric-and-merging.md)
 
 **Example investigation**:
@@ -404,21 +400,15 @@ speconsense-synth target_and_contaminant.fasta -n 400 -e 0.02 \
     --ratios 80,20 --seed 42 -o contam_80_20.fastq
 
 # Test with both clustering algorithms
-# Note: Use --min-cluster-ratio 0 to see ALL clusters including small artifacts
-speconsense contam_95_5.fastq --algorithm graph -o mcl_95_5 --min-size 0 --min-cluster-ratio 0
-speconsense contam_95_5.fastq --algorithm greedy -o greedy_95_5 --min-size 0 --min-cluster-ratio 0
-
+# Note: Use --min-size 0 to see ALL clusters including small artifacts
+speconsense contam_95_5.fastq --algorithm graph -o mcl_95_5 --min-size 0speconsense contam_95_5.fastq --algorithm greedy -o greedy_95_5 --min-size 0
 # Test additional ratios
-speconsense contam_90_10.fastq --algorithm graph -o mcl_90_10 --min-size 0 --min-cluster-ratio 0
-speconsense contam_80_20.fastq --algorithm graph -o mcl_80_20 --min-size 0 --min-cluster-ratio 0
-
+speconsense contam_90_10.fastq --algorithm graph -o mcl_90_10 --min-size 0speconsense contam_80_20.fastq --algorithm graph -o mcl_80_20 --min-size 0
 # Compare algorithm behavior at equal mixture (50/50)
 # This tests the franken-consensus danger zone
 speconsense-synth target_and_contaminant.fasta -n 400 -e 0.02 \
     --ratios 50,50 --seed 42 -o contam_50_50.fastq
-speconsense contam_50_50.fastq --algorithm graph -o mcl_50_50 --min-size 0 --min-cluster-ratio 0
-speconsense contam_50_50.fastq --algorithm greedy -o greedy_50_50 --min-size 0 --min-cluster-ratio 0
-```
+speconsense contam_50_50.fastq --algorithm graph -o mcl_50_50 --min-size 0speconsense contam_50_50.fastq --algorithm greedy -o greedy_50_50 --min-size 0```
 
 **What to look for**:
 - **Separation**: Do you get two clean clusters (target + contaminant)?
@@ -483,7 +473,7 @@ Across all tested scenarios, **artifacts appearing in the consensus sequence** o
 - **Clean separation** (two clusters with correct sizes): Pipeline successfully detected contamination
 - **Franken-consensus** (one cluster with mixed reads): Sequences too similar or algorithm too aggressive
 - **Multiple small clusters**: Over-fragmentation, may need parameter tuning
-- Use `--min-cluster-ratio` to filter contaminants below a certain proportion
+- Use summarize's `--prune-group-frac`/`--prune-group-abs` to filter contaminants below a certain proportion
 - Check quality_report.txt (from speconsense-summarize) to identify mixed consensuses by elevated stability metrics
 
 **Example analysis**:
@@ -512,7 +502,7 @@ grep "^>" greedy_50_50/contam_50_50-all.fasta
 # (Single cluster, elevated p50diff warns of mixed population)
 
 # For production use, filter minor contaminants
-speconsense contam_95_5.fastq --min-cluster-ratio 0.10 -o filtered
+speconsense contam_95_5.fastq --min-size 3 -o filtered
 # Only keeps clusters ≥10% of total (filters out <10% contamination)
 ```
 
@@ -525,9 +515,7 @@ speconsense-synth target_and_contaminant.fasta -n 100 -e 0.02 \
 speconsense-synth target_and_contaminant.fasta -n 50 -e 0.02 \
     --ratios 95,5 --seed 42 -o contam_95_5_n50.fastq
 
-speconsense contam_95_5_n100.fastq --algorithm graph -o mcl_95_5_n100 --min-cluster-ratio 0
-speconsense contam_95_5_n50.fastq --algorithm graph -o mcl_95_5_n50 --min-cluster-ratio 0
-
+speconsense contam_95_5_n100.fastq --algorithm graph -o mcl_95_5_n100speconsense contam_95_5_n50.fastq --algorithm graph -o mcl_95_5_n50
 # Compare: Does N=50 still detect the 5% minority?
 grep "^>" mcl_95_5_n100/contam_95_5_n100-all.fasta
 grep "^>" mcl_95_5_n50/contam_95_5_n50-all.fasta
@@ -536,7 +524,7 @@ grep "^>" mcl_95_5_n50/contam_95_5_n50-all.fasta
 
 This experiment helps you:
 1. Understand contamination detection limits (both algorithm and read depth effects)
-2. Set appropriate `--min-cluster-ratio` thresholds
+2. Apply summarize quality filters (`--min-cer-factor`, `--prune-group-frac`)
 3. Recognize franken-consensus signatures in real data (greedy at ~50% contamination)
 4. Understand when contamination is masked (greedy at low levels, MCL below ~5 minority reads)
 5. Evaluate whether small variants are real biology or contamination
@@ -584,7 +572,7 @@ Given the limited empirical validation to date, **default parameters in Speconse
 **Key defaults and their rationale:**
 - `--min-size 5` (speconsense): Filters small clusters at the empirically-observed artifact threshold (≤4 reads)
 - `--min-ric 3` (speconsense-summarize): Matches the minimum N for reliable consensus shown in testing
-- `--min-cluster-ratio 0.01` (speconsense): Filters clusters smaller than 1% of the largest cluster; serves as runaway protection while allowing minor variants through for downstream curation
+- `--min-size 3` (speconsense): Filters trivially small clusters while allowing minor variants through for downstream curation
 - MCL as default algorithm: More computationally expensive but safer for contamination detection than greedy
 
 **Rationale:**
@@ -759,7 +747,7 @@ Remember that `speconsense-synth` is a simplified model:
 After exploring these synthetic scenarios, you can:
 
 1. **Apply insights to real data**: Use stability metrics and cluster size patterns learned from synthetic tests to evaluate real consensus sequences
-2. **Set evidence-based thresholds**: Calibrate `--min-ric`, `--min-size`, and `--min-cluster-ratio` based on synthetic experiments
+2. **Set evidence-based thresholds**: Calibrate `--min-ric`, `--min-size`, and summarize quality filters based on synthetic experiments
 3. **Design custom tests**: Create synthetic datasets specific to your questions (e.g., specific polymorphic regions, chimera simulation)
 4. **Build confidence**: Use repeated synthetic experiments with different seeds to understand variance in outcomes
 5. **Review quality reports**: Compare patterns in synthetic quality_report.txt to real data reports to identify anomalies

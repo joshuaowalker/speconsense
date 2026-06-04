@@ -208,8 +208,8 @@ def parse_arguments():
                                  dest="select_max_variants", type=int, default=-1,
                                  help="Maximum total variants to output per group (default: -1 = no limit, 0 also means no limit)")
     selection_group.add_argument("--select-strategy", "--variant-selection",
-                                 dest="select_strategy", choices=["size", "diversity"], default="size",
-                                 help="Variant selection strategy: size or diversity (default: size)")
+                                 dest="select_strategy", default="size",
+                                 help=argparse.SUPPRESS)
     selection_group.add_argument("--select-min-size-ratio", type=float, default=0,
                                  help="Minimum size ratio (variant/largest) to include in output "
                                       "(default: 0 = disabled, e.g. 0.2 for 20%% cutoff)")
@@ -319,9 +319,6 @@ def parse_arguments():
 
     if '--max-groups' in sys.argv:
         logging.warning("--max-groups is deprecated, use --select-max-groups instead")
-
-    if '--variant-selection' in sys.argv:
-        logging.warning("--variant-selection is deprecated, use --select-strategy instead")
 
     return args
 
@@ -869,8 +866,9 @@ def main():
     logging.info(f"  --group-identity: {args.group_identity}")
     logging.info(f"  --select-max-variants: {args.select_max_variants}")
     logging.info(f"  --select-max-groups: {args.select_max_groups}")
-    logging.info(f"  --select-strategy: {args.select_strategy}")
     logging.info(f"  --select-min-size-ratio: {args.select_min_size_ratio}")
+    logging.info(f"  --prune-group-frac: {args.prune_group_frac}")
+    logging.info(f"  --prune-group-abs: {args.prune_group_abs}")
     logging.info(f"  --log-level: {args.log_level}")
     logging.info("")
 

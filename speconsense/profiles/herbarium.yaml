@@ -14,7 +14,6 @@ description: "High-recall settings for herbarium specimens with degraded DNA"
 
 speconsense:
   min-identity: 0.85            # Lower threshold for degraded DNA
-  min-cluster-ratio: 0          # Keep all clusters
   min-size: 3                   # Lower minimum for degraded samples
   min-variant-frequency: 0.05   # More sensitive variant detection (5%)
   presample: 0                  # Use all reads

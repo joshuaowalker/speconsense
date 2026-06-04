@@ -183,7 +183,7 @@ Speconsense can detect and isolate sequence variants within specimens (aka "hapl
 - MSA-based variant merging with IUPAC ambiguity codes and size-weighted consensus, applied within each identity group
 - Cross-primer overlap merging across identity groups (for primer-pool workflows)
 - CER and err_factor filtering to route low-confidence variants to a separate `.ns`/`.lq` track
-- Size-based or diversity-based variant selection strategies
+- Size-based variant selection with configurable limits per group
 
 For detailed information on variant handling options, see the [Advanced Post-Processing](#advanced-post-processing) section below.
 
@@ -476,7 +476,7 @@ Speconsense offers two clustering approaches with different characteristics:
 - You're willing to evaluate multiple consensus sequences per specimen
 - You need fine-grained discrimination between similar sequences
 - You want the most comprehensive analysis of sequence diversity
-- **Note**: Use `speconsense-summarize` after clustering to manage multiple variants per specimen. Key options include `--merge-position-count` for merging variants differing by few SNPs/indels, `--group-identity` for grouping similar variants, and `--select-max-variants`/`--select-strategy` for controlling which variants to output
+- **Note**: Use `speconsense-summarize` after clustering to manage multiple variants per specimen. Key options include `--merge-position-count` for merging variants differing by few SNPs/indels, `--group-identity` for grouping similar variants, and `--select-max-variants` for controlling which variants to output
 
 ### Cluster Merging
 
@@ -506,12 +506,6 @@ Speconsense provides two complementary filters to control which clusters are out
 - Applied at the post-phasing size-filtering phase (after merging, phasing, reassignment, recovery, and CER validation)
 - Set to 0 to disable and output all clusters regardless of size
 
-**Relative size filtering (`--min-cluster-ratio`, default: 0):**
-- Filters clusters based on size relative to the largest cluster in the specimen
-- Applied at the same phase as `--min-size`, against post-merge / post-reassignment cluster sizes
-- Default `0` disables this filter; the unconditional hard-floor of 3 reads (built into core) prevents trivially-small clusters from surviving
-- Set to a non-zero value to suppress weakly-supported variants relative to the dominant cluster
-
 **Processing order (high level):**
 1. Initial clustering produces raw clusters
 2. Pre-phasing merge of identical/homopolymer-equivalent clusters
@@ -522,13 +516,11 @@ Speconsense provides two complementary filters to control which clusters are out
 7. Discard recovery re-admits previously-dropped reads to surviving clusters
 8. Second phasing pass re-phases any clusters that gained reads
 9. CER validation annotates each non-anchor cluster with a `cer_factor`
-10. **Size filtering: apply `--min-size` and `--min-cluster-ratio`**
+10. **Size filtering: apply `--min-size`**
 11. Final consensus + MAD outlier removal + FASTA writing
 
-For per-group filtering (e.g., suppressing weak minor variants without affecting secondary primer-pool groups), prefer summarize's `--select-min-size-ratio`, which applies within each identity group rather than against the global largest cluster.
-
 **Deferred filtering strategy:**
-For maximum flexibility in detecting rare variants and contaminants, set `--min-size 0 --min-cluster-ratio 0` in `speconsense` and apply final quality thresholds in summarize via `--min-ric`, `--min-cer-factor`, and `--max-err-factor`. This lets you run expensive clustering once and experiment with thresholds during post-processing. The CER and err_factor filters route low-confidence clusters to the `.ns`/`.lq` track rather than dropping them entirely, so you can revisit decisions without re-running core.
+For maximum flexibility in detecting rare variants and contaminants, set `--min-size 0` in `speconsense` and apply final quality thresholds in summarize via `--min-ric`, `--min-cer-factor`, `--max-err-factor`, and `--prune-group-frac`/`--prune-group-abs`. This lets you run expensive clustering once and experiment with thresholds during post-processing. The CER and err_factor filters route low-confidence clusters to the `.ns`/`.lq` track rather than dropping them entirely, so you can revisit decisions without re-running core.
 
 ### Consensus Generation
 
@@ -614,7 +606,7 @@ After initial clustering, speconsense runs a 12-phase pipeline. Phases 5–9 are
 | 7 | Discard recovery | Re-admit previously-dropped reads to surviving clusters |
 | 8 | Second phasing pass | Re-phase clusters whose membership changed via reassignment/recovery |
 | 9 | CER validation | Annotate each non-anchor cluster with a `cer_factor` |
-| 10 | Size filtering | Apply `--min-size` / `--min-cluster-ratio` |
+| 10 | Size filtering | Apply `--min-size` |
 | 11 | Output generation | Final consensus, MAD outlier removal, FASTA writing |
 | 12 | Discard writeout | Optional, with `--collect-discards` |
 
@@ -713,36 +705,7 @@ speconsense-summarize --group-identity 0.85
 
 **Variant Selection (within each group):**
 
-When multiple variants exist per identity group, `speconsense-summarize` offers two strategies for selecting which variants to output:
-
-**Size-based selection (default):**
-```bash
-speconsense-summarize --select-strategy size --select-max-variants 2
-```
-- Selects variants by cluster size (largest first)
-- Primary variant is always the largest cluster
-- Additional variants are selected in order of decreasing size
-- Best for identifying the most abundant sequence variants
-- Suitable when read count reflects biological abundance
-- **Default**: `--select-max-variants=-1` (outputs all variants, no limit)
-
-**Diversity-based selection:**
-```bash
-speconsense-summarize --select-strategy diversity --select-max-variants 2
-```
-- Uses a **maximum distance algorithm** to select variants that are most genetically different from each other
-- Primary variant is still the largest cluster
-- Additional variants are selected to maximize sequence diversity in the output
-- Iteratively selects the variant with the **maximum minimum distance** to all previously selected variants
-- Best for capturing the full range of genetic variation in your sample
-- Suitable when you want to detect distinct sequence types regardless of their abundance
-
-**Algorithm Details for Diversity Selection (within each group):**
-1. Primary variant = largest cluster within the group (by read count)
-2. For each additional variant slot in the group:
-   - Calculate the minimum sequence distance from each remaining candidate to all already-selected variants in this group
-   - Select the candidate with the largest minimum distance (farthest from all selected in this group)
-   - Repeat until select_max_variants reached for this group
+When multiple variants exist per identity group, `speconsense-summarize` selects variants by size (largest first). Use `--select-max-variants N` to cap the number of variants per group (default: no limit).
 
 **Overall Process:**
 1. Read FASTA outputs from `speconsense`, parsing `gid=`/`vid=` to recover core's identity groups
@@ -1167,7 +1130,7 @@ The complete speconsense-summarize workflow operates in this order:
 3. **Cross-primer overlap conflation** (`--min-merge-overlap`, `--group-identity`) merges different-primer core groups whose anchors overlap above the identity threshold
 4. **Homopolymer-aware MSA-based variant merging** within each (possibly-conflated) group (`--disable-merging`, `--merge-effort`, `--merge-position-count`, `--merge-indel-length`, `--min-merge-overlap`, `--merge-snp`, `--merge-min-size-ratio`, `--disable-homopolymer-equivalence`, `--hp-normalization-length`)
 5. **Selection size ratio filtering** to remove tiny post-merge variants (`--select-min-size-ratio`)
-6. **Variant selection** within each group (`--select-max-variants`, `--select-strategy`, `--select-max-groups`)
+6. **Variant selection** within each group (`--select-max-variants`, `--select-max-groups`)
 7. **CER and err_factor filtering** — route failing records to `.ns` / `.lq` (`--min-cer-factor`, `--max-err-factor`)
 8. **Output generation** — passing FASTA + FASTQ, filtered records under `variants/`, per-specimen tree under `trees/`, customizable header fields (`--fasta-fields`) and full traceability
 
@@ -1219,7 +1182,6 @@ usage: speconsense [-h] [-O OUTPUT_DIR] [--primers PRIMERS]
                    [--inflation INFLATION]
                    [--k-nearest-neighbors K_NEAREST_NEIGHBORS]
                    [--min-size MIN_SIZE]
-                   [--min-cluster-ratio MIN_CLUSTER_RATIO]
                    [--max-sample-size MAX_SAMPLE_SIZE]
                    [--disable-position-phasing] [--enable-position-phasing]
                    [--disable-read-reassignment] [--enable-read-reassignment]
@@ -1277,9 +1239,6 @@ Clustering:
 
 Filtering:
   --min-size MIN_SIZE   Minimum cluster size (default: 3, 0 to disable)
-  --min-cluster-ratio MIN_CLUSTER_RATIO
-                        Minimum size ratio between a cluster and the largest
-                        cluster (default: 0, 0 to disable)
   --max-sample-size MAX_SAMPLE_SIZE
                         Maximum cluster size for consensus (default: 100)
 
@@ -1413,7 +1372,6 @@ usage: speconsense-summarize [-h] [--source SOURCE]
                              [--hp-normalization-length HP_NORMALIZATION_LENGTH]
                              [--select-max-groups SELECT_MAX_GROUPS]
                              [--select-max-variants SELECT_MAX_VARIANTS]
-                             [--select-strategy {size,diversity}]
                              [--select-min-size-ratio SELECT_MIN_SIZE_RATIO]
                              [--scale-threshold SCALE_THRESHOLD] [--threads N]
                              [--log-level {DEBUG,INFO,WARNING,ERROR,CRITICAL}]
@@ -1521,9 +1479,6 @@ Selection:
   --select-max-variants SELECT_MAX_VARIANTS, --max-variants SELECT_MAX_VARIANTS
                         Maximum total variants to output per group (default:
                         -1 = no limit, 0 also means no limit)
-  --select-strategy {size,diversity}, --variant-selection {size,diversity}
-                        Variant selection strategy: size or diversity
-                        (default: size)
   --select-min-size-ratio SELECT_MIN_SIZE_RATIO
                         Minimum size ratio (variant/largest) to include in
                         output (default: 0 = disabled, e.g. 0.2 for 20%

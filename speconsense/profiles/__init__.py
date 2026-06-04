@@ -58,7 +58,6 @@ VALID_SPECONSENSE_KEYS = {
     "k-nearest-neighbors",
     # Cluster filtering
     "min-size",
-    "min-cluster-ratio",
     # Sampling
     "max-sample-size",
     "presample",
@@ -119,7 +118,6 @@ VALID_SUMMARIZE_KEYS = {
     # Selection
     "select-max-groups",
     "select-max-variants",
-    "select-strategy",
     "select-min-size-ratio",
     "enable-full-consensus",
     # Processing

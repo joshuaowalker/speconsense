@@ -21,7 +21,6 @@ from speconsense.types import ConsensusInfo
 
 from .iupac import (
     primers_are_same,
-    calculate_adjusted_identity_distance,
     calculate_overlap_aware_distance,
     create_variant_summary,
 )
@@ -145,91 +144,42 @@ def group_by_core_identity(
 
 def select_variants(group: List[ConsensusInfo],
                    max_variants: int,
-                   variant_selection: str,
+                   variant_selection: str = "size",
                    group_number: int = None,
                    hp_normalization_length: int = 1) -> List[ConsensusInfo]:
     """
-    Select variants from a group based on the specified strategy.
-    Always includes the largest variant first.
+    Select variants from a group by size (largest first).
     max_variants of 0 or -1 means no limit (return all variants).
 
     Logs variant summaries for ALL variants in the group, including those
     that will be skipped in the final output.
-
-    Args:
-        group: List of ConsensusInfo to select from
-        max_variants: Maximum total variants per group (0 or -1 for no limit)
-        variant_selection: Selection strategy ("size" or "diversity")
-        group_number: Group number for logging prefix (optional)
-        hp_normalization_length: HP threshold forwarded to distance calc
-            (diversity strategy only).
     """
-    # Sort by size, largest first
     sorted_group = sorted(group, key=lambda x: x.size, reverse=True)
 
     if not sorted_group:
         return []
 
-    # The primary variant is always the largest
     primary_variant = sorted_group[0]
 
-    # Build prefix for logging
     prefix = f"Group {group_number}: " if group_number is not None else ""
 
-    # Only log Primary when there are other variants to compare against
     if len(sorted_group) > 1:
         logging.info(f"{prefix}Primary: {primary_variant.sample_name} (size={primary_variant.size}, ric={primary_variant.ric})")
 
-    # Handle no limit case (0 or -1 means unlimited)
-    if max_variants <= 0:
-        selected = sorted_group
-    elif len(group) <= max_variants:
+    if max_variants <= 0 or len(group) <= max_variants:
         selected = sorted_group
     else:
-        # Always include the largest (main) variant
-        selected = [primary_variant]
-        candidates = sorted_group[1:]
+        selected = sorted_group[:max_variants]
 
-        if variant_selection == "size":
-            # Select by size (max_variants - 1 because we already have primary)
-            selected.extend(candidates[:max_variants - 1])
-        else:  # diversity
-            # Select by diversity (maximum distance from already selected)
-            while len(selected) < max_variants and candidates:
-                best_candidate = None
-                best_min_distance = -1
-
-                for candidate in candidates:
-                    # Calculate minimum distance to all selected variants
-                    min_distance = min(
-                        calculate_adjusted_identity_distance(
-                            candidate.sequence, sel.sequence, hp_normalization_length)
-                        for sel in selected
-                    )
-
-                    if min_distance > best_min_distance:
-                        best_min_distance = min_distance
-                        best_candidate = candidate
-
-                if best_candidate:
-                    selected.append(best_candidate)
-                    candidates.remove(best_candidate)
-
-    # Now generate variant summaries, showing selected variants first in their final order
-    # Then show skipped variants
-
-    # Log selected variants first (excluding primary, which is already logged)
-    selected_secondary = selected[1:]  # Exclude primary variant
+    selected_secondary = selected[1:]
     for i, variant in enumerate(selected_secondary, 1):
         variant_summary = create_variant_summary(primary_variant.sequence, variant.sequence)
         logging.info(f"{prefix}Variant {i}: (size={variant.size}, ric={variant.ric}) - {variant_summary}")
 
-    # Log skipped variants
     selected_names = {variant.sample_name for variant in selected}
     skipped_variants = [v for v in sorted_group[1:] if v.sample_name not in selected_names]
 
     for i, variant in enumerate(skipped_variants):
-        # Calculate what the variant number would have been in the original sorted order
         original_position = next(j for j, v in enumerate(sorted_group) if v.sample_name == variant.sample_name)
         variant_summary = create_variant_summary(primary_variant.sequence, variant.sequence)
         logging.info(f"{prefix}Variant {original_position}: (size={variant.size}, ric={variant.ric}) - {variant_summary} - skipping")

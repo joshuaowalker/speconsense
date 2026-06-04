@@ -76,7 +76,7 @@ class TestBundledProfiles:
         profile = Profile.load("herbarium", check_version=False)
         assert profile.name == "herbarium"
         assert profile.description != ""
-        assert "min-cluster-ratio" in profile.speconsense
+        assert "min-size" in profile.speconsense
         assert "min-ric" in profile.speconsense_summarize
 
 
@@ -152,7 +152,6 @@ speconsense-version: "*"
 description: "Valid profile"
 speconsense:
   min-size: 10
-  min-cluster-ratio: 0.05
 speconsense-summarize:
   min-ric: 5
 """)
@@ -244,17 +243,17 @@ class TestProfileApplication:
             name="test",
             version="*",
             description="Test",
-            speconsense={"min-size": 10, "min-cluster-ratio": 0.05},
+            speconsense={"min-size": 10, "min-identity": 0.85},
             speconsense_summarize={},
         )
 
-        args = argparse.Namespace(min_size=5, min_cluster_ratio=0.01, other=True)
+        args = argparse.Namespace(min_size=5, min_identity=0.9, other=True)
         explicit_args = set()  # No explicit args
 
         apply_profile_to_args(args, profile, "speconsense", explicit_args)
 
         assert args.min_size == 10
-        assert args.min_cluster_ratio == 0.05
+        assert args.min_identity == 0.85
         assert args.other is True  # Unchanged
 
     def test_explicit_args_override_profile(self):
@@ -262,17 +261,17 @@ class TestProfileApplication:
             name="test",
             version="*",
             description="Test",
-            speconsense={"min-size": 10, "min-cluster-ratio": 0.05},
+            speconsense={"min-size": 10, "min-identity": 0.85},
             speconsense_summarize={},
         )
 
-        args = argparse.Namespace(min_size=20, min_cluster_ratio=0.01)
+        args = argparse.Namespace(min_size=20, min_identity=0.9)
         explicit_args = {"min_size"}  # User explicitly set min_size
 
         apply_profile_to_args(args, profile, "speconsense", explicit_args)
 
         assert args.min_size == 20  # Not overridden
-        assert args.min_cluster_ratio == 0.05  # Overridden by profile
+        assert args.min_identity == 0.85  # Overridden by profile
 
     def test_apply_summarize_profile(self):
         profile = Profile(

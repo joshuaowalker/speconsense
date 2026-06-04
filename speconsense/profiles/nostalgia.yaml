@@ -12,7 +12,6 @@ speconsense:
   disable-ambiguity-calling: True
   disable-read-reassignment: True   # Old pipelines didn't reassign reads
   disable-discard-recovery: True    # Defensive; auto-skipped when reassignment off
-  min-cluster-ratio: 0.2
   min-size: 5
   max-sample-size: 500
   presample: 500

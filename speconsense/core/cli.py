@@ -46,8 +46,6 @@ def main():
     filtering_group = parser.add_argument_group("Filtering")
     filtering_group.add_argument("--min-size", type=int, default=3,
                                  help="Minimum cluster size (default: 3, 0 to disable)")
-    filtering_group.add_argument("--min-cluster-ratio", type=float, default=0,
-                                 help="Minimum size ratio between a cluster and the largest cluster (default: 0, 0 to disable)")
     filtering_group.add_argument("--max-sample-size", type=int, default=100,
                                  help="Maximum cluster size for consensus (default: 100)")
 
@@ -281,7 +279,6 @@ def main():
         min_identity=args.min_identity,
         inflation=args.inflation,
         min_size=args.min_size,
-        min_cluster_ratio=args.min_cluster_ratio,
         max_sample_size=args.max_sample_size,
         presample_size=args.presample,
         k_nearest_neighbors=args.k_nearest_neighbors,
