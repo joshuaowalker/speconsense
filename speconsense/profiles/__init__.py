@@ -102,6 +102,8 @@ VALID_SUMMARIZE_KEYS = {
     "max-len",
     "min-cer-factor",
     "max-err-factor",
+    "prune-group-frac",
+    "prune-group-abs",
     # Grouping
     "group-identity",
     # Merging

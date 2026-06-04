@@ -718,6 +718,8 @@ class TestProcessSingleSpecimenNaming:
             select_strategy="size",
             disable_merging=True,
             enable_full_consensus=False,
+            prune_group_frac=0.10,
+            prune_group_abs=15,
         )
         defaults.update(overrides)
         return SimpleNamespace(**defaults)
@@ -1279,6 +1281,8 @@ class TestFullConsensus:
                 select_strategy="size",
                 disable_merging=True,
                 enable_full_consensus=True,
+                prune_group_frac=0.10,
+                prune_group_abs=15,
             )
             final, _, _, _, _, full_reads, _, _ = process_single_specimen(
                 members, args,
@@ -1332,6 +1336,8 @@ class TestFrequencyFields:
             select_strategy="size",
             disable_merging=True,
             enable_full_consensus=False,
+            prune_group_frac=0.10,
+            prune_group_abs=15,
         )
         defaults.update(overrides)
         return SimpleNamespace(**defaults)

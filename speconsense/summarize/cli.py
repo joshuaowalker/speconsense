@@ -154,6 +154,16 @@ def parse_arguments():
                                       "routed to __Summary__/variants/ as .lq records. Variants "
                                       "with err_factor=None (legacy output) always pass. Set to 0 "
                                       "to disable err_factor filtering. (default: 1.5)")
+    filtering_group.add_argument("--prune-group-frac", type=float, default=0.10,
+                                 help="Prune secondary identity groups (gid >= 2) whose total size "
+                                      "is below this fraction of the largest group. Both "
+                                      "--prune-group-frac and --prune-group-abs must be satisfied "
+                                      "to prune. Set to 0 to disable. (default: 0.10)")
+    filtering_group.add_argument("--prune-group-abs", type=int, default=15,
+                                 help="Absolute size threshold for secondary group pruning. Groups "
+                                      "with total size >= this value are kept regardless of "
+                                      "--prune-group-frac. Both conditions must be met to prune. "
+                                      "Set to 0 to disable. (default: 15)")
     # Grouping group
     grouping_group = parser.add_argument_group("Grouping")
     grouping_group.add_argument("--group-identity", "--variant-group-identity",
@@ -463,6 +473,33 @@ def process_single_specimen(file_consensuses: List[ConsensusInfo],
         # Keep only top N groups
         variant_groups = dict(sorted_for_filtering[:args.select_max_groups])
         logging.info(f"Filtered to top {args.select_max_groups} groups by size (from {len(sorted_for_filtering)} total groups)")
+
+    # Phase 1d: Secondary identity group pruning. Small secondary groups
+    # (gid >= 2) that are both proportionally and absolutely small are
+    # likely chimeric fragments, cross-sample bleed, or spurious clusters.
+    # Route their variants to the .lq track.
+    if args.prune_group_frac > 0 and args.prune_group_abs > 0 and len(variant_groups) > 1:
+        max_group_size = max(bucket_totals.get(gid, 0) for gid in variant_groups)
+        pruned_gids = []
+        for gid in list(variant_groups):
+            if gid == 1:
+                continue
+            group_total = bucket_totals.get(gid, 0)
+            if (group_total / max_group_size < args.prune_group_frac
+                    and group_total < args.prune_group_abs):
+                pruned_gids.append(gid)
+                lq_for_specimen.extend(variant_groups.pop(gid))
+        if pruned_gids:
+            # Also route ns records from pruned groups to lq
+            pruned_set = set(pruned_gids)
+            promoted = [r for r in ns_for_specimen if r.group_rank in pruned_set]
+            lq_for_specimen.extend(promoted)
+            ns_for_specimen = [r for r in ns_for_specimen if r.group_rank not in pruned_set]
+            logging.info(
+                f"Pruned {len(pruned_gids)} secondary group(s) "
+                f"(gids {pruned_gids}) below frac={args.prune_group_frac}, "
+                f"abs={args.prune_group_abs} -> .lq track"
+            )
 
     # Phase 2: MSA-based merging within each group
     merged_groups = {}
