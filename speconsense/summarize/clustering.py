@@ -144,7 +144,6 @@ def group_by_core_identity(
 
 def select_variants(group: List[ConsensusInfo],
                    max_variants: int,
-                   variant_selection: str = "size",
                    group_number: int = None,
                    hp_normalization_length: int = 1) -> List[ConsensusInfo]:
     """

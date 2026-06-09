@@ -209,9 +209,6 @@ def parse_arguments():
     selection_group.add_argument("--select-max-variants", "--max-variants",
                                  dest="select_max_variants", type=int, default=-1,
                                  help="Maximum total variants to output per group (default: -1 = no limit, 0 also means no limit)")
-    selection_group.add_argument("--select-strategy", "--variant-selection",
-                                 dest="select_strategy", default="size",
-                                 help=argparse.SUPPRESS)
     selection_group.add_argument("--select-min-size-ratio", type=float, default=0,
                                  help="Minimum size ratio (variant/largest) to include in output "
                                       "(default: 0 = disabled, e.g. 0.2 for 20%% cutoff)")
@@ -635,7 +632,7 @@ def process_single_specimen(file_consensuses: List[ConsensusInfo],
 
         # Select variants for this group
         selected_variants = select_variants(
-            group_members, args.select_max_variants, args.select_strategy,
+            group_members, args.select_max_variants,
             group_number=final_gid,
             hp_normalization_length=args.hp_normalization_length)
 
