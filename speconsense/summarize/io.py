@@ -18,6 +18,8 @@ from collections import defaultdict
 from Bio import SeqIO
 
 from speconsense.types import ConsensusInfo
+from speconsense.significance import DEFAULT_MIN_CER_FACTOR
+from speconsense.msa import DEFAULT_MAX_ERR_FACTOR
 
 from .fields import FastaField, format_fasta_header
 
@@ -121,8 +123,8 @@ def load_consensus_sequences(
     min_len: int = 0,
     max_len: int = 0,
     specimen_id: str = None,
-    min_cer_factor: float = 1.0,
-    max_err_factor: float = 1.5,
+    min_cer_factor: float = DEFAULT_MIN_CER_FACTOR,
+    max_err_factor: float = DEFAULT_MAX_ERR_FACTOR,
 ) -> Tuple[List[ConsensusInfo], List[ConsensusInfo], List[ConsensusInfo]]:
     """Load consensus sequences from speconsense output files.
 

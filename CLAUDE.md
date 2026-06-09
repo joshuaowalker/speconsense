@@ -115,10 +115,12 @@ Read in `SpecimenClusterer.cluster()` (`speconsense/core/clusterer.py`); 14 sequ
 10. **Post-refinement merge** — combine clusters whose post-MAD consensuses are identical or HP-equivalent; reruns Phase 9 worker on each merge survivor
 11. **CER validation** — annotate each non-anchor candidate with its `cer_factor`
 12. **Size filtering** — drop clusters below `--min-size`
-13. **Output emission** — write FASTA/FASTQ/MSA; compute `err_factor` on stamped MSA
+13. **Output emission** — compute `err_factor` on each stamped MSA, then assign identity ranks (`_assign_identity_ranks`) and write FASTA/FASTQ/MSA
 14. **Discard reads written** (optional, `--collect-discards`)
 
 Orientation (when `--orient-mode` ≠ skip) and primer trimming run during input processing and final consensus respectively, outside the numbered phases. Reads that fail clustering or are dropped by any filter accumulate in `self.discarded_read_ids`; phase 7 attempts to recover concordant ones.
+
+**Identity rank (gid/vid) ordering** (`_assign_identity_ranks`): groups are ranked by anchor (largest-member) size desc, so `gid=1` is always the largest group. Variants *within* a group are ranked by a quality-aware tier `(expected_to_pass_summarize, size)` desc — clusters expected to survive summarize's default cer/err filters get the low vids, then size desc within each tier. This keeps primary-track vids contiguous in the common case (no gap where a low-`cer_factor`/high-`err_factor` variant gets routed to `.ns`/`.lq`) while preserving traceability: vids are stamped once here and summarize never renumbers. The tier boundaries are the shared constants `DEFAULT_MIN_CER_FACTOR` (`significance.py`) and `DEFAULT_MAX_ERR_FACTOR` (`msa.py`), which also back summarize's `--min-cer-factor`/`--max-err-factor` defaults so they cannot drift. Because the largest cluster can be demoted below `vid=1` when its `err_factor` is high, `fit_error_model` re-derives the primary anchor by max read count rather than trusting the `1.v1` label.
 
 ### Post-Processing Pipeline (speconsense-summarize)
 

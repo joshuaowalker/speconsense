@@ -21,6 +21,15 @@ import numpy as np
 from Bio import SeqIO
 
 
+# Default boundary for the cluster err_factor above which summarize routes a
+# variant to the ``.lq`` track. err_factor is the observed/q_ctx-expected
+# disagreement ratio (see compute_cluster_err_factor); >1.5 indicates internal
+# heterogeneity beyond basecaller noise. Core's vid tiering
+# (SpecimenClusterer._assign_identity_ranks) and summarize's ``--max-err-factor``
+# default both reference it so they cannot drift.
+DEFAULT_MAX_ERR_FACTOR = 1.5
+
+
 # IUPAC nucleotide ambiguity codes mapping
 # Maps sets of nucleotides to their corresponding IUPAC code
 IUPAC_CODES = {

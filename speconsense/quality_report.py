@@ -30,6 +30,8 @@ from datetime import datetime
 from typing import Callable, Dict, List, Optional, Tuple
 
 from speconsense.types import ConsensusInfo, OverlapMergeInfo
+from speconsense.significance import DEFAULT_MIN_CER_FACTOR
+from speconsense.msa import DEFAULT_MAX_ERR_FACTOR
 
 
 # ---------------------------------------------------------------------------
@@ -733,8 +735,8 @@ def write_quality_report(
     consensus_list: Optional[List[ConsensusInfo]] = None,
     ns_list: Optional[List[ConsensusInfo]] = None,
     lq_list: Optional[List[ConsensusInfo]] = None,
-    min_cer_factor: float = 1.0,
-    max_err_factor: float = 1.5,
+    min_cer_factor: float = DEFAULT_MIN_CER_FACTOR,
+    max_err_factor: float = DEFAULT_MAX_ERR_FACTOR,
 ) -> None:
     """Write the action-oriented quality report.
 

@@ -247,13 +247,14 @@ def hp_positions_of_runs(hp_runs: List[Dict]) -> set:
 def _find_primary_msa(specimen_name: str, debug_dir: str) -> Optional[str]:
     """Locate the primary-anchor MSA file for a specimen.
 
-    Tries the current schema-2.0 naming (``-1.v1-RiC*-msa.fasta``) first,
-    falls back to the legacy ``-c1-RiC*-msa.fasta``. When multiple matches
-    exist (cluster ID reused across pipeline passes), picks the highest
-    RiC.
+    The primary anchor is the largest cluster of group 1 (most reads). Core
+    numbers vids by a quality-aware tier rather than pure size, so the largest
+    cluster is not necessarily ``-1.v1``; glob all of group 1's variants
+    (``-1.v*``) and pick the highest RiC, which identifies the largest cluster
+    independent of its vid label. Falls back to the legacy ``-c1-RiC*-msa.fasta``.
     """
     base = os.path.join(debug_dir, specimen_name)
-    matches = glob.glob(f"{base}-1.v1-RiC*-msa.fasta")
+    matches = glob.glob(f"{base}-1.v*-RiC*-msa.fasta")
     if not matches:
         matches = glob.glob(f"{base}-c1-RiC*-msa.fasta")
     if not matches:

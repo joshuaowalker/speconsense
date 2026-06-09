@@ -118,6 +118,57 @@ def test_assign_identity_ranks_orders_groups_and_variants_by_size():
     }
 
 
+def test_assign_identity_ranks_demotes_low_cer_variant_below_smaller_clean():
+    # The largest variant (c1, 40 reads) has cer_factor < 1.0 → expected to be
+    # routed to .ns, so it is demoted below the smaller clean variant (c2).
+    cluster_dicts = [
+        {'cluster_id': 'c1', 'identity_group_id': 'g0',
+         'read_ids': set(range(40)), 'cer_factor': 0.5},
+        {'cluster_id': 'c2', 'identity_group_id': 'g0',
+         'read_ids': set(range(25)), 'cer_factor': 3.0},
+        {'cluster_id': 'c3', 'identity_group_id': 'g0',
+         'read_ids': set(range(10)), 'cer_factor': 0.2},
+    ]
+    SpecimenClusterer._assign_identity_ranks(cluster_dicts)
+    ranks = {c['cluster_id']: c['identity_variant_rank'] for c in cluster_dicts}
+    # Pass tier first (c2), then routed tier by size desc (c1 > c3).
+    assert ranks == {'c2': 1, 'c1': 2, 'c3': 3}
+
+
+def test_assign_identity_ranks_demotes_high_err_variant():
+    # The largest variant (c1) has err_factor > 1.5 → expected .lq, demoted below
+    # the smaller clean variant (c2). c3 also clean but smaller than c2.
+    cluster_dicts = [
+        {'cluster_id': 'c1', 'identity_group_id': 'g0',
+         'read_ids': set(range(40)), 'err_factor': 2.0},
+        {'cluster_id': 'c2', 'identity_group_id': 'g0',
+         'read_ids': set(range(25)), 'err_factor': 1.0},
+        {'cluster_id': 'c3', 'identity_group_id': 'g0',
+         'read_ids': set(range(30)), 'err_factor': 1.2},
+    ]
+    SpecimenClusterer._assign_identity_ranks(cluster_dicts)
+    ranks = {c['cluster_id']: c['identity_variant_rank'] for c in cluster_dicts}
+    # Pass tier by size desc (c3=30, c2=25), then routed c1.
+    assert ranks == {'c3': 1, 'c2': 2, 'c1': 3}
+
+
+def test_assign_identity_ranks_none_and_inf_cer_pass():
+    # cer_factor None (anchor) and inf (strongly supported) both pass; a finite
+    # cer below 1.0 is demoted even though larger. err_factor None passes.
+    cluster_dicts = [
+        {'cluster_id': 'anchor', 'identity_group_id': 'g0',
+         'read_ids': set(range(50)), 'cer_factor': None},
+        {'cluster_id': 'strong', 'identity_group_id': 'g0',
+         'read_ids': set(range(20)), 'cer_factor': float('inf')},
+        {'cluster_id': 'weak', 'identity_group_id': 'g0',
+         'read_ids': set(range(35)), 'cer_factor': 0.9},
+    ]
+    SpecimenClusterer._assign_identity_ranks(cluster_dicts)
+    ranks = {c['cluster_id']: c['identity_variant_rank'] for c in cluster_dicts}
+    # Pass tier by size desc (anchor=50, strong=20), then weak (demoted).
+    assert ranks == {'anchor': 1, 'strong': 2, 'weak': 3}
+
+
 def test_assign_identity_ranks_skips_ungrouped_clusters():
     cluster_dicts = [
         {'cluster_id': 'c1', 'identity_group_id': 'g0', 'read_ids': set(range(10))},

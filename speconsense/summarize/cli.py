@@ -49,6 +49,8 @@ from speconsense.profiles import (
 from speconsense._help import install_advanced_help, add_advanced_argument
 from speconsense.scalability import ScalabilityConfig
 from speconsense.types import ConsensusInfo, OverlapMergeInfo
+from speconsense.significance import DEFAULT_MIN_CER_FACTOR
+from speconsense.msa import DEFAULT_MAX_ERR_FACTOR
 
 from .fields import parse_fasta_fields
 
@@ -141,14 +143,14 @@ def parse_arguments():
                                  help="Minimum sequence length in bp (default: 0 = disabled)")
     filtering_group.add_argument("--max-len", type=int, default=0,
                                  help="Maximum sequence length in bp (default: 0 = disabled)")
-    filtering_group.add_argument("--min-cer-factor", type=float, default=1.0,
+    filtering_group.add_argument("--min-cer-factor", type=float, default=DEFAULT_MIN_CER_FACTOR,
                                  help="Minimum per-position CER factor for a variant to be kept "
                                       "as a primary output. Variants with cer_factor below this "
                                       "are routed to __Summary__/variants/ as .ns records. "
                                       "Variants with cer_factor=None (anchors, clusters without a "
                                       "valid pairwise comparison) always pass. Set to 0 to disable "
                                       "CER filtering. (default: 1.0)")
-    filtering_group.add_argument("--max-err-factor", type=float, default=1.5,
+    filtering_group.add_argument("--max-err-factor", type=float, default=DEFAULT_MAX_ERR_FACTOR,
                                  help="Maximum cluster err_factor (observed/q_ctx-expected "
                                       "disagreement ratio). Clusters above this threshold are "
                                       "routed to __Summary__/variants/ as .lq records. Variants "
