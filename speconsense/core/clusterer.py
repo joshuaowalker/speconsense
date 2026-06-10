@@ -310,6 +310,7 @@ class SpecimenClusterer:
         self.input_file = None
         self.algorithm = None
         self.orient_mode = None
+        self.profile_name = None
         self.primers_file = None
 
     def _log_stage(self, description: str, clusters,
@@ -349,6 +350,7 @@ class SpecimenClusterer:
         metadata = {
             "schema_version": "2.0",
             "version": __version__,
+            "profile": self.profile_name,
             "timestamp": datetime.now().isoformat(),
             "sample_name": self.sample_name,
             "parameters": {

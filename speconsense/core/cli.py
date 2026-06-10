@@ -16,6 +16,7 @@ from speconsense.profiles import (
     Profile,
     ProfileError,
     print_profiles_list,
+    show_profile,
 )
 from speconsense._help import install_advanced_help, add_advanced_argument
 
@@ -213,13 +214,23 @@ def main():
                         help="Load parameter profile (use --list-profiles to see available)")
     parser.add_argument("--list-profiles", action="store_true",
                         help="List available profiles and exit")
+    parser.add_argument("--show-profile", metavar="NAME",
+                        help="Show contents of a named profile and exit")
     parser.add_argument("--list-error-models", action="store_true",
                         help="List available error models and exit")
 
-    # Handle --list-profiles early (before requiring input_file)
+    # Handle --list-profiles and --show-profile early (before requiring input_file)
     if '--list-profiles' in sys.argv:
         print_profiles_list('speconsense')
         sys.exit(0)
+
+    for i, arg in enumerate(sys.argv[1:], 1):
+        if arg == '--show-profile' and i < len(sys.argv):
+            show_profile(sys.argv[i + 1])
+            sys.exit(0)
+        if arg.startswith('--show-profile='):
+            show_profile(arg.split('=', 1)[1])
+            sys.exit(0)
 
     # Handle --list-error-models early (before requiring input_file)
     if '--list-error-models' in sys.argv:
@@ -319,6 +330,7 @@ def main():
     clusterer.input_file = os.path.abspath(args.input_file)
     clusterer.algorithm = args.algorithm
     clusterer.orient_mode = args.orient_mode
+    clusterer.profile_name = args.profile
 
     # Read primary sequences
     logging.info(f"Reading sequences from {args.input_file}")

@@ -89,9 +89,11 @@ pytest -m "not slow"
 **speconsense/profiles/** - Profile system for parameter presets:
 - YAML profiles (`compressed`, `herbarium`, `largedata`, `nostalgia`, `strict`, `example`) bundled in the package
 - User profiles in `~/.config/speconsense/profiles/` take precedence over bundled
-- Override order: defaults → profile → explicit CLI arguments
+- Override order: defaults → profile (explicit or auto-detected) → explicit CLI arguments
 - Valid keys are strictly validated; profile keys use dashes (e.g., `disable-merging`), argparse attrs use underscores
 - `VALID_SPECONSENSE_KEYS` / `VALID_SUMMARIZE_KEYS` in `profiles/__init__.py` are the source of truth for acceptable keys
+- Reserved profile name `default` (`RESERVED_PROFILE_NAMES`): selects CLI defaults without loading a YAML file. Use `-p default` on summarize to override auto-detection, or on core for explicit "no profile" in metadata
+- **Profile auto-detection**: summarize scans metadata JSONs for the `profile` field written by core. If all specimens that report a profile agree, summarize auto-applies it (with logged parameter listing). Mixed profiles warn. Specimens without metadata or profile field are ignored. `-p` (including `-p default`) skips auto-detection
 
 **speconsense/error_models/** - Bundled per-basecaller error models (YAML), loadable by name (`--error-model dorado-v5.0`), from `~/.config/speconsense/error_models/`, or by filesystem path.
 

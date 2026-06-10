@@ -44,7 +44,9 @@ except ImportError:
 from speconsense.profiles import (
     Profile,
     ProfileError,
+    RESERVED_PROFILE_NAMES,
     print_profiles_list,
+    show_profile,
 )
 from speconsense._help import install_advanced_help, add_advanced_argument
 from speconsense.scalability import ScalabilityConfig
@@ -111,6 +113,49 @@ def parse_merge_effort(spec: str) -> int:
                 f"Use preset (fast, balanced, thorough) or numeric 6-14"
             )
         raise
+
+
+def _detect_profile_from_metadata(source_folder):
+    """Scan metadata JSONs for a unanimous core profile name.
+
+    Returns the profile name if all specimens that report a profile agree,
+    None otherwise.  Specimens without metadata or without a ``profile``
+    field are ignored — only specimens with a real (non-reserved) profile
+    name participate in the consensus check.
+    """
+    from collections import Counter
+    pattern = os.path.join(source_folder, "*", "cluster_debug", "*-metadata.json")
+    metadata_files = glob.glob(pattern)
+    if not metadata_files:
+        return None
+
+    profile_counts = Counter()
+    for path in metadata_files:
+        try:
+            with open(path, 'r') as f:
+                data = json.load(f)
+            name = data.get("profile")
+            if name is not None and name not in RESERVED_PROFILE_NAMES:
+                profile_counts[name] += 1
+        except (json.JSONDecodeError, IOError, KeyError):
+            continue
+
+    if not profile_counts:
+        return None
+
+    if len(profile_counts) == 1:
+        return next(iter(profile_counts))
+
+    # Mixed profiles — warn with breakdown
+    parts = ", ".join(
+        f"{name}: {count}" for name, count in profile_counts.most_common()
+    )
+    print(
+        f"Warning: specimens were processed with different core profiles: {parts}\n"
+        f"Use -p to specify a profile for summarize.",
+        file=sys.stderr,
+    )
+    return None
 
 
 def parse_arguments():
@@ -264,11 +309,21 @@ def parse_arguments():
                         help="Load parameter profile (use --list-profiles to see available)")
     parser.add_argument("--list-profiles", action="store_true",
                         help="List available profiles and exit")
+    parser.add_argument("--show-profile", metavar="NAME",
+                        help="Show contents of a named profile and exit")
 
-    # Handle --list-profiles early (before requiring other args)
+    # Handle --list-profiles and --show-profile early (before requiring other args)
     if '--list-profiles' in sys.argv:
         print_profiles_list('speconsense-summarize')
         sys.exit(0)
+
+    for i, arg in enumerate(sys.argv[1:], 1):
+        if arg == '--show-profile' and i < len(sys.argv):
+            show_profile(sys.argv[i + 1])
+            sys.exit(0)
+        if arg.startswith('--show-profile='):
+            show_profile(arg.split('=', 1)[1])
+            sys.exit(0)
 
     # First pass: get profile name if specified
     pre_args, _ = parser.parse_known_args()
@@ -281,25 +336,49 @@ def parse_arguments():
         elif arg.startswith('--'):
             explicit_args.add(arg[2:].replace('-', '_'))
 
-    # Load and apply profile if specified
+    # Load profile: explicit -p takes precedence, else auto-detect from core metadata
     loaded_profile = None
+    auto_detected = False
     if pre_args.profile:
         try:
             loaded_profile = Profile.load(pre_args.profile)
         except ProfileError as e:
             print(f"Error: {e}", file=sys.stderr)
             sys.exit(1)
+    else:
+        detected_name = _detect_profile_from_metadata(pre_args.source)
+        if detected_name:
+            try:
+                loaded_profile = Profile.load(detected_name)
+                auto_detected = True
+            except ProfileError:
+                print(
+                    f"Warning: core profile '{detected_name}' not found "
+                    f"(removed or renamed?). Using CLI defaults.",
+                    file=sys.stderr,
+                )
 
-        # Apply profile values to parser defaults (explicit CLI args will override)
+    # Apply profile values to parser defaults (explicit CLI args will override)
+    if loaded_profile and loaded_profile.speconsense_summarize:
+        applied_keys = []
         for key, value in loaded_profile.speconsense_summarize.items():
             attr_name = key.replace('-', '_')
             if attr_name not in explicit_args:
                 parser.set_defaults(**{attr_name: value})
+                applied_keys.append(f"{key}={value}")
+        if auto_detected and applied_keys:
+            print(
+                f"Profile '{loaded_profile.name}' detected from core metadata.\n"
+                f"  Applying: {', '.join(applied_keys)}\n"
+                f"  Use -p to override, or -p default for CLI defaults.",
+                file=sys.stderr,
+            )
 
     args = parser.parse_args()
 
     # Store loaded profile for logging later
     args._loaded_profile = loaded_profile
+    args._auto_detected_profile = auto_detected
 
     # Handle backward compatibility for deprecated parameters
     if args._snp_merge_limit_deprecated is not None:
@@ -950,7 +1029,8 @@ def main():
 
     logging.info(f"speconsense-summarize version {__version__}")
     if args._loaded_profile:
-        logging.info(f"Using profile '{args._loaded_profile.name}': {args._loaded_profile.description}")
+        prefix = "Auto-detected" if args._auto_detected_profile else "Using"
+        logging.info(f"{prefix} profile '{args._loaded_profile.name}': {args._loaded_profile.description}")
     logging.info(f"Command: speconsense-summarize {' '.join(sys.argv[1:])}")
     logging.info("")
     logging.info("Starting enhanced speconsense summarization")
