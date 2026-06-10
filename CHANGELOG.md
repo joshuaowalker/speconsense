@@ -5,6 +5,38 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.8.4] - 2026-06-10
+
+Rationalized ratio/frequency CLI semantics, four-track variant routing, profile auto-detection, and configurable gap handling in merged consensus sequences.
+
+### Added
+
+- **Four-track variant routing** (summarize) — Variants that pass quality gates but are excluded by selection or pruning decisions (`--select-max-variants`, `--select-min-size-ratio`, `--select-max-groups`, `--prune-group-ratio`/`--prune-group-abs`) now route to a new `.filtered` track (`variants/*.filtered-RiC*.fasta`) instead of being silently dropped. Distinguishes "quality problem" (`.ns`/`.lq`) from "selection decision" (`.filtered`). Pre-merge contributors of merged variants dropped by selection are unwound to the `.filtered` track individually, preserving per-cluster metrics.
+- **Post-merge re-check** (summarize) — After MSA merging recomputes `err_factor`/`cer_factor` on merged records, merges whose recomputed metrics cross filter thresholds are cancelled: original pre-merge contributors are restored on the pass track rather than routing the synthetic merged record to `.lq`/`.ns`.
+- **Pre-merge contributor files** (summarize) — `.raw.{gid}.v{vid}` files in the variants directory preserve the original core variant for each merge contributor, named by the contributor's core `gid.vid` for direct traceability.
+- **Profile auto-detection** (summarize) — When no `-p` is given, summarize scans core metadata JSONs for the `profile` field. If all specimens that report a profile agree, summarize auto-applies it with a logged parameter listing. Mixed profiles warn. Use `-p default` to override auto-detection.
+- **`-p default` reserved profile name** — Selects CLI defaults without loading a YAML file. Serves as the escape hatch for summarize auto-detection and as a scripting convenience for core.
+- **`--show-profile`** (summarize) — Display the effective profile parameters and exit.
+- **`--min-position-frequency`** and **`--min-position-count`** (summarize) — Control gap vs. base resolution in merged and `-full` consensus sequences. A column is retained when its non-gap fraction meets the frequency threshold (default 0.5 = majority wins) AND the absolute non-gap support meets the count threshold (default 3). Set `--min-position-frequency` lower (e.g. 0.1) to preserve positions where a minority of contributors carry content. Applies to within-group MSA merging, overlap merging (overlap region), and `-full` group consensus. Set to 0.1 in the `compressed` profile.
+
+### Changed
+
+- **`--prune-group-frac` renamed to `--prune-group-ratio`** (summarize) — Consistent with `--select-min-size-ratio` and `--merge-min-size-ratio` naming.
+- **`--select-min-size-ratio` denominator changed** (summarize) — Now computes `variant_size / group_total` instead of `variant_size / largest_variant_size`. The largest variant in each group is always exempt from filtering. Profiles using this parameter (`compressed` at 0.2, `strict` at 0.05) keep their current settings.
+- **`--merge-min-size-ratio` semantics changed** (summarize) — Now checked per candidate merge subset rather than as a pre-batch filter. Denominator is the subset total (sum of sizes of variants in the candidate merge) rather than the pair ratio. Evaluated during exhaustive subset enumeration, so subset composition and total are fully determined at check time.
+- **Quality-aware variant rank (vid) ordering** (core) — Variants within an identity group are now ranked by a quality-aware tier `(expected_to_pass_summarize, size)` descending, so clusters expected to survive summarize's default CER/err_factor filters get the low vids. Keeps primary-track vids contiguous in the common case.
+
+### Removed
+
+- **`--select-strategy` removed as a profile key** (summarize) — The CLI argument is retained as a hidden no-op for backward compatibility but is no longer a valid profile key.
+
+### Migration notes (0.8.3 → 0.8.4)
+
+- **`--prune-group-frac` renamed**: Scripts and profiles using `--prune-group-frac` must switch to `--prune-group-ratio`. The CLI argument is not aliased.
+- **`--select-min-size-ratio` and `--merge-min-size-ratio` denominator changes** affect threshold interpretation. Review existing settings if using non-default values.
+- **New `.filtered` track**: Summarize output directories now contain `*.filtered-RiC*.fasta` files. Downstream tools that glob `variants/` may need to account for the new file pattern.
+- **Profile auto-detection** may change summarize behavior if core was run with `-p` and summarize was previously run without. Pass `-p default` to suppress.
+
 ## [0.8.3] - 2026-06-04
 
 Quality-gate refinement: a new secondary group pruning filter in summarize, and removal of two superseded options.

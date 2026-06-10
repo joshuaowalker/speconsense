@@ -153,4 +153,4 @@ Profiles specify a `speconsense-version` field (e.g., `"0.8.*"`) indicating comp
 
 ---
 
-*Document generated for speconsense 0.8.3*
+*Document generated for speconsense 0.8.4*
