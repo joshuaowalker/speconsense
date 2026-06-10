@@ -70,7 +70,7 @@ Parameters for the post-processing and summarization tool.
 | `merge-snp` | Enable SNP-based variant merging | true | — | — | — | — | — |
 | `merge-indel-length` | Max individual indel length for merging (0 = disabled) | 0 | 5 | — | — | — | — |
 | `merge-position-count` | Max total SNP+indel positions for merging | 2 | 10 | — | — | — | — |
-| `merge-min-size-ratio` | Min size ratio (smaller/larger) for merging (0 = disabled) | 0.1 | 0.2 | — | — | — | — |
+| `merge-min-size-ratio` | Min size ratio (contributor/merged total) for merging (0 = disabled) | 0.1 | 0.2 | — | — | — | — |
 | `min-merge-overlap` | Min overlap in bp for different-length sequence merging | 200 | 0 | — | — | — | — |
 | `disable-homopolymer-equivalence` | Treat homopolymer length differences as structural | false | — | — | — | — | — |
 | `select-max-groups` | Max groups to output per specimen (-1 = all) | -1 | — | — | — | — | — |

@@ -229,7 +229,9 @@ def parse_arguments():
     merging_group.add_argument("--merge-position-count", type=int, default=2,
                                help="Maximum total SNP+indel positions allowed in merging (default: 2)")
     merging_group.add_argument("--merge-min-size-ratio", type=float, default=0.1,
-                               help="Minimum size ratio (smaller/larger) for merging clusters (default: 0.1, 0 to disable)")
+                               help="Minimum size ratio (contributor/merged total) for merging clusters. "
+                                    "Subsets where any contributor is below this fraction of the subset "
+                                    "total are skipped. (default: 0.1, 0 to disable)")
     merging_group.add_argument("--min-merge-overlap", type=int, default=200,
                                help="Minimum overlap in bp for merging sequences of different lengths (default: 200, 0 to disable)")
     merging_group.add_argument("--merge-effort", type=str, default="balanced", metavar="LEVEL",

@@ -947,7 +947,7 @@ speconsense-summarize --snp-merge-limit 2  # Equivalent to --merge-position-coun
 - `--merge-position-count N`: Maximum total SNP + structural indel positions allowed (default: 2)
 - `--merge-indel-length N`: Maximum length of individual structural indels allowed (default: 0 = disabled)
 - `--merge-snp`: Enable/disable SNP merging (default: True)
-- `--merge-min-size-ratio R`: Minimum size ratio (smaller/larger) for merging clusters (default: 0.1, 0 to disable)
+- `--merge-min-size-ratio R`: Minimum size ratio (contributor/merged total) for merging clusters (default: 0.1, 0 to disable)
 - `--disable-homopolymer-equivalence`: Treat homopolymer length differences as structural indels (default: disabled, meaning homopolymer equivalence is enabled)
 - `--snp-merge-limit N`: Legacy parameter, equivalent to `--merge-position-count` (deprecated)
 
@@ -1057,9 +1057,9 @@ Merge decisions depend on the complete HAC group composition, not just the seque
 speconsense-summarize --merge-min-size-ratio 0.1
 ```
 - Prevents merging clusters with very different sizes (e.g., well-supported variant + poorly-supported variant)
-- Ratio calculated as `smaller_size / larger_size` - must be ≥ threshold to merge
-- Example: `--merge-min-size-ratio 0.1` means smaller cluster must be ≥10% size of larger
-- Default is 0.1 - smaller cluster must be ≥10% size of larger to merge
+- For each candidate merge subset, every contributor must be ≥ threshold fraction of the subset total
+- Example: `--merge-min-size-ratio 0.1` means every contributor must represent ≥10% of the merged total
+- Default is 0.1
 - **Use cases:**
   - Prevent poorly-supported variants (low read count) from introducing ambiguities into well-supported sequences
   - Avoid merging weakly-supported bioinformatic artifacts into high-confidence sequences
@@ -1450,8 +1450,10 @@ Merging:
                         Maximum total SNP+indel positions allowed in merging
                         (default: 2)
   --merge-min-size-ratio MERGE_MIN_SIZE_RATIO
-                        Minimum size ratio (smaller/larger) for merging
-                        clusters (default: 0.1, 0 to disable)
+                        Minimum size ratio (contributor/merged total) for
+                        merging clusters. Subsets where any contributor is
+                        below this fraction are skipped. (default: 0.1,
+                        0 to disable)
   --min-merge-overlap MIN_MERGE_OVERLAP
                         Minimum overlap in bp for merging sequences of
                         different lengths (default: 200, 0 to disable)

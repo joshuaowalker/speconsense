@@ -22,7 +22,7 @@ speconsense:
 speconsense-summarize:
   merge-indel-length: 5         # Merge indels up to 5bp
   merge-position-count: 10      # Allow up to 10 variant positions in a merge
-  merge-min-size-ratio: 0.2     # Match 20% calling threshold
+  merge-min-size-ratio: 0.2     # Each contributor must be ≥20% of merged total
   select-min-size-ratio: 0.2    # Drop variants below 20% of group total
   min-merge-overlap: 0          # Disable partial overlap merging
   enable-full-consensus: true   # Emit -{gid}-full noise-scrubbed query consensus
