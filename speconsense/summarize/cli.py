@@ -274,6 +274,20 @@ def parse_arguments():
                                       "(e.g. when using the compressed profile but the -full "
                                       "artifact isn't wanted for this run).")
 
+    # Consensus output group — controls how merged and -full consensus sequences are built
+    consensus_group = parser.add_argument_group("Consensus output")
+    consensus_group.add_argument("--min-position-frequency", type=float, default=0.5,
+                                  help="Minimum fraction of non-gap content at a column to retain "
+                                       "the position in merged and -full consensus sequences. "
+                                       "Default 0.5 matches majority-wins behavior. Set lower "
+                                       "(e.g. 0.1) to preserve positions where a minority of "
+                                       "contributors carry content. (default: 0.5)")
+    consensus_group.add_argument("--min-position-count", type=int, default=3,
+                                  help="Minimum absolute non-gap support (size-weighted votes for "
+                                       "merging, read count for -full) to retain a column. Both "
+                                       "--min-position-frequency and --min-position-count must be "
+                                       "met. (default: 3)")
+
     # Performance group
     perf_group = parser.add_argument_group("Performance")
     perf_group.add_argument("--scale-threshold", type=int, default=1001,
@@ -865,6 +879,8 @@ def process_single_specimen(file_consensuses: List[ConsensusInfo],
                 primary_file_path=selected_variants[0].file_path,
                 group_size_total=bucket_totals.get(final_gid),
                 global_size_total=specimen_global_size_total,
+                min_position_frequency=args.min_position_frequency,
+                min_position_count=args.min_position_count,
             )
             if full_result is not None:
                 full_record, sampled_reads = full_result

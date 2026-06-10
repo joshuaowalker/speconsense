@@ -120,6 +120,9 @@ VALID_SUMMARIZE_KEYS = {
     "select-max-variants",
     "select-min-size-ratio",
     "enable-full-consensus",
+    # Consensus output
+    "min-position-frequency",
+    "min-position-count",
     # Processing
     "scale-threshold",
     "threads",

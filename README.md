@@ -746,6 +746,18 @@ speconsense-summarize --enable-full-consensus
 - Intended use: BLAST query against legacy unphased ITS references. The `-full` output is IUPAC-bearing by construction and should be scored with adjusted-identity (MycoBLAST) tools — under raw BLAST it will silently degrade because every IUPAC code counts as a mismatch
 - Enabled by default in the `compressed` profile
 
+**Consensus Column Retention (gap handling):**
+```bash
+speconsense-summarize --min-position-frequency 0.1 --min-position-count 3
+```
+- Controls how gap vs. base disagreements are resolved in merged and `-full` consensus sequences
+- A column is retained when the fraction of non-gap content is ≥ `--min-position-frequency` AND the absolute non-gap support is ≥ `--min-position-count`
+- Default `0.5` matches majority-wins behavior: positions where more than half the (size-weighted) votes are gaps are omitted
+- Lower values (e.g. `0.1`) preserve positions where a minority of contributors carry content — useful when merging variants of different lengths or when indel events should not delete content from the merged consensus
+- `--min-position-count` (default 3) prevents columns with negligible support from surviving at low frequency thresholds
+- Set to `0.1` in the `compressed` profile alongside its aggressive merge settings
+- Applies to within-group MSA merging, overlap merging (overlap region only — non-overlap regions always preserve content from contributing sequences), and `-full` group consensus
+
 ### Customizing FASTA Header Fields
 
 Control which metadata fields appear in FASTA headers using the `--fasta-fields` option:
@@ -1374,6 +1386,8 @@ usage: speconsense-summarize [-h] [--source SOURCE]
                              [--select-max-groups SELECT_MAX_GROUPS]
                              [--select-max-variants SELECT_MAX_VARIANTS]
                              [--select-min-size-ratio SELECT_MIN_SIZE_RATIO]
+                             [--min-position-frequency MIN_POSITION_FREQUENCY]
+                             [--min-position-count MIN_POSITION_COUNT]
                              [--scale-threshold SCALE_THRESHOLD] [--threads N]
                              [--log-level {DEBUG,INFO,WARNING,ERROR,CRITICAL}]
                              [--version] [-p NAME] [--list-profiles]
@@ -1486,6 +1500,19 @@ Selection:
                         Minimum size ratio (variant/group total) to include in
                         output. The largest variant in each group is always
                         kept. (default: 0 = disabled, e.g. 0.2 for 20% cutoff)
+
+Consensus output:
+  --min-position-frequency MIN_POSITION_FREQUENCY
+                        Minimum fraction of non-gap content at a column to
+                        retain the position in merged and -full consensus
+                        sequences. Default 0.5 matches majority-wins behavior.
+                        Set lower (e.g. 0.1) to preserve positions where a
+                        minority of contributors carry content. (default: 0.5)
+  --min-position-count MIN_POSITION_COUNT
+                        Minimum absolute non-gap support (size-weighted votes
+                        for merging, read count for -full) to retain a column.
+                        Both --min-position-frequency and --min-position-count
+                        must be met. (default: 3)
 
 Performance:
   --scale-threshold SCALE_THRESHOLD

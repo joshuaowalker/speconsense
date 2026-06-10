@@ -102,6 +102,10 @@ speconsense-summarize:
   # select-max-variants: -1       # Max variants per group (-1 = no limit)
   # select-min-size-ratio: 0      # Min size ratio (variant/group total) to include (0 = disabled)
 
+  # --- Consensus Output ---
+  # min-position-frequency: 0.5   # Min non-gap fraction to retain a column in merges/-full (0.5 = majority wins)
+  # min-position-count: 3         # Min absolute non-gap support to retain a column
+
   # --- Processing ---
   # threads: 0                    # Max threads (0 = auto-detect, default for summarize)
   # scale-threshold: 1001         # Read count threshold for scaled processing (vsearch-backed)

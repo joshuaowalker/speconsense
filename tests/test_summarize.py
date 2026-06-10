@@ -719,6 +719,8 @@ class TestProcessSingleSpecimenNaming:
             enable_full_consensus=False,
             prune_group_ratio=0.10,
             prune_group_abs=15,
+            min_position_frequency=0.5,
+            min_position_count=3,
         )
         defaults.update(overrides)
         return SimpleNamespace(**defaults)
@@ -1281,6 +1283,8 @@ class TestFullConsensus:
                 enable_full_consensus=True,
                 prune_group_ratio=0.10,
                 prune_group_abs=15,
+                min_position_frequency=0.5,
+                min_position_count=3,
             )
             final, _, _, _, _, full_reads, _, _, _ = process_single_specimen(
                 members, args,
@@ -1335,6 +1339,8 @@ class TestFrequencyFields:
             enable_full_consensus=False,
             prune_group_ratio=0.10,
             prune_group_abs=15,
+            min_position_frequency=0.5,
+            min_position_count=3,
         )
         defaults.update(overrides)
         return SimpleNamespace(**defaults)

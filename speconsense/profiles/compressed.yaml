@@ -26,3 +26,4 @@ speconsense-summarize:
   select-min-size-ratio: 0.2    # Drop variants below 20% of group total
   min-merge-overlap: 0          # Disable partial overlap merging
   enable-full-consensus: true   # Emit -{gid}-full noise-scrubbed query consensus
+  min-position-frequency: 0.1   # Retain columns with ≥10% non-gap content in merges/-full

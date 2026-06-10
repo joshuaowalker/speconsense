@@ -209,7 +209,9 @@ def _build_merged_consensus_info(
     )
 
 
-def create_consensus_from_msa(aligned_seqs: List, variants: List[ConsensusInfo]) -> ConsensusInfo:
+def create_consensus_from_msa(aligned_seqs: List, variants: List[ConsensusInfo],
+                              min_position_frequency: float = 0.5,
+                              min_position_count: int = 3) -> ConsensusInfo:
     """
     Generate consensus from MSA using size-weighted majority voting.
 
@@ -224,6 +226,11 @@ def create_consensus_from_msa(aligned_seqs: List, variants: List[ConsensusInfo])
     Args:
         aligned_seqs: MSA sequences with gaps as '-'
         variants: Original ConsensusInfo objects (for size weighting)
+        min_position_frequency: Minimum fraction of non-gap votes to retain
+            the column (default 0.5 = majority wins). Set to a lower value
+            to preserve columns where a minority of variants carry content.
+        min_position_count: Minimum absolute non-gap vote weight to retain
+            the column (default 3). Both frequency and count must be met.
 
     Returns:
         ConsensusInfo with merged consensus sequence
@@ -249,9 +256,11 @@ def create_consensus_from_msa(aligned_seqs: List, variants: List[ConsensusInfo])
 
         # Determine if position should be included
         total_base_votes = sum(base_votes.values())
+        total_votes = total_base_votes + gap_votes
+        base_freq = total_base_votes / total_votes if total_votes > 0 else 0.0
 
-        if total_base_votes > gap_votes:
-            # Majority wants a base - include position
+        if base_freq >= min_position_frequency and total_base_votes >= min_position_count:
+            # Enough non-gap support - include position
             if len(base_votes) == 1:
                 # Single base - no ambiguity
                 consensus_seq.append(list(base_votes.keys())[0])
@@ -261,7 +270,7 @@ def create_consensus_from_msa(aligned_seqs: List, variants: List[ConsensusInfo])
                 iupac_code = merge_bases_to_iupac(represented_bases)
                 consensus_seq.append(iupac_code)
                 snp_count += 1
-        # else: majority wants gap, omit position
+        # else: insufficient non-gap support, omit position
 
     return _build_merged_consensus_info(consensus_seq, snp_count, variants)
 
@@ -269,6 +278,8 @@ def create_consensus_from_msa(aligned_seqs: List, variants: List[ConsensusInfo])
 def build_full_consensus_from_msa(
     aligned_reads: List,
     min_ambiguity_frequency: float,
+    min_position_frequency: float = 0.5,
+    min_position_count: int = 3,
 ) -> Tuple[str, int]:
     """Per-column consensus over a read MSA, one vote per read.
 
@@ -280,7 +291,8 @@ def build_full_consensus_from_msa(
     legacy NGSpeciesID heaviest-bundle path on noise-scrubbed input.
 
     Per column:
-    - If gap count >= base count, omit the position (majority-wins gap).
+    - If base frequency < ``min_position_frequency`` or base count <
+      ``min_position_count``, omit the position.
     - Otherwise, keep bases whose fraction of the base total is
       >= ``min_ambiguity_frequency``. A single survivor emits unchanged;
       multiple survivors collapse to an IUPAC ambiguity code via
@@ -296,6 +308,10 @@ def build_full_consensus_from_msa(
         min_ambiguity_frequency: Minimum minor-base fraction to keep at
             an IUPAC site. Sourced from the core run's metadata so the
             threshold matches the per-cluster IUPAC calling.
+        min_position_frequency: Minimum fraction of non-gap reads to
+            retain the column (default 0.5 = majority wins).
+        min_position_count: Minimum absolute non-gap read count to retain
+            the column (default 3). Both frequency and count must be met.
 
     Returns:
         ``(consensus_str, snp_count)``. ``consensus_str`` excludes gap
@@ -320,7 +336,9 @@ def build_full_consensus_from_msa(
                 base_counts[symbol] += 1
 
         base_total = sum(base_counts.values())
-        if base_total == 0 or gap_count >= base_total:
+        total = base_total + gap_count
+        base_freq = base_total / total if total > 0 else 0.0
+        if base_total == 0 or base_freq < min_position_frequency or base_total < min_position_count:
             continue
 
         surviving = {
@@ -339,12 +357,14 @@ def build_full_consensus_from_msa(
     return "".join(consensus_seq), snp_count
 
 
-def create_overlap_consensus_from_msa(aligned_seqs: List, variants: List[ConsensusInfo]) -> ConsensusInfo:
+def create_overlap_consensus_from_msa(aligned_seqs: List, variants: List[ConsensusInfo],
+                                      min_position_frequency: float = 0.5,
+                                      min_position_count: int = 3) -> ConsensusInfo:
     """
     Generate consensus from MSA where sequences may have different lengths.
 
     For overlap merging (primer pools with different endpoints):
-    - In overlap region: Use size-weighted majority voting
+    - In overlap region: Use size-weighted majority voting with gap thresholds
     - In non-overlap regions: Keep content from whichever sequence(s) have it
 
     This produces a consensus spanning the union of all input sequences.
@@ -352,6 +372,11 @@ def create_overlap_consensus_from_msa(aligned_seqs: List, variants: List[Consens
     Args:
         aligned_seqs: MSA sequences with gaps as '-'
         variants: Original ConsensusInfo objects (for size weighting)
+        min_position_frequency: Minimum fraction of non-gap votes to retain
+            the column in the overlap region (default 0.5 = majority wins).
+        min_position_count: Minimum absolute non-gap vote weight to retain
+            the column in the overlap region (default 3). Both frequency and
+            count must be met.
 
     Returns:
         ConsensusInfo with merged consensus sequence spanning full length
@@ -402,8 +427,10 @@ def create_overlap_consensus_from_msa(aligned_seqs: List, variants: List[Consens
             gap_votes = votes.get('-', 0)
             base_votes = {b: v for b, v in votes.items() if b != '-'}
             total_base_votes = sum(base_votes.values())
+            total_votes = total_base_votes + gap_votes
+            base_freq = total_base_votes / total_votes if total_votes > 0 else 0.0
 
-            if total_base_votes > gap_votes:
+            if base_freq >= min_position_frequency and total_base_votes >= min_position_count:
                 if len(base_votes) == 1:
                     consensus_seq.append(list(base_votes.keys())[0])
                 else:
@@ -624,11 +651,15 @@ def merge_group_with_msa(variants: List[ConsensusInfo], args) -> Tuple[List[Cons
                     merged_consensus = subset_variants[0]
                 elif use_overlap_mode:
                     merged_consensus = create_overlap_consensus_from_msa(
-                        subset_aligned, subset_variants
+                        subset_aligned, subset_variants,
+                        min_position_frequency=getattr(args, 'min_position_frequency', 0.5),
+                        min_position_count=getattr(args, 'min_position_count', 3),
                     )
                 else:
                     merged_consensus = create_consensus_from_msa(
-                        subset_aligned, subset_variants
+                        subset_aligned, subset_variants,
+                        min_position_frequency=getattr(args, 'min_position_frequency', 0.5),
+                        min_position_count=getattr(args, 'min_position_count', 3),
                     )
 
                 # Update merged consensus with cumulative position counts for iterative tracking

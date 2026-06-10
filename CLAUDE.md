@@ -247,6 +247,7 @@ Parameters are controlled via CLI arguments, optionally pre-set via YAML profile
 - Summarize err_factor filter (`--max-err-factor`, default `1.5`; `0` disables)
 - Summarize secondary group pruning (`--prune-group-ratio`, default `0.10`; `--prune-group-abs`, default `15`; both `0` disables)
 - Summarize HP threshold (`--hp-normalization-length`, default `6`; matches core; `1` restores legacy blanket-normalize-all behavior)
+- Summarize consensus output gap handling (`--min-position-frequency`, default `0.5`; `--min-position-count`, default `3`). Controls how gap vs. base disagreements are resolved in merged and `-full` consensus sequences. Both thresholds must be met for a column to be retained. Default `0.5` matches majority-wins behavior; `compressed` profile uses `0.1`.
 
 ## Integration with specimux-suite
 
