@@ -143,7 +143,7 @@ Note: Identity grouping is performed once, in core, via complete linkage on `--g
 - **pass** — quality gates met and selected for review. Written to `-all.fasta` and `variants/`.
 - **`.ns`** (not significant) — `cer_factor` below `--min-cer-factor` (default `1.0`). Likely sequencing artifacts relative to a larger peer.
 - **`.lq`** (low quality) — `err_factor` above `--max-err-factor` (default `1.5`). Internal cluster heterogeneity exceeds basecaller noise expectations. `.lq` takes precedence when both `.ns` and `.lq` thresholds fire.
-- **`.filtered`** — passes quality gates but excluded by a selection or pruning decision: `--select-max-variants`, `--select-min-size-ratio`, `--select-max-groups`, or `--prune-group-frac`/`--prune-group-abs`. Distinguishes "quality problem" (`.ns`/`.lq`) from "selection decision" (`.filtered`).
+- **`.filtered`** — passes quality gates but excluded by a selection or pruning decision: `--select-max-variants`, `--select-min-size-ratio`, `--select-max-groups`, or `--prune-group-ratio`/`--prune-group-abs`. Distinguishes "quality problem" (`.ns`/`.lq`) from "selection decision" (`.filtered`).
 
 **Post-merge re-check and merge unwind**: after Phase 4 (MSA merging) recomputes `err_factor`/`cer_factor` on merged records, any merged record whose recomputed metrics cross filter thresholds has its merge cancelled — the original pre-merge contributors are restored on the pass track rather than routing the synthetic merged record to `.lq`/`.ns`. When a merged record is dropped by selection filtering (Phase 6/7), the merge is unwound: original pre-merge contributors are emitted individually on the `.filtered` track instead of the synthetic merged record, preserving per-cluster metrics for reviewer detail.
 
@@ -245,7 +245,7 @@ Parameters are controlled via CLI arguments, optionally pre-set via YAML profile
 - Error model selection (`--error-model`, `--hp-normalization-length`)
 - Summarize CER filter (`--min-cer-factor`, default `1.0`, `0` disables)
 - Summarize err_factor filter (`--max-err-factor`, default `1.5`; `0` disables)
-- Summarize secondary group pruning (`--prune-group-frac`, default `0.10`; `--prune-group-abs`, default `15`; both `0` disables)
+- Summarize secondary group pruning (`--prune-group-ratio`, default `0.10`; `--prune-group-abs`, default `15`; both `0` disables)
 - Summarize HP threshold (`--hp-normalization-length`, default `6`; matches core; `1` restores legacy blanket-normalize-all behavior)
 
 ## Integration with specimux-suite

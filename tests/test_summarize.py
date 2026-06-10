@@ -717,7 +717,7 @@ class TestProcessSingleSpecimenNaming:
             select_max_variants=-1,
             disable_merging=True,
             enable_full_consensus=False,
-            prune_group_frac=0.10,
+            prune_group_ratio=0.10,
             prune_group_abs=15,
         )
         defaults.update(overrides)
@@ -1279,7 +1279,7 @@ class TestFullConsensus:
                 select_max_variants=-1,
                 disable_merging=True,
                 enable_full_consensus=True,
-                prune_group_frac=0.10,
+                prune_group_ratio=0.10,
                 prune_group_abs=15,
             )
             final, _, _, _, _, full_reads, _, _, _ = process_single_specimen(
@@ -1333,7 +1333,7 @@ class TestFrequencyFields:
             select_max_variants=-1,
             disable_merging=True,
             enable_full_consensus=False,
-            prune_group_frac=0.10,
+            prune_group_ratio=0.10,
             prune_group_abs=15,
         )
         defaults.update(overrides)

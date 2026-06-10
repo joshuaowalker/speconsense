@@ -643,7 +643,7 @@ def write_filtered_variant_files(filtered_consensuses: List[ConsensusInfo],
 
     Selection-filtered variants passed quality gates (cer_factor, err_factor)
     but were excluded by selection or pruning parameters (--select-max-variants,
-    --select-min-size-ratio, --select-max-groups, --prune-group-frac/abs).
+    --select-min-size-ratio, --select-max-groups, --prune-group-ratio/abs).
     This distinguishes "quality problem" (.ns/.lq) from "selection decision"
     (.filtered).
     """

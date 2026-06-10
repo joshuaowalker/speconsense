@@ -202,15 +202,15 @@ def parse_arguments():
                                       "routed to __Summary__/variants/ as .lq records. Variants "
                                       "with err_factor=None (legacy output) always pass. Set to 0 "
                                       "to disable err_factor filtering. (default: 1.5)")
-    filtering_group.add_argument("--prune-group-frac", type=float, default=0.10,
+    filtering_group.add_argument("--prune-group-ratio", type=float, default=0.10,
                                  help="Prune secondary identity groups (gid >= 2) whose total size "
-                                      "is below this fraction of the largest group. Both "
-                                      "--prune-group-frac and --prune-group-abs must be satisfied "
+                                      "is below this ratio of the largest group. Both "
+                                      "--prune-group-ratio and --prune-group-abs must be satisfied "
                                       "to prune. Set to 0 to disable. (default: 0.10)")
     filtering_group.add_argument("--prune-group-abs", type=int, default=15,
                                  help="Absolute size threshold for secondary group pruning. Groups "
                                       "with total size >= this value are kept regardless of "
-                                      "--prune-group-frac. Both conditions must be met to prune. "
+                                      "--prune-group-ratio. Both conditions must be met to prune. "
                                       "Set to 0 to disable. (default: 15)")
     # Grouping group
     grouping_group = parser.add_argument_group("Grouping")
@@ -596,14 +596,14 @@ def process_single_specimen(file_consensuses: List[ConsensusInfo],
     # Route to .filtered (not .lq) because this is a selection decision
     # based on relative size, not a quality judgment about the cluster's
     # internal coherence or CER significance.
-    if args.prune_group_frac > 0 and args.prune_group_abs > 0 and len(variant_groups) > 1:
+    if args.prune_group_ratio > 0 and args.prune_group_abs > 0 and len(variant_groups) > 1:
         max_group_size = max(bucket_totals.get(gid, 0) for gid in variant_groups)
         pruned_gids = []
         for gid in list(variant_groups):
             if gid == 1:
                 continue
             group_total = bucket_totals.get(gid, 0)
-            if (group_total / max_group_size < args.prune_group_frac
+            if (group_total / max_group_size < args.prune_group_ratio
                     and group_total < args.prune_group_abs):
                 pruned_gids.append(gid)
                 filtered_for_specimen.extend(variant_groups.pop(gid))
@@ -618,7 +618,7 @@ def process_single_specimen(file_consensuses: List[ConsensusInfo],
             lq_for_specimen = [r for r in lq_for_specimen if r.group_rank not in pruned_set]
             logging.info(
                 f"Pruned {len(pruned_gids)} secondary group(s) "
-                f"(gids {pruned_gids}) below frac={args.prune_group_frac}, "
+                f"(gids {pruned_gids}) below ratio={args.prune_group_ratio}, "
                 f"abs={args.prune_group_abs} -> .filtered track"
             )
 
@@ -1053,7 +1053,7 @@ def main():
     logging.info(f"  --select-max-variants: {args.select_max_variants}")
     logging.info(f"  --select-max-groups: {args.select_max_groups}")
     logging.info(f"  --select-min-size-ratio: {args.select_min_size_ratio}")
-    logging.info(f"  --prune-group-frac: {args.prune_group_frac}")
+    logging.info(f"  --prune-group-ratio: {args.prune_group_ratio}")
     logging.info(f"  --prune-group-abs: {args.prune_group_abs}")
     logging.info(f"  --log-level: {args.log_level}")
     logging.info("")

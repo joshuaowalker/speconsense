@@ -520,7 +520,7 @@ Speconsense provides two complementary filters to control which clusters are out
 11. Final consensus + MAD outlier removal + FASTA writing
 
 **Deferred filtering strategy:**
-For maximum flexibility in detecting rare variants and contaminants, set `--min-size 0` in `speconsense` and apply final quality thresholds in summarize via `--min-ric`, `--min-cer-factor`, `--max-err-factor`, and `--prune-group-frac`/`--prune-group-abs`. This lets you run expensive clustering once and experiment with thresholds during post-processing. The CER and err_factor filters route low-confidence clusters to the `.ns`/`.lq` track rather than dropping them entirely, so you can revisit decisions without re-running core.
+For maximum flexibility in detecting rare variants and contaminants, set `--min-size 0` in `speconsense` and apply final quality thresholds in summarize via `--min-ric`, `--min-cer-factor`, `--max-err-factor`, and `--prune-group-ratio`/`--prune-group-abs`. This lets you run expensive clustering once and experiment with thresholds during post-processing. The CER and err_factor filters route low-confidence clusters to the `.ns`/`.lq` track rather than dropping them entirely, so you can revisit decisions without re-running core.
 
 ### Consensus Generation
 
