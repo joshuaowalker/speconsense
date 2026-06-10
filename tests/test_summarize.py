@@ -509,7 +509,7 @@ class TestSelectMinSizeRatio:
             output_fasta = os.path.join(summary_dir, "summary.fasta")
             output_sequences = list(SeqIO.parse(output_fasta, "fasta"))
 
-            # Only the large variant should remain (3/100 = 0.03 < 0.1)
+            # Only the large variant should remain (3/103 = 0.029 < 0.1)
             assert len(output_sequences) == 1, \
                 f"Expected 1 sequence after filtering, got {len(output_sequences)}"
             assert "size=100" in output_sequences[0].description
@@ -739,9 +739,9 @@ class TestProcessSingleSpecimenNaming:
         members = [
             self._make("test-1.v1", 1, 1, 100),
             self._make("test-1.v2", 1, 2, 80),
-            self._make("test-1.v3", 1, 3, 5),  # filtered by ratio
+            self._make("test-1.v3", 1, 3, 5),  # 5/185 = 0.027, filtered by ratio
         ]
-        args = self._args(select_min_size_ratio=0.5)
+        args = self._args(select_min_size_ratio=0.1)
         final, _, _, _, _, _, _, _, _ = process_single_specimen(members, args)
         names = sorted(v.sample_name for v in final)
         assert names == ["test-1.v1", "test-1.v2"]

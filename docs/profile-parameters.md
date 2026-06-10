@@ -75,7 +75,7 @@ Parameters for the post-processing and summarization tool.
 | `disable-homopolymer-equivalence` | Treat homopolymer length differences as structural | false | — | — | — | — | — |
 | `select-max-groups` | Max groups to output per specimen (-1 = all) | -1 | — | — | — | — | — |
 | `select-max-variants` | Max variants per group (-1 = no limit) | -1 | — | — | — | — | — |
-| `select-min-size-ratio` | Min size ratio (variant/largest) to include in output (0 = disabled) | 0 | 0.2 | — | — | — | 0.05 |
+| `select-min-size-ratio` | Min size ratio (variant/group total) to include in output (0 = disabled) | 0 | 0.2 | — | — | — | 0.05 |
 | `fasta-fields` | Header fields: preset or comma-separated list | default | — | — | — | — | — |
 | `scale-threshold` | Sequence count to enable vsearch acceleration (0 = disabled) | 1001 | — | — | — | — | — |
 | `threads` | Max threads for internal parallelism (0 = auto) | 0 | — | — | — | — | — |

@@ -229,7 +229,7 @@ This is a major release. Headline themes:
 ## [0.7.4] - 2026-02-05
 
 ### Added
-- **`--select-min-size-ratio` parameter** (summarize) — Filters out post-merge variants whose size ratio to the largest variant in their group falls below the threshold (default: 0 = disabled, e.g. 0.2 for 20% cutoff). Applied after merging, before variant selection
+- **`--select-min-size-ratio` parameter** (summarize) — Filters out post-merge variants whose size as a fraction of the group total falls below the threshold; the largest variant in each group is always kept (default: 0 = disabled, e.g. 0.2 for 20% cutoff). Applied after merging, before variant selection
 
 ### Changed
 - **`compressed` bundled profile** — Now includes `select-min-size-ratio: 0.2` to match 20% calling threshold theme

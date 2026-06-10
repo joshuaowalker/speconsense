@@ -23,5 +23,5 @@ speconsense:
 speconsense-summarize:
   min-ric: 5                   # Higher consensus threshold
   disable-merging: true        # Skip merging entirely - preserve all variants
-  select-min-size-ratio: 0.05  # Drop weak minor variants per identity group
+  select-min-size-ratio: 0.05  # Drop variants below 5% of group total
                                # (per-group; doesn't suppress secondary primer pairs)

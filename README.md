@@ -723,9 +723,10 @@ When multiple variants exist per identity group, `speconsense-summarize` selects
 ```bash
 speconsense-summarize --select-min-size-ratio 0.2
 ```
-- Filters out post-merge variants whose size is too small relative to the largest variant in their group
-- Ratio calculated as `variant_size / largest_size` — must be ≥ threshold to keep
-- Example: `--select-min-size-ratio 0.2` means a variant must have ≥20% the reads of the largest variant in its group
+- Filters out post-merge variants whose size is too small relative to the group total
+- Ratio calculated as `variant_size / group_total` — must be ≥ threshold to keep
+- The largest variant in each group is always kept
+- Example: `--select-min-size-ratio 0.2` means a variant must represent ≥20% of the group's total reads
 - Default is 0 (disabled) — all post-merge variants pass through to selection
 - Applied after merging but before variant selection
 - Useful for suppressing noise variants that survived merging but are too small to be meaningful
@@ -1480,9 +1481,9 @@ Selection:
                         Maximum total variants to output per group (default:
                         -1 = no limit, 0 also means no limit)
   --select-min-size-ratio SELECT_MIN_SIZE_RATIO
-                        Minimum size ratio (variant/largest) to include in
-                        output (default: 0 = disabled, e.g. 0.2 for 20%
-                        cutoff)
+                        Minimum size ratio (variant/group total) to include in
+                        output. The largest variant in each group is always
+                        kept. (default: 0 = disabled, e.g. 0.2 for 20% cutoff)
 
 Performance:
   --scale-threshold SCALE_THRESHOLD

@@ -256,7 +256,8 @@ def parse_arguments():
                                  dest="select_max_variants", type=int, default=-1,
                                  help="Maximum total variants to output per group (default: -1 = no limit, 0 also means no limit)")
     selection_group.add_argument("--select-min-size-ratio", type=float, default=0,
-                                 help="Minimum size ratio (variant/largest) to include in output "
+                                 help="Minimum size ratio (variant/group total) to include in output. "
+                                      "The largest variant in each group is always kept. "
                                       "(default: 0 = disabled, e.g. 0.2 for 20%% cutoff)")
     selection_group.add_argument("--enable-full-consensus", action="store_true", default=False,
                                  help="Per identity group with >=2 selected variants, emit an "
@@ -796,14 +797,16 @@ def process_single_specimen(file_consensuses: List[ConsensusInfo],
 
         # Apply select-min-size-ratio filter
         if args.select_min_size_ratio > 0 and len(group_members) > 1:
+            group_total = sum(v.size for v in group_members)
             largest_size = max(v.size for v in group_members)
             filtered = [v for v in group_members
-                        if (v.size / largest_size) >= args.select_min_size_ratio]
+                        if v.size == largest_size
+                        or (v.size / group_total) >= args.select_min_size_ratio]
             if len(filtered) < len(group_members):
                 filtered_count = len(group_members) - len(filtered)
                 logging.debug(f"Group {final_gid}: filtered out {filtered_count} "
                               f"variants with size ratio < {args.select_min_size_ratio} "
-                              f"relative to largest (size={largest_size})")
+                              f"of group total (size={group_total})")
                 group_members = filtered
 
         # Select variants for this group
