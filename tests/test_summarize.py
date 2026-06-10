@@ -718,7 +718,7 @@ class TestProcessSingleSpecimenNaming:
             disable_merging=True,
             enable_full_consensus=False,
             prune_group_ratio=0.10,
-            prune_group_abs=15,
+            prune_group_count=15,
             min_position_frequency=0.5,
             min_position_count=3,
         )
@@ -1282,7 +1282,7 @@ class TestFullConsensus:
                 disable_merging=True,
                 enable_full_consensus=True,
                 prune_group_ratio=0.10,
-                prune_group_abs=15,
+                prune_group_count=15,
                 min_position_frequency=0.5,
                 min_position_count=3,
             )
@@ -1338,7 +1338,7 @@ class TestFrequencyFields:
             disable_merging=True,
             enable_full_consensus=False,
             prune_group_ratio=0.10,
-            prune_group_abs=15,
+            prune_group_count=15,
             min_position_frequency=0.5,
             min_position_count=3,
         )

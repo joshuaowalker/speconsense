@@ -205,9 +205,9 @@ def parse_arguments():
     filtering_group.add_argument("--prune-group-ratio", type=float, default=0.10,
                                  help="Prune secondary identity groups (gid >= 2) whose total size "
                                       "is below this ratio of the largest group. Both "
-                                      "--prune-group-ratio and --prune-group-abs must be satisfied "
+                                      "--prune-group-ratio and --prune-group-count must be satisfied "
                                       "to prune. Set to 0 to disable. (default: 0.10)")
-    filtering_group.add_argument("--prune-group-abs", type=int, default=15,
+    filtering_group.add_argument("--prune-group-count", type=int, default=15,
                                  help="Absolute size threshold for secondary group pruning. Groups "
                                       "with total size >= this value are kept regardless of "
                                       "--prune-group-ratio. Both conditions must be met to prune. "
@@ -613,7 +613,7 @@ def process_single_specimen(file_consensuses: List[ConsensusInfo],
     # Route to .filtered (not .lq) because this is a selection decision
     # based on relative size, not a quality judgment about the cluster's
     # internal coherence or CER significance.
-    if args.prune_group_ratio > 0 and args.prune_group_abs > 0 and len(variant_groups) > 1:
+    if args.prune_group_ratio > 0 and args.prune_group_count > 0 and len(variant_groups) > 1:
         max_group_size = max(bucket_totals.get(gid, 0) for gid in variant_groups)
         pruned_gids = []
         for gid in list(variant_groups):
@@ -621,7 +621,7 @@ def process_single_specimen(file_consensuses: List[ConsensusInfo],
                 continue
             group_total = bucket_totals.get(gid, 0)
             if (group_total / max_group_size < args.prune_group_ratio
-                    and group_total < args.prune_group_abs):
+                    and group_total < args.prune_group_count):
                 pruned_gids.append(gid)
                 filtered_for_specimen.extend(variant_groups.pop(gid))
         if pruned_gids:
@@ -636,7 +636,7 @@ def process_single_specimen(file_consensuses: List[ConsensusInfo],
             logging.info(
                 f"Pruned {len(pruned_gids)} secondary group(s) "
                 f"(gids {pruned_gids}) below ratio={args.prune_group_ratio}, "
-                f"abs={args.prune_group_abs} -> .filtered track"
+                f"abs={args.prune_group_count} -> .filtered track"
             )
 
     # Phase 2: MSA-based merging within each group
@@ -1075,7 +1075,7 @@ def main():
     logging.info(f"  --select-max-groups: {args.select_max_groups}")
     logging.info(f"  --select-min-size-ratio: {args.select_min_size_ratio}")
     logging.info(f"  --prune-group-ratio: {args.prune_group_ratio}")
-    logging.info(f"  --prune-group-abs: {args.prune_group_abs}")
+    logging.info(f"  --prune-group-count: {args.prune_group_count}")
     logging.info(f"  --log-level: {args.log_level}")
     logging.info("")
 

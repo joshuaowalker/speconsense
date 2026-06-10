@@ -65,7 +65,7 @@ Parameters for the post-processing and summarization tool.
 | `min-cer-factor` | Min per-position CER factor to keep a variant as primary (routes to `variants/*.ns-…` otherwise; 0 disables) | 1.0 | — | 0 | — | 0 | — |
 | `max-err-factor` | Max cluster err_factor (observed/expected disagreement); routes to `variants/*.lq-…` above (0 disables) | 1.5 | — | 0 | — | 0 | — |
 | `prune-group-ratio` | Prune secondary groups below this ratio of the largest group (0 disables) | 0.10 | — | — | — | — | — |
-| `prune-group-abs` | Absolute size threshold — groups with total size ≥ this are kept regardless of ratio (0 disables) | 15 | — | — | — | — | — |
+| `prune-group-count` | Absolute size threshold — groups with total size ≥ this are kept regardless of ratio (0 disables) | 15 | — | — | — | — | — |
 | `group-identity` | Anchor identity for cross-primer overlap conflation between core groups | 0.85 | — | — | 0.95 | — | — |
 | `disable-merging` | Skip MSA-based merge evaluation entirely | false | — | — | — | true | true |
 | `merge-effort` | Merge thoroughness: `fast`, `balanced`, `thorough`, or 6-14 | balanced | — | — | fast | — | — |

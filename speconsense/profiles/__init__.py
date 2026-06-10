@@ -102,7 +102,7 @@ VALID_SUMMARIZE_KEYS = {
     "min-cer-factor",
     "max-err-factor",
     "prune-group-ratio",
-    "prune-group-abs",
+    "prune-group-count",
     # Grouping
     "group-identity",
     # Merging

@@ -473,7 +473,7 @@ Across all tested scenarios, **artifacts appearing in the consensus sequence** o
 - **Clean separation** (two clusters with correct sizes): Pipeline successfully detected contamination
 - **Franken-consensus** (one cluster with mixed reads): Sequences too similar or algorithm too aggressive
 - **Multiple small clusters**: Over-fragmentation, may need parameter tuning
-- Use summarize's `--prune-group-ratio`/`--prune-group-abs` to filter contaminants below a certain proportion
+- Use summarize's `--prune-group-ratio`/`--prune-group-count` to filter contaminants below a certain proportion
 - Check quality_report.txt (from speconsense-summarize) to identify mixed consensuses by elevated stability metrics
 
 **Example analysis**:
