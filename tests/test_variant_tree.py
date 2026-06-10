@@ -73,7 +73,7 @@ def test_build_tree_singleton_no_parent():
     assert nodes[0].children == []
 
 
-def test_write_specimen_variant_tree_renders_passed_ns_lq_together():
+def test_write_specimen_variant_tree_renders_all_statuses():
     base = "ACGT" * 80
     passed = [
         _ci("SP-1.v1", base, size=100, gid=1),
@@ -85,6 +85,9 @@ def test_write_specimen_variant_tree_renders_passed_ns_lq_together():
     lq = [
         _ci("SP-1.v4", "G" * len(base), size=5, gid=1, cer=0.5, err=1.7),
     ]
+    filtered = [
+        _ci("SP-1.v5", base[:-3] + "CCC", size=3, gid=1, cer=2.0, err=0.8),
+    ]
 
     with tempfile.TemporaryDirectory() as tmp:
         write_specimen_variant_tree(
@@ -94,22 +97,22 @@ def test_write_specimen_variant_tree_renders_passed_ns_lq_together():
             lq=lq,
             output_dir=tmp,
             hp_normalization_length=6,
+            filtered=filtered,
         )
         out_path = os.path.join(tmp, "SP.txt")
         assert os.path.exists(out_path), "Tree file not written"
         contents = open(out_path).read()
 
     assert "VARIANT TREE — SP" in contents
-    assert "4 variants total" in contents
+    assert "5 variants total" in contents
     assert "Group 1" in contents
     assert "[anchor]" in contents
-    # Status indicators present for each non-anchor variant
     assert " passed " in contents
     assert " ns " in contents
     assert " lq " in contents
-    # Tree glyphs
+    assert " filtered " in contents
+    assert ".filtered" in contents
     assert "├─" in contents or "└─" in contents
-    # Diff line format
     assert "vs " in contents and "id) —" in contents
 
 

@@ -272,11 +272,38 @@ class TestGroupField:
         field = GroupField()
         assert field.format_value(consensus) == "group=12"
 
-    def test_format_value_raw_variant(self):
-        """Should extract group from .raw suffixed names."""
+    def test_format_value_raw_variant_legacy(self):
+        """Should extract group from legacy .raw suffixed names."""
         consensus = make_consensus(sample_name="specimen-2.v1.raw1")
         field = GroupField()
         assert field.format_value(consensus) == "group=2"
+
+    def test_format_value_raw_variant_traceability(self):
+        """Should extract group from new .raw.{gid}.v{vid} names."""
+        consensus = make_consensus(sample_name="specimen-1.v1.raw.2.v3")
+        field = GroupField()
+        assert field.format_value(consensus) == "group=1"
+
+    def test_format_value_ns_suffix(self):
+        consensus = make_consensus(sample_name="specimen-1.v2.ns")
+        field = GroupField()
+        assert field.format_value(consensus) == "group=1"
+
+    def test_format_value_lq_suffix(self):
+        consensus = make_consensus(sample_name="specimen-3.v1.lq")
+        field = GroupField()
+        assert field.format_value(consensus) == "group=3"
+
+    def test_format_value_filtered_suffix(self):
+        consensus = make_consensus(sample_name="specimen-2.v4.filtered")
+        field = GroupField()
+        assert field.format_value(consensus) == "group=2"
+
+    def test_format_value_raw_with_filtered_suffix(self):
+        """Should handle combined .raw.{gid}.v{vid}.filtered suffix."""
+        consensus = make_consensus(sample_name="specimen-1.v1.raw.2.v3.filtered")
+        field = GroupField()
+        assert field.format_value(consensus) == "group=1"
 
     def test_format_value_no_match(self):
         """Should return None for non-summarize naming."""
@@ -298,9 +325,35 @@ class TestVariantField:
         field = VariantField()
         assert field.format_value(consensus) == "variant=v5"
 
-    def test_format_value_raw_variant(self):
-        """Should extract variant from .raw suffixed names."""
+    def test_format_value_raw_variant_legacy(self):
+        """Should extract variant from legacy .raw suffixed names."""
         consensus = make_consensus(sample_name="specimen-2.v1.raw1")
+        field = VariantField()
+        assert field.format_value(consensus) == "variant=v1"
+
+    def test_format_value_raw_variant_traceability(self):
+        """Should capture the merged variant's vid, not the raw contributor's."""
+        consensus = make_consensus(sample_name="specimen-1.v1.raw.2.v3")
+        field = VariantField()
+        assert field.format_value(consensus) == "variant=v1"
+
+    def test_format_value_ns_suffix(self):
+        consensus = make_consensus(sample_name="specimen-1.v2.ns")
+        field = VariantField()
+        assert field.format_value(consensus) == "variant=v2"
+
+    def test_format_value_lq_suffix(self):
+        consensus = make_consensus(sample_name="specimen-1.v3.lq")
+        field = VariantField()
+        assert field.format_value(consensus) == "variant=v3"
+
+    def test_format_value_filtered_suffix(self):
+        consensus = make_consensus(sample_name="specimen-2.v4.filtered")
+        field = VariantField()
+        assert field.format_value(consensus) == "variant=v4"
+
+    def test_format_value_raw_with_filtered_suffix(self):
+        consensus = make_consensus(sample_name="specimen-1.v1.raw.2.v3.filtered")
         field = VariantField()
         assert field.format_value(consensus) == "variant=v1"
 

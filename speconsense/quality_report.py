@@ -114,11 +114,20 @@ class _Specimen:
 
 
 def _specimen_from_name(cluster_name: str) -> str:
-    return re.sub(r"-\d+\.v\d+(\.raw\d+)?$", "", cluster_name)
+    return re.sub(
+        r"-\d+\.v\d+"
+        r"(?:\.raw(?:\d+|\.\d+\.v\d+))?"
+        r"(?:\.(?:ns|lq|filtered))?$",
+        "", cluster_name,
+    )
 
 
 def _short_id(cluster_name: str) -> str:
-    m = re.search(r"-(\d+\.v\d+(?:\.raw\d+)?)$", cluster_name)
+    m = re.search(
+        r"-(\d+\.v\d+(?:\.raw(?:\d+|\.\d+\.v\d+))?)"
+        r"(?:\.(?:ns|lq|filtered))?$",
+        cluster_name,
+    )
     return m.group(1) if m else cluster_name
 
 
@@ -127,6 +136,7 @@ def _build_specimens(
     ns_list: List[ConsensusInfo],
     lq_list: List[ConsensusInfo],
     source_folder: str,
+    filtered_list: Optional[List[ConsensusInfo]] = None,
 ) -> Tuple[Dict[str, _Specimen], List[Tuple[str, int]]]:
     """Group source-level clusters by specimen and pull total_input_reads.
 
@@ -150,6 +160,8 @@ def _build_specimens(
         _add(info, "ns")
     for info in lq_list:
         _add(info, "lq")
+    for info in (filtered_list or []):
+        _add(info, "filtered")
 
     # Pull total_input_reads from per-specimen metadata JSONs. Also catch
     # specimens that had input but produced zero clusters.
@@ -273,7 +285,7 @@ def _render_executive_summary(
         spec_line,
         f"Total clusters:    {counts['total']}  "
         f"({counts['passed']} passed | {counts['ns']} routed to .ns | "
-        f"{counts['lq']} routed to .lq)",
+        f"{counts['lq']} routed to .lq | {counts['filtered']} routed to .filtered)",
     ]
     if rics:
         lines.append(
@@ -596,7 +608,8 @@ def _render_pipeline_activity(
         f"  Filter routing:    "
         f"{counts['passed']} passed ({100*counts['passed']/total:.1f}%), "
         f"{counts['ns']} .ns ({100*counts['ns']/total:.1f}%), "
-        f"{counts['lq']} .lq ({100*counts['lq']/total:.1f}%)",
+        f"{counts['lq']} .lq ({100*counts['lq']/total:.1f}%), "
+        f"{counts['filtered']} .filtered ({100*counts['filtered']/total:.1f}%)",
         f"  Merged variants:   {merged} (carry snp > 0)",
         f"  Cross-primer overlap merges: {len(overlap_merges)} "
         f"(threshold --min-merge-overlap={min_merge_overlap})",
@@ -644,8 +657,8 @@ def _render_qctx_calibration(specimens: Dict[str, _Specimen]) -> str:
     """
     body = _section("q_ctx CALIBRATION CHECK (run-pooled)")
 
-    bucket_order = ("passed", "ns", "lq")
-    bucket_label = {"passed": "passed", "ns": ".ns", "lq": ".lq"}
+    bucket_order = ("passed", "ns", "lq", "filtered")
+    bucket_label = {"passed": "passed", "ns": ".ns", "lq": ".lq", "filtered": ".filtered"}
     buckets: Dict[str, Dict[str, float]] = {
         s: {"obs": 0.0, "exp": 0.0, "cols": 0, "n": 0} for s in bucket_order
     }
@@ -735,6 +748,7 @@ def write_quality_report(
     consensus_list: Optional[List[ConsensusInfo]] = None,
     ns_list: Optional[List[ConsensusInfo]] = None,
     lq_list: Optional[List[ConsensusInfo]] = None,
+    filtered_list: Optional[List[ConsensusInfo]] = None,
     min_cer_factor: float = DEFAULT_MIN_CER_FACTOR,
     max_err_factor: float = DEFAULT_MAX_ERR_FACTOR,
 ) -> None:
@@ -756,6 +770,8 @@ def write_quality_report(
             for merged variants).
         ns_list: Source clusters routed to .ns by the CER filter.
         lq_list: Source clusters routed to .lq by the err_factor filter.
+        filtered_list: Variants excluded by selection/pruning parameters
+            (--select-max-variants, --select-min-size-ratio, etc.).
         min_cer_factor: Threshold used for .ns routing (for header context).
         max_err_factor: Threshold used for .lq routing (for header context).
     """
@@ -768,15 +784,18 @@ def write_quality_report(
     passing = consensus_list if consensus_list is not None else final_consensus
     ns_list = ns_list or []
     lq_list = lq_list or []
+    filtered_list = filtered_list or []
 
     specimens, zero_cluster_specimens = _build_specimens(
-        passing, ns_list, lq_list, source_folder
+        passing, ns_list, lq_list, source_folder,
+        filtered_list=filtered_list,
     )
     counts = {
         "passed": len(passing),
         "ns": len(ns_list),
         "lq": len(lq_list),
-        "total": len(passing) + len(ns_list) + len(lq_list),
+        "filtered": len(filtered_list),
+        "total": len(passing) + len(ns_list) + len(lq_list) + len(filtered_list),
     }
 
     report = (

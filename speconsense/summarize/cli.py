@@ -61,6 +61,7 @@ from .io import (
     write_specimen_data_files,
     write_ns_variant_files,
     write_lq_variant_files,
+    write_filtered_variant_files,
     write_output_files,
     load_metadata_from_json,
     strip_cluster_suffix,
@@ -350,6 +351,30 @@ def setup_logging(log_level: str, log_file: str = None):
     return None
 
 
+def _route_to_filtered_with_unwind(
+    record: ConsensusInfo,
+    filtered_list: List[ConsensusInfo],
+    merge_traceability: Dict[str, List[str]],
+    original_lookup: Dict[str, ConsensusInfo],
+) -> None:
+    """Route a dropped variant to .filtered, unwinding merges if applicable.
+
+    When a merged variant is dropped by selection parameters, emit its
+    original pre-merge contributors individually rather than the synthetic
+    merged record. The non-pass tracks are for detailed review; the
+    original variants carry meaningful per-cluster metrics (cer_factor,
+    err_factor, rid) while the merged record's metrics describe a
+    synthetic entity that never existed as a real cluster.
+    """
+    contributors_names = merge_traceability.get(record.sample_name)
+    if contributors_names and len(contributors_names) > 1:
+        for name in contributors_names:
+            if name in original_lookup:
+                filtered_list.append(original_lookup[name])
+    else:
+        filtered_list.append(record)
+
+
 def process_single_specimen(file_consensuses: List[ConsensusInfo],
                            args,
                            ns_for_specimen: List[ConsensusInfo] = None,
@@ -360,16 +385,19 @@ def process_single_specimen(file_consensuses: List[ConsensusInfo],
                            full_min_ambiguity_frequency: float = 0.10,
                            full_max_sample_size: int = 100,
                            specimen_global_size_total: Optional[int] = None,
-                           ) -> Tuple[List[ConsensusInfo], Dict[str, List[str]], Dict, int, List[OverlapMergeInfo], Dict[str, List], List[ConsensusInfo], List[ConsensusInfo]]:
+                           ) -> Tuple[List[ConsensusInfo], Dict[str, List[str]], Dict, int, List[OverlapMergeInfo], Dict[str, List], List[ConsensusInfo], List[ConsensusInfo], List[ConsensusInfo]]:
     """
     Process a single specimen file: bucket by core gid, MSA-merge within each
     bucket, conflate cross-primer groups, select variants, and emit final
     names that honor core's gid/vid except where cross-primer conflation moved
-    a record between groups. Returns final consensus list, merge traceability,
-    naming info (keyed by final gid), limited_count, overlap merge info,
-    full-consensus reads, and the *annotated* ns/lq lists (with
-    ``group_size_total`` / ``global_size_total`` populated for the
-    frequency fields).
+    a record between groups.
+
+    Returns a 9-tuple: (final_consensus, merge_traceability, naming_info,
+    limited_count, overlap_merges, full_consensus_reads, ns_for_specimen,
+    lq_for_specimen, filtered_for_specimen).
+
+    The returned ns/lq/filtered lists are annotated with
+    ``group_size_total`` / ``global_size_total`` for the frequency fields.
 
     ``ns_for_specimen`` and ``lq_for_specimen`` are the specimen's filtered
     records (CER-routed and err_factor-routed). They are not renamed, but their
@@ -383,10 +411,11 @@ def process_single_specimen(file_consensuses: List[ConsensusInfo],
     None when metadata is missing.
     """
     if not file_consensuses:
-        return [], {}, {}, 0, [], {}, ns_for_specimen or [], lq_for_specimen or []
+        return [], {}, {}, 0, [], {}, ns_for_specimen or [], lq_for_specimen or [], []
 
     ns_for_specimen = ns_for_specimen or []
     lq_for_specimen = lq_for_specimen or []
+    filtered_for_specimen: List[ConsensusInfo] = []
 
     file_name = os.path.basename(file_consensuses[0].file_path)
     logging.info(f"Processing specimen from file: {file_name}")
@@ -458,22 +487,36 @@ def process_single_specimen(file_consensuses: List[ConsensusInfo],
         for gid, members in variant_groups.items()
     }
 
-    # Filter to max groups if specified
+    # Filter to max groups if specified. Route dropped groups (and their
+    # ns/lq records) to .filtered — these passed quality gates but are
+    # excluded by --select-max-groups, a selection parameter.
     if args.select_max_groups > 0 and len(variant_groups) > args.select_max_groups:
-        # Sort groups by size of largest member
         sorted_for_filtering = sorted(
             variant_groups.items(),
             key=lambda x: max(m.size for m in x[1]),
             reverse=True
         )
-        # Keep only top N groups
+        dropped_gids = {gid for gid, _ in sorted_for_filtering[args.select_max_groups:]}
+        for _gid, members in sorted_for_filtering[args.select_max_groups:]:
+            filtered_for_specimen.extend(members)
+        filtered_for_specimen.extend(
+            r for r in ns_for_specimen if r.group_rank in dropped_gids)
+        filtered_for_specimen.extend(
+            r for r in lq_for_specimen if r.group_rank in dropped_gids)
+        ns_for_specimen = [r for r in ns_for_specimen if r.group_rank not in dropped_gids]
+        lq_for_specimen = [r for r in lq_for_specimen if r.group_rank not in dropped_gids]
         variant_groups = dict(sorted_for_filtering[:args.select_max_groups])
-        logging.info(f"Filtered to top {args.select_max_groups} groups by size (from {len(sorted_for_filtering)} total groups)")
+        logging.info(
+            f"Filtered to top {args.select_max_groups} groups by size "
+            f"(from {len(sorted_for_filtering)} total groups) -> .filtered track"
+        )
 
     # Phase 1d: Secondary identity group pruning. Small secondary groups
     # (gid >= 2) that are both proportionally and absolutely small are
     # likely chimeric fragments, cross-sample bleed, or spurious clusters.
-    # Route their variants to the .lq track.
+    # Route to .filtered (not .lq) because this is a selection decision
+    # based on relative size, not a quality judgment about the cluster's
+    # internal coherence or CER significance.
     if args.prune_group_frac > 0 and args.prune_group_abs > 0 and len(variant_groups) > 1:
         max_group_size = max(bucket_totals.get(gid, 0) for gid in variant_groups)
         pruned_gids = []
@@ -484,17 +527,20 @@ def process_single_specimen(file_consensuses: List[ConsensusInfo],
             if (group_total / max_group_size < args.prune_group_frac
                     and group_total < args.prune_group_abs):
                 pruned_gids.append(gid)
-                lq_for_specimen.extend(variant_groups.pop(gid))
+                filtered_for_specimen.extend(variant_groups.pop(gid))
         if pruned_gids:
-            # Also route ns records from pruned groups to lq
             pruned_set = set(pruned_gids)
             promoted = [r for r in ns_for_specimen if r.group_rank in pruned_set]
-            lq_for_specimen.extend(promoted)
+            filtered_for_specimen.extend(promoted)
             ns_for_specimen = [r for r in ns_for_specimen if r.group_rank not in pruned_set]
+            # Also move lq records from pruned groups to filtered
+            promoted_lq = [r for r in lq_for_specimen if r.group_rank in pruned_set]
+            filtered_for_specimen.extend(promoted_lq)
+            lq_for_specimen = [r for r in lq_for_specimen if r.group_rank not in pruned_set]
             logging.info(
                 f"Pruned {len(pruned_gids)} secondary group(s) "
                 f"(gids {pruned_gids}) below frac={args.prune_group_frac}, "
-                f"abs={args.prune_group_abs} -> .lq track"
+                f"abs={args.prune_group_abs} -> .filtered track"
             )
 
     # Phase 2: MSA-based merging within each group
@@ -528,8 +574,10 @@ def process_single_specimen(file_consensuses: List[ConsensusInfo],
     #     apply to merged-locus candidates).
     # Inherited values from ``_build_merged_consensus_info`` are otherwise
     # stale because they describe the largest contributor's pre-merge state.
+    # original_consensus_lookup is also used by the post-merge quality
+    # re-check and the Phase 3 merge-unwind for .filtered routing.
+    original_consensus_lookup = {c.sample_name: c for c in file_consensuses}
     if fastq_lookup is not None:
-        original_consensus_lookup = {c.sample_name: c for c in file_consensuses}
         for group_id, group_members in merged_groups.items():
             for idx, record in enumerate(group_members):
                 contributors_names = all_merge_traceability.get(record.sample_name)
@@ -576,6 +624,53 @@ def process_single_specimen(file_consensuses: List[ConsensusInfo],
                 )
                 group_members[idx] = refreshed
 
+        # Post-merge quality re-check: if merging pushed a record's
+        # err_factor or cer_factor beyond the filter thresholds, the merge
+        # was counterproductive — it created a synthetic record that won't
+        # survive quality filtering. Cancel the merge and restore the
+        # original pre-merge contributors, which passed individually at
+        # load time, so they remain on the pass track.
+        max_err = getattr(args, 'max_err_factor', 0)
+        min_cer = getattr(args, 'min_cer_factor', 0)
+        err_check_enabled = max_err > 0
+        cer_check_enabled = min_cer > 0
+        if err_check_enabled or cer_check_enabled:
+            for group_id in list(merged_groups.keys()):
+                group_members = merged_groups[group_id]
+                new_members = []
+                for record in group_members:
+                    contributors_names = all_merge_traceability.get(record.sample_name)
+                    if not contributors_names or len(contributors_names) <= 1:
+                        new_members.append(record)
+                        continue
+                    failed_err = (err_check_enabled
+                                  and record.err_factor is not None
+                                  and record.err_factor > max_err)
+                    failed_cer = (cer_check_enabled
+                                  and record.cer_factor is not None
+                                  and record.cer_factor < min_cer)
+                    if failed_err or failed_cer:
+                        originals = [
+                            original_consensus_lookup[n]
+                            for n in contributors_names
+                            if n in original_consensus_lookup
+                        ]
+                        reason = []
+                        if failed_err:
+                            reason.append(f"err_factor={record.err_factor:.2f}>{max_err}")
+                        if failed_cer:
+                            reason.append(f"cer_factor={record.cer_factor:.2f}<{min_cer}")
+                        logging.info(
+                            f"Cancelled merge {record.sample_name} "
+                            f"({', '.join(reason)}): restoring "
+                            f"{len(originals)} original contributors"
+                        )
+                        new_members.extend(originals)
+                        del all_merge_traceability[record.sample_name]
+                    else:
+                        new_members.append(record)
+                merged_groups[group_id] = new_members
+
     # Phase 3: Select representative variants and emit final names.
     #
     # Naming policy: preserve core's gid/vid verbatim except for variants moved
@@ -618,6 +713,8 @@ def process_single_specimen(file_consensuses: List[ConsensusInfo],
                           reverse=True)
 
     for final_gid, group_members in sorted_groups:
+        pre_selection_members = list(group_members)
+
         # Apply select-min-size-ratio filter
         if args.select_min_size_ratio > 0 and len(group_members) > 1:
             largest_size = max(v.size for v in group_members)
@@ -635,6 +732,16 @@ def process_single_specimen(file_consensuses: List[ConsensusInfo],
             group_members, args.select_max_variants,
             group_number=final_gid,
             hp_normalization_length=args.hp_normalization_length)
+
+        # Route dropped variants to .filtered, unwinding merges so
+        # reviewers see original per-cluster metrics instead of synthetic
+        # merged-record metrics.
+        selected_set = {v.sample_name for v in selected_variants}
+        for dropped in pre_selection_members:
+            if dropped.sample_name not in selected_set:
+                _route_to_filtered_with_unwind(
+                    dropped, filtered_for_specimen,
+                    all_merge_traceability, original_consensus_lookup)
 
         used_vids = set(core_vids_by_gid.get(final_gid, set()))
 
@@ -684,7 +791,7 @@ def process_single_specimen(file_consensuses: List[ConsensusInfo],
 
     return (final_consensus, all_merge_traceability, naming_info,
             total_limited_count, all_overlap_merges, full_consensus_reads,
-            ns_for_specimen, lq_for_specimen)
+            ns_for_specimen, lq_for_specimen, filtered_for_specimen)
 
 
 def _resolve_specimen_cer_context(
@@ -942,6 +1049,7 @@ def main():
     all_naming_info = {}
     all_raw_consensuses = []  # Collect .raw files from all specimens
     all_overlap_merges = []  # Collect overlap merge info for quality reporting
+    all_filtered_consensus = []  # Collect .filtered records from all specimens
     total_limited_merges = 0
 
     # Iterate the union of file paths from all three lists so specimens whose
@@ -991,7 +1099,7 @@ def main():
         # denominators so the .ns/.lq writers emit those fields too.
         (final_consensus, merge_traceability, naming_info,
          limited_count, overlap_merges, full_reads_by_name,
-         specimen_ns, specimen_lq) = process_single_specimen(
+         specimen_ns, specimen_lq, specimen_filtered) = process_single_specimen(
             file_consensuses, args,
             ns_for_specimen=specimen_ns,
             lq_for_specimen=specimen_lq,
@@ -1028,7 +1136,13 @@ def main():
                 specimen_lq, args.summary_dir, fastq_lookup, fasta_fields
             )
 
-        # Emit per-specimen variant tree (passed + ns + lq, grouped by core gid)
+        # Emit filtered variants (selection-filtered) for this specimen
+        if specimen_filtered:
+            write_filtered_variant_files(
+                specimen_filtered, args.summary_dir, fastq_lookup, fasta_fields
+            )
+
+        # Emit per-specimen variant tree (passed + ns + lq + filtered)
         specimen_id = os.path.basename(file_path)
         if specimen_id.endswith('-all.fasta'):
             specimen_id = specimen_id[:-len('-all.fasta')]
@@ -1039,6 +1153,7 @@ def main():
             lq=specimen_lq,
             output_dir=os.path.join(args.summary_dir, 'trees'),
             hp_normalization_length=args.hp_normalization_length,
+            filtered=specimen_filtered,
         )
 
         # Accumulate results for summary files
@@ -1046,6 +1161,7 @@ def main():
         all_merge_traceability.update(merge_traceability)
         all_raw_consensuses.extend(specimen_raw_consensuses)
         all_overlap_merges.extend(overlap_merges)
+        all_filtered_consensus.extend(specimen_filtered)
         total_limited_merges += limited_count
 
         # Update naming info with unique keys per specimen
@@ -1097,6 +1213,7 @@ def main():
         consensus_list=consensus_list,
         ns_list=ns_list,
         lq_list=lq_list,
+        filtered_list=all_filtered_consensus,
         min_cer_factor=args.min_cer_factor,
         max_err_factor=args.max_err_factor,
     )
