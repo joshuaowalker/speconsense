@@ -509,7 +509,7 @@ class TestSelectMinSizeRatio:
             output_fasta = os.path.join(summary_dir, "summary.fasta")
             output_sequences = list(SeqIO.parse(output_fasta, "fasta"))
 
-            # Only the large variant should remain (3/100 = 0.03 < 0.1)
+            # Only the large variant should remain (3/103 = 0.029 < 0.1)
             assert len(output_sequences) == 1, \
                 f"Expected 1 sequence after filtering, got {len(output_sequences)}"
             assert "size=100" in output_sequences[0].description
@@ -715,11 +715,12 @@ class TestProcessSingleSpecimenNaming:
             select_max_groups=-1,
             select_min_size_ratio=0,
             select_max_variants=-1,
-            select_strategy="size",
             disable_merging=True,
             enable_full_consensus=False,
-            prune_group_frac=0.10,
-            prune_group_abs=15,
+            prune_group_ratio=0.10,
+            prune_group_count=15,
+            min_position_frequency=0.5,
+            min_position_count=3,
         )
         defaults.update(overrides)
         return SimpleNamespace(**defaults)
@@ -731,7 +732,7 @@ class TestProcessSingleSpecimenNaming:
             self._make("test-1.v2", 1, 2, 50),
             self._make("test-1.v3", 1, 3, 10),
         ]
-        final, _, _, _, _, _, _, _ = process_single_specimen(members, self._args())
+        final, _, _, _, _, _, _, _, _ = process_single_specimen(members, self._args())
         names = {v.sample_name for v in final}
         assert names == {"test-1.v1", "test-1.v2", "test-1.v3"}
 
@@ -740,10 +741,10 @@ class TestProcessSingleSpecimenNaming:
         members = [
             self._make("test-1.v1", 1, 1, 100),
             self._make("test-1.v2", 1, 2, 80),
-            self._make("test-1.v3", 1, 3, 5),  # filtered by ratio
+            self._make("test-1.v3", 1, 3, 5),  # 5/185 = 0.027, filtered by ratio
         ]
-        args = self._args(select_min_size_ratio=0.5)
-        final, _, _, _, _, _, _, _ = process_single_specimen(members, args)
+        args = self._args(select_min_size_ratio=0.1)
+        final, _, _, _, _, _, _, _, _ = process_single_specimen(members, args)
         names = sorted(v.sample_name for v in final)
         assert names == ["test-1.v1", "test-1.v2"]
 
@@ -756,7 +757,7 @@ class TestProcessSingleSpecimenNaming:
             self._make("test-2.v1", 2, 1, 50, "AAA" * 20 + shared, ["P2"]),
         ]
         args = self._args(min_merge_overlap=200)
-        final, _, _, _, _, _, _, _ = process_single_specimen(members, args)
+        final, _, _, _, _, _, _, _, _ = process_single_specimen(members, args)
         names = sorted(v.sample_name for v in final)
         # gid=1 keeps v1/v2 verbatim; gid=2's v1 is moved to v3 under gid=1
         assert names == ["test-1.v1", "test-1.v2", "test-1.v3"]
@@ -770,7 +771,7 @@ class TestProcessSingleSpecimenNaming:
         ]
         ns_records = [self._make("test-1.v2", 1, 2, 5)]  # vid=2 already used in gid=1
         args = self._args(min_merge_overlap=200)
-        final, _, _, _, _, _, _, _ = process_single_specimen(
+        final, _, _, _, _, _, _, _, _ = process_single_specimen(
             members, args, ns_for_specimen=ns_records)
         names = sorted(v.sample_name for v in final)
         # moved record gets v3, skipping v2 occupied by ns
@@ -785,7 +786,7 @@ class TestProcessSingleSpecimenNaming:
         ]
         lq_records = [self._make("test-1.v4", 1, 4, 5)]  # lq occupies vid=4
         args = self._args(min_merge_overlap=200)
-        final, _, _, _, _, _, _, _ = process_single_specimen(
+        final, _, _, _, _, _, _, _, _ = process_single_specimen(
             members, args, lq_for_specimen=lq_records)
         names = sorted(v.sample_name for v in final)
         # moved record gets v5 (max(used={1,4}) + 1), not v2/v3 (gaps in core)
@@ -801,7 +802,7 @@ class TestProcessSingleSpecimenNaming:
             self._make("test-3.v1", 3, 1, 40, shared + "GGG" * 50, ["P3"]),
         ]
         args = self._args(min_merge_overlap=200)
-        final, _, _, _, _, _, _, _ = process_single_specimen(members, args)
+        final, _, _, _, _, _, _, _, _ = process_single_specimen(members, args)
         names = sorted(v.sample_name for v in final)
         assert len(names) == 4
         # All emit under gid=1
@@ -822,7 +823,7 @@ class TestProcessSingleSpecimenNaming:
         ns_records = [self._make("test-2.v2", 2, 2, 5)]
         lq_records = [self._make("test-2.v3", 2, 3, 5)]
         args = self._args(min_merge_overlap=200)
-        final, _, _, _, _, _, _, _ = process_single_specimen(
+        final, _, _, _, _, _, _, _, _ = process_single_specimen(
             members, args, ns_for_specimen=ns_records,
             lq_for_specimen=lq_records)
         names = sorted(v.sample_name for v in final)
@@ -1278,13 +1279,14 @@ class TestFullConsensus:
                 select_max_groups=-1,
                 select_min_size_ratio=0,
                 select_max_variants=-1,
-                select_strategy="size",
                 disable_merging=True,
                 enable_full_consensus=True,
-                prune_group_frac=0.10,
-                prune_group_abs=15,
+                prune_group_ratio=0.10,
+                prune_group_count=15,
+                min_position_frequency=0.5,
+                min_position_count=3,
             )
-            final, _, _, _, _, full_reads, _, _ = process_single_specimen(
+            final, _, _, _, _, full_reads, _, _, _ = process_single_specimen(
                 members, args,
                 fastq_lookup=fastq_lookup,
                 full_min_ambiguity_frequency=0.10,
@@ -1333,11 +1335,12 @@ class TestFrequencyFields:
             select_max_groups=-1,
             select_min_size_ratio=0,
             select_max_variants=-1,
-            select_strategy="size",
             disable_merging=True,
             enable_full_consensus=False,
-            prune_group_frac=0.10,
-            prune_group_abs=15,
+            prune_group_ratio=0.10,
+            prune_group_count=15,
+            min_position_frequency=0.5,
+            min_position_count=3,
         )
         defaults.update(overrides)
         return SimpleNamespace(**defaults)
@@ -1397,7 +1400,7 @@ class TestFrequencyFields:
             lq_for_specimen=lq_records,
             specimen_global_size_total=2000,
         )
-        final, _, _, _, _, _, annotated_ns, annotated_lq = result
+        final, _, _, _, _, _, annotated_ns, annotated_lq, _ = result
         for v in final:
             assert v.group_size_total == 165
             assert v.global_size_total == 2000
@@ -1428,7 +1431,7 @@ class TestFrequencyFields:
             ns_for_specimen=ns_records,
             specimen_global_size_total=500,
         )
-        final, _, _, _, _, _, annotated_ns, _ = result
+        final, _, _, _, _, _, annotated_ns, _, _ = result
         # Bucket total = 100 + 30 + 20 + 5 = 155 — across all conflated gids
         for v in final:
             assert v.group_size_total == 155, \
@@ -1446,7 +1449,7 @@ class TestFrequencyFields:
         result = process_single_specimen(
             members, self._args(), specimen_global_size_total=None,
         )
-        final, _, _, _, _, _, _, _ = result
+        final, _, _, _, _, _, _, _, _ = result
         for v in final:
             assert v.group_size_total == 150
             assert v.global_size_total is None

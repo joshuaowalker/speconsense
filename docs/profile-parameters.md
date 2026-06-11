@@ -64,18 +64,24 @@ Parameters for the post-processing and summarization tool.
 | `max-len` | Maximum sequence length in bp (0 = disabled) | 0 | — | — | — | — | — |
 | `min-cer-factor` | Min per-position CER factor to keep a variant as primary (routes to `variants/*.ns-…` otherwise; 0 disables) | 1.0 | — | 0 | — | 0 | — |
 | `max-err-factor` | Max cluster err_factor (observed/expected disagreement); routes to `variants/*.lq-…` above (0 disables) | 1.5 | — | 0 | — | 0 | — |
+| `prune-group-ratio` | Prune secondary groups below this ratio of the largest group (0 disables) | 0.10 | — | — | — | — | — |
+| `prune-group-count` | Absolute size threshold — groups with total size ≥ this are kept regardless of ratio (0 disables) | 15 | — | — | — | — | — |
 | `group-identity` | Anchor identity for cross-primer overlap conflation between core groups | 0.85 | — | — | 0.95 | — | — |
 | `disable-merging` | Skip MSA-based merge evaluation entirely | false | — | — | — | true | true |
 | `merge-effort` | Merge thoroughness: `fast`, `balanced`, `thorough`, or 6-14 | balanced | — | — | fast | — | — |
 | `merge-snp` | Enable SNP-based variant merging | true | — | — | — | — | — |
 | `merge-indel-length` | Max individual indel length for merging (0 = disabled) | 0 | 5 | — | — | — | — |
 | `merge-position-count` | Max total SNP+indel positions for merging | 2 | 10 | — | — | — | — |
-| `merge-min-size-ratio` | Min size ratio (smaller/larger) for merging (0 = disabled) | 0.1 | 0.2 | — | — | — | — |
+| `merge-min-size-ratio` | Min size ratio (contributor/merged total) for merging (0 = disabled) | 0.1 | 0.2 | — | — | — | — |
 | `min-merge-overlap` | Min overlap in bp for different-length sequence merging | 200 | 0 | — | — | — | — |
 | `disable-homopolymer-equivalence` | Treat homopolymer length differences as structural | false | — | — | — | — | — |
+| `hp-normalization-length` | HP run length at/above which length differences are blanket-normalized in merging | 6 | — | — | — | — | — |
 | `select-max-groups` | Max groups to output per specimen (-1 = all) | -1 | — | — | — | — | — |
 | `select-max-variants` | Max variants per group (-1 = no limit) | -1 | — | — | — | — | — |
-| `select-min-size-ratio` | Min size ratio (variant/largest) to include in output (0 = disabled) | 0 | 0.2 | — | — | — | 0.05 |
+| `select-min-size-ratio` | Min size ratio (variant/group total) to include in output (0 = disabled) | 0 | 0.2 | — | — | — | 0.05 |
+| `enable-full-consensus` | Emit a `-{gid}-full` IUPAC consensus per identity group with ≥2 pass-track variants | false | true | — | — | — | — |
+| `min-position-frequency` | Min non-gap fraction to retain a column in merged/-full consensus (0.5 = majority wins) | 0.5 | 0.1 | — | — | — | — |
+| `min-position-count` | Min absolute non-gap support to retain a column in merged/-full consensus | 3 | — | — | — | — | — |
 | `fasta-fields` | Header fields: preset or comma-separated list | default | — | — | — | — | — |
 | `scale-threshold` | Sequence count to enable vsearch acceleration (0 = disabled) | 1001 | — | — | — | — | — |
 | `threads` | Max threads for internal parallelism (0 = auto) | 0 | — | — | — | — | — |
@@ -151,4 +157,4 @@ Profiles specify a `speconsense-version` field (e.g., `"0.8.*"`) indicating comp
 
 ---
 
-*Document generated for speconsense 0.8.3*
+*Document generated for speconsense 0.8.4*

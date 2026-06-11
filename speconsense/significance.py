@@ -28,6 +28,14 @@ _LOG_Q_MIN = -700.0
 _LOG_Q_MAX = -1e-15
 _LOG3 = math.log(3.0)
 
+# Default boundary for the per-position CER factor below which summarize routes a
+# variant to the ``.ns`` track. cer_factor < 1.0 means the pairwise difference is
+# within single-position significance (i.e. plausibly a basecaller artifact of a
+# larger peer). This is the natural floor, not merely a UI default — core's vid
+# tiering (SpecimenClusterer._assign_identity_ranks) and summarize's
+# ``--min-cer-factor`` default both reference it so they cannot drift.
+DEFAULT_MIN_CER_FACTOR = 1.0
+
 
 def _log_binom_coef(N: int, M: int) -> float:
     """log C(N, M) via lgamma (handles large N robustly)."""

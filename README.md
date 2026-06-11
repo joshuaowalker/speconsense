@@ -520,7 +520,7 @@ Speconsense provides two complementary filters to control which clusters are out
 11. Final consensus + MAD outlier removal + FASTA writing
 
 **Deferred filtering strategy:**
-For maximum flexibility in detecting rare variants and contaminants, set `--min-size 0` in `speconsense` and apply final quality thresholds in summarize via `--min-ric`, `--min-cer-factor`, `--max-err-factor`, and `--prune-group-frac`/`--prune-group-abs`. This lets you run expensive clustering once and experiment with thresholds during post-processing. The CER and err_factor filters route low-confidence clusters to the `.ns`/`.lq` track rather than dropping them entirely, so you can revisit decisions without re-running core.
+For maximum flexibility in detecting rare variants and contaminants, set `--min-size 0` in `speconsense` and apply final quality thresholds in summarize via `--min-ric`, `--min-cer-factor`, `--max-err-factor`, and `--prune-group-ratio`/`--prune-group-count`. This lets you run expensive clustering once and experiment with thresholds during post-processing. The CER and err_factor filters route low-confidence clusters to the `.ns`/`.lq` track rather than dropping them entirely, so you can revisit decisions without re-running core.
 
 ### Consensus Generation
 
@@ -723,9 +723,10 @@ When multiple variants exist per identity group, `speconsense-summarize` selects
 ```bash
 speconsense-summarize --select-min-size-ratio 0.2
 ```
-- Filters out post-merge variants whose size is too small relative to the largest variant in their group
-- Ratio calculated as `variant_size / largest_size` — must be ≥ threshold to keep
-- Example: `--select-min-size-ratio 0.2` means a variant must have ≥20% the reads of the largest variant in its group
+- Filters out post-merge variants whose size is too small relative to the group total
+- Ratio calculated as `variant_size / group_total` — must be ≥ threshold to keep
+- The largest variant in each group is always kept
+- Example: `--select-min-size-ratio 0.2` means a variant must represent ≥20% of the group's total reads
 - Default is 0 (disabled) — all post-merge variants pass through to selection
 - Applied after merging but before variant selection
 - Useful for suppressing noise variants that survived merging but are too small to be meaningful
@@ -744,6 +745,18 @@ speconsense-summarize --enable-full-consensus
 - Suppressed when fewer than 2 pass-track variants exist or fewer than 2 contributors clear the gate; `.ns` / `.lq` records are not eligible to contribute
 - Intended use: BLAST query against legacy unphased ITS references. The `-full` output is IUPAC-bearing by construction and should be scored with adjusted-identity (MycoBLAST) tools — under raw BLAST it will silently degrade because every IUPAC code counts as a mismatch
 - Enabled by default in the `compressed` profile
+
+**Consensus Column Retention (gap handling):**
+```bash
+speconsense-summarize --min-position-frequency 0.1 --min-position-count 3
+```
+- Controls how gap vs. base disagreements are resolved in merged and `-full` consensus sequences
+- A column is retained when the fraction of non-gap content is ≥ `--min-position-frequency` AND the absolute non-gap support is ≥ `--min-position-count`
+- Default `0.5` matches majority-wins behavior: positions where more than half the (size-weighted) votes are gaps are omitted
+- Lower values (e.g. `0.1`) preserve positions where a minority of contributors carry content — useful when merging variants of different lengths or when indel events should not delete content from the merged consensus
+- `--min-position-count` (default 3) prevents columns with negligible support from surviving at low frequency thresholds
+- Set to `0.1` in the `compressed` profile alongside its aggressive merge settings
+- Applies to within-group MSA merging, overlap merging (overlap region only — non-overlap regions always preserve content from contributing sequences), and `-full` group consensus
 
 ### Customizing FASTA Header Fields
 
@@ -946,7 +959,7 @@ speconsense-summarize --snp-merge-limit 2  # Equivalent to --merge-position-coun
 - `--merge-position-count N`: Maximum total SNP + structural indel positions allowed (default: 2)
 - `--merge-indel-length N`: Maximum length of individual structural indels allowed (default: 0 = disabled)
 - `--merge-snp`: Enable/disable SNP merging (default: True)
-- `--merge-min-size-ratio R`: Minimum size ratio (smaller/larger) for merging clusters (default: 0.1, 0 to disable)
+- `--merge-min-size-ratio R`: Minimum size ratio (contributor/merged total) for merging clusters (default: 0.1, 0 to disable)
 - `--disable-homopolymer-equivalence`: Treat homopolymer length differences as structural indels (default: disabled, meaning homopolymer equivalence is enabled)
 - `--snp-merge-limit N`: Legacy parameter, equivalent to `--merge-position-count` (deprecated)
 
@@ -1056,9 +1069,9 @@ Merge decisions depend on the complete HAC group composition, not just the seque
 speconsense-summarize --merge-min-size-ratio 0.1
 ```
 - Prevents merging clusters with very different sizes (e.g., well-supported variant + poorly-supported variant)
-- Ratio calculated as `smaller_size / larger_size` - must be ≥ threshold to merge
-- Example: `--merge-min-size-ratio 0.1` means smaller cluster must be ≥10% size of larger
-- Default is 0.1 - smaller cluster must be ≥10% size of larger to merge
+- For each candidate merge subset, every contributor must be ≥ threshold fraction of the subset total
+- Example: `--merge-min-size-ratio 0.1` means every contributor must represent ≥10% of the merged total
+- Default is 0.1
 - **Use cases:**
   - Prevent poorly-supported variants (low read count) from introducing ambiguities into well-supported sequences
   - Avoid merging weakly-supported bioinformatic artifacts into high-confidence sequences
@@ -1373,6 +1386,8 @@ usage: speconsense-summarize [-h] [--source SOURCE]
                              [--select-max-groups SELECT_MAX_GROUPS]
                              [--select-max-variants SELECT_MAX_VARIANTS]
                              [--select-min-size-ratio SELECT_MIN_SIZE_RATIO]
+                             [--min-position-frequency MIN_POSITION_FREQUENCY]
+                             [--min-position-count MIN_POSITION_COUNT]
                              [--scale-threshold SCALE_THRESHOLD] [--threads N]
                              [--log-level {DEBUG,INFO,WARNING,ERROR,CRITICAL}]
                              [--version] [-p NAME] [--list-profiles]
@@ -1449,8 +1464,10 @@ Merging:
                         Maximum total SNP+indel positions allowed in merging
                         (default: 2)
   --merge-min-size-ratio MERGE_MIN_SIZE_RATIO
-                        Minimum size ratio (smaller/larger) for merging
-                        clusters (default: 0.1, 0 to disable)
+                        Minimum size ratio (contributor/merged total) for
+                        merging clusters. Subsets where any contributor is
+                        below this fraction are skipped. (default: 0.1,
+                        0 to disable)
   --min-merge-overlap MIN_MERGE_OVERLAP
                         Minimum overlap in bp for merging sequences of
                         different lengths (default: 200, 0 to disable)
@@ -1480,9 +1497,22 @@ Selection:
                         Maximum total variants to output per group (default:
                         -1 = no limit, 0 also means no limit)
   --select-min-size-ratio SELECT_MIN_SIZE_RATIO
-                        Minimum size ratio (variant/largest) to include in
-                        output (default: 0 = disabled, e.g. 0.2 for 20%
-                        cutoff)
+                        Minimum size ratio (variant/group total) to include in
+                        output. The largest variant in each group is always
+                        kept. (default: 0 = disabled, e.g. 0.2 for 20% cutoff)
+
+Consensus output:
+  --min-position-frequency MIN_POSITION_FREQUENCY
+                        Minimum fraction of non-gap content at a column to
+                        retain the position in merged and -full consensus
+                        sequences. Default 0.5 matches majority-wins behavior.
+                        Set lower (e.g. 0.1) to preserve positions where a
+                        minority of contributors carry content. (default: 0.5)
+  --min-position-count MIN_POSITION_COUNT
+                        Minimum absolute non-gap support (size-weighted votes
+                        for merging, read count for -full) to retain a column.
+                        Both --min-position-frequency and --min-position-count
+                        must be met. (default: 3)
 
 Performance:
   --scale-threshold SCALE_THRESHOLD

@@ -4,8 +4,9 @@ Produces a human-readable hierarchical view of a specimen's variants for
 validator review. Each identity group becomes a tree where every non-anchor
 variant branches from its closest larger-size peer (highest pairwise
 adjusted-identity), with a one-line diff summary versus that parent. Passed,
-.ns (CER-filtered), and .lq (err_factor-filtered) variants all appear together
-so validators can judge filter calls in context.
+.ns (CER-filtered), .lq (err_factor-filtered), and .filtered
+(selection-filtered) variants all appear together so validators can judge
+filter calls in context.
 """
 
 from __future__ import annotations
@@ -30,7 +31,7 @@ from .io import strip_cluster_suffix
 @dataclass
 class _Node:
     info: ConsensusInfo
-    status: str  # "passed" | "ns" | "lq"
+    status: str  # "passed" | "ns" | "lq" | "filtered"
     short_name: str  # display suffix (e.g. "-1.v2") relative to specimen base
     parent_idx: Optional[int] = None
     parent_identity: Optional[float] = None
@@ -48,14 +49,16 @@ def _short_name(sample_name: str, specimen_base: str, status: str) -> str:
         suffix = sample_name[len(specimen_base):] or sample_name
     else:
         suffix = sample_name
-    if status in ('ns', 'lq'):
+    if status in ('ns', 'lq', 'filtered'):
         return f"{suffix}.{status}"
     return suffix
 
 
 def _tag_status(passed: List[ConsensusInfo],
                 ns: List[ConsensusInfo],
-                lq: List[ConsensusInfo]) -> List[Tuple[ConsensusInfo, str]]:
+                lq: List[ConsensusInfo],
+                filtered: Optional[List[ConsensusInfo]] = None,
+                ) -> List[Tuple[ConsensusInfo, str]]:
     out: List[Tuple[ConsensusInfo, str]] = []
     for c in passed:
         out.append((c, 'passed'))
@@ -63,6 +66,8 @@ def _tag_status(passed: List[ConsensusInfo],
         out.append((c, 'ns'))
     for c in lq:
         out.append((c, 'lq'))
+    for c in (filtered or []):
+        out.append((c, 'filtered'))
     return out
 
 
@@ -154,11 +159,11 @@ def _format_metrics(c: ConsensusInfo, status: str) -> str:
 
 
 def _render_group(gid: int, nodes: List[_Node], anchor_full_name: str) -> List[str]:
-    counts = {'passed': 0, 'ns': 0, 'lq': 0}
+    counts = {'passed': 0, 'ns': 0, 'lq': 0, 'filtered': 0}
     for node in nodes:
         counts[node.status] = counts.get(node.status, 0) + 1
     breakdown_parts = []
-    for key in ('passed', 'ns', 'lq'):
+    for key in ('passed', 'ns', 'lq', 'filtered'):
         n = counts.get(key, 0)
         if n > 0:
             breakdown_parts.append(f"{n} {key}")
@@ -212,12 +217,13 @@ def write_specimen_variant_tree(
     lq: List[ConsensusInfo],
     output_dir: str,
     hp_normalization_length: int = 6,
+    filtered: Optional[List[ConsensusInfo]] = None,
 ) -> None:
     """Write a tree-view text file for one specimen at output_dir/{specimen_id}.txt.
 
     No-ops when there are no eligible variants (no group_rank populated).
     """
-    items = _tag_status(passed, ns, lq)
+    items = _tag_status(passed, ns, lq, filtered)
     if not items:
         return
 
@@ -233,6 +239,7 @@ def write_specimen_variant_tree(
     total_passed = sum(1 for _, s in items if s == 'passed')
     total_ns = sum(1 for _, s in items if s == 'ns')
     total_lq = sum(1 for _, s in items if s == 'lq')
+    total_filtered = sum(1 for _, s in items if s == 'filtered')
 
     header_lines: List[str] = []
     header_lines.append("=" * 80)
@@ -245,6 +252,8 @@ def write_specimen_variant_tree(
         breakdown.append(f"{total_ns} .ns")
     if total_lq:
         breakdown.append(f"{total_lq} .lq")
+    if total_filtered:
+        breakdown.append(f"{total_filtered} .filtered")
     plural = "s" if len(items) != 1 else ""
     header_lines.append(f"{len(items)} variant{plural} total: {', '.join(breakdown) if breakdown else '0'}")
     header_lines.append(f"{len(groups)} identity group{'s' if len(groups) != 1 else ''}")

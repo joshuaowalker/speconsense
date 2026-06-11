@@ -18,11 +18,17 @@ from collections import defaultdict
 from Bio import SeqIO
 
 from speconsense.types import ConsensusInfo
+from speconsense.significance import DEFAULT_MIN_CER_FACTOR
+from speconsense.msa import DEFAULT_MAX_ERR_FACTOR
 
 from .fields import FastaField, format_fasta_header
 
 
-_CLUSTER_SUFFIX_RE = re.compile(r'-\d+(?:\.v\d+|-full)(?:\.raw\d+)?$')
+_CLUSTER_SUFFIX_RE = re.compile(
+    r'-\d+(?:\.v\d+|-full)'
+    r'(?:\.raw(?:\d+|\.\d+\.v\d+))?'
+    r'(?:\.(?:ns|lq|filtered))?$'
+)
 
 
 def strip_cluster_suffix(sample_name: str) -> str:
@@ -30,7 +36,11 @@ def strip_cluster_suffix(sample_name: str) -> str:
 
     Handles the end-to-end gid.vid naming conventions:
     - ``specimen-1.v2`` → ``specimen``
-    - ``specimen-1.v2.raw3`` → ``specimen``
+    - ``specimen-1.v2.raw3`` → ``specimen`` (legacy)
+    - ``specimen-1.v2.raw.1.v3`` → ``specimen`` (traceability)
+    - ``specimen-1.v2.ns`` → ``specimen``
+    - ``specimen-1.v2.lq`` → ``specimen``
+    - ``specimen-1.v2.filtered`` → ``specimen``
     - ``specimen-1-full`` → ``specimen``
 
     Returns the input unchanged when no suffix is present.
@@ -121,8 +131,8 @@ def load_consensus_sequences(
     min_len: int = 0,
     max_len: int = 0,
     specimen_id: str = None,
-    min_cer_factor: float = 1.0,
-    max_err_factor: float = 1.5,
+    min_cer_factor: float = DEFAULT_MIN_CER_FACTOR,
+    max_err_factor: float = DEFAULT_MAX_ERR_FACTOR,
 ) -> Tuple[List[ConsensusInfo], List[ConsensusInfo], List[ConsensusInfo]]:
     """Load consensus sequences from speconsense output files.
 
@@ -470,9 +480,11 @@ def write_specimen_data_files(specimen_consensus: List[ConsensusInfo],
 
                 contributing_infos.sort(key=lambda x: x.size, reverse=True)
 
-                # Create .raw file entries
-                for raw_idx, raw_info in enumerate(contributing_infos, 1):
-                    raw_name = f"{consensus.sample_name}.raw{raw_idx}"
+                # Create .raw file entries. Name by original core gid.vid for
+                # direct traceability to the pre-merge core output
+                # (e.g. specimen-1.v1.raw.2.v3 traces back to core's 2.v3).
+                for raw_info in contributing_infos:
+                    raw_name = f"{consensus.sample_name}.raw.{raw_info.group_rank}.v{raw_info.variant_rank}"
 
                     # Build .raw ConsensusInfo from the pre-merge cluster's full
                     # field set. Mirrors the .ns/.lq pass-through treatment so
@@ -620,6 +632,24 @@ def write_lq_variant_files(lq_consensuses: List[ConsensusInfo],
     """Emit err_factor-filtered (lq) variants to variants/ using the raw-variant layout."""
     _write_filtered_variant_files(
         lq_consensuses, summary_folder, fastq_lookup, fasta_fields, marker='lq'
+    )
+
+
+def write_filtered_variant_files(filtered_consensuses: List[ConsensusInfo],
+                                  summary_folder: str,
+                                  fastq_lookup: Dict[str, List[str]],
+                                  fasta_fields: List[FastaField]) -> None:
+    """Emit selection-filtered variants to variants/ using the raw-variant layout.
+
+    Selection-filtered variants passed quality gates (cer_factor, err_factor)
+    but were excluded by selection or pruning parameters (--select-max-variants,
+    --select-min-size-ratio, --select-max-groups, --prune-group-ratio/abs).
+    This distinguishes "quality problem" (.ns/.lq) from "selection decision"
+    (.filtered).
+    """
+    _write_filtered_variant_files(
+        filtered_consensuses, summary_folder, fastq_lookup, fasta_fields,
+        marker='filtered',
     )
 
 

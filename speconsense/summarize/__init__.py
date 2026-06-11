@@ -68,6 +68,7 @@ from .io import (
     write_specimen_data_files,
     write_ns_variant_files,
     write_lq_variant_files,
+    write_filtered_variant_files,
     write_position_debug_file,
     write_output_files,
 )
@@ -122,6 +123,7 @@ __all__ = [
     "write_specimen_data_files",
     "write_ns_variant_files",
     "write_lq_variant_files",
+    "write_filtered_variant_files",
     "write_position_debug_file",
     "write_output_files",
 ]

@@ -473,7 +473,7 @@ Across all tested scenarios, **artifacts appearing in the consensus sequence** o
 - **Clean separation** (two clusters with correct sizes): Pipeline successfully detected contamination
 - **Franken-consensus** (one cluster with mixed reads): Sequences too similar or algorithm too aggressive
 - **Multiple small clusters**: Over-fragmentation, may need parameter tuning
-- Use summarize's `--prune-group-frac`/`--prune-group-abs` to filter contaminants below a certain proportion
+- Use summarize's `--prune-group-ratio`/`--prune-group-count` to filter contaminants below a certain proportion
 - Check quality_report.txt (from speconsense-summarize) to identify mixed consensuses by elevated stability metrics
 
 **Example analysis**:
@@ -524,7 +524,7 @@ grep "^>" mcl_95_5_n50/contam_95_5_n50-all.fasta
 
 This experiment helps you:
 1. Understand contamination detection limits (both algorithm and read depth effects)
-2. Apply summarize quality filters (`--min-cer-factor`, `--prune-group-frac`)
+2. Apply summarize quality filters (`--min-cer-factor`, `--prune-group-ratio`)
 3. Recognize franken-consensus signatures in real data (greedy at ~50% contamination)
 4. Understand when contamination is masked (greedy at low levels, MCL below ~5 minority reads)
 5. Evaluate whether small variants are real biology or contamination

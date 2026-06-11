@@ -12,6 +12,7 @@ from speconsense.profiles import (
     ProfileError,
     ProfileVersionError,
     ProfileValidationError,
+    RESERVED_PROFILE_NAMES,
     check_version_compatible,
     list_profiles,
     list_bundled_profiles,
@@ -235,6 +236,38 @@ speconsense:
                 assert "hp-min-length" in str(exc_info.value)
 
 
+class TestDefaultProfile:
+    """Tests for the reserved 'default' profile name."""
+
+    def test_load_default_returns_empty_profile(self):
+        profile = Profile.load("default")
+        assert profile.name == "default"
+        assert profile.speconsense == {}
+        assert profile.speconsense_summarize == {}
+        assert profile.version == "*"
+
+    def test_load_default_does_not_require_yaml(self):
+        """-p default works even without PyYAML installed."""
+        with patch("speconsense.profiles.yaml", None):
+            profile = Profile.load("default")
+            assert profile.name == "default"
+            assert profile.speconsense == {}
+
+    def test_default_is_reserved(self):
+        assert "default" in RESERVED_PROFILE_NAMES
+
+    def test_default_yaml_file_is_shadowed(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            user_dir = Path(tmpdir) / "profiles"
+            user_dir.mkdir()
+            (user_dir / "default.yaml").write_text(
+                'speconsense-version: "*"\nspeconsense:\n  min-size: 99\n'
+            )
+            with patch("speconsense.profiles.PROFILES_DIR", user_dir):
+                profile = Profile.load("default")
+                assert profile.speconsense == {}
+
+
 class TestProfileApplication:
     """Tests for applying profiles to argparse args."""
 
@@ -310,6 +343,76 @@ class TestListProfiles:
             with patch("speconsense.profiles.PROFILES_DIR", user_dir):
                 profiles = list_profiles()
                 assert "custom" in profiles
+
+
+class TestDetectProfileFromMetadata:
+    """Tests for auto-detection of profile from core metadata."""
+
+    def _write_metadata(self, base_dir, specimen, profile_value):
+        """Write a minimal metadata JSON with the given profile value."""
+        specimen_dir = os.path.join(base_dir, specimen, "cluster_debug")
+        os.makedirs(specimen_dir, exist_ok=True)
+        metadata = {"schema_version": "2.0", "profile": profile_value}
+        with open(os.path.join(specimen_dir, f"{specimen}-metadata.json"), 'w') as f:
+            import json
+            json.dump(metadata, f)
+
+    def test_unanimous_profile_detected(self):
+        from speconsense.summarize.cli import _detect_profile_from_metadata
+        with tempfile.TemporaryDirectory() as tmpdir:
+            self._write_metadata(tmpdir, "sp1", "compressed")
+            self._write_metadata(tmpdir, "sp2", "compressed")
+            assert _detect_profile_from_metadata(tmpdir) == "compressed"
+
+    def test_mixed_profiles_returns_none(self, capsys):
+        from speconsense.summarize.cli import _detect_profile_from_metadata
+        with tempfile.TemporaryDirectory() as tmpdir:
+            self._write_metadata(tmpdir, "sp1", "compressed")
+            self._write_metadata(tmpdir, "sp2", "strict")
+            result = _detect_profile_from_metadata(tmpdir)
+            assert result is None
+            err = capsys.readouterr().err
+            assert "different core profiles" in err
+
+    def test_all_null_returns_none(self):
+        from speconsense.summarize.cli import _detect_profile_from_metadata
+        with tempfile.TemporaryDirectory() as tmpdir:
+            self._write_metadata(tmpdir, "sp1", None)
+            self._write_metadata(tmpdir, "sp2", None)
+            assert _detect_profile_from_metadata(tmpdir) is None
+
+    def test_all_default_returns_none(self):
+        from speconsense.summarize.cli import _detect_profile_from_metadata
+        with tempfile.TemporaryDirectory() as tmpdir:
+            self._write_metadata(tmpdir, "sp1", "default")
+            self._write_metadata(tmpdir, "sp2", "default")
+            assert _detect_profile_from_metadata(tmpdir) is None
+
+    def test_no_metadata_files_returns_none(self):
+        from speconsense.summarize.cli import _detect_profile_from_metadata
+        with tempfile.TemporaryDirectory() as tmpdir:
+            assert _detect_profile_from_metadata(tmpdir) is None
+
+    def test_missing_profile_field_ignored(self):
+        """Specimens without a profile field in metadata are ignored."""
+        from speconsense.summarize.cli import _detect_profile_from_metadata
+        import json
+        with tempfile.TemporaryDirectory() as tmpdir:
+            self._write_metadata(tmpdir, "sp1", "compressed")
+            # Write a metadata JSON without a profile field
+            sp2_dir = os.path.join(tmpdir, "sp2", "cluster_debug")
+            os.makedirs(sp2_dir)
+            with open(os.path.join(sp2_dir, "sp2-metadata.json"), 'w') as f:
+                json.dump({"schema_version": "2.0"}, f)
+            assert _detect_profile_from_metadata(tmpdir) == "compressed"
+
+    def test_null_and_real_profile_detected(self):
+        """Null profiles are ignored; unanimous real profiles are detected."""
+        from speconsense.summarize.cli import _detect_profile_from_metadata
+        with tempfile.TemporaryDirectory() as tmpdir:
+            self._write_metadata(tmpdir, "sp1", "compressed")
+            self._write_metadata(tmpdir, "sp2", None)
+            assert _detect_profile_from_metadata(tmpdir) == "compressed"
 
 
 class TestUserDirectoryInit:

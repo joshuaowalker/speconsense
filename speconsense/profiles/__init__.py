@@ -101,8 +101,8 @@ VALID_SUMMARIZE_KEYS = {
     "max-len",
     "min-cer-factor",
     "max-err-factor",
-    "prune-group-frac",
-    "prune-group-abs",
+    "prune-group-ratio",
+    "prune-group-count",
     # Grouping
     "group-identity",
     # Merging
@@ -120,10 +120,16 @@ VALID_SUMMARIZE_KEYS = {
     "select-max-variants",
     "select-min-size-ratio",
     "enable-full-consensus",
+    # Consensus output
+    "min-position-frequency",
+    "min-position-count",
     # Processing
     "scale-threshold",
     "threads",
 }
+
+
+RESERVED_PROFILE_NAMES = frozenset({"default"})
 
 
 class ProfileError(Exception):
@@ -166,6 +172,21 @@ class Profile:
             ProfileVersionError: If version incompatible
             ProfileValidationError: If profile contains invalid keys
         """
+        if name in RESERVED_PROFILE_NAMES:
+            shadowed = PROFILES_DIR / f"{name}.yaml"
+            if shadowed.exists():
+                logger.warning(
+                    f"Profile file '{shadowed}' is shadowed by the reserved "
+                    f"name '{name}'. Rename the file to use it."
+                )
+            return cls(
+                name=name,
+                version="*",
+                description="CLI defaults (no profile)",
+                speconsense={},
+                speconsense_summarize={},
+            )
+
         if yaml is None:
             raise ProfileError(
                 "PyYAML is required for profile support. "
@@ -529,3 +550,37 @@ def print_profiles_list(tool: str = 'speconsense') -> None:
 
     print(f"Usage: {tool} -p <profile> [other options]")
     print(f"Profile directory: {PROFILES_DIR}")
+
+
+def show_profile(name: str) -> None:
+    """Print the contents and source path of a named profile."""
+    if name in RESERVED_PROFILE_NAMES:
+        print(f"'{name}' is a reserved profile name (CLI defaults, no YAML file).")
+        return
+
+    # Resolve to a file path (user takes precedence over bundled)
+    ensure_user_profiles_dir()
+    user_path = PROFILES_DIR / f"{name}.yaml"
+    if user_path.exists():
+        source_path = user_path
+        source = "user"
+    else:
+        source_path = get_bundled_profile_path(name)
+        source = "bundled"
+
+    if source_path is None:
+        available = list_profiles()
+        if available:
+            print(
+                f"Profile '{name}' not found. "
+                f"Available profiles: {', '.join(available)}"
+            )
+        else:
+            print(f"Profile '{name}' not found.")
+        sys.exit(1)
+
+    print(f"# Profile '{name}' ({source})")
+    print(f"# Source: {source_path}")
+    print()
+    with open(source_path, 'r') as f:
+        print(f.read(), end='')

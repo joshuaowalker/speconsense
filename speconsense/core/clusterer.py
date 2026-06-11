@@ -20,7 +20,7 @@ try:
 except ImportError:
     __version__ = "dev"
 
-from speconsense.msa import ReadAlignment, analyze_positional_variation, has_no_majority, call_iupac_ambiguities, compute_cluster_err_factor
+from speconsense.msa import ReadAlignment, analyze_positional_variation, has_no_majority, call_iupac_ambiguities, compute_cluster_err_factor, DEFAULT_MAX_ERR_FACTOR
 from speconsense.context import classify_pairwise_differences
 from speconsense.distances import count_variant_differences
 from speconsense.qctx import DORADO_V5_0, get_qctx, load_table as load_error_model
@@ -28,6 +28,7 @@ from speconsense.significance import (
     compute_cer_factor,
     compute_critical_error_rate,
     compute_per_position_qstar,
+    DEFAULT_MIN_CER_FACTOR,
 )
 from speconsense.scalability import (
     VsearchCandidateFinder,
@@ -309,6 +310,7 @@ class SpecimenClusterer:
         self.input_file = None
         self.algorithm = None
         self.orient_mode = None
+        self.profile_name = None
         self.primers_file = None
 
     def _log_stage(self, description: str, clusters,
@@ -348,6 +350,7 @@ class SpecimenClusterer:
         metadata = {
             "schema_version": "2.0",
             "version": __version__,
+            "profile": self.profile_name,
             "timestamp": datetime.now().isoformat(),
             "sample_name": self.sample_name,
             "parameters": {
@@ -408,12 +411,43 @@ class SpecimenClusterer:
         logging.debug(f"Wrote run metadata to {metadata_file}")
 
     @staticmethod
+    def _expected_to_pass_summarize(cluster_dict: Dict) -> bool:
+        """Whether a cluster is expected to survive summarize's default filters.
+
+        Mirrors summarize's routing at its *default* thresholds: a variant is
+        routed to ``.ns`` iff ``cer_factor`` is finite and below
+        ``DEFAULT_MIN_CER_FACTOR``, and to ``.lq`` iff ``err_factor`` is finite
+        and above ``DEFAULT_MAX_ERR_FACTOR``. ``cer_factor`` of ``None``/``inf``
+        and ``err_factor`` of ``None`` always pass (anchors, comparisons that
+        could not run, and CER-bypass pipelines). Reads via ``.get`` so clusters
+        lacking the fields collapse to "pass" (i.e. pure-size ordering).
+        """
+        cer = cluster_dict.get('cer_factor')
+        err = cluster_dict.get('err_factor')
+        cer_pass = (cer is None) or (cer >= DEFAULT_MIN_CER_FACTOR)
+        err_pass = (err is None) or (err <= DEFAULT_MAX_ERR_FACTOR)
+        return cer_pass and err_pass
+
+    @staticmethod
     def _assign_identity_ranks(cluster_dicts: List[Dict]) -> None:
         """Stamp identity_group_rank and identity_variant_rank on clusters.
 
-        Groups are ranked by anchor (largest member) size descending. Variants
-        within each group are ranked by size descending. Clusters without an
-        ``identity_group_id`` are skipped (they won't emit gid/vid).
+        Groups are ranked by anchor (largest member) size descending, so
+        ``gid=1`` is always the largest group.
+
+        Variants within each group are ranked by a tiered key:
+        ``(expected_to_pass_summarize, size)`` descending — clusters expected to
+        survive summarize's default cer/err filters are numbered first, then by
+        size within each tier. This makes the primary-track vids contiguous in
+        the common case (no gaps where a low-cer/high-err variant was routed to
+        ``.ns``/``.lq``) while preserving full traceability: vids are stamped
+        once here and summarize never renumbers. Requires ``err_factor`` and
+        ``cer_factor`` to already be stamped on the cluster_dicts; clusters
+        lacking them fall back to pure-size ordering (see
+        ``_expected_to_pass_summarize``).
+
+        Clusters without an ``identity_group_id`` are skipped (they won't emit
+        gid/vid).
         """
         group_anchor_size: Dict[str, int] = {}
         for cluster_dict in cluster_dicts:
@@ -440,7 +474,13 @@ class SpecimenClusterer:
             if gid is not None:
                 group_members[gid].append(cluster_dict)
         for members in group_members.values():
-            members.sort(key=lambda c: len(c.get('read_ids', [])), reverse=True)
+            members.sort(
+                key=lambda c: (
+                    SpecimenClusterer._expected_to_pass_summarize(c),
+                    len(c.get('read_ids', [])),
+                ),
+                reverse=True,
+            )
             for rank, cluster_dict in enumerate(members, start=1):
                 cluster_dict['identity_variant_rank'] = rank
 
@@ -2689,11 +2729,31 @@ class SpecimenClusterer:
         total_ambiguity_positions = 0
         clusters_with_ambiguities = 0
 
+        # Compute err_factor for every cluster from its post-MAD MSA (stamped in
+        # Phase 9). Done before rank assignment because the variant-rank tier key
+        # reads err_factor (and cer_factor) to number expected-to-pass variants
+        # first. Stamped on the cluster_dict so the output loop reuses it.
+        for cluster_dict in clusters:
+            msa_string = cluster_dict.get('msa')
+            if not msa_string:
+                continue
+            ef, obs_sum, exp_sum, ef_cols = compute_cluster_err_factor(
+                msa_string, self.qctx_table
+            )
+            cluster_dict['err_factor'] = ef
+            cluster_dict['err_factor_details'] = {
+                'obs_sum': obs_sum,
+                'exp_sum': exp_sum,
+                'cols': ef_cols,
+            }
+
         # Compute identity group/variant ranks for the surviving clusters.
-        # Groups are ranked by anchor (largest-member) size desc; variants
-        # within each group are ranked by size desc. These drive gid=/vid=
-        # header emission and the group_rank/variant_rank metadata fields,
-        # giving summarize a stable end-to-end identity for each cluster.
+        # Groups are ranked by anchor (largest-member) size desc; variants within
+        # each group are ranked by a quality-aware tier (expected-to-pass-summarize
+        # first, then size desc) so primary-track vids stay contiguous in the
+        # common case. These drive gid=/vid= header emission and the
+        # group_rank/variant_rank metadata fields, giving summarize a stable
+        # end-to-end identity for each cluster.
         self._assign_identity_ranks(clusters)
 
         # Assign cluster_id (the {gid}.v{vid} designator). Fallback c{idx}
@@ -2718,20 +2778,9 @@ class SpecimenClusterer:
                     total_ambiguity_positions += iupac_count
                     clusters_with_ambiguities += 1
 
-                # Compute err_factor from the post-MAD MSA stamped in Phase 9.
-                err_factor = None
+                # err_factor was computed and stamped before rank assignment.
+                err_factor = cluster_dict.get('err_factor')
                 msa_string = cluster_dict.get('msa')
-                if msa_string:
-                    ef, obs_sum, exp_sum, ef_cols = compute_cluster_err_factor(
-                        msa_string, self.qctx_table
-                    )
-                    err_factor = ef
-                    cluster_dict['err_factor'] = ef
-                    cluster_dict['err_factor_details'] = {
-                        'obs_sum': obs_sum,
-                        'exp_sum': exp_sum,
-                        'cols': ef_cols,
-                    }
 
                 self.write_cluster_files(
                     cluster_name=cluster_dict['cluster_id'],

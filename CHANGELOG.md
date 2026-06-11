@@ -5,17 +5,49 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.8.4] - 2026-06-10
+
+Rationalized ratio/frequency CLI semantics, four-track variant routing, profile auto-detection, and configurable gap handling in merged consensus sequences.
+
+### Added
+
+- **Four-track variant routing** (summarize) — Variants that pass quality gates but are excluded by selection or pruning decisions (`--select-max-variants`, `--select-min-size-ratio`, `--select-max-groups`, `--prune-group-ratio`/`--prune-group-count`) now route to a new `.filtered` track (`variants/*.filtered-RiC*.fasta`) instead of being silently dropped. Distinguishes "quality problem" (`.ns`/`.lq`) from "selection decision" (`.filtered`). Pre-merge contributors of merged variants dropped by selection are unwound to the `.filtered` track individually, preserving per-cluster metrics.
+- **Post-merge re-check** (summarize) — After MSA merging recomputes `err_factor`/`cer_factor` on merged records, merges whose recomputed metrics cross filter thresholds are cancelled: original pre-merge contributors are restored on the pass track rather than routing the synthetic merged record to `.lq`/`.ns`.
+- **Pre-merge contributor files** (summarize) — `.raw.{gid}.v{vid}` files in the variants directory preserve the original core variant for each merge contributor, named by the contributor's core `gid.vid` for direct traceability.
+- **Profile auto-detection** (summarize) — When no `-p` is given, summarize scans core metadata JSONs for the `profile` field. If all specimens that report a profile agree, summarize auto-applies it with a logged parameter listing. Mixed profiles warn. Use `-p default` to override auto-detection.
+- **`-p default` reserved profile name** — Selects CLI defaults without loading a YAML file. Serves as the escape hatch for summarize auto-detection and as a scripting convenience for core.
+- **`--show-profile`** (summarize) — Display the effective profile parameters and exit.
+- **`--min-position-frequency`** and **`--min-position-count`** (summarize) — Control gap vs. base resolution in merged and `-full` consensus sequences. A column is retained when its non-gap fraction meets the frequency threshold (default 0.5 = majority wins) AND the absolute non-gap support meets the count threshold (default 3). Set `--min-position-frequency` lower (e.g. 0.1) to preserve positions where a minority of contributors carry content. Applies to within-group MSA merging, overlap merging (overlap region), and `-full` group consensus. Set to 0.1 in the `compressed` profile.
+
+### Changed
+
+- **`--prune-group-frac` renamed to `--prune-group-ratio`** (summarize) — Consistent with `--select-min-size-ratio` and `--merge-min-size-ratio` naming.
+- **`--select-min-size-ratio` denominator changed** (summarize) — Now computes `variant_size / group_total` instead of `variant_size / largest_variant_size`. The largest variant in each group is always exempt from filtering. Profiles using this parameter (`compressed` at 0.2, `strict` at 0.05) keep their current settings.
+- **`--merge-min-size-ratio` semantics changed** (summarize) — Now checked per candidate merge subset rather than as a pre-batch filter. Denominator is the subset total (sum of sizes of variants in the candidate merge) rather than the pair ratio. Evaluated during exhaustive subset enumeration, so subset composition and total are fully determined at check time.
+- **Quality-aware variant rank (vid) ordering** (core) — Variants within an identity group are now ranked by a quality-aware tier `(expected_to_pass_summarize, size)` descending, so clusters expected to survive summarize's default CER/err_factor filters get the low vids. Keeps primary-track vids contiguous in the common case.
+
+### Removed
+
+- **`--select-strategy` removed as a profile key** (summarize) — The CLI argument is retained as a hidden no-op for backward compatibility but is no longer a valid profile key.
+
+### Migration notes (0.8.3 → 0.8.4)
+
+- **`--prune-group-frac` renamed**: Scripts and profiles using `--prune-group-frac` must switch to `--prune-group-ratio`. The CLI argument is not aliased.
+- **`--select-min-size-ratio` and `--merge-min-size-ratio` denominator changes** affect threshold interpretation. Review existing settings if using non-default values.
+- **New `.filtered` track**: Summarize output directories now contain `*.filtered-RiC*.fasta` files. Downstream tools that glob `variants/` may need to account for the new file pattern.
+- **Profile auto-detection** may change summarize behavior if core was run with `-p` and summarize was previously run without. Pass `-p default` to suppress.
+
 ## [0.8.3] - 2026-06-04
 
 Quality-gate refinement: a new secondary group pruning filter in summarize, and removal of two superseded options.
 
 ### Added
 
-- **Secondary identity group pruning** (summarize) — New `--prune-group-frac` (default `0.10`) and `--prune-group-abs` (default `15`) options prune small secondary identity groups (gid >= 2) that are both proportionally small relative to the largest group and small in absolute read count. Targets residual chimeric fragments, cross-sample bleed, and spurious clusters that survive CER and err_factor filtering. Both conditions must be met to prune — the relative threshold catches proportionally insignificant groups while the absolute threshold preserves legitimate low-abundance organisms with meaningful read depth. Pruned variants route to the `.lq` track for traceability. Group 1 is always exempt. Validated against 831 specimens: the conservative defaults remove 56.5% of pass-track noise with 0.7% primary variant loss and zero specimen-level primary casualties. Both keys are profile-loadable (`prune-group-frac`, `prune-group-abs`). Set either to `0` to disable.
+- **Secondary identity group pruning** (summarize) — New `--prune-group-ratio` (default `0.10`) and `--prune-group-count` (default `15`) options prune small secondary identity groups (gid >= 2) that are both proportionally small relative to the largest group and small in absolute read count. Targets residual chimeric fragments, cross-sample bleed, and spurious clusters that survive CER and err_factor filtering. Both conditions must be met to prune — the relative threshold catches proportionally insignificant groups while the absolute threshold preserves legitimate low-abundance organisms with meaningful read depth. Pruned variants route to the `.lq` track for traceability. Group 1 is always exempt. Validated against 831 specimens: the conservative defaults remove 56.5% of pass-track noise with 0.7% primary variant loss and zero specimen-level primary casualties. Both keys are profile-loadable (`prune-group-ratio`, `prune-group-count`). Set either to `0` to disable.
 
 ### Removed
 
-- **`--min-cluster-ratio` removed** (core) — The global specimen-wide ratio filter compared every cluster against the single largest cluster, ignoring identity groups entirely. Its function is now precisely covered by three summarize-side filters: `--min-cer-factor` (per-variant statistical significance), `--max-err-factor` (cluster homogeneity), and the new `--prune-group-frac`/`--prune-group-abs` (group-level abundance). The option was already disabled by default (0) since 0.8.0. Profiles that still reference `min-cluster-ratio` will fail validation.
+- **`--min-cluster-ratio` removed** (core) — The global specimen-wide ratio filter compared every cluster against the single largest cluster, ignoring identity groups entirely. Its function is now precisely covered by three summarize-side filters: `--min-cer-factor` (per-variant statistical significance), `--max-err-factor` (cluster homogeneity), and the new `--prune-group-ratio`/`--prune-group-count` (group-level abundance). The option was already disabled by default (0) since 0.8.0. Profiles that still reference `min-cluster-ratio` will fail validation.
 - **`--select-strategy diversity` removed** (summarize) — The diversity selection mode was never used in any bundled profile or known workflow; it required `--select-max-variants` to be active, which was also unused in practice. Size-based selection is now the only strategy. The `--select-strategy` CLI argument is retained as a hidden no-op for backward compatibility, but is no longer a valid profile key. Profiles referencing `select-strategy` will fail validation.
 
 ### Migration notes (0.8.2 → 0.8.3)
@@ -23,7 +55,7 @@ Quality-gate refinement: a new secondary group pruning filter in summarize, and 
 - **Profiles referencing `min-cluster-ratio`** (speconsense section) or `select-strategy` (speconsense-summarize section) must remove those keys. Both are now rejected by profile validation.
 - **Scripts passing `--min-cluster-ratio`** to `speconsense` will get an unrecognized-argument error. Remove the flag; the default behavior (no ratio filtering) was already equivalent to `--min-cluster-ratio 0`.
 - **Scripts passing `--select-strategy size`** to `speconsense-summarize` will continue to work (hidden arg). `--select-strategy diversity` will be silently accepted but behaves as `size`.
-- **The new group pruning filter is on by default.** To disable it, pass `--prune-group-frac 0` or `--prune-group-abs 0`. Existing outputs will change: small secondary groups that previously passed will now route to `.lq`.
+- **The new group pruning filter is on by default.** To disable it, pass `--prune-group-ratio 0` or `--prune-group-count 0`. Existing outputs will change: small secondary groups that previously passed will now route to `.lq`.
 
 ## [0.8.2] - 2026-05-25
 
@@ -229,7 +261,7 @@ This is a major release. Headline themes:
 ## [0.7.4] - 2026-02-05
 
 ### Added
-- **`--select-min-size-ratio` parameter** (summarize) — Filters out post-merge variants whose size ratio to the largest variant in their group falls below the threshold (default: 0 = disabled, e.g. 0.2 for 20% cutoff). Applied after merging, before variant selection
+- **`--select-min-size-ratio` parameter** (summarize) — Filters out post-merge variants whose size as a fraction of the group total falls below the threshold; the largest variant in each group is always kept (default: 0 = disabled, e.g. 0.2 for 20% cutoff). Applied after merging, before variant selection
 
 ### Changed
 - **`compressed` bundled profile** — Now includes `select-min-size-ratio: 0.2` to match 20% calling threshold theme

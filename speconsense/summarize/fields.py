@@ -182,8 +182,15 @@ class GroupField(FastaField):
         super().__init__('group', 'Variant group number')
 
     def format_value(self, consensus: ConsensusInfo) -> Optional[str]:
-        # Extract from sample_name (e.g., "...-1.v1", "...-2.v1.raw1")
-        match = re.search(r'-(\d+)\.v\d+(?:\.raw\d+)?$', consensus.sample_name)
+        # Extract group from sample_name, stripping any .raw and status suffixes.
+        # Handles: -1.v1, -2.v1.raw1 (legacy), -2.v1.raw.1.v3 (traceability),
+        #          -1.v1.ns, -1.v1.lq, -1.v1.filtered, -1.v1.raw.2.v3.filtered
+        match = re.search(
+            r'-(\d+)\.v\d+'
+            r'(?:\.raw(?:\d+|\.\d+\.v\d+))?'
+            r'(?:\.(?:ns|lq|filtered))?$',
+            consensus.sample_name,
+        )
         if match:
             return f"group={match.group(1)}"
         return None
@@ -194,8 +201,16 @@ class VariantField(FastaField):
         super().__init__('variant', 'Variant identifier within group')
 
     def format_value(self, consensus: ConsensusInfo) -> Optional[str]:
-        # Extract from sample_name (e.g., "...-1.v1" -> "v1", "...-1.v1.raw1" -> "v1")
-        match = re.search(r'\.(v\d+)(?:\.raw\d+)?$', consensus.sample_name)
+        # Extract variant from sample_name, stripping any .raw and status suffixes.
+        # re.search returns the leftmost match, so for .raw.{gid}.v{vid} names
+        # (e.g. specimen-1.v1.raw.2.v3) this captures v1 (the merged variant's
+        # vid), not v3 (the raw contributor's vid).
+        match = re.search(
+            r'\.(v\d+)'
+            r'(?:\.raw(?:\d+|\.\d+\.v\d+))?'
+            r'(?:\.(?:ns|lq|filtered))?$',
+            consensus.sample_name,
+        )
         if match:
             return f"variant={match.group(1)}"
         return None

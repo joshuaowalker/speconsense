@@ -44,11 +44,18 @@ class SpecimenRecord:
 
 
 def _find_primary_anchor(variants: list) -> Optional[dict]:
-    """Return the variant dict with group_rank=1 AND variant_rank=1, if any."""
-    for v in variants:
-        if v.get("group_rank") == 1 and v.get("variant_rank") == 1:
-            return v
-    return None
+    """Return the largest cluster (max ``M``) in the largest group (group_rank=1).
+
+    The primary anchor is the most-supported cluster — the best HP ground truth.
+    It is *not* found by the ``variant_rank==1`` label: core now numbers vids by a
+    quality-aware tier (expected-to-pass first, then size), so the largest cluster
+    of group 1 may carry a vid > 1 when it is internally heterogeneous. Re-derive
+    by size to keep this selection independent of the vid labeling.
+    """
+    group1 = [v for v in variants if v.get("group_rank") == 1]
+    if not group1:
+        return None
+    return max(group1, key=lambda v: v.get("M") or 0)
 
 
 def load_specimen(metadata_path: str) -> SpecimenRecord:

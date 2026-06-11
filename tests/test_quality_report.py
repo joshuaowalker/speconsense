@@ -127,6 +127,17 @@ def test_calibration_skips_clusters_without_metadata():
     assert "1 clusters" in out
 
 
+def test_calibration_includes_filtered_state():
+    # .filtered records should participate in the q_ctx calibration just
+    # like .ns and .lq — they are real clusters with valid err_factor data.
+    out = _render_with([
+        ("passed", 100.0, 100.0, MIN_CALIBRATION_COLS // 2),
+        ("filtered", 100.0, 100.0, MIN_CALIBRATION_COLS // 2 + 2),
+    ])
+    assert "Pooled obs/exp:    1.00" in out
+    assert ".filtered" in out
+
+
 def test_calibration_thresholds_are_module_constants():
     # Defaults are intentionally weakly-held; verify they exist and are sane.
     assert 0 < CALIBRATION_LOW < 1.0 < CALIBRATION_HIGH
