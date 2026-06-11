@@ -310,6 +310,7 @@ class SpecimenClusterer:
         self.input_file = None
         self.algorithm = None
         self.orient_mode = None
+        self.pyitsx_organism = None
         self.profile_name = None
         self.primers_file = None
 
@@ -374,6 +375,7 @@ class SpecimenClusterer:
                 "scale_threshold": self.scale_threshold,
                 "max_threads": self.max_threads,
                 "orient_mode": self.orient_mode,
+                "pyitsx_organism": self.pyitsx_organism,
                 "significance_level": self.significance_level,
                 "group_identity": self.group_identity,
                 "error_model": self.error_model,
@@ -2818,7 +2820,7 @@ class SpecimenClusterer:
         - Reads from clusters dropped by the Phase 10 merge when re-SPOA on the
           merged read set failed
         - Reads from clusters filtered out by size/ratio thresholds (Phase 12)
-        - Reads filtered during orientation (when --orient-mode filter-failed)
+        - Reads filtered during orientation (--orient-mode primer or pyitsx)
 
         Output: cluster_debug/{sample_name}-discards.fastq
         """
@@ -3161,6 +3163,66 @@ class SpecimenClusterer:
 
         # Return set of failed sequence IDs for potential filtering
         return failed_sequences
+
+    def orient_sequences_pyitsx(self, organism: str = "F") -> Tuple[Set[str], Set[str]]:
+        """Orient sequences using pyitsx HMM-based ITS strand detection.
+
+        Returns:
+            Tuple of (failed_ids, chimeric_ids) for discard tracking.
+        """
+        try:
+            import pyitsx
+        except ImportError:
+            raise ImportError(
+                "pyitsx is required for --orient-mode=pyitsx but is not installed. "
+                "Install with: pip install pyitsx\n"
+                "ITSx HMM profiles must also be available (install ITSx or set PYITSX_HMM_DIR)."
+            )
+
+        try:
+            db = pyitsx.ProfileDB(organism=organism)
+        except Exception as e:
+            raise RuntimeError(
+                f"Failed to initialize pyitsx ProfileDB for organism '{organism}': {e}\n"
+                "Ensure ITSx is installed and HMM profiles are accessible."
+            ) from e
+
+        logging.info(f"Starting pyitsx orientation (organism={organism}, {len(self.sequences)} sequences)...")
+
+        seq_tuples = [(seq_id, seq) for seq_id, seq in self.sequences.items()]
+        results = pyitsx.orient(seq_tuples, db)
+
+        failed_ids = set()
+        chimeric_ids = set()
+        reverse_complemented = 0
+        already_correct = 0
+
+        for result in results:
+            seq_id = result.seq_id
+
+            if result.chimeric:
+                chimeric_ids.add(seq_id)
+            elif result.strand is None:
+                failed_ids.add(seq_id)
+            elif result.strand == pyitsx.Strand.MINUS:
+                self.sequences[seq_id] = str(reverse_complement(self.sequences[seq_id]))
+
+                if seq_id in self.records:
+                    record = self.records[seq_id]
+                    record.seq = reverse_complement(record.seq)
+                    if 'phred_quality' in record.letter_annotations:
+                        record.letter_annotations['phred_quality'] = \
+                            record.letter_annotations['phred_quality'][::-1]
+
+                reverse_complemented += 1
+            else:
+                already_correct += 1
+
+        logging.info(f"pyitsx orientation complete: {already_correct} kept as-is, "
+                    f"{reverse_complemented} reverse-complemented, "
+                    f"{len(failed_ids)} failed, {len(chimeric_ids)} chimeric")
+
+        return failed_ids, chimeric_ids
 
     def _score_orientation(self, sequence: str, orientation: str) -> int:
         """Score how well primers match in the given orientation.

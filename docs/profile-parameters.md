@@ -42,7 +42,8 @@ Parameters for the main clustering and consensus tool.
 | `min-ambiguity-count` | Min read count for IUPAC ambiguity calling | 3 | — | — | — | — | — |
 | `disable-cluster-merging` | Disable merging identical consensus sequences | false | — | — | — | — | — |
 | `disable-homopolymer-equivalence` | Require exact match for cluster merging | false | — | — | — | — | — |
-| `orient-mode` | Sequence orientation: `skip`, `keep-all`, `filter-failed` | skip | — | — | — | — | — |
+| `orient-mode` | Sequence orientation: `none`, `primer`, `pyitsx` | none | — | — | — | — | — |
+| `pyitsx-organism` | Organism group for pyitsx orientation (e.g. F, T, M) | F | — | — | — | — | — |
 | `scale-threshold` | Sequence count to enable vsearch acceleration (0 = disabled) | 1001 | — | — | — | — | — |
 | `threads` | Max threads for internal parallelism (0 = auto) | 1 | — | — | 0 | — | — |
 
