@@ -481,6 +481,7 @@ def process_single_specimen(file_consensuses: List[ConsensusInfo],
                            full_min_ambiguity_frequency: float = 0.10,
                            full_max_sample_size: int = 100,
                            specimen_global_size_total: Optional[int] = None,
+                           full_primers: Optional[List[Tuple[str, str]]] = None,
                            ) -> Tuple[List[ConsensusInfo], Dict[str, List[str]], Dict, int, List[OverlapMergeInfo], Dict[str, List], List[ConsensusInfo], List[ConsensusInfo], List[ConsensusInfo]]:
     """
     Process a single specimen file: bucket by core gid, MSA-merge within each
@@ -881,6 +882,7 @@ def process_single_specimen(file_consensuses: List[ConsensusInfo],
                 global_size_total=specimen_global_size_total,
                 min_position_frequency=args.min_position_frequency,
                 min_position_count=args.min_position_count,
+                primers=full_primers,
             )
             if full_result is not None:
                 full_record, sampled_reads = full_result
@@ -966,11 +968,16 @@ def _resolve_specimen_global_total(
 def _resolve_full_consensus_params(
     source_folder: str,
     file_path: str,
-) -> Tuple[float, int]:
-    """Return ``(min_ambiguity_frequency, max_sample_size)`` for the
+) -> Tuple[float, int, Optional[List[Tuple[str, str]]]]:
+    """Return ``(min_ambiguity_frequency, max_sample_size, primers)`` for the
     ``-full`` builder, sourced from the specimen's metadata JSON. Falls
     back to the speconsense defaults when metadata is missing — older
     runs predate per-field serialization.
+
+    ``primers`` is the list of ``(name, sequence)`` pairs including RC
+    variants, matching the format ``_trim_primers_standalone`` expects.
+    ``None`` when the metadata lacks primer info (no trimming needed —
+    the core run didn't use primers).
     """
     DEFAULT_MIN_AMBIG = 0.10
     DEFAULT_MAX_SAMPLE = 100
@@ -979,13 +986,24 @@ def _resolve_full_consensus_params(
         specimen_base = specimen_base[:-len('-all.fasta')]
     metadata = load_metadata_from_json(source_folder, specimen_base)
     if not metadata:
-        return DEFAULT_MIN_AMBIG, DEFAULT_MAX_SAMPLE
+        return DEFAULT_MIN_AMBIG, DEFAULT_MAX_SAMPLE, None
     params = metadata.get('parameters') or {}
     min_ambig = params.get('min_ambiguity_frequency')
     max_sample = params.get('max_sample_size')
+
+    primers = None
+    primer_dict = metadata.get('primers')
+    if primer_dict:
+        from Bio.Seq import reverse_complement
+        primers = []
+        for name, seq in primer_dict.items():
+            primers.append((name, seq))
+            primers.append((f"{name}_RC", str(reverse_complement(seq))))
+
     return (
         float(min_ambig) if min_ambig is not None else DEFAULT_MIN_AMBIG,
         int(max_sample) if max_sample is not None else DEFAULT_MAX_SAMPLE,
+        primers,
     )
 
 
@@ -1180,9 +1198,9 @@ def main():
         # the -full builder reuses the exact thresholds the per-cluster
         # consensus already applied.
         if args.enable_full_consensus:
-            full_min_ambig, full_max_sample = _resolve_full_consensus_params(args.source, file_path)
+            full_min_ambig, full_max_sample, full_primers = _resolve_full_consensus_params(args.source, file_path)
         else:
-            full_min_ambig, full_max_sample = 0.10, 100
+            full_min_ambig, full_max_sample, full_primers = 0.10, 100, None
 
         # Per-specimen denominator for global_frequency=. Sourced from
         # parameters.total_input_reads in the metadata JSON (post-presample
@@ -1210,6 +1228,7 @@ def main():
             full_min_ambiguity_frequency=full_min_ambig,
             full_max_sample_size=full_max_sample,
             specimen_global_size_total=specimen_global_total,
+            full_primers=full_primers,
         )
 
         # Write individual data files immediately

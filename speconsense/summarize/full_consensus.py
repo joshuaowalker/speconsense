@@ -30,6 +30,7 @@ from Bio.SeqRecord import SeqRecord
 
 from speconsense.types import ConsensusInfo
 from speconsense.msa import extract_alignments_from_msa
+from speconsense.core.workers import _trim_primers_standalone
 
 from .analysis import run_spoa_for_cluster_metrics
 from .merging import (
@@ -131,6 +132,7 @@ def build_group_full_consensus(
     global_size_total: Optional[int] = None,
     min_position_frequency: float = 0.5,
     min_position_count: int = 3,
+    primers: Optional[List[Tuple[str, str]]] = None,
 ) -> Optional[Tuple[ConsensusInfo, List[SeqRecord]]]:
     """Build the ``-{gid}-full`` consensus and return it with the sampled
     reads, or ``None`` when the guards fire (single pass-track variant,
@@ -218,7 +220,11 @@ def build_group_full_consensus(
     if not consensus_seq:
         return None
 
-    primer_set = sorted({p for v in gated for p in (v.primers or [])}) or None
+    if primers:
+        consensus_seq, found_primers = _trim_primers_standalone(consensus_seq, primers)
+        primer_set = sorted(found_primers) or None
+    else:
+        primer_set = sorted({p for v in gated for p in (v.primers or [])}) or None
     total_size = sum(v.size for v in gated)
     total_ric = len(sampled)
 
