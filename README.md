@@ -820,6 +820,7 @@ speconsense-summarize --fasta-fields minimal,qc
 - `cer_factor` — Statistical variant validation factor (None for anchors)
 - `err_factor` — Cluster homogeneity ratio (observed/expected disagreement)
 - `primers` — Detected primer names (when detected)
+- `locus` — Detected locus label: `ITS`, `ITS1`, or `ITS2` (requires pyitsx + ITSx; auto-enabled when pyitsx is available)
 - `group` — Identity group number (extracted from `-{gid}.v{vid}` filename; superseded by `gid=` from core)
 - `variant` — Variant identifier within group (extracted from filename; superseded by `vid=` from core)
 
@@ -827,7 +828,7 @@ speconsense-summarize --fasta-fields minimal,qc
 - `default`: `size, ric, rawric, rawlen, snp, ambig, primers`
 - `minimal`: `size, ric`
 - `qc`: `size, ric, length, rid, ambig, cer_factor, err_factor`
-- `full`: `size, ric, length, rawric, rawlen, snp, ambig, rid, cer_factor, err_factor, primers`
+- `full`: `size, ric, length, rawric, rawlen, snp, ambig, rid, cer_factor, err_factor, primers, locus`
 - `id-only`: (no fields)
 
 The `default` preset does not include `cer_factor` / `err_factor` / `gid` / `vid`. If you want CER and homogeneity metrics in summarize-emitted FASTAs, use `--fasta-fields qc` or `--fasta-fields full`. Core's own FASTA always includes `gid`, `vid`, `cer_factor`, and `err_factor` regardless of the summarize preset.
@@ -1356,9 +1357,10 @@ Orientation:
                         profiles, discard failed/chimeric; requires pyitsx +
                         ITSx)
   --pyitsx-organism PYITSX_ORGANISM
-                        Organism group for pyitsx orientation (default: F for
-                        Fungi). Only used when --orient-mode=pyitsx. Common
-                        codes: F (Fungi), T (Tracheophyta), M (Metazoa)
+                        Organism group for pyitsx (default: F for Fungi).
+                        Used for --orient-mode=pyitsx orientation and locus
+                        labeling in summarize. Common codes: F (Fungi),
+                        T (Tracheophyta), M (Metazoa)
 
 Performance:
   --presample PRESAMPLE
@@ -1674,7 +1676,7 @@ TCCTCCGCTTATTGATATGC
 - Orientation occurs before clustering, ensuring all sequences are in the same direction
 - Quality scores are reversed when sequences are reverse-complemented
 - Chimeric reads (detected by pyitsx) are discarded alongside failed orientations
-- The `pyitsx_organism` parameter is recorded in the metadata JSON for reproducibility
+- The `pyitsx_organism` parameter is always recorded in the metadata JSON; summarize uses it for locus labeling (`locus=` field) regardless of orient-mode
 
 ### Testing with Synthetic Data
 

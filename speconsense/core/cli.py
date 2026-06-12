@@ -90,9 +90,9 @@ def main():
                                    "primer (orient via primer matching, discard failed), "
                                    "or pyitsx (orient via ITS HMM profiles, discard failed/chimeric; requires pyitsx + ITSx)")
     orient_group.add_argument("--pyitsx-organism", default="F",
-                              help="Organism group for pyitsx orientation (default: F for Fungi). "
-                                   "Only used when --orient-mode=pyitsx. Common codes: "
-                                   "F (Fungi), T (Tracheophyta), M (Metazoa)")
+                              help="Organism group for pyitsx (default: F for Fungi). "
+                                   "Used for --orient-mode=pyitsx orientation and locus labeling in summarize. "
+                                   "Common codes: F (Fungi), T (Tracheophyta), M (Metazoa)")
 
     # Performance group
     perf_group = parser.add_argument_group("Performance")
@@ -336,7 +336,7 @@ def main():
     clusterer.input_file = os.path.abspath(args.input_file)
     clusterer.algorithm = args.algorithm
     clusterer.orient_mode = args.orient_mode
-    clusterer.pyitsx_organism = args.pyitsx_organism if args.orient_mode == "pyitsx" else None
+    clusterer.pyitsx_organism = args.pyitsx_organism
     clusterer.profile_name = args.profile
 
     # Read primary sequences
