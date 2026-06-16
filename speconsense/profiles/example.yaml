@@ -62,7 +62,7 @@ speconsense:
   # disable-homopolymer-equivalence: false  # Set true for strict homopolymer comparison
 
   # --- Orientation ---
-  # orient-mode: none             # none, primer, or pyitsx
+  # orient-mode: none             # none, primer, pyitsx, or pyitsx+primer
   # pyitsx-organism: F            # Organism group for pyitsx (F=Fungi, T=Tracheophyta, M=Metazoa, etc.)
 
   # --- Processing ---

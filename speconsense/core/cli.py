@@ -85,13 +85,16 @@ def main():
 
     # Orientation group
     orient_group = parser.add_argument_group("Orientation")
-    orient_group.add_argument("--orient-mode", choices=["none", "primer", "pyitsx"], default="none",
+    orient_group.add_argument("--orient-mode", choices=["none", "primer", "pyitsx", "pyitsx+primer"],
+                              default="none",
                               help="Sequence orientation mode: none (default, no orientation), "
                                    "primer (orient via primer matching, discard failed), "
-                                   "or pyitsx (orient via ITS HMM profiles, discard failed/chimeric; requires pyitsx + ITSx)")
+                                   "pyitsx (orient via ITS HMM profiles, discard failed/chimeric; "
+                                   "requires pyitsx + ITSx), "
+                                   "or pyitsx+primer (pyitsx with primer fallback for unrecognized reads)")
     orient_group.add_argument("--pyitsx-organism", default="F",
                               help="Organism group for pyitsx (default: F for Fungi). "
-                                   "Used for --orient-mode=pyitsx orientation and locus labeling in summarize. "
+                                   "Used for --orient-mode pyitsx/pyitsx+primer and locus labeling in summarize. "
                                    "Common codes: F (Fungi), T (Tracheophyta), M (Metazoa)")
 
     # Performance group
@@ -387,13 +390,30 @@ def main():
         else:
             logging.warning("--orient-mode=primer specified but no primers with position information loaded")
 
-    elif args.orient_mode == "pyitsx":
+    elif args.orient_mode in ("pyitsx", "pyitsx+primer"):
         failed_ids, chimeric_ids = clusterer.orient_sequences_pyitsx(
             organism=args.pyitsx_organism,
         )
+
+        # Primer fallback for pyitsx+primer mode
+        # (chimeric reads are always discarded — that's a pyitsx-specific signal)
+        if args.orient_mode == "pyitsx+primer" and failed_ids:
+            has_primers = (hasattr(clusterer, 'forward_primers')
+                           and hasattr(clusterer, 'reverse_primers'))
+            if has_primers:
+                primer_failed = clusterer.orient_sequences(seq_ids=failed_ids)
+                primer_rescued = failed_ids - primer_failed
+                if primer_rescued:
+                    logging.info(f"Primer fallback rescued {len(primer_rescued)} of "
+                                f"{len(failed_ids)} pyitsx-failed reads")
+                failed_ids = primer_failed
+            else:
+                logging.warning("--orient-mode=pyitsx+primer specified but no primers "
+                               "with position information loaded; skipping primer fallback")
+
         discard_ids = failed_ids | chimeric_ids
         if discard_ids:
-            logging.info(f"Filtering out {len(discard_ids)} reads after pyitsx orientation "
+            logging.info(f"Filtering out {len(discard_ids)} reads after orientation "
                         f"({len(failed_ids)} failed, {len(chimeric_ids)} chimeric)")
             clusterer.discarded_read_ids.update(discard_ids)
             for seq_id in discard_ids:

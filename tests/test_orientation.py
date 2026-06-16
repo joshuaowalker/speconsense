@@ -151,6 +151,42 @@ TTTTTTTTTT
         os.unlink(primer_file)
 
 
+def test_primer_orientation_subset():
+    """Test that orient_sequences can operate on a subset of sequence IDs."""
+    forward_seq = 'AAAAAAAAAA' + 'G' * 100 + 'AAAAAAAAAA'
+    reverse_seq = 'TTTTTTTTTT' + 'C' * 100 + 'TTTTTTTTTT'
+    other_seq = 'CCCC' * 30
+
+    records = [
+        SeqRecord(Seq(forward_seq), id='seq1', letter_annotations={'phred_quality': [30] * len(forward_seq)}),
+        SeqRecord(Seq(reverse_seq), id='seq2', letter_annotations={'phred_quality': [30] * len(reverse_seq)}),
+        SeqRecord(Seq(other_seq), id='seq3', letter_annotations={'phred_quality': [30] * len(other_seq)}),
+    ]
+
+    clusterer = SpecimenClusterer()
+    clusterer.add_sequences(records)
+
+    primer_file = create_test_primers()
+    try:
+        clusterer.load_primers(primer_file)
+
+        original_seq1 = clusterer.sequences['seq1']
+        original_seq2 = clusterer.sequences['seq2']
+        original_seq3 = clusterer.sequences['seq3']
+
+        # Only orient seq2 and seq3 — seq1 should be untouched
+        failed = clusterer.orient_sequences(seq_ids={'seq2', 'seq3'})
+
+        assert clusterer.sequences['seq1'] == original_seq1
+        assert clusterer.sequences['seq2'] == str(reverse_complement(original_seq2))
+        assert clusterer.sequences['seq3'] == original_seq3
+        assert 'seq3' in failed
+        assert 'seq2' not in failed
+        assert 'seq1' not in failed
+    finally:
+        os.unlink(primer_file)
+
+
 # --- pyitsx tests ---
 
 @pytest.mark.skipif(not HAS_PYITSX, reason="pyitsx not installed")

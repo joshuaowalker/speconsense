@@ -3094,8 +3094,12 @@ class SpecimenClusterer:
             logging.error(f"Error loading primers: {str(e)}")
             raise
 
-    def orient_sequences(self) -> set:
+    def orient_sequences(self, seq_ids=None) -> set:
         """Normalize sequence orientations based on primer matches.
+
+        Args:
+            seq_ids: Optional set/collection of sequence IDs to orient.
+                     If None, orients all sequences.
 
         Scoring system:
         - +1 point if a forward primer is found at the expected position
@@ -3114,7 +3118,8 @@ class SpecimenClusterer:
             logging.warning("No positioned primers available, skipping orientation")
             return set()
 
-        logging.info("Starting sequence orientation based on primer positions...")
+        ids_to_orient = seq_ids if seq_ids is not None else self.sequences
+        logging.info(f"Starting sequence orientation based on primer positions ({len(ids_to_orient)} sequences)...")
 
         oriented_count = 0
         already_correct = 0
@@ -3122,7 +3127,7 @@ class SpecimenClusterer:
         failed_sequences = set()  # Track which sequences failed orientation
 
         # Process each sequence
-        for seq_id in tqdm(self.sequences, desc="Orienting sequences"):
+        for seq_id in tqdm(ids_to_orient, desc="Orienting sequences"):
             sequence = self.sequences[seq_id]
 
             # Test both orientations (scores will be 0, 1, or 2)

@@ -17,6 +17,7 @@ from speconsense.summarize.fields import (
     RidMinField,
     GroupField,
     VariantField,
+    LocusField,
     # Registry and presets
     FASTA_FIELDS,
     FASTA_FIELD_PRESETS,
@@ -360,6 +361,25 @@ class TestVariantField:
     def test_format_value_no_match(self):
         consensus = make_consensus(sample_name="specimen-c1")
         field = VariantField()
+        assert field.format_value(consensus) is None
+
+
+class TestLocusField:
+    """Tests for the locus field."""
+
+    def test_format_value(self):
+        consensus = make_consensus()._replace(locus="ITS")
+        field = LocusField()
+        assert field.format_value(consensus) == "locus=ITS"
+
+    def test_format_value_its1(self):
+        consensus = make_consensus()._replace(locus="ITS1")
+        field = LocusField()
+        assert field.format_value(consensus) == "locus=ITS1"
+
+    def test_format_value_none(self):
+        consensus = make_consensus()
+        field = LocusField()
         assert field.format_value(consensus) is None
 
 
