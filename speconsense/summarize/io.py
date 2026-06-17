@@ -21,6 +21,11 @@ from speconsense.types import ConsensusInfo
 from speconsense.significance import DEFAULT_MIN_CER_FACTOR
 from speconsense.msa import DEFAULT_MAX_ERR_FACTOR
 
+try:
+    from speconsense import __version__
+except ImportError:
+    __version__ = "dev"
+
 from .fields import FastaField, format_fasta_header
 
 
@@ -385,7 +390,7 @@ def write_consensus_fastq(consensus: ConsensusInfo,
                         cluster_reads += sum(1 for _ in rf) // 4
 
                 # Write cluster boundary delimiter
-                outf.write(f"@CLUSTER_BOUNDARY_{idx}:{cluster_name}:RiC={ric}:reads={cluster_reads}\n")
+                outf.write(f"@CLUSTER_BOUNDARY_{idx}:{cluster_name}:RiC={ric}:reads={cluster_reads}:speconsense={__version__}\n")
                 outf.write("NNNNNNNNNN\n")
                 outf.write("+\n")
                 outf.write("!!!!!!!!!!\n")
@@ -522,7 +527,12 @@ def write_specimen_data_files(specimen_consensus: List[ConsensusInfo],
                 f"{consensus.sample_name}-RiC{consensus.ric}.fastq",
             )
             try:
+                num_reads = len(full_reads_by_name[consensus.sample_name])
                 with open(fastq_output_path, 'w') as outf:
+                    outf.write(f"@CLUSTER_BOUNDARY_1:{consensus.sample_name}:RiC={consensus.ric}:reads={num_reads}:speconsense={__version__}\n")
+                    outf.write("NNNNNNNNNN\n")
+                    outf.write("+\n")
+                    outf.write("!!!!!!!!!!\n")
                     SeqIO.write(full_reads_by_name[consensus.sample_name], outf, "fastq")
                 logging.debug(f"Wrote -full FASTQ: {os.path.basename(fastq_output_path)}")
             except Exception as e:
