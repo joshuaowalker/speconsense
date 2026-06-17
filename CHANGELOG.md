@@ -5,6 +5,27 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.8.5] - 2026-06-17
+
+pyitsx-based orientation, combined orientation mode, locus labeling, and FASTQ provenance stamping.
+
+### Added
+
+- **`--orient-mode=pyitsx`** (core) — HMM-based ITS strand detection via pyitsx as an alternative to primer-based orientation. Reverse-complements minus-strand reads (including quality scores) and discards failed and chimeric reads. Requires pyitsx and ITSx HMM profiles. New `--pyitsx-organism` flag (default `F` for Fungi) selects the kingdom.
+- **`--orient-mode=pyitsx+primer`** (core) — Combined mode: pyitsx runs first, then reads it cannot classify fall back to primer-based orientation. Chimeric reads (a positive HMM signal) are always discarded with no fallback.
+- **`locus=` FASTA field** (summarize) — Classifies each consensus sequence via `pyitsx.classify()` and stamps `locus=ITS`, `locus=ITS1`, or `locus=ITS2`. Reads `pyitsx_organism` from core's metadata JSON. Included in the `full` preset and available via `--fasta-fields locus`. Independent of `--orient-mode` — works even with `--orient-mode none` when pyitsx is installed.
+- **Version stamp in FASTQ cluster boundary delimiters** (summarize) — `CLUSTER_BOUNDARY` synthetic records now include `speconsense={version}`, providing provenance tracking and a forensic indicator of whether output has been reprocessed by another tool. Applied to both regular and `-full` FASTQs.
+
+### Changed
+
+- **Orientation mode names simplified** (core) — `skip`/`keep-all`/`filter-failed` replaced by `none`/`primer`/`pyitsx`/`pyitsx+primer`. The `keep-all` mode (orient but keep failures) is removed; all modes now discard failures.
+
+### Migration notes (0.8.4 → 0.8.5)
+
+- **`--orient-mode` values renamed**: `skip` → `none`, `filter-failed` → `primer`. `keep-all` is removed. Scripts using the old names will get an unrecognized-value error.
+- **New `locus=` field** may appear in FASTA headers when using `--fasta-fields full`. Downstream parsers that split on `=` should handle the new key.
+- **FASTQ `CLUSTER_BOUNDARY` format extended** with a trailing `:speconsense=` field. Parsers that split on `:` will see one additional element.
+
 ## [0.8.4] - 2026-06-10
 
 Rationalized ratio/frequency CLI semantics, four-track variant routing, profile auto-detection, and configurable gap handling in merged consensus sequences.
