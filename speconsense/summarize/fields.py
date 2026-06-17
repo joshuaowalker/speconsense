@@ -177,6 +177,16 @@ class GlobalFrequencyField(FastaField):
         return f"global_frequency={consensus.size / consensus.global_size_total * 100:.1f}"
 
 
+class LocusField(FastaField):
+    def __init__(self):
+        super().__init__('locus', 'Detected locus (e.g. ITS, ITS1, ITS2)')
+
+    def format_value(self, consensus: ConsensusInfo) -> Optional[str]:
+        if consensus.locus:
+            return f"locus={consensus.locus}"
+        return None
+
+
 class GroupField(FastaField):
     def __init__(self):
         super().__init__('group', 'Variant group number')
@@ -234,6 +244,7 @@ FASTA_FIELDS = {
     'variant': VariantField(),
     'group_frequency': GroupFrequencyField(),
     'global_frequency': GlobalFrequencyField(),
+    'locus': LocusField(),
 }
 
 # Preset definitions
@@ -241,7 +252,7 @@ FASTA_FIELD_PRESETS = {
     'default': ['size', 'ric', 'rawric', 'rawlen', 'snp', 'ambig', 'primers'],
     'minimal': ['size', 'ric'],
     'qc': ['size', 'ric', 'length', 'rid', 'ambig', 'cer_factor', 'err_factor'],
-    'full': ['size', 'ric', 'length', 'rawric', 'rawlen', 'snp', 'ambig', 'rid', 'cer_factor', 'err_factor', 'primers', 'group_frequency', 'global_frequency'],
+    'full': ['size', 'ric', 'length', 'rawric', 'rawlen', 'snp', 'ambig', 'rid', 'cer_factor', 'err_factor', 'primers', 'locus', 'group_frequency', 'global_frequency'],
     'id-only': [],
 }
 

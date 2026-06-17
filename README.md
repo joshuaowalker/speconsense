@@ -28,6 +28,7 @@ The key features of Speconsense include:
   - [SPOA (SIMD POA)](https://github.com/rvaser/spoa) - Required (install via conda)
   - [MCL](https://micans.org/mcl/) - Optional but recommended for graph-based clustering (install via conda)
   - [vsearch](https://github.com/torognes/vsearch) - Optional, required for scalability mode with large datasets (install via conda)
+  - [pyitsx](https://github.com/joshwalker-bio/pyitsx) + [ITSx](https://microbiology.se/software/itsx/) - Optional, for HMM-based orientation (`--orient-mode pyitsx`)
 
 ### Install from GitHub (Recommended)
 
@@ -83,6 +84,15 @@ conda install bioconda::spoa
 conda install bioconda::vsearch
 
 # Or download from https://github.com/torognes/vsearch/releases
+```
+
+**pyitsx + ITSx - Optional (for HMM-based orientation):**
+```bash
+# pyitsx (Python package)
+pip install pyitsx
+
+# ITSx (provides HMM profiles that pyitsx uses)
+conda install bioconda::itsx
 ```
 
 **Note:** If the mcl tool is not available, speconsense will automatically fall back to the greedy clustering algorithm.
@@ -810,6 +820,7 @@ speconsense-summarize --fasta-fields minimal,qc
 - `cer_factor` — Statistical variant validation factor (None for anchors)
 - `err_factor` — Cluster homogeneity ratio (observed/expected disagreement)
 - `primers` — Detected primer names (when detected)
+- `locus` — Detected locus label: `ITS`, `ITS1`, or `ITS2` (requires pyitsx + ITSx; auto-enabled when pyitsx is available)
 - `group` — Identity group number (extracted from `-{gid}.v{vid}` filename; superseded by `gid=` from core)
 - `variant` — Variant identifier within group (extracted from filename; superseded by `vid=` from core)
 
@@ -817,7 +828,7 @@ speconsense-summarize --fasta-fields minimal,qc
 - `default`: `size, ric, rawric, rawlen, snp, ambig, primers`
 - `minimal`: `size, ric`
 - `qc`: `size, ric, length, rid, ambig, cer_factor, err_factor`
-- `full`: `size, ric, length, rawric, rawlen, snp, ambig, rid, cer_factor, err_factor, primers`
+- `full`: `size, ric, length, rawric, rawlen, snp, ambig, rid, cer_factor, err_factor, primers, locus`
 - `id-only`: (no fields)
 
 The `default` preset does not include `cer_factor` / `err_factor` / `gid` / `vid`. If you want CER and homogeneity metrics in summarize-emitted FASTAs, use `--fasta-fields qc` or `--fasta-fields full`. Core's own FASTA always includes `gid`, `vid`, `cer_factor`, and `err_factor` regardless of the summarize preset.
@@ -1211,7 +1222,8 @@ usage: speconsense [-h] [-O OUTPUT_DIR] [--primers PRIMERS]
                    [--disable-cluster-merging] [--enable-cluster-merging]
                    [--disable-homopolymer-equivalence]
                    [--enable-homopolymer-equivalence]
-                   [--orient-mode {skip,keep-all,filter-failed}]
+                   [--orient-mode {none,primer,pyitsx}]
+                   [--pyitsx-organism PYITSX_ORGANISM]
                    [--presample PRESAMPLE] [--scale-threshold SCALE_THRESHOLD]
                    [--threads N] [--collect-discards]
                    [--no-collect-discards]
@@ -1338,10 +1350,17 @@ Cluster Merging:
                         setting
 
 Orientation:
-  --orient-mode {skip,keep-all,filter-failed}
-                        Sequence orientation mode: skip (default, no
-                        orientation), keep-all (orient but keep failed), or
-                        filter-failed (orient and remove failed)
+  --orient-mode {none,primer,pyitsx}
+                        Sequence orientation mode: none (default, no
+                        orientation), primer (orient via primer matching,
+                        discard failed), or pyitsx (orient via ITS HMM
+                        profiles, discard failed/chimeric; requires pyitsx +
+                        ITSx)
+  --pyitsx-organism PYITSX_ORGANISM
+                        Organism group for pyitsx (default: F for Fungi).
+                        Used for --orient-mode=pyitsx orientation and locus
+                        labeling in summarize. Common codes: F (Fungi),
+                        T (Tracheophyta), M (Metazoa)
 
 Performance:
   --presample PRESAMPLE
@@ -1587,48 +1606,77 @@ Run against the same dataset that produced a shipped model and compare. On `/Use
 
 ### Sequence Orientation Normalization
 
-**Use Case:** Reprocessing output from older bioinformatics pipelines (such as minibar) that do not automatically normalize sequence orientation.
+**Use Case:** Reprocessing output from older bioinformatics pipelines (such as minibar) that do not automatically normalize sequence orientation, or data from public repositories where primer-trimming status is inconsistent.
 
 **Note:** When using speconsense downstream of specimux (recommended workflow), orientation normalization is unnecessary as specimux automatically orients all sequences during demultiplexing.
 
-The `--orient-mode` parameter enables automatic detection and correction of sequence orientation based on primer positions:
+The `--orient-mode` parameter enables automatic detection and correction of sequence orientation:
 
 ```bash
-# Keep all sequences, including those with ambiguous orientation
-speconsense input.fastq --primers primers.fasta --orient-mode keep-all
+# Primer-based orientation (fast, requires primers with position annotations)
+speconsense input.fastq --primers primers.fasta --orient-mode primer
 
-# Filter out sequences that couldn't be reliably oriented
-speconsense input.fastq --primers primers.fasta --orient-mode filter-failed
+# HMM-based orientation via pyitsx (works on primer-trimmed reads, ITS loci only)
+speconsense input.fastq --orient-mode pyitsx
 
-# Skip orientation (default, appropriate when using specimux output)
-speconsense input.fastq --primers primers.fasta
+# HMM-based with non-fungal organism group
+speconsense input.fastq --orient-mode pyitsx --pyitsx-organism T
+
+# No orientation (default, appropriate when using specimux output)
+speconsense input.fastq
 ```
 
 **Available modes:**
-- `skip` (default): No orientation performed, sequences processed as-is
-- `keep-all`: Perform orientation but keep all sequences, including those that failed
-- `filter-failed`: Perform orientation and remove sequences with failed/ambiguous orientation
+- `none` (default): No orientation performed, sequences processed as-is
+- `primer`: Orient via primer matching at read ends; discard reads that fail orientation
+- `pyitsx`: Orient via ITSx HMM profiles; discard reads that fail orientation or are flagged as chimeric
 
-**How it works:**
+Both `primer` and `pyitsx` modes discard unorientable reads (added to discards file when `--collect-discards` is enabled).
+
+#### Primer-based orientation (`--orient-mode primer`)
+
 - Detects orientation by checking for forward and reverse primers at expected positions
 - Uses binary scoring: +1 for forward primer match, +1 for reverse primer match
 - Sequences with clear orientation (score >0 in one direction, 0 in the other) are reoriented if needed
-- Sequences with ambiguous orientation (both 0 or both >0) are marked as failed
+- Sequences with ambiguous orientation (both 0 or both >0) are discarded
+- Requires a primers FASTA with position annotations: `position=forward` or `position=reverse`
+- Fast (~100K reads/sec) but fails on primer-trimmed reads
+
+**Primer file format:**
+```
+>ITS1F  pool=ITS    position=forward
+CTTGGTCATTTAGAGGAAGTAA
+>ITS4   pool=ITS    position=reverse
+TCCTCCGCTTATTGATATGC
+```
+
+#### HMM-based orientation (`--orient-mode pyitsx`)
+
+- Uses conserved rRNA anchor regions (SSU, 5.8S, LSU) to determine strand
+- Works on primer-trimmed reads where primer-based orientation fails
+- Detects chimeric sequences (significant HMM hits on both strands)
+- ITS loci only — not applicable to other amplicon targets
+- ~750 reads/sec (adds ~1s at the default 1000-read presample cap)
+
+**Organism groups** (`--pyitsx-organism`, default `F`):
+
+| Code | Group | Code | Group |
+|------|-------|------|-------|
+| F | Fungi | T | Tracheophyta |
+| M | Metazoa | B | Bryophyta |
+| G | Chlorophyta | H | Rhodophyta |
+| O | Oomycota | N | Microsporidia |
 
 **Requirements:**
-- Primers FASTA file must include position annotations: `position=forward` or `position=reverse`
-- Example format:
-  ```
-  >ITS1F  pool=ITS    position=forward
-  CTTGGTCATTTAGAGGAAGTAA
-  >ITS4   pool=ITS    position=reverse
-  TCCTCCGCTTATTGATATGC
-  ```
+- [pyitsx](https://github.com/joshwalker-bio/pyitsx): `pip install pyitsx`
+- [ITSx](https://microbiology.se/software/itsx/) must be installed (provides HMM profiles): `conda install bioconda::itsx`
+- Alternatively, set `PYITSX_HMM_DIR` to point to the ITSx HMM profile directory
 
 **Technical details:**
 - Orientation occurs before clustering, ensuring all sequences are in the same direction
-- Failed orientations typically indicate: no primers found, chimeric sequences, or degraded primers
 - Quality scores are reversed when sequences are reverse-complemented
+- Chimeric reads (detected by pyitsx) are discarded alongside failed orientations
+- The `pyitsx_organism` parameter is always recorded in the metadata JSON; summarize uses it for locus labeling (`locus=` field) regardless of orient-mode
 
 ### Testing with Synthetic Data
 

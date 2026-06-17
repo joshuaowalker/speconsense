@@ -88,6 +88,7 @@ VALID_SPECONSENSE_KEYS = {
     "disable-homopolymer-equivalence",
     # Orientation
     "orient-mode",
+    "pyitsx-organism",
     # Processing
     "scale-threshold",
     "threads",

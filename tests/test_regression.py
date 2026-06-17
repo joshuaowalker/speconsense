@@ -850,7 +850,7 @@ class TestDiscardTrackingCompleteness:
         """Verify reads filtered by orientation appear in discards.
 
         Creates reads where some cannot be oriented (no primer match).
-        With --orient-mode filter-failed, unoriented reads should be discarded.
+        With --orient-mode primer, unoriented reads should be discarded.
         """
         # Forward primer at start
         forward_primer = "ACGTACGTACGT"
@@ -902,7 +902,7 @@ class TestDiscardTrackingCompleteness:
             sys.executable, '-m', core_module,
             fastq_path,
             '--primers', primers_path,
-            '--orient-mode', 'filter-failed',  # Filter reads that can't be oriented
+            '--orient-mode', 'primer',  # Filter reads that can't be oriented
             '--min-size', '0',
             '--algorithm', 'greedy',
             '--collect-discards'

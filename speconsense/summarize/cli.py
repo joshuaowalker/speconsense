@@ -1007,6 +1007,63 @@ def _resolve_full_consensus_params(
     )
 
 
+def _init_locus_labeler(source_folder: str, file_paths):
+    """Try to initialize a pyitsx ProfileDB for locus labeling.
+
+    Reads pyitsx_organism from the first specimen's metadata JSON.
+    Returns a ProfileDB if pyitsx is available and configured, else None.
+    """
+    try:
+        import pyitsx
+    except ImportError:
+        return None
+
+    organism = None
+    for fp in file_paths:
+        specimen_base = os.path.basename(fp)
+        if specimen_base.endswith('-all.fasta'):
+            specimen_base = specimen_base[:-len('-all.fasta')]
+        metadata = load_metadata_from_json(source_folder, specimen_base)
+        if metadata:
+            organism = (metadata.get('parameters') or {}).get('pyitsx_organism')
+            if organism:
+                break
+
+    if not organism or not pyitsx.is_available(organism):
+        return None
+
+    logging.debug(f"Locus labeling enabled via pyitsx (organism={organism})")
+    return pyitsx.ProfileDB(organism=organism)
+
+
+def _label_loci(consensus_lists, pyitsx_db):
+    """Stamp locus= on each ConsensusInfo in the provided lists.
+
+    Uses pyitsx classification if a ProfileDB is provided.
+    Modifies lists in place (replaces ConsensusInfo via ._replace()).
+    """
+    if pyitsx_db is None:
+        return
+
+    import pyitsx
+
+    for lst in consensus_lists:
+        if not lst:
+            continue
+        seq_tuples = [(cons.sample_name, cons.sequence) for cons in lst]
+        results = pyitsx.classify(seq_tuples, pyitsx_db)
+        for i, r in enumerate(results):
+            if r.has_its1 and r.has_its2:
+                locus = "ITS"
+            elif r.has_its1:
+                locus = "ITS1"
+            elif r.has_its2:
+                locus = "ITS2"
+            else:
+                continue
+            lst[i] = lst[i]._replace(locus=locus)
+
+
 def _clean_specimen_output(summary_dir: str, specimen_id: str) -> None:
     """Remove previous output files for a specimen before reprocessing.
 
@@ -1162,6 +1219,13 @@ def main():
     # cer_factor. Populated lazily inside the per-specimen loop.
     qctx_table_cache: Dict[str, Optional[Dict[str, float]]] = {}
 
+    # Initialize locus labeler from core metadata (pyitsx_organism).
+    # Returns a ProfileDB if pyitsx is available, else None.
+    all_file_paths_for_init = sorted(
+        set(file_groups.keys()) | set(ns_by_file.keys()) | set(lq_by_file.keys())
+    )
+    pyitsx_db = _init_locus_labeler(args.source, all_file_paths_for_init)
+
     # Process each specimen file independently
     all_final_consensus = []
     all_merge_traceability = {}
@@ -1229,6 +1293,12 @@ def main():
             full_max_sample_size=full_max_sample,
             specimen_global_size_total=specimen_global_total,
             full_primers=full_primers,
+        )
+
+        # Label loci on all output tracks before writing
+        _label_loci(
+            [final_consensus, specimen_ns, specimen_lq, specimen_filtered],
+            pyitsx_db,
         )
 
         # Write individual data files immediately

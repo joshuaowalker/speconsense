@@ -17,6 +17,7 @@ from speconsense.summarize.fields import (
     RidMinField,
     GroupField,
     VariantField,
+    LocusField,
     # Registry and presets
     FASTA_FIELDS,
     FASTA_FIELD_PRESETS,
@@ -363,6 +364,25 @@ class TestVariantField:
         assert field.format_value(consensus) is None
 
 
+class TestLocusField:
+    """Tests for the locus field."""
+
+    def test_format_value(self):
+        consensus = make_consensus()._replace(locus="ITS")
+        field = LocusField()
+        assert field.format_value(consensus) == "locus=ITS"
+
+    def test_format_value_its1(self):
+        consensus = make_consensus()._replace(locus="ITS1")
+        field = LocusField()
+        assert field.format_value(consensus) == "locus=ITS1"
+
+    def test_format_value_none(self):
+        consensus = make_consensus()
+        field = LocusField()
+        assert field.format_value(consensus) is None
+
+
 class TestFieldRegistry:
     """Tests for the field registry."""
 
@@ -372,7 +392,7 @@ class TestFieldRegistry:
             'size', 'ric', 'length', 'rawric', 'rawlen',
             'snp', 'ambig', 'rid', 'rid_min', 'cer_factor',
             'err_factor', 'primers', 'group', 'variant',
-            'group_frequency', 'global_frequency'
+            'group_frequency', 'global_frequency', 'locus'
         }
         assert set(FASTA_FIELDS.keys()) == expected
 

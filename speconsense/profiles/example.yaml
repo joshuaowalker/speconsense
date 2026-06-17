@@ -61,8 +61,9 @@ speconsense:
   # disable-cluster-merging: false     # Set true to skip merging similar clusters
   # disable-homopolymer-equivalence: false  # Set true for strict homopolymer comparison
 
-  # --- Primer Orientation ---
-  # orient-mode: skip             # skip, keep-all, or filter-failed
+  # --- Orientation ---
+  # orient-mode: none             # none, primer, pyitsx, or pyitsx+primer
+  # pyitsx-organism: F            # Organism group for pyitsx (F=Fungi, T=Tracheophyta, M=Metazoa, etc.)
 
   # --- Processing ---
   # threads: 1                    # Max threads (0 = auto-detect, 1 = safe for parallel workflows)
