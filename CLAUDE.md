@@ -1,258 +1,97 @@
 # CLAUDE.md
 
-This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
+Guidance for Claude Code working in this repository.
 
-## Project Overview
+## Project
 
-Speconsense is a Python tool for high-quality clustering and consensus generation from Oxford Nanopore amplicon reads. It's designed as an experimental alternative to NGSpeciesID in the fungal DNA barcoding pipeline.
+Speconsense clusters Oxford Nanopore amplicon reads and generates high-quality consensus
+sequences — an experimental alternative to NGSpeciesID in the fungal DNA barcoding pipeline.
+Two entry points do the work: `speconsense` (clustering + consensus) and
+`speconsense-summarize` (post-processing, quality routing, naming).
 
-## Key Commands
+## Commands
 
-### Running the tools
 ```bash
-# Main clustering tool (basic usage)
-speconsense input.fastq
+pip install -e .                  # dev install
+pytest                            # full suite (config in pytest.ini)
+pytest tests/test_orientation.py  # single file
 
-# With common options
-speconsense input.fastq --algorithm greedy --min-size 10 --primers primers.fasta
-
-# Post-processing tool
-speconsense-summarize --min-ric 5 --source /path/to/output --summary-dir MyResults
-
-# Synthetic data generator for testing
-speconsense-synth reference.fasta --num-reads 1000 --error-rate 0.05 --output synthetic.fastq
-
-# Custom error-model fitter (deposits ~/.config/speconsense/error_models/{name}.yaml)
-speconsense-fit-error-model /path/to/clusters --name my-model --min-ric 200 --max-err-factor 1.0
+conda install bioconda::spoa      # required, must be on PATH
+conda install bioconda::mcl       # optional, recommended
 ```
 
-### Development setup
-```bash
-# Install in development mode
-pip install -e .
+README.md covers installation, usage, options, and output layout for users. `--help` is
+current for every flag; prefer it over any list written down here.
 
-# External dependencies (must be in PATH)
-conda install bioconda::spoa  # Required
-conda install bioconda::mcl   # Optional but recommended
-```
+## Where things are
 
-### Testing
-```bash
-# Run all tests
-pytest
+| Need | Read |
+|---|---|
+| Module map, the 14 core phases, summarize's 8, orientation backends | `docs/architecture/pipeline.md` |
+| CER, `err_factor`, identity grouping, gid/vid ranks, IUPAC/distance machinery | `docs/architecture/variant-model.md` |
+| Naming policy, four output tracks, merge-time field recompute, `-full` | `docs/architecture/summarize-outputs.md` |
+| Profile parameters / FASTA header fields / RiC semantics (user-facing) | `docs/profile-parameters.md`, `docs/customizing-fasta-headers.md`, `docs/understanding-ric-and-merging.md` |
 
-# Run specific test file
-pytest tests/test_orientation.py
+Phase-level detail lives in code: `SpecimenClusterer._phase_*` docstrings
+(`speconsense/core/clusterer.py`) and the `# Phase N:` comments in `speconsense/summarize/cli.py`.
+Those are authoritative — the docs above are the map, not the territory.
 
-# Run tests with specific markers
-pytest -m "not slow"
-```
+## Gotchas
 
-## Code Architecture
+Things that will bite you, that reading the nearby code will not reveal.
 
-### Main Components
+**The MCL K-NN graph is deliberately asymmetric.** `similarities[id1]` holds only neighbors
+`id2 > id1` (`scalability/base.py`). This contradicts the MCL docs and looks like a bug; it is a
+weakly-held decision that affects tie-breaking and changes clustering results if "fixed."
+Validate against existing tests before touching it.
 
-**speconsense/core/** - Core clustering and consensus generation subpackage:
-- `clusterer.py`: `SpecimenClusterer` class — main orchestrator for the clustering pipeline
-- `workers.py`: Worker functions for parallel processing (SPOA, cluster processing, phasing, primer trimming)
-- `cli.py`: Command-line interface and argument parsing
-- Two clustering algorithms: graph-based MCL (default) and greedy clustering
-- Consensus generation via external SPOA tool
-- Cluster merging based on consensus sequence similarity
-- Stability assessment through subsampling
+**`DEFAULT_MIN_CER_FACTOR` (`significance.py`) and `DEFAULT_MAX_ERR_FACTOR` (`msa.py`) are shared
+on purpose.** They back both core's vid tiering and summarize's `--min-cer-factor` /
+`--max-err-factor` defaults, so the two cannot drift. Don't hardcode `1.0` / `1.5` anywhere.
 
-**speconsense/summarize/** - Post-processing utility subpackage:
-- `cli.py`: Command-line interface and main entry point
-- `iupac.py`: IUPAC-aware distance calculations (re-exports shared helpers from `distances.py`)
-- `fields.py`: FASTA header field classes and formatting
-- `analysis.py`: MSA analysis, cluster quality, outlier detection
-- `merging.py`: MSA-based variant merging with IUPAC consensus
-- `clustering.py`: Bucketing by core-assigned gid, cross-primer anchor merger, variant selection
-- `io.py`: File I/O (loading sequences, writing consensus FASTA/FASTQ/debug outputs)
+**Core stamps `gid`/`vid` once; summarize never renumbers.** Gaps in the vid sequence are expected
+output — a variant routed to `.ns`/`.lq`/`.filtered` leaves its number behind. Summarize hard-fails
+on inputs lacking `gid=`/`vid=`; identity grouping happens only in core.
 
-**Shared top-level modules** (used by both subpackages):
-- `types.py`: `ConsensusInfo`, `OverlapMergeInfo` NamedTuples — avoids circular imports. Use `._replace()` to create modified copies.
-- `msa.py`: SPOA MSA analysis, homopolymer-normalized error detection, IUPAC generation, variant position detection/phasing support. Defines `IUPAC_CODES`.
-- `distances.py`: IUPAC-aware edlib alignment, adjusted-identity distance, variant difference counting. Defines `IUPAC_EQUIV` and `STANDARD_ADJUSTMENT_PARAMS`.
-- `context.py`: Per-position variant context classification (`ContextClass`, `ContextTag`) driving CER q_ctx lookup. HP context comes from the reference consensus.
-- `qctx.py`: Loads error models (context-specific error-rate tables) from `error_models/*.yaml`. `DEFAULT_MODEL_NAME = "dorado-v5.0"`. HP runs beyond `MAX_HP_LENGTH=5` route to blanket normalization. Resolution order: filesystem path → `~/.config/speconsense/error_models/` → bundled.
-- `significance.py`: Critical error rate (p*) via binomial survival with Bonferroni correction, uniform error model (q=p/3). The shipped pipeline reports `cer_factor` (per-position multiplicative inflation) directly from the joint q* solver; the uniform-p* form is retained for the variant-significance paper's tables.
-- `quality_report.py`: Multi-section quality report for `speconsense-summarize`.
-- `cli.py`: Top-level entry-point stub that re-exports `core.main`.
+**The largest cluster is not necessarily `1.v1`.** Variant ranking is
+`(expected_to_pass_summarize, size)`, so a high-`err_factor` cluster gets demoted. This is why
+`fit_error_model` re-derives the primary anchor by read count instead of trusting the label.
 
-**speconsense/scalability/** - Optional acceleration for O(n²) pairwise work:
-- `base.py`: `CandidateFinder` protocol, `ScalablePairwiseOperation` (top-K neighbors for MCL, sparse distance matrix for identity grouping, equivalence groups for cluster merging)
-- `vsearch.py`: vsearch-backed candidate finder
-- `config.py`: `ScalabilityConfig`
-- Activates when `len(seqs) >= scale_threshold` AND vsearch is on PATH. Active uses: initial-clustering K-NN (MCL graph), cluster-equivalence merging (HP-equivalence union-find), identity grouping (`_form_identity_groups` sparse distance matrix, used by read reassignment, discard recovery, and CER validation), discard screening (top-K cluster matches per discard), CER validation within-group top-K (per-group most-similar peers when group exceeds 50). Noise-filter SPOA is parallelized via `ProcessPoolExecutor` when `--threads N>1` (no vsearch dependency).
+**`qctx.MAX_HP_LENGTH = 5` and `--hp-normalization-length` (default 6) are different knobs.** The
+first is where the error-model table stops and blanket HP normalization takes over; the second is
+the distance-comparison threshold shared by core and summarize.
 
-**speconsense/profiles/** - Profile system for parameter presets:
-- YAML profiles (`compressed`, `herbarium`, `largedata`, `nostalgia`, `strict`, `example`) bundled in the package
-- User profiles in `~/.config/speconsense/profiles/` take precedence over bundled
-- Override order: defaults → profile (explicit or auto-detected) → explicit CLI arguments
-- Valid keys are strictly validated; profile keys use dashes (e.g., `disable-merging`), argparse attrs use underscores
-- `VALID_SPECONSENSE_KEYS` / `VALID_SUMMARIZE_KEYS` in `profiles/__init__.py` are the source of truth for acceptable keys
-- Reserved profile name `default` (`RESERVED_PROFILE_NAMES`): selects CLI defaults without loading a YAML file. Use `-p default` on summarize to override auto-detection, or on core for explicit "no profile" in metadata
-- **Profile auto-detection**: summarize scans metadata JSONs for the `profile` field written by core. If all specimens that report a profile agree, summarize auto-applies it (with logged parameter listing). Mixed profiles warn. Specimens without metadata or profile field are ignored. `-p` (including `-p default`) skips auto-detection
+**`snp_count` can over-count by 0–2** across iterative merge rounds when the same physical position
+goes ambiguous more than once. `ambig` is the canonical IUPAC-site count.
 
-**speconsense/error_models/** - Bundled per-basecaller error models (YAML), loadable by name (`--error-model dorado-v5.0`), from `~/.config/speconsense/error_models/`, or by filesystem path.
+**SPOA output depends on input order.** The first sequence anchors the graph and therefore the
+alignment coordinate frame. `_run_spoa_for_cluster_worker` writes dict entries in insertion order,
+so callers control the frame by construction order. All cluster-level SPOA calls use linear gap
+scoring (`-m 1 -n -1 -g -1 -e -1`), which produces roughly 4x fewer ambiguities than SPOA's
+defaults — keep them in sync across `core/workers.py` and `summarize/analysis.py`.
 
-**speconsense/synth.py** - Synthetic read generator for testing consensus algorithms.
+**`-full` records carry IUPAC codes.** They are meant for BLAST against legacy unphased ITS
+references *with adjusted-identity scoring*, and degrade silently under raw BLAST.
 
-**speconsense/fit_error_model/** - `speconsense-fit-error-model` CLI: offline q_ctx re-estimation from a finished output tree, writes a user model to `~/.config/speconsense/error_models/{name}.yaml`. Approach-1 (HP rates from primary-anchor MSAs, mode-as-ground-truth + Bonferroni outlier + bimodal filter) and approach-2 (non-HP rates pooled across all-cluster MSAs) from HP paper §8 / CER paper §4.2. `hp-l{N}` is the implied per-position rate `p` such that `(1-p)^N = frac_correct` (HP paper §3.5), not raw `1-frac_correct`.
+**`ConsensusInfo` / `OverlapMergeInfo` are NamedTuples** (`types.py`, structured that way to avoid
+circular imports). Use `._replace()` to derive modified copies.
 
-### Key Processing Pipeline
+**Profile keys use dashes, argparse attrs use underscores** (`disable-merging` →
+`disable_merging`). `VALID_SPECONSENSE_KEYS` / `VALID_SUMMARIZE_KEYS` in `profiles/__init__.py`
+are the source of truth, and validation is strict.
 
-Read in `SpecimenClusterer.cluster()` (`speconsense/core/clusterer.py`); 14 sequential phases:
+**In `summarize/fields.py`, the `.raw` portion of the variant regex must stay outside the capture
+group**, or `VariantField` returns `v1.raw2` instead of `v1`.
 
-1. **Initial clustering** — MCL graph-based or greedy
-2. **Pre-phasing merge** — combine HP-equivalent initial clusters
-3. **Variant phasing** — split clusters by haplotype via MSA position analysis
-4. **Post-phasing merge** — combine HP-equivalent subclusters
-5. **Noise filter** — drop small clusters with no-majority columns
-6. **Read reassignment** (optional) — concordance-based moves within identity groups
-7. **Discard recovery** (optional, coupled to 6) — re-admit previously-dropped reads
-8. **Second phasing pass** — re-phase any clusters that gained reads via 6/7
-9. **Cluster consensus generation** — SPOA → MAD outlier removal → re-SPOA → IUPAC ambiguity calling → primer trimming; stamps post-MAD MSA and consensus on each cluster_dict
-10. **Post-refinement merge** — combine clusters whose post-MAD consensuses are identical or HP-equivalent; reruns Phase 9 worker on each merge survivor
-11. **CER validation** — annotate each non-anchor candidate with its `cer_factor`
-12. **Size filtering** — drop clusters below `--min-size`
-13. **Output emission** — compute `err_factor` on each stamped MSA, then assign identity ranks (`_assign_identity_ranks`) and write FASTA/FASTQ/MSA
-14. **Discard reads written** (optional, `--collect-discards`)
+## Conventions
 
-Orientation (when `--orient-mode` ≠ none) and primer trimming run during input processing and final consensus respectively, outside the numbered phases. Two backends: `primer` (edlib-based primer matching at read ends) and `pyitsx` (HMM profile-based ITS strand detection via pyitsx; optional dependency, ITS loci only, `--pyitsx-organism` selects kingdom, default Fungi). Both discard failed reads. `--orient-mode=pyitsx+primer` combines both: pyitsx runs first, then reads it cannot classify (strand=None) fall back to primer-based orientation; chimeric reads are always discarded. Useful for mixed runs where some amplicons target non-ITS loci not covered by ITSx HMMs. `--orient-mode=pyitsx` (without `+primer`) discards all pyitsx failures with no fallback. Reads that fail clustering or are dropped by any filter accumulate in `self.discarded_read_ids`; phase 7 attempts to recover concordant ones.
+Match the surrounding code — this codebase leans on substantial module and function docstrings
+that explain *why*, especially in `clusterer.py`. Follow that where the reasoning is non-obvious.
 
-**Identity rank (gid/vid) ordering** (`_assign_identity_ranks`): groups are ranked by anchor (largest-member) size desc, so `gid=1` is always the largest group. Variants *within* a group are ranked by a quality-aware tier `(expected_to_pass_summarize, size)` desc — clusters expected to survive summarize's default cer/err filters get the low vids, then size desc within each tier. This keeps primary-track vids contiguous in the common case (no gap where a low-`cer_factor`/high-`err_factor` variant gets routed to `.ns`/`.lq`) while preserving traceability: vids are stamped once here and summarize never renumbers. The tier boundaries are the shared constants `DEFAULT_MIN_CER_FACTOR` (`significance.py`) and `DEFAULT_MAX_ERR_FACTOR` (`msa.py`), which also back summarize's `--min-cer-factor`/`--max-err-factor` defaults so they cannot drift. Because the largest cluster can be demoted below `vid=1` when its `err_factor` is high, `fit_error_model` re-derives the primary anchor by max read count rather than trusting the `1.v1` label.
+Behavior changes that affect FASTA headers, naming, or output tracks need a test; `tests/` mixes
+direct-import unit tests with subprocess-driven integration tests of the CLIs.
 
-### Post-Processing Pipeline (speconsense-summarize)
+## Related
 
-1. Load sequences with RiC filtering
-2. Bucket by core-assigned `gid=` (identity group rank) — no re-grouping
-3. Cross-primer overlap conflation (`--min-merge-overlap`) merges different-primer core groups whose members overlap well (primer-pool use case: ITS/ITS1/ITS2)
-4. Homopolymer-aware MSA-based merging within each (possibly-conflated) group
-5. Post-merge re-check — cancel merges whose recomputed `err_factor`/`cer_factor` cross filter thresholds; restore original contributors on pass track
-6. Selection size ratio filtering (`--select-min-size-ratio`) — removes tiny post-merge variants
-7. Variant selection within each group (size-based or diversity-based)
-8. Output generation with full traceability
-
-Note: Identity grouping is performed once, in core, via complete linkage on `--group-identity` (default 0.85). Summarize honors those groups verbatim (hard-fails on inputs lacking `gid=`/`vid=`) and only merges *across* core groups when cross-primer overlap passes threshold.
-
-**Naming policy** (`process_single_specimen`): summarize preserves core's `gid`/`vid` on every record that is **not moved between groups by cross-primer conflation**. Variants dropped by within-group MSA merging, `--select-max-variants`, `--select-min-size-ratio`, `--min-cer-factor`, or `--max-err-factor` leave their vids as gaps. Variants moved into a survivor group by cross-primer conflation adopt the survivor's `gid` and get a freshly-minted `vid` strictly above the highest vid core ever wrote under that gid — collision-avoidance considers passed + `.ns` + `.lq` + `.filtered` records under that gid plus any vids already minted in the same pass (covers 3+ group conflation). Vids under absorbed-group gids stay on disk under their original gid in `.ns`/`.lq`/`.filtered` outputs and do not block the survivor's namespace.
-
-**Four-track variant routing**: summarize routes every variant to exactly one of four output tracks:
-- **pass** — quality gates met and selected for review. Written to `-all.fasta` and `variants/`.
-- **`.ns`** (not significant) — `cer_factor` below `--min-cer-factor` (default `1.0`). Likely sequencing artifacts relative to a larger peer.
-- **`.lq`** (low quality) — `err_factor` above `--max-err-factor` (default `1.5`). Internal cluster heterogeneity exceeds basecaller noise expectations. `.lq` takes precedence when both `.ns` and `.lq` thresholds fire.
-- **`.filtered`** — passes quality gates but excluded by a selection or pruning decision: `--select-max-variants`, `--select-min-size-ratio`, `--select-max-groups`, or `--prune-group-ratio`/`--prune-group-count`. Distinguishes "quality problem" (`.ns`/`.lq`) from "selection decision" (`.filtered`).
-
-**Post-merge re-check and merge unwind**: after Phase 4 (MSA merging) recomputes `err_factor`/`cer_factor` on merged records, any merged record whose recomputed metrics cross filter thresholds has its merge cancelled — the original pre-merge contributors are restored on the pass track rather than routing the synthetic merged record to `.lq`/`.ns`. When a merged record is dropped by selection filtering (Phase 6/7), the merge is unwound: original pre-merge contributors are emitted individually on the `.filtered` track instead of the synthetic merged record, preserving per-cluster metrics for reviewer detail.
-
-**Merge-time field handling**: when ≥2 contributors collapse into one record (within-group MSA merge or cross-primer overlap conflation), summarize aggregates per-field via `_build_merged_consensus_info` and a follow-up recompute pass in `process_single_specimen`. `size`/`ric` are summed; `length`/`ambig` are re-derived from the column-voted consensus; `rawric`/`rawlen` carry flattened merge history; `primers` is the union of contributor primer names sorted; `rid`/`rid_min`/`err_factor` are re-derived from a SPOA MSA over the union of contributor reads (loaded from each contributor's `cluster_debug` FASTQ); `cer_factor` is recomputed against larger peers in the post-merge bucket for same-primer merges and set to `None` for cross-primer merges (CER noise model is per-locus). `snp_count` is cumulative across iterative rounds and can over-count by 0–2 when the same physical position becomes ambiguous in multiple rounds — `ambig` is the canonical IUPAC-site count. `.raw` pre-merge files are named `.raw.{gid}.v{vid}` (using the original core `gid.vid` of the contributor) for direct traceability, and carry every field from their source cluster (matching `.ns`/`.lq` pass-through), only resetting the merge-history fields. Recompute requires the contributors' debug FASTQs and the per-specimen metadata JSON's `parameters.error_model`; missing inputs fall back to the inherited values from the largest contributor.
-
-**Frequency fields** (`group_frequency=`, `global_frequency=` — opt-in via `--fasta-fields full` or explicit listing): each variant's `size` as a percentage of a per-specimen denominator. `group_frequency` uses the **conflation-aware bucket total** — sum of `size` over every record (passed + `.ns` + `.lq` + `.filtered`) in the same post-cross-primer-conflation bucket, so a moved variant is measured against the merged-group total. `global_frequency` uses `total_input_reads` from the metadata JSON (post-presample-cap count fed into clustering, not the literal cap). Denominators computed in `process_single_specimen` after Phase 1b and stashed on each `ConsensusInfo` (`group_size_total`, `global_size_total`). Suppressed when denominators are unavailable (legacy inputs without `gid=`; specimens with missing metadata). Both fields propagate through within-group MSA merges, the `-{gid}-full` builder, and the `.raw` / `.ns` / `.lq` / `.filtered` writers.
-
-**Locus labeling** (`locus=` — opt-in via `--fasta-fields full`, `--fasta-fields locus`, or explicit listing): summarize classifies each consensus sequence via `pyitsx.classify()` and stamps `locus=ITS`, `locus=ITS1`, or `locus=ITS2`. The organism group is read from core's metadata (`parameters.pyitsx_organism`, always recorded, default `F`). Initialization is lazy: `_init_locus_labeler` checks `pyitsx.is_available()` and creates a `ProfileDB` once for the run. Silently omitted when pyitsx is unavailable or the organism's profiles are not installed. Independent of `--orient-mode` — locus labeling works even with `--orient-mode none`.
-
-**Group full consensus** (`--enable-full-consensus`, `speconsense/summarize/full_consensus.py`): per identity group with ≥2 selected variants on the pass track, summarize emits an additional `-{gid}-full` record built from a size-weighted, top-mean-Phred sample of the **pre-merge core variants** in the bucket (sourced from `variant_groups[final_gid]`, so within-group MSA merging and selection filters do not constrain the read pool). Variants are gated by a running-total threshold using `parameters.min_ambiguity_frequency` from core's metadata JSON (default 0.10): each contributor must satisfy `size ≥ min_ambiguity_frequency × running_total`. The sampled reads (budget = `parameters.max_sample_size`, default 100) go through SPOA with linear gap scoring; `-l 0` (local SW) when the gated bucket spans multiple primer sets, else `-l 1` (global NW). The MSA is collapsed via `build_full_consensus_from_msa` with one-vote-per-read and majority-wins gaps; columns where ≥2 bases each clear `min_ambiguity_frequency` get IUPAC codes. Output: FASTA entry in `-all.fasta`, sampled-reads FASTQ in `FASTQ Files/`, no `.raw` lineage (synthetic record). Suppressed when `<2` pass-track variants exist for the group, `<2` contributors clear the gate, or the read pool can't be loaded. `.ns` and `.lq` records are excluded from the pool by construction (filtered upstream by `load_consensus_sequences`). Intended use is BLAST query against legacy unphased ITS references with adjusted-identity scoring — `-full` is IUPAC-bearing and will silently degrade under raw BLAST.
-
-### External Dependencies
-
-- **SPOA**: Required for consensus generation, must be in PATH. When running SPOA, the candidate sequence must be the first input.
-- **MCL**: Optional but recommended for graph clustering (falls back to greedy if missing)
-- **vsearch**: Optional; enables the `scalability` candidate-finder backend for large inputs
-- **edlib**: Edit distance calculations; used with `IUPAC_EQUIV` for ambiguity-aware alignment
-- **adjusted-identity**: IUPAC-aware sequence alignment (from GitHub, `>=0.2.4`)
-- **BioPython**, **NumPy**, **SciPy**, **tqdm**, **PyYAML**: see `pyproject.toml`
-
-### Output Structure
-
-**Main consensus files** (from speconsense):
-- `{sample_name}-all.fasta` - All consensus sequences for a specimen
-- `cluster_debug/` directory:
-  - `{sample_name}-c{num}-RiC{size}-reads.fastq` - Original reads
-  - `{sample_name}-c{num}-RiC{size}-sampled.fastq` - Sampled reads for consensus
-  - `{sample_name}-c{num}-RiC{size}-untrimmed.fasta` - Untrimmed consensus
-
-**Summary files** (from speconsense-summarize):
-- `__Summary__/` directory with processed outputs
-- Dual namespace system:
-  - Original clustering: `-c1`, `-c2`, `-c3` format
-  - Summarization: `-1.v1`, `-1.v2`, `-2.v1` format for groups and variants
-- Four output tracks in `__Summary__/variants/`:
-  - Pass: `{name}-RiC{ric}.fasta` — selected, quality-passing variants
-  - `.ns`: `{name}.ns-RiC{ric}.fasta` — CER-filtered (below `--min-cer-factor`)
-  - `.lq`: `{name}.lq-RiC{ric}.fasta` — err_factor-filtered (above `--max-err-factor`)
-  - `.filtered`: `{name}.filtered-RiC{ric}.fasta` — selection-filtered (pruning, max-variants, size-ratio)
-- Pre-merge contributor files: `{name}.raw.{gid}.v{vid}-RiC{ric}.fasta` — original core variant for each merge contributor, named by the contributor's core `gid.vid` for direct traceability
-
-### IUPAC Ambiguity Code Handling
-
-The codebase uses IUPAC nucleotide ambiguity codes throughout:
-- `IUPAC_CODES` (in `msa.py`) maps nucleotide sets to codes (R=A/G, Y=C/T, etc.)
-- `IUPAC_EQUIV` (in `distances.py`) enables edlib alignment to treat ambiguity codes as matching their constituent bases
-- `STANDARD_ADJUSTMENT_PARAMS` (in `distances.py`) defines consistent sequence comparison parameters:
-  - Homopolymer normalization enabled (treats "AAA" = "AAAAA")
-  - IUPAC overlap disabled (uses standard IUPAC semantics: Y≠M)
-  - No end trimming (`end_skip_distance=0`)
-  - Single-base repeats for homopolymer normalization
-- Safeguards `MIN_COVERAGE_THRESHOLD=0.5` and `MAX_ADJUSTMENT_RATIO=1.5` fall back to raw edlib identity when terminal-gap exclusion would inflate adjusted identity on length-mismatched sequences.
-
-### Variant Significance and CER
-
-Phasing uses a three-stage architecture: phase indiscriminately, group by identity, then annotate pairwise via CER. Identity grouping uses **complete linkage** (every pair in a group must meet `--group-identity`, default `0.85`) via `scipy.cluster.hierarchy`, preventing transitive chains that would otherwise collapse closely related variants in eDNA-style mixtures. The same groups gate read reassignment and discard recovery — reads can only move within their identity group. Key pieces:
-- `significance.compute_critical_error_rate(N, M, L, alpha, K)` — p* under uniform model (q=p/3), with combinatorial Bonferroni for `K>1` multi-position variants.
-- `context.classify_variant_context()` produces one `ContextTag` per variant event (substitution or contiguous indel block). HP context comes from the reference consensus — the artifact hypothesis under test is that the candidate's reads are miscalled copies of the reference.
-- `qctx.get_qctx(tag, table)` returns a per-position error rate; HP runs longer than the table's max route to blanket homopolymer normalization.
-
-**No gating in core.** Every non-anchor candidate is pairwise-compared against all larger peers in its identity group, annotated with a `cer_factor` (per-position multiplicative inflation; worst-case across peers), and flows through to the FASTA output. The reference pool accumulates all processed clusters regardless of factor — `min_factor` is inherently conservative for artifact-vs-artifact cases. **Summarize applies the user-visible pass/ns/lq/filtered routing** via `--min-cer-factor` (default `1.0`; `0` disables) and `--max-err-factor` (default `1.5`; `0` disables). Records below the CER threshold are routed to `.ns`; records above the err_factor threshold to `.lq` (`.lq` takes precedence); records that pass quality but are excluded by selection/pruning to `.filtered`. Records with `cer_factor=None` (anchors, failed pairwise comparison) always pass quality gates. The FASTA header carries only `cer_factor=`; full per-position detail (p*, K, context tags, q_ctx values, reference idx) lives in the metadata JSON via `_build_variant_record`.
-
-### Cluster Homogeneity (err_factor)
-
-Complementary to CER, `err_factor` is a cluster-wide observed-vs-q_ctx-expected disagreement ratio: for each non-gap consensus column, the fraction of reads disagreeing with the consensus divided by the q_ctx rate predicted for that column's context (HP run length or non-HP). Values near 1.0 indicate reads consistent with basecaller noise; values ≫ 1.0 indicate internal heterogeneity beyond what sequencing noise would produce. Unlike `cer_factor`, `err_factor` is peer-independent — it distinguishes novel-but-real sequences (low) from noise combinations (high).
-
-Computed in `msa.compute_cluster_err_factor(msa_string, qctx_table)` during final consensus generation; emitted as `err_factor=` in the FASTA header and stored with raw `obs_sum`/`exp_sum`/`cols` in metadata JSON for reproducibility. **Summarize filters on it** via `--max-err-factor` (default `1.5`; `0` disables). Records above threshold route to `__Summary__/variants/{name}.lq-RiC{ric}.fasta`; `.lq` takes precedence over `.ns` when both fire. The 1.5 default is safe because MAD outlier removal at final consensus (see ``speconsense.outliers.detect_rid_outliers``) removes single-read outliers that would otherwise inflate err_factor on real clusters.
-
-### Algorithm Selection
-
-**Graph-based MCL (default)**:
-- Better at detecting sequence variants within specimens
-- More clusters, higher granularity
-- Requires MCL tool in PATH (falls back to greedy if missing)
-
-**Greedy clustering (`--algorithm greedy`)**:
-- Faster, simpler output
-- Fewer clusters, focuses on well-separated sequences
-- Good for detecting distinct targets vs. contaminants
-
-### MCL Graph Construction (Design Decision)
-
-The K-NN similarity graph for MCL (in `scalability/base.py`) uses an **asymmetric edge storage pattern** where `similarities[id1]` only contains entries for neighbors `id2 > id1` (lexicographically). This is a weakly-held design decision that produces good clustering results despite the MCL documentation recommending symmetric graphs.
-
-**Why asymmetric?** The pattern emerged from the original implementation and affects tie-breaking when multiple neighbors have identical similarity scores. Changing to symmetric storage would alter which neighbors are selected during K-NN construction, potentially changing clustering results. Validate against existing test cases before changing.
-
-### Integration Context
-
-Designed to replace NGSpeciesID in the ONT fungal barcoding pipeline from protocols.io. Processes demultiplexed FASTQ files and generates consensus sequences suitable for taxonomic identification. Typically used downstream of specimux for demultiplexing.
-
-### Configuration
-
-Parameters are controlled via CLI arguments, optionally pre-set via YAML profiles (`-p/--profile`, `--list-profiles`). Key parameters:
-- Identity thresholds (`--min-identity`)
-- Clustering algorithm choice (`--algorithm`)
-- Sample size limits (`--max-sample-size`, `--presample`)
-- Cluster size filtering (`--min-size`)
-- Primer handling (`--primers`, `--orient-mode {none,primer,pyitsx,pyitsx+primer}`, `--pyitsx-organism`)
-- Variant phasing (`--disable-position-phasing`, `--min-variant-frequency`, `--significance-level`)
-- Post-phasing refinement: `--disable-read-reassignment` (concordance-based reassignment within identity groups), `--disable-discard-recovery` (re-admit dropped reads; auto-skipped if read reassignment is disabled). The second phasing pass is gated by `--disable-position-phasing` AND `--disable-read-reassignment` — disabling either skips it.
-- Error model selection (`--error-model`, `--hp-normalization-length`)
-- Summarize CER filter (`--min-cer-factor`, default `1.0`, `0` disables)
-- Summarize err_factor filter (`--max-err-factor`, default `1.5`; `0` disables)
-- Summarize secondary group pruning (`--prune-group-ratio`, default `0.10`; `--prune-group-count`, default `15`; both `0` disables)
-- Summarize HP threshold (`--hp-normalization-length`, default `6`; matches core; `1` restores legacy blanket-normalize-all behavior)
-- Summarize consensus output gap handling (`--min-position-frequency`, default `0.5`; `--min-position-count`, default `3`). Controls how gap vs. base disagreements are resolved in merged and `-full` consensus sequences. Both thresholds must be met for a column to be retained. Default `0.5` matches majority-wins behavior; `compressed` profile uses `0.1`.
-
-## Integration with specimux-suite
-
-See `~/mm/code/specimux-suite/INTEGRATION.md` for integration contracts with specimux-suite, including:
-- Profile system (`-p/--profile`, `--list-profiles`) — profiles in `~/.config/speconsense/profiles/` and bundled
-- Subprocess invocation contract — how specimux-suite constructs speconsense commands
+`~/mm/code/specimux-suite/INTEGRATION.md` — profile system and subprocess invocation contracts
+with specimux-suite.
