@@ -272,3 +272,97 @@ def test_validate_identity_group_skips_below_threshold():
     # Identical, since scale_threshold=10 still triggers scalability_config.enabled
     # but the per-group >50 gate inside _validate_identity_group keeps the dense path.
     assert dense_factors == sparse_attempt
+
+
+# ---------- force_scalable: cluster-level ops below the read-count threshold ----------
+
+def _spied_finder():
+    """VsearchCandidateFinder whose build_index calls are counted."""
+    from speconsense.scalability import VsearchCandidateFinder
+
+    finder = VsearchCandidateFinder(num_threads=1)
+    calls = []
+    orig = finder.build_index
+
+    def spy(*args, **kwargs):
+        calls.append(1)
+        return orig(*args, **kwargs)
+
+    finder.build_index = spy
+    return finder, calls
+
+
+def test_compute_equivalence_groups_force_scalable_parity():
+    """force_scalable must activate the vsearch path when n is below the
+    read-count activation_threshold (the cluster-level gating fix), and the
+    groups must match the brute-force path exactly."""
+    from speconsense.scalability import ScalablePairwiseOperation, ScalabilityConfig
+
+    # 60 sequences: 20 distinct prototypes x 3 identical copies each.
+    sequences = {}
+    idx = 0
+    for g in range(20):
+        proto = _rng_seq(seed=200 + g)
+        for _ in range(3):
+            sequences[f"s{idx}"] = proto
+            idx += 1
+
+    config = ScalabilityConfig(enabled=True, activation_threshold=1001,
+                               max_threads=1)
+    finder, calls = _spied_finder()
+    op = ScalablePairwiseOperation(
+        candidate_finder=finder,
+        scoring_function=lambda a, b, i, j: 1.0 if a == b else 0.0,
+        config=config,
+    )
+
+    def norm(groups):
+        return sorted(tuple(sorted(g)) for g in groups)
+
+    with tempfile.TemporaryDirectory() as td:
+        forced = op.compute_equivalence_groups(
+            sequences, lambda a, b: a == b, td, force_scalable=True)
+        assert calls, "force_scalable=True did not take the scalable path"
+
+        n_calls_after_forced = len(calls)
+        brute = op.compute_equivalence_groups(
+            sequences, lambda a, b: a == b, td, force_scalable=False)
+        assert len(calls) == n_calls_after_forced, \
+            "n=60 < activation_threshold without force must stay brute-force"
+
+    assert norm(forced) == norm(brute)
+    assert sorted(len(g) for g in forced) == [3] * 20
+
+
+def test_compute_distance_matrix_force_scalable_activates():
+    """force_scalable must activate the sparse distance path below the
+    read-count activation_threshold; distances for candidate pairs must match
+    the brute-force values (same scoring function)."""
+    from speconsense.scalability import ScalablePairwiseOperation, ScalabilityConfig
+
+    consensuses = _build_consensuses(n_per_group=20)  # 60 total
+    sequences = {f"c{i}": s for i, s in enumerate(consensuses)}
+
+    def score(a, b, i, j):
+        same = sum(1 for x, y in zip(a, b) if x == y)
+        return same / max(len(a), len(b))
+
+    config = ScalabilityConfig(enabled=True, activation_threshold=1001,
+                               max_threads=1)
+    finder, calls = _spied_finder()
+    op = ScalablePairwiseOperation(
+        candidate_finder=finder, scoring_function=score, config=config)
+
+    with tempfile.TemporaryDirectory() as td:
+        sparse = op.compute_distance_matrix(
+            sequences, td, min_identity=0.9, force_scalable=True)
+        assert calls, "force_scalable=True did not take the scalable path"
+        dense = op.compute_distance_matrix(
+            sequences, td, min_identity=0.9, force_scalable=False)
+
+    # Brute force at n=60 < threshold computes every pair; the sparse matrix
+    # must agree exactly on every pair it contains (same scoring function).
+    assert sparse, "sparse matrix is empty"
+    for pair, dist in sparse.items():
+        assert pair in dense
+        assert abs(dense[pair] - dist) < 1e-12

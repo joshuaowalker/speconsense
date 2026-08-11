@@ -231,13 +231,20 @@ class ScalablePairwiseOperation:
     def compute_distance_matrix(self,
                                  sequences: Dict[str, str],
                                  output_dir: str,
-                                 min_identity: float = 0.9) -> Dict[Tuple[str, str], float]:
+                                 min_identity: float = 0.9,
+                                 force_scalable: bool = False) -> Dict[Tuple[str, str], float]:
         """Compute pairwise distance matrix (for HAC clustering).
 
         Args:
             sequences: Dict mapping sequence_id -> sequence_string
             output_dir: Directory for temporary files
             min_identity: Identity threshold for clustering (used to filter candidates)
+            force_scalable: Skip the config activation_threshold check (the
+                caller has already decided this operation's n warrants the
+                scalable path). activation_threshold is calibrated for
+                read counts; cluster-level operations (n = cluster count)
+                would otherwise never activate it and silently fall back to
+                the single-threaded O(n^2) loop.
 
         Returns:
             Dict mapping (id1, id2) -> distance, symmetric
@@ -250,7 +257,7 @@ class ScalablePairwiseOperation:
             self.config.enabled and
             self.candidate_finder is not None and
             self.candidate_finder.is_available and
-            n >= self.config.activation_threshold and
+            (force_scalable or n >= self.config.activation_threshold) and
             n > 50  # Only worthwhile for larger sets
         )
 
@@ -328,7 +335,8 @@ class ScalablePairwiseOperation:
                                     sequences: Dict[str, str],
                                     equivalence_fn: Callable[[str, str], bool],
                                     output_dir: str,
-                                    min_candidate_identity: float = 0.95) -> List[List[str]]:
+                                    min_candidate_identity: float = 0.95,
+                                    force_scalable: bool = False) -> List[List[str]]:
         """Compute groups of equivalent sequences using candidate pre-filtering.
 
         This is useful for merging clusters whose consensus sequences are
@@ -339,6 +347,12 @@ class ScalablePairwiseOperation:
             equivalence_fn: Function(seq1, seq2) -> bool for exact equivalence check
             output_dir: Directory for temporary files
             min_candidate_identity: Min identity threshold for candidates (default 0.95)
+            force_scalable: Skip the config activation_threshold check (the
+                caller has already decided this operation's n warrants the
+                scalable path). activation_threshold is calibrated for
+                read counts; cluster-level operations (n = cluster count)
+                would otherwise never activate it and silently fall back to
+                the single-threaded O(n^2) loop.
 
         Returns:
             List of groups, where each group is a list of equivalent sequence IDs
@@ -350,7 +364,7 @@ class ScalablePairwiseOperation:
             self.config.enabled and
             self.candidate_finder is not None and
             self.candidate_finder.is_available and
-            n >= self.config.activation_threshold and
+            (force_scalable or n >= self.config.activation_threshold) and
             n > 50  # Only worthwhile for larger sets
         )
 
