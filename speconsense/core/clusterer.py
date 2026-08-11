@@ -4,7 +4,6 @@ from collections import defaultdict
 import json
 import logging
 import os
-import statistics
 import subprocess
 import tempfile
 from datetime import datetime
@@ -282,6 +281,16 @@ class SpecimenClusterer:
         self.error_model = error_model
         self.qctx_table = load_error_model(error_model)
         self.discarded_read_ids: Set[str] = set()  # Track all discarded reads (outliers + filtered)
+        # Per-read mean Phred quality, computed lazily once per read. The mean
+        # is invariant under reverse-complement (orientation reverses the
+        # quality list but not its mean), so entries never need invalidation.
+        self._mean_quality_cache: Dict[str, float] = {}
+        # Validation-consensus memo keyed by (frozenset(read_ids), iupac_flag).
+        # _generate_consensus_for_validation is deterministic in its inputs, so
+        # a changed cluster membership simply misses the cache; stale entries
+        # are never served. Collapses the Phase 6 -> Phase 7 duplicate
+        # regeneration (identical read sets) to a dict lookup.
+        self._validation_consensus_cache: Dict[Tuple[frozenset, bool], Optional[str]] = {}
 
         # Initialize scalability configuration
         # scale_threshold: 0=disabled, N>0=enabled for datasets >= N sequences
@@ -566,14 +575,31 @@ class SpecimenClusterer:
 
         logging.debug(f"Wrote phasing statistics to {stats_file}")
 
+    def _mean_read_quality(self, seq_id: str) -> float:
+        """Cached mean Phred quality for a read.
+
+        sum/len over the int quality list is exactly equal to statistics.mean
+        (both are the correctly-rounded float of the exact rational mean) but
+        ~40x faster, and the cache removes the per-phase recomputation that
+        previously dominated quality-sorted sampling.
+        """
+        q = self._mean_quality_cache.get(seq_id)
+        if q is None:
+            quals = self.records[seq_id].letter_annotations["phred_quality"]
+            q = sum(quals) / len(quals) if quals else 0.0
+            self._mean_quality_cache[seq_id] = q
+        return q
+
     def add_sequences(self, records: List[SeqIO.SeqRecord]) -> None:
         """Add sequences to be clustered, with optional presampling."""
         if self.presample_size and len(records) > self.presample_size:
             logging.info(f"Presampling {self.presample_size} reads from {len(records)} total")
-            records = sorted(
-                records,
-                key=lambda r: -statistics.mean(r.letter_annotations["phred_quality"])
-            )[:self.presample_size]
+
+            def _mean_qual(r):
+                quals = r.letter_annotations["phred_quality"]
+                return sum(quals) / len(quals) if quals else 0.0
+
+            records = sorted(records, key=lambda r: -_mean_qual(r))[:self.presample_size]
             logging.info(f"Presampled {len(records)} highest-quality reads")
 
         for record in records:
@@ -722,9 +748,7 @@ class SpecimenClusterer:
                 # Sample by quality
                 qualities = []
                 for seq_id in cluster_reads:
-                    record = self.records[seq_id]
-                    mean_quality = statistics.mean(record.letter_annotations["phred_quality"])
-                    qualities.append((mean_quality, seq_id))
+                    qualities.append((self._mean_read_quality(seq_id), seq_id))
 
                 # Sort by quality (descending), then by read ID (ascending) for deterministic tie-breaking
                 sampled_ids = [seq_id for _, seq_id in
@@ -734,9 +758,7 @@ class SpecimenClusterer:
                 # Sort all reads by quality for optimal SPOA ordering
                 qualities = []
                 for seq_id in cluster_reads:
-                    record = self.records[seq_id]
-                    mean_quality = statistics.mean(record.letter_annotations["phred_quality"])
-                    qualities.append((mean_quality, seq_id))
+                    qualities.append((self._mean_read_quality(seq_id), seq_id))
                 sorted_ids = [seq_id for _, seq_id in
                               sorted(qualities, key=lambda x: (-x[0], x[1]))]
                 sampled_seqs = {seq_id: self.sequences[seq_id] for seq_id in sorted_ids}
@@ -813,13 +835,17 @@ class SpecimenClusterer:
                 str_to_index = {str(i): i for i in cluster_to_consensus.keys()}
                 consensus_seq_dict = {str(i): seq for i, seq in cluster_to_consensus.items()}
 
-                # Use scalable equivalence grouping
+                # Use scalable equivalence grouping. force_scalable: this is a
+                # cluster-level operation (n = cluster count), so the read-count
+                # activation_threshold does not apply — the >50 gate above is
+                # the decision.
                 operation = self._get_scalable_operation()
                 equivalence_groups = operation.compute_equivalence_groups(
                     sequences=consensus_seq_dict,
                     equivalence_fn=self.are_homopolymer_equivalent,
                     output_dir=self.output_dir,
-                    min_candidate_identity=0.95
+                    min_candidate_identity=0.95,
+                    force_scalable=True
                 )
 
                 # Convert groups back to indices and populate consensus_to_clusters
@@ -1217,7 +1243,7 @@ class SpecimenClusterer:
         for initial_idx, cluster in indexed_clusters:
             cluster_seqs = {sid: self.sequences[sid] for sid in cluster}
             cluster_quals = {
-                sid: statistics.mean(self.records[sid].letter_annotations["phred_quality"])
+                sid: self._mean_read_quality(sid)
                 for sid in cluster
             }
             work_packages.append((initial_idx, cluster, cluster_seqs, cluster_quals, config))
@@ -1305,7 +1331,7 @@ class SpecimenClusterer:
                 continue
 
             qualities = {
-                sid: statistics.mean(self.records[sid].letter_annotations["phred_quality"])
+                sid: self._mean_read_quality(sid)
                 for sid in read_ids
             }
             sorted_ids = sorted(read_ids, key=lambda x: (-qualities.get(x, 0), x))
@@ -1399,10 +1425,9 @@ class SpecimenClusterer:
         if len(subclusters) <= 1:
             return subclusters
 
-        # Generate consensus for each cluster
-        consensuses = {}
-        for i, cluster_dict in enumerate(subclusters):
-            consensuses[i] = self._generate_consensus_for_validation(cluster_dict['read_ids'])
+        # Generate consensus for each cluster (pooled SPOA, cache-aware)
+        consensuses = dict(enumerate(self._generate_validation_consensuses(
+            [c['read_ids'] for c in subclusters])))
 
         # Form identity groups
         identity_groups = self._form_identity_groups(subclusters, consensuses)
@@ -1444,24 +1469,62 @@ class SpecimenClusterer:
             max_sample_size=self.max_sample_size,
         )
 
-        result = []
-        split_count = 0
+        # Pass 1: partition. Small clusters pass through untouched; the rest
+        # queue their initial SPOA for pooled dispatch (the same pattern as
+        # Phases 3/5/9 — this loop was previously the last serial SPOA scan).
+        # Each input cluster owns one output slot so splits stay in place and
+        # the flattened result matches the previous sequential order exactly.
+        result_slots: List[List[Dict]] = []
+        spoa_queue: List[Tuple[int, Dict[str, str]]] = []  # (slot_idx, seqs)
+        slot_meta: Dict[int, Tuple[Dict, Dict[str, float], List[str]]] = {}
 
         for cluster_dict in subclusters:
             read_ids = cluster_dict['read_ids']
+            slot_idx = len(result_slots)
             if len(read_ids) < config.min_variant_count * 2:
-                result.append(cluster_dict)
+                result_slots.append([cluster_dict])
                 continue
 
             # Build quality-sorted sequences
             qualities = {
-                sid: statistics.mean(self.records[sid].letter_annotations["phred_quality"])
+                sid: self._mean_read_quality(sid)
                 for sid in read_ids
             }
             sorted_ids = sorted(read_ids, key=lambda x: (-qualities.get(x, 0), x))
             cluster_seqs = {sid: self.sequences[sid] for sid in sorted_ids}
 
-            msa_result = _run_spoa_for_cluster_worker(cluster_seqs, self.disable_homopolymer_equivalence, self.min_hp_length)
+            result_slots.append([])
+            spoa_queue.append((slot_idx, cluster_seqs))
+            slot_meta[slot_idx] = (cluster_dict, qualities, sorted_ids)
+
+        # Pass 2: pooled SPOA dispatch.
+        msa_by_slot: Dict[int, Optional[MSAResult]] = {}
+        if spoa_queue:
+            work_packages = [
+                (slot_idx, seqs, self.disable_homopolymer_equivalence, self.min_hp_length)
+                for slot_idx, seqs in spoa_queue
+            ]
+            if self.max_threads > 1 and len(work_packages) > 4:
+                from concurrent.futures import ProcessPoolExecutor
+                with ProcessPoolExecutor(max_workers=self.max_threads) as executor:
+                    spoa_results = list(tqdm(
+                        executor.map(_run_spoa_worker, work_packages),
+                        total=len(work_packages),
+                        desc="Second phasing SPOA",
+                    ))
+            else:
+                spoa_results = [_run_spoa_worker(wp) for wp in work_packages]
+            for slot_idx, msa_result in spoa_results:
+                msa_by_slot[slot_idx] = msa_result
+
+        # Pass 3: variant detection + phasing on the parent, input order.
+        split_count = 0
+
+        for slot_idx, (cluster_dict, qualities, sorted_ids) in slot_meta.items():
+            read_ids = cluster_dict['read_ids']
+            result = result_slots[slot_idx]
+
+            msa_result = msa_by_slot.get(slot_idx)
             if msa_result is None:
                 result.append(cluster_dict)
                 continue
@@ -1512,17 +1575,19 @@ class SpecimenClusterer:
             if lost:
                 self.discarded_read_ids.update(lost)
 
+        flattened = [c for slot in result_slots for c in slot]
+
         if split_count > 0:
             # Remove empty clusters
-            result = [c for c in result if c['read_ids']]
+            flattened = [c for c in flattened if c['read_ids']]
             self._log_stage(
-                f"Variant phasing (round 2): split {split_count} cluster(s) → {len(result)} sub-clusters",
-                result,
+                f"Variant phasing (round 2): split {split_count} cluster(s) → {len(flattened)} sub-clusters",
+                flattened,
             )
         else:
             logging.debug("Variant phasing (round 2): no splits")
 
-        return result
+        return flattened
 
     def _reassign_reads_in_group(self, subclusters: List[Dict],
                                  consensuses: Dict[int, Optional[str]],
@@ -1567,8 +1632,7 @@ class SpecimenClusterer:
                 sampled_reads: Dict[str, str] = {}
                 for idx in group_indices:
                     cluster_rids = sorted(subclusters[idx]['read_ids'],
-                        key=lambda x: (-statistics.mean(
-                            self.records[x].letter_annotations["phred_quality"]), x))
+                        key=lambda x: (-self._mean_read_quality(x), x))
                     for rid in cluster_rids[:per_cluster_cap]:
                         sampled_reads[rid] = self.sequences[rid]
                 spoa_input.update(sampled_reads)
@@ -1678,10 +1742,11 @@ class SpecimenClusterer:
         if not self.discarded_read_ids or not subclusters:
             return subclusters
 
-        # Generate consensus for each cluster
-        consensuses: Dict[int, Optional[str]] = {}
-        for i, cluster_dict in enumerate(subclusters):
-            consensuses[i] = self._generate_consensus_for_validation(cluster_dict['read_ids'])
+        # Generate consensus for each cluster (pooled SPOA, cache-aware; after
+        # Phase 6 most read sets are unchanged and hit the cache outright)
+        consensuses: Dict[int, Optional[str]] = dict(enumerate(
+            self._generate_validation_consensuses(
+                [c['read_ids'] for c in subclusters])))
 
         valid_consensuses = {i: c for i, c in consensuses.items() if c}
         if not valid_consensuses:
@@ -1843,11 +1908,7 @@ class SpecimenClusterer:
                 # Sort by quality descending
                 candidates_with_qual = []
                 for rid, seq in candidates:
-                    rec = self.records.get(rid)
-                    if rec:
-                        qual = statistics.mean(rec.letter_annotations["phred_quality"])
-                    else:
-                        qual = 0.0
+                    qual = self._mean_read_quality(rid) if rid in self.records else 0.0
                     candidates_with_qual.append((qual, rid, seq))
                 candidates_with_qual.sort(reverse=True)
                 candidates = [(rid, seq) for _, rid, seq in candidates_with_qual[:max_candidates]]
@@ -1975,7 +2036,7 @@ class SpecimenClusterer:
         for idx, cluster_dict in enumerate(subclusters):
             cluster = cluster_dict['read_ids']
             qualities = {
-                seq_id: statistics.mean(self.records[seq_id].letter_annotations["phred_quality"])
+                seq_id: self._mean_read_quality(seq_id)
                 for seq_id in cluster
             }
             sequences = {seq_id: self.sequences[seq_id] for seq_id in cluster}
@@ -2138,6 +2199,7 @@ class SpecimenClusterer:
                     equivalence_fn=self.are_homopolymer_equivalent,
                     output_dir=self.output_dir,
                     min_candidate_identity=0.95,
+                    force_scalable=True,
                 )
                 for group in equivalence_groups:
                     if group:
@@ -2211,7 +2273,7 @@ class SpecimenClusterer:
             survivor_dict['merged_from'] = merged_from
 
             qualities = {
-                seq_id: statistics.mean(self.records[seq_id].letter_annotations["phred_quality"])
+                seq_id: self._mean_read_quality(seq_id)
                 for seq_id in merged_read_ids
             }
             sequences = {seq_id: self.sequences[seq_id] for seq_id in merged_read_ids}
@@ -2354,18 +2416,24 @@ class SpecimenClusterer:
             rid = next(iter(read_ids))
             return self.sequences.get(rid)
 
+        iupac = bool(apply_ambiguity_calling and self.enable_iupac_calling)
+        cache_key = (frozenset(read_ids), iupac)
+        if cache_key in self._validation_consensus_cache:
+            return self._validation_consensus_cache[cache_key]
+
         # Sort by quality descending, sample if needed
         sorted_ids = sorted(read_ids,
-            key=lambda x: (-statistics.mean(self.records[x].letter_annotations["phred_quality"]), x))
+            key=lambda x: (-self._mean_read_quality(x), x))
         if len(sorted_ids) > self.max_sample_size:
             sorted_ids = sorted_ids[:self.max_sample_size]
 
         seqs = {sid: self.sequences[sid] for sid in sorted_ids}
         result = _run_spoa_for_cluster_worker(seqs, self.disable_homopolymer_equivalence, self.min_hp_length)
         if not result or not result.consensus:
+            self._validation_consensus_cache[cache_key] = None
             return None
 
-        if apply_ambiguity_calling and self.enable_iupac_calling:
+        if iupac:
             consensus, _, _ = call_iupac_ambiguities(
                 consensus=result.consensus,
                 alignments=result.alignments,
@@ -2373,9 +2441,67 @@ class SpecimenClusterer:
                 min_variant_frequency=self.min_ambiguity_frequency,
                 min_variant_count=self.min_ambiguity_count
             )
+            self._validation_consensus_cache[cache_key] = consensus
             return consensus
 
+        self._validation_consensus_cache[cache_key] = result.consensus
         return result.consensus
+
+    def _generate_validation_consensuses(self, read_sets: List[Set[str]]) -> List[Optional[str]]:
+        """Batch version of ``_generate_consensus_for_validation`` (no IUPAC).
+
+        Produces results identical to calling the single-cluster method on
+        each read set in order: same single-read shortcut, same quality-sorted
+        sampling, same SPOA invocation, and the same
+        ``_validation_consensus_cache`` (hits are returned directly, misses
+        are stored). The only difference is dispatch: cache misses go to a
+        ``ProcessPoolExecutor`` when ``--threads`` allows and the batch is
+        large enough, matching the pooling pattern of Phases 3/5/9.
+        """
+        results: List[Optional[str]] = [None] * len(read_sets)
+        pending: List[Tuple[int, Dict[str, str]]] = []
+        pending_key: Dict[int, Tuple[frozenset, bool]] = {}
+
+        for idx, read_ids in enumerate(read_sets):
+            if not read_ids:
+                continue
+            if len(read_ids) == 1:
+                rid = next(iter(read_ids))
+                results[idx] = self.sequences.get(rid)
+                continue
+            key = (frozenset(read_ids), False)
+            if key in self._validation_consensus_cache:
+                results[idx] = self._validation_consensus_cache[key]
+                continue
+            sorted_ids = sorted(read_ids,
+                key=lambda x: (-self._mean_read_quality(x), x))
+            if len(sorted_ids) > self.max_sample_size:
+                sorted_ids = sorted_ids[:self.max_sample_size]
+            pending.append((idx, {sid: self.sequences[sid] for sid in sorted_ids}))
+            pending_key[idx] = key
+
+        if pending:
+            work_packages = [
+                (idx, seqs, self.disable_homopolymer_equivalence, self.min_hp_length)
+                for idx, seqs in pending
+            ]
+            if self.max_threads > 1 and len(work_packages) > 4:
+                from concurrent.futures import ProcessPoolExecutor
+                with ProcessPoolExecutor(max_workers=self.max_threads) as executor:
+                    spoa_results = list(tqdm(
+                        executor.map(_run_spoa_worker, work_packages),
+                        total=len(work_packages),
+                        desc="Validation consensus generation",
+                    ))
+            else:
+                spoa_results = [_run_spoa_worker(wp) for wp in work_packages]
+
+            for idx, msa_result in spoa_results:
+                consensus = msa_result.consensus if (msa_result and msa_result.consensus) else None
+                results[idx] = consensus
+                self._validation_consensus_cache[pending_key[idx]] = consensus
+
+        return results
 
     def _form_identity_groups(self, subclusters: List[Dict],
                               consensuses: Dict[int, Optional[str]]) -> Dict[int, List[int]]:
@@ -2405,12 +2531,14 @@ class SpecimenClusterer:
         threshold = 1.0 - self.group_identity
         dist_matrix = [[0.0] * n for _ in range(n)]
 
+        # Cluster-level operation (n = cluster count): the read-count
+        # activation_threshold does not apply, so the >50 gate here is the
+        # decision and compute_distance_matrix gets force_scalable.
         use_scalable = (
             self.scalability_config.enabled
             and self._candidate_finder is not None
             and self._candidate_finder.is_available
             and n > 50
-            and n >= self.scalability_config.activation_threshold
         )
 
         if use_scalable:
@@ -2423,7 +2551,8 @@ class SpecimenClusterer:
             seq_dict = {str(i): c for i, c in consensuses.items() if c}
             op = self._get_scalable_operation(scoring_function=hp_similarity)
             sparse_distances = op.compute_distance_matrix(
-                seq_dict, self.output_dir, min_identity=self.group_identity)
+                seq_dict, self.output_dir, min_identity=self.group_identity,
+                force_scalable=True)
 
             logging.debug(
                 f"Identity grouping (scalable): n={n}, candidate pairs={len(sparse_distances) // 2}, "
@@ -3038,7 +3167,7 @@ class SpecimenClusterer:
         qualities = {}
         for rid in cluster_read_ids:
             if rid in self.records:
-                qualities[rid] = statistics.mean(self.records[rid].letter_annotations["phred_quality"])
+                qualities[rid] = self._mean_read_quality(rid)
 
         return _phase_reads_by_variants_standalone(
             cluster_read_ids, self.sequences, qualities, variant_positions, config
