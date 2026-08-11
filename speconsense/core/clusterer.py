@@ -1610,7 +1610,15 @@ class SpecimenClusterer:
                 if not consensus:
                     continue
                 cluster_consensus_seqs[idx] = consensus
-                for rid in subclusters[idx]['read_ids']:
+                # Quality-sorted, NOT raw set order: all_read_seqs insertion
+                # order becomes the SPOA input order below, and SPOA output
+                # depends on input order (the coordinate-frame gotcha). Raw
+                # set iteration is hash-seed dependent and made reassignment
+                # nondeterministic across runs; this also matches the
+                # quality-sorted order the >max_reads sampling branch uses.
+                cluster_rids = sorted(subclusters[idx]['read_ids'],
+                    key=lambda x: (-self._mean_read_quality(x), x))
+                for rid in cluster_rids:
                     read_to_cluster[rid] = idx
                     all_read_seqs[rid] = self.sequences[rid]
 
