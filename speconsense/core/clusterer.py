@@ -35,6 +35,7 @@ from speconsense.scalability import (
     ScalabilityConfig,
 )
 
+from .records import ReadRecord, from_seqrecord, write_fastq
 from .workers import (
     ClusterProcessingConfig,
     ConsensusGenerationConfig,
@@ -306,7 +307,7 @@ class SpecimenClusterer:
                 self._candidate_finder = finder
 
         self.sequences = {}  # id -> sequence string
-        self.records = {}  # id -> SeqRecord object
+        self.records = {}  # id -> ReadRecord (lightweight; ~1.5KB/read vs ~45KB for SeqRecord)
         self.id_map = {}  # short_id -> original_id
         self.rev_id_map = {}  # original_id -> short_id
 
@@ -585,25 +586,34 @@ class SpecimenClusterer:
         """
         q = self._mean_quality_cache.get(seq_id)
         if q is None:
-            quals = self.records[seq_id].letter_annotations["phred_quality"]
-            q = sum(quals) / len(quals) if quals else 0.0
+            rec = self.records[seq_id]
+            if isinstance(rec, ReadRecord):
+                q = rec.mean_quality()
+            else:
+                # BioPython SeqRecord injected directly into self.records
+                # (tests / external callers bypassing add_sequences).
+                quals = (rec.letter_annotations or {}).get("phred_quality") or []
+                q = sum(quals) / len(quals) if quals else 0.0
             self._mean_quality_cache[seq_id] = q
         return q
 
-    def add_sequences(self, records: List[SeqIO.SeqRecord]) -> None:
-        """Add sequences to be clustered, with optional presampling."""
+    def add_sequences(self, records: List) -> None:
+        """Add sequences to be clustered, with optional presampling.
+
+        Accepts ``ReadRecord`` (preferred) or BioPython ``SeqRecord``
+        (converted on entry; kept for tests and API compatibility).
+        """
+        records = [
+            r if isinstance(r, ReadRecord) else from_seqrecord(r)
+            for r in records
+        ]
         if self.presample_size and len(records) > self.presample_size:
             logging.info(f"Presampling {self.presample_size} reads from {len(records)} total")
-
-            def _mean_qual(r):
-                quals = r.letter_annotations["phred_quality"]
-                return sum(quals) / len(quals) if quals else 0.0
-
-            records = sorted(records, key=lambda r: -_mean_qual(r))[:self.presample_size]
+            records = sorted(records, key=lambda r: -r.mean_quality())[:self.presample_size]
             logging.info(f"Presampled {len(records)} highest-quality reads")
 
         for record in records:
-            self.sequences[record.id] = str(record.seq)
+            self.sequences[record.id] = record.seq
             self.records[record.id] = record
 
         # Log scalability mode status for large datasets
@@ -1038,7 +1048,7 @@ class SpecimenClusterer:
         with open(reads_file, 'w') as f:
             read_ids_to_write = sorted_cluster_ids if sorted_cluster_ids is not None else cluster
             for seq_id in read_ids_to_write:
-                SeqIO.write(self.records[seq_id], f, "fastq")
+                write_fastq(f, self.records[seq_id])
 
         # Write sampled reads FASTQ (only sequences used for consensus generation)
         # Use sorted order (by quality descending) if available, matching MSA order
@@ -1047,7 +1057,7 @@ class SpecimenClusterer:
             with open(sampled_file, 'w') as f:
                 sampled_to_write = sorted_sampled_ids if sorted_sampled_ids is not None else sampled_ids
                 for seq_id in sampled_to_write:
-                    SeqIO.write(self.records[seq_id], f, "fastq")
+                    write_fastq(f, self.records[seq_id])
 
         # Write MSA (multiple sequence alignment) to debug directory
         if msa is not None:
@@ -2993,7 +3003,7 @@ class SpecimenClusterer:
         with open(discards_file, 'w') as f:
             for seq_id in sorted(self.discarded_read_ids):
                 if seq_id in self.records:
-                    SeqIO.write(self.records[seq_id], f, "fastq")
+                    write_fastq(f, self.records[seq_id])
 
         logging.info(f"Wrote {len(self.discarded_read_ids)} discarded reads to {discards_file}")
 
@@ -3307,12 +3317,7 @@ class SpecimenClusterer:
 
                 # Also update the record if it exists
                 if seq_id in self.records:
-                    record = self.records[seq_id]
-                    record.seq = reverse_complement(record.seq)
-                    # Reverse quality scores too if they exist
-                    if 'phred_quality' in record.letter_annotations:
-                        record.letter_annotations['phred_quality'] = \
-                            record.letter_annotations['phred_quality'][::-1]
+                    self.records[seq_id] = self.records[seq_id].reverse_complemented()
 
                 oriented_count += 1
                 logging.debug(f"Reoriented {seq_id}: forward_score={forward_score}, reverse_score={reverse_score}")
@@ -3375,11 +3380,7 @@ class SpecimenClusterer:
                 self.sequences[seq_id] = str(reverse_complement(self.sequences[seq_id]))
 
                 if seq_id in self.records:
-                    record = self.records[seq_id]
-                    record.seq = reverse_complement(record.seq)
-                    if 'phred_quality' in record.letter_annotations:
-                        record.letter_annotations['phred_quality'] = \
-                            record.letter_annotations['phred_quality'][::-1]
+                    self.records[seq_id] = self.records[seq_id].reverse_complemented()
 
                 reverse_complemented += 1
             else:
