@@ -721,8 +721,15 @@ class SpecimenClusterer:
         consensuses = []
         cluster_to_consensus = {}  # Map from cluster index to its consensus
 
-        # First pass: prepare sampled sequences and handle single-read clusters
+        # First pass: prepare sampled sequences and handle single-read clusters.
+        # The sampling recipe below (quality-sorted, capped at max_sample_size)
+        # is identical to _generate_consensus_for_validation's, so results are
+        # shared through _validation_consensus_cache: a consensus computed here
+        # (Phase 2/4) is a cache hit for Phase 6/7 validation on the same read
+        # set, and vice versa. Cached None records a deterministic SPOA
+        # failure and is honored without re-running.
         clusters_needing_spoa = []  # (cluster_index, sampled_seqs)
+        spoa_cache_keys = {}  # cluster_index -> cache key
 
         for i, cluster_dict in enumerate(clusters):
             cluster_reads = cluster_dict['read_ids']
@@ -737,6 +744,19 @@ class SpecimenClusterer:
                 seq_id = next(iter(cluster_reads))
                 consensus = self.sequences[seq_id]
                 # Trim primers before comparison
+                if hasattr(self, 'primers'):
+                    consensus, _ = self.trim_primers(consensus)
+                consensuses.append(consensus)
+                cluster_to_consensus[i] = consensus
+                continue
+
+            cache_key = (frozenset(cluster_reads), False)
+            if cache_key in self._validation_consensus_cache:
+                consensus = self._validation_consensus_cache[cache_key]
+                if consensus is None:
+                    logging.warning(f"Cluster {i} produced no consensus, discarding {len(cluster_reads)} reads")
+                    self.discarded_read_ids.update(cluster_reads)
+                    continue
                 if hasattr(self, 'primers'):
                     consensus, _ = self.trim_primers(consensus)
                 consensuses.append(consensus)
@@ -764,6 +784,7 @@ class SpecimenClusterer:
                 sampled_seqs = {seq_id: self.sequences[seq_id] for seq_id in sorted_ids}
 
             clusters_needing_spoa.append((i, sampled_seqs))
+            spoa_cache_keys[i] = cache_key
 
         # Run SPOA for multi-read clusters
         if clusters_needing_spoa:
@@ -785,6 +806,8 @@ class SpecimenClusterer:
                     ))
 
                 for cluster_idx, result in results:
+                    self._validation_consensus_cache[spoa_cache_keys[cluster_idx]] = (
+                        result.consensus if result and result.consensus else None)
                     if result is None:
                         logging.warning(f"Cluster {cluster_idx} produced no consensus, discarding {len(clusters[cluster_idx]['read_ids'])} reads")
                         self.discarded_read_ids.update(clusters[cluster_idx]['read_ids'])
@@ -798,6 +821,8 @@ class SpecimenClusterer:
                 # Sequential SPOA execution using same worker function as parallel path
                 for cluster_idx, sampled_seqs in clusters_needing_spoa:
                     _, result = _run_spoa_worker((cluster_idx, sampled_seqs, self.disable_homopolymer_equivalence, self.min_hp_length))
+                    self._validation_consensus_cache[spoa_cache_keys[cluster_idx]] = (
+                        result.consensus if result and result.consensus else None)
                     if result is None:
                         logging.warning(f"Cluster {cluster_idx} produced no consensus, discarding {len(clusters[cluster_idx]['read_ids'])} reads")
                         self.discarded_read_ids.update(clusters[cluster_idx]['read_ids'])
