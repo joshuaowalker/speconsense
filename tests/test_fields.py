@@ -392,7 +392,7 @@ class TestFieldRegistry:
             'size', 'ric', 'length', 'rawric', 'rawlen',
             'snp', 'ambig', 'rid', 'rid_min', 'cer_factor',
             'err_factor', 'primers', 'group', 'variant',
-            'group_frequency', 'global_frequency', 'locus'
+            'group_frequency', 'global_frequency', 'locus', 'chimera'
         }
         assert set(FASTA_FIELDS.keys()) == expected
 

@@ -64,6 +64,7 @@ from .io import (
     write_ns_variant_files,
     write_lq_variant_files,
     write_filtered_variant_files,
+    write_chimera_variant_files,
     write_output_files,
     load_metadata_from_json,
     strip_cluster_suffix,
@@ -202,6 +203,11 @@ def parse_arguments():
                                       "routed to __Summary__/variants/ as .lq records. Variants "
                                       "with err_factor=None (legacy output) always pass. Set to 0 "
                                       "to disable err_factor filtering. (default: 1.5)")
+    filtering_group.add_argument("--filter-chimeras", action="store_true",
+                                 help="Route variants carrying core's chimera= flag (two-parent "
+                                      "recombinant test) to __Summary__/variants/ as .chimera "
+                                      "records instead of the pass track. Default off: the flag "
+                                      "is carried through in headers for review (report-only).")
     filtering_group.add_argument("--prune-group-ratio", type=float, default=0.10,
                                  help="Prune secondary identity groups (gid >= 2) whose total size "
                                       "is below this ratio of the largest group. Both "
@@ -475,6 +481,7 @@ def process_single_specimen(file_consensuses: List[ConsensusInfo],
                            args,
                            ns_for_specimen: List[ConsensusInfo] = None,
                            lq_for_specimen: List[ConsensusInfo] = None,
+                           chimera_for_specimen: List[ConsensusInfo] = None,
                            fastq_lookup: Dict[str, List[str]] = None,
                            qctx_table: Dict[str, float] = None,
                            cer_alpha: float = 1e-5,
@@ -482,36 +489,40 @@ def process_single_specimen(file_consensuses: List[ConsensusInfo],
                            full_max_sample_size: int = 100,
                            specimen_global_size_total: Optional[int] = None,
                            full_primers: Optional[List[Tuple[str, str]]] = None,
-                           ) -> Tuple[List[ConsensusInfo], Dict[str, List[str]], Dict, int, List[OverlapMergeInfo], Dict[str, List], List[ConsensusInfo], List[ConsensusInfo], List[ConsensusInfo]]:
+                           ) -> Tuple[List[ConsensusInfo], Dict[str, List[str]], Dict, int, List[OverlapMergeInfo], Dict[str, List], List[ConsensusInfo], List[ConsensusInfo], List[ConsensusInfo], List[ConsensusInfo]]:
     """
     Process a single specimen file: bucket by core gid, MSA-merge within each
     bucket, conflate cross-primer groups, select variants, and emit final
     names that honor core's gid/vid except where cross-primer conflation moved
     a record between groups.
 
-    Returns a 9-tuple: (final_consensus, merge_traceability, naming_info,
+    Returns a 10-tuple: (final_consensus, merge_traceability, naming_info,
     limited_count, overlap_merges, full_consensus_reads, ns_for_specimen,
-    lq_for_specimen, filtered_for_specimen).
+    lq_for_specimen, chimera_for_specimen, filtered_for_specimen).
 
-    The returned ns/lq/filtered lists are annotated with
+    The returned ns/lq/chimera/filtered lists are annotated with
     ``group_size_total`` / ``global_size_total`` for the frequency fields.
 
-    ``ns_for_specimen`` and ``lq_for_specimen`` are the specimen's filtered
-    records (CER-routed and err_factor-routed). They are not renamed, but their
-    core-assigned vids contribute to the collision set when summarize allocates
-    fresh vids for cross-primer-moved variants, and their ``size`` contributes
-    to the conflation-aware ``group_size_total`` denominator. Callers should
-    use the returned annotated lists when writing ``.ns`` / ``.lq`` outputs.
+    ``ns_for_specimen``, ``lq_for_specimen``, and ``chimera_for_specimen``
+    are the specimen's filtered records (CER-routed, err_factor-routed, and
+    chimera-routed when --filter-chimeras is on). They are not renamed, but
+    their core-assigned vids contribute to the collision set when summarize
+    allocates fresh vids for cross-primer-moved variants, and their ``size``
+    contributes to the conflation-aware ``group_size_total`` denominator.
+    Callers should use the returned annotated lists when writing ``.ns`` /
+    ``.lq`` / ``.chimera`` outputs.
 
     ``specimen_global_size_total`` is the per-specimen denominator for
     ``global_frequency=`` (``total_input_reads`` from the metadata JSON).
     None when metadata is missing.
     """
     if not file_consensuses:
-        return [], {}, {}, 0, [], {}, ns_for_specimen or [], lq_for_specimen or [], []
+        return ([], {}, {}, 0, [], {}, ns_for_specimen or [],
+                lq_for_specimen or [], chimera_for_specimen or [], [])
 
     ns_for_specimen = ns_for_specimen or []
     lq_for_specimen = lq_for_specimen or []
+    chimera_for_specimen = chimera_for_specimen or []
     filtered_for_specimen: List[ConsensusInfo] = []
 
     file_name = os.path.basename(file_consensuses[0].file_path)
@@ -562,6 +573,10 @@ def process_single_specimen(file_consensuses: List[ConsensusInfo],
         if record.group_rank is not None:
             bucket = core_to_bucket.get(record.group_rank, record.group_rank)
             bucket_totals[bucket] += record.size
+    for record in chimera_for_specimen:
+        if record.group_rank is not None:
+            bucket = core_to_bucket.get(record.group_rank, record.group_rank)
+            bucket_totals[bucket] += record.size
 
     def _annotate(record: ConsensusInfo) -> ConsensusInfo:
         if record.group_rank is None:
@@ -579,6 +594,7 @@ def process_single_specimen(file_consensuses: List[ConsensusInfo],
     file_consensuses = [_annotate(r) for r in file_consensuses]
     ns_for_specimen = [_annotate(r) for r in ns_for_specimen]
     lq_for_specimen = [_annotate(r) for r in lq_for_specimen]
+    chimera_for_specimen = [_annotate(r) for r in chimera_for_specimen]
     variant_groups = {
         gid: [_annotate(m) for m in members]
         for gid, members in variant_groups.items()
@@ -600,8 +616,11 @@ def process_single_specimen(file_consensuses: List[ConsensusInfo],
             r for r in ns_for_specimen if r.group_rank in dropped_gids)
         filtered_for_specimen.extend(
             r for r in lq_for_specimen if r.group_rank in dropped_gids)
+        filtered_for_specimen.extend(
+            r for r in chimera_for_specimen if r.group_rank in dropped_gids)
         ns_for_specimen = [r for r in ns_for_specimen if r.group_rank not in dropped_gids]
         lq_for_specimen = [r for r in lq_for_specimen if r.group_rank not in dropped_gids]
+        chimera_for_specimen = [r for r in chimera_for_specimen if r.group_rank not in dropped_gids]
         variant_groups = dict(sorted_for_filtering[:args.select_max_groups])
         logging.info(
             f"Filtered to top {args.select_max_groups} groups by size "
@@ -630,10 +649,13 @@ def process_single_specimen(file_consensuses: List[ConsensusInfo],
             promoted = [r for r in ns_for_specimen if r.group_rank in pruned_set]
             filtered_for_specimen.extend(promoted)
             ns_for_specimen = [r for r in ns_for_specimen if r.group_rank not in pruned_set]
-            # Also move lq records from pruned groups to filtered
+            # Also move lq and chimera records from pruned groups to filtered
             promoted_lq = [r for r in lq_for_specimen if r.group_rank in pruned_set]
             filtered_for_specimen.extend(promoted_lq)
             lq_for_specimen = [r for r in lq_for_specimen if r.group_rank not in pruned_set]
+            promoted_chimera = [r for r in chimera_for_specimen if r.group_rank in pruned_set]
+            filtered_for_specimen.extend(promoted_chimera)
+            chimera_for_specimen = [r for r in chimera_for_specimen if r.group_rank not in pruned_set]
             logging.info(
                 f"Pruned {len(pruned_gids)} secondary group(s) "
                 f"(gids {pruned_gids}) below ratio={args.prune_group_ratio}, "
@@ -802,6 +824,9 @@ def process_single_specimen(file_consensuses: List[ConsensusInfo],
     for record in lq_for_specimen:
         if record.group_rank is not None and record.variant_rank is not None:
             core_vids_by_gid[record.group_rank].add(record.variant_rank)
+    for record in chimera_for_specimen:
+        if record.group_rank is not None and record.variant_rank is not None:
+            core_vids_by_gid[record.group_rank].add(record.variant_rank)
 
     # Iterate groups in anchor-size desc order for stable selection logging;
     # naming itself is gid-based so iteration order does not affect output.
@@ -893,7 +918,8 @@ def process_single_specimen(file_consensuses: List[ConsensusInfo],
 
     return (final_consensus, all_merge_traceability, naming_info,
             total_limited_count, all_overlap_merges, full_consensus_reads,
-            ns_for_specimen, lq_for_specimen, filtered_for_specimen)
+            ns_for_specimen, lq_for_specimen, chimera_for_specimen,
+            filtered_for_specimen)
 
 
 def _resolve_specimen_cer_context(
@@ -1178,13 +1204,14 @@ def main():
     logging.info("Processing each specimen file independently to organize variants within specimens")
 
     # Load consensus sequences (optionally filtered to single specimen)
-    consensus_list, ns_list, lq_list = load_consensus_sequences(
+    consensus_list, ns_list, lq_list, chimera_list = load_consensus_sequences(
         args.source, args.min_ric, args.min_len, args.max_len,
         specimen_id=args.specimen,
         min_cer_factor=args.min_cer_factor,
         max_err_factor=args.max_err_factor,
+        filter_chimeras=args.filter_chimeras,
     )
-    if not consensus_list and not ns_list and not lq_list:
+    if not consensus_list and not ns_list and not lq_list and not chimera_list:
         logging.error("No consensus sequences found")
         _cleanup_log(temp_log_file.name)
         return
@@ -1199,6 +1226,9 @@ def main():
     lq_by_file = defaultdict(list)
     for cons in lq_list:
         lq_by_file[cons.file_path].append(cons)
+    chimera_by_file = defaultdict(list)
+    for cons in chimera_list:
+        chimera_by_file[cons.file_path].append(cons)
 
     # Create output directories before processing
     os.makedirs(args.summary_dir, exist_ok=True)
@@ -1223,6 +1253,7 @@ def main():
     # Returns a ProfileDB if pyitsx is available, else None.
     all_file_paths_for_init = sorted(
         set(file_groups.keys()) | set(ns_by_file.keys()) | set(lq_by_file.keys())
+        | set(chimera_by_file.keys())
     )
     pyitsx_db = _init_locus_labeler(args.source, all_file_paths_for_init)
 
@@ -1235,18 +1266,20 @@ def main():
     all_filtered_consensus = []  # Collect .filtered records from all specimens
     total_limited_merges = 0
 
-    # Iterate the union of file paths from all three lists so specimens whose
-    # variants are entirely routed to .ns/.lq still get their filtered-variant
-    # files written. process_single_specimen and write_specimen_data_files
-    # both no-op cleanly on an empty consensus list.
+    # Iterate the union of file paths from all the routed lists so specimens
+    # whose variants are entirely routed to .ns/.lq/.chimera still get their
+    # filtered-variant files written. process_single_specimen and
+    # write_specimen_data_files both no-op cleanly on an empty consensus list.
     all_file_paths = (
         set(file_groups.keys()) | set(ns_by_file.keys()) | set(lq_by_file.keys())
+        | set(chimera_by_file.keys())
     )
     sorted_file_paths = sorted(all_file_paths)
     for file_path in tqdm(sorted_file_paths, desc="Processing specimens", unit="specimen"):
         file_consensuses = file_groups.get(file_path, [])
         specimen_ns = ns_by_file.get(file_path, [])
         specimen_lq = lq_by_file.get(file_path, [])
+        specimen_chimera = chimera_by_file.get(file_path, [])
 
         # Resolve the q_ctx table + CER alpha for this specimen so merge-time
         # recompute of err_factor and cer_factor uses the same model and
@@ -1282,10 +1315,12 @@ def main():
         # denominators so the .ns/.lq writers emit those fields too.
         (final_consensus, merge_traceability, naming_info,
          limited_count, overlap_merges, full_reads_by_name,
-         specimen_ns, specimen_lq, specimen_filtered) = process_single_specimen(
+         specimen_ns, specimen_lq, specimen_chimera,
+         specimen_filtered) = process_single_specimen(
             file_consensuses, args,
             ns_for_specimen=specimen_ns,
             lq_for_specimen=specimen_lq,
+            chimera_for_specimen=specimen_chimera,
             fastq_lookup=fastq_lookup,
             qctx_table=specimen_qctx,
             cer_alpha=specimen_alpha,
@@ -1297,7 +1332,8 @@ def main():
 
         # Label loci on all output tracks before writing
         _label_loci(
-            [final_consensus, specimen_ns, specimen_lq, specimen_filtered],
+            [final_consensus, specimen_ns, specimen_lq, specimen_chimera,
+             specimen_filtered],
             pyitsx_db,
         )
 
@@ -1326,13 +1362,19 @@ def main():
                 specimen_lq, args.summary_dir, fastq_lookup, fasta_fields
             )
 
+        # Emit chimera variants (recombinant-flagged) for this specimen
+        if specimen_chimera:
+            write_chimera_variant_files(
+                specimen_chimera, args.summary_dir, fastq_lookup, fasta_fields
+            )
+
         # Emit filtered variants (selection-filtered) for this specimen
         if specimen_filtered:
             write_filtered_variant_files(
                 specimen_filtered, args.summary_dir, fastq_lookup, fasta_fields
             )
 
-        # Emit per-specimen variant tree (passed + ns + lq + filtered)
+        # Emit per-specimen variant tree (passed + ns + lq + chimera + filtered)
         specimen_id = os.path.basename(file_path)
         if specimen_id.endswith('-all.fasta'):
             specimen_id = specimen_id[:-len('-all.fasta')]
@@ -1344,6 +1386,7 @@ def main():
             output_dir=os.path.join(args.summary_dir, 'trees'),
             hp_normalization_length=args.hp_normalization_length,
             filtered=specimen_filtered,
+            chimera=specimen_chimera,
         )
 
         # Accumulate results for summary files

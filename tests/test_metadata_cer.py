@@ -56,6 +56,7 @@ def test_build_variant_record_anchor_no_cer_details():
         'err_factor_obs_sum': None,
         'err_factor_exp_sum': None,
         'err_factor_cols': None,
+        'chimera': None,
     }
 
 
@@ -94,6 +95,7 @@ def test_build_variant_record_with_cer_details():
         'err_factor_obs_sum': None,
         'err_factor_exp_sum': None,
         'err_factor_cols': None,
+        'chimera': None,
     }
 
 

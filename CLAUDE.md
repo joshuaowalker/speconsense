@@ -28,7 +28,7 @@ current for every flag; prefer it over any list written down here.
 | Need | Read |
 |---|---|
 | Module map, the 14 core phases, summarize's 8, orientation backends | `docs/architecture/pipeline.md` |
-| CER, `err_factor`, identity grouping, gid/vid ranks, IUPAC/distance machinery | `docs/architecture/variant-model.md` |
+| CER, `err_factor`, chimera detection, identity grouping, gid/vid ranks, IUPAC/distance machinery | `docs/architecture/variant-model.md` |
 | Naming policy, four output tracks, merge-time field recompute, `-full` | `docs/architecture/summarize-outputs.md` |
 | Profile parameters / FASTA header fields / RiC semantics (user-facing) | `docs/profile-parameters.md`, `docs/customizing-fasta-headers.md`, `docs/understanding-ric-and-merging.md` |
 

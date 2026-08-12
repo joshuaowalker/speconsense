@@ -20,6 +20,7 @@ except ImportError:
     __version__ = "dev"
 
 from speconsense.msa import ReadAlignment, analyze_positional_variation, has_no_majority, call_iupac_ambiguities, compute_cluster_err_factor, DEFAULT_MAX_ERR_FACTOR
+from speconsense.chimera import DEFAULT_ABSKEW, detect_chimera
 from speconsense.context import classify_pairwise_differences
 from speconsense.distances import count_variant_differences
 from speconsense.qctx import DORADO_V5_0, get_qctx, load_table as load_error_model
@@ -152,6 +153,7 @@ class SpecimenClusterer:
                  enable_phase8: bool = True,
                  enable_noise_filter: bool = True,
                  enable_mad_outlier_removal: bool = True,
+                 enable_chimera_detection: bool = True,
                  mad_z_threshold: float = 1.5,
                  mad_gap_factor: float = 2.5,
                  mad_min_mad: float = 0.002,
@@ -185,6 +187,7 @@ class SpecimenClusterer:
         self.enable_phase8 = enable_phase8
         self.enable_noise_filter = enable_noise_filter
         self.enable_mad_outlier_removal = enable_mad_outlier_removal
+        self.enable_chimera_detection = enable_chimera_detection
         # MAD tuning knobs. Forwarded to detect_rid_outliers via
         # ConsensusGenerationConfig. Defaults mirror the function's own defaults
         # so a clusterer constructed with no MAD kwargs is identical to the
@@ -470,6 +473,7 @@ class SpecimenClusterer:
             'err_factor_obs_sum': ef_details.get('obs_sum'),
             'err_factor_exp_sum': ef_details.get('exp_sum'),
             'err_factor_cols': ef_details.get('cols'),
+            'chimera': cluster_dict.get('chimera'),
         }
 
     def write_phasing_stats(self, initial_clusters_count: int, after_prephasing_merge_count: int,
@@ -933,7 +937,8 @@ class SpecimenClusterer:
                             cer_factor: Optional[float] = None,
                             err_factor: Optional[float] = None,
                             identity_group_rank: Optional[int] = None,
-                            identity_variant_rank: Optional[int] = None) -> None:
+                            identity_variant_rank: Optional[int] = None,
+                            chimera: Optional[str] = None) -> None:
         """Write cluster files: reads FASTQ, MSA, and consensus FASTA.
 
         ``cluster_name`` is the group.variant suffix used in filenames and the
@@ -970,6 +975,8 @@ class SpecimenClusterer:
                 info_parts.append(f"cer_factor={cer_factor:.3f}")
         if err_factor is not None:
             info_parts.append(f"err_factor={err_factor:.3f}")
+        if chimera is not None:
+            info_parts.append(f"chimera={chimera}")
         if identity_group_rank is not None:
             info_parts.append(f"gid={identity_group_rank}")
         if identity_variant_rank is not None:
@@ -2603,7 +2610,72 @@ class SpecimenClusterer:
             reference_pool.append(candidate_idx)
             annotated += 1
 
+        if self.enable_chimera_detection:
+            self._detect_group_chimeras(subclusters, consensuses, sorted_indices)
+
         return annotated
+
+    def _detect_group_chimeras(self, subclusters: List[Dict],
+                               consensuses: Dict[int, Optional[str]],
+                               sorted_indices: List[int]) -> None:
+        """Test each candidate for being a two-parent recombinant of larger peers.
+
+        Complements CER, which tests the single-parent artifact hypothesis
+        ("miscalled copies of one reference") and therefore *promotes* PCR
+        chimeras: a recombinant differs from each parent at many real linked
+        positions, so its cer_factor comes out high. See speconsense.chimera
+        for the test itself and the empirical provenance of its gates.
+
+        Eligible parents follow uchime's abundance-skew logic: peers with
+        more than DEFAULT_ABSKEW times the candidate's read count (strictly
+        larger at the default of 1.0). A flagged candidate gets a
+        serializable 'chimera' dict stamped on its cluster dict, plus
+        '_chimera_parent_dicts' — direct references to the two parent
+        cluster dicts in (prefix, suffix) order, resolved to final cluster
+        ids during Phase 13 emission. Parents are never lost to Phase 12
+        size filtering because they are strictly larger than a candidate
+        that survived it.
+        """
+        for pos, cand_idx in enumerate(sorted_indices):
+            if pos < 2:
+                continue
+            cand_consensus = consensuses.get(cand_idx)
+            if not cand_consensus:
+                continue
+            cand_size = len(subclusters[cand_idx]['read_ids'])
+            eligible = [
+                (peer_idx, consensuses[peer_idx])
+                for peer_idx in sorted_indices[:pos]
+                if consensuses.get(peer_idx)
+                and len(subclusters[peer_idx]['read_ids']) > DEFAULT_ABSKEW * cand_size
+            ]
+            if len(eligible) < 2:
+                continue
+
+            hit = detect_chimera(cand_consensus, eligible)
+            if hit is None:
+                continue
+
+            if hit.orientation == "A|B":
+                prefix_idx, suffix_idx = hit.parent_a, hit.parent_b
+            else:
+                prefix_idx, suffix_idx = hit.parent_b, hit.parent_a
+            subclusters[cand_idx]['chimera'] = {
+                'score': hit.score,
+                'diagnostic_sites': hit.diagnostic_sites,
+                'single_mismatches': hit.single_mismatches,
+                'chimera_mismatches': hit.chimera_mismatches,
+                'left_support': hit.left_support,
+                'right_support': hit.right_support,
+            }
+            subclusters[cand_idx]['_chimera_parent_dicts'] = (
+                subclusters[prefix_idx], subclusters[suffix_idx])
+            logging.debug(
+                f"Chimera flagged: candidate size={cand_size} explained by "
+                f"parents (sizes {len(subclusters[prefix_idx]['read_ids'])}, "
+                f"{len(subclusters[suffix_idx]['read_ids'])}), "
+                f"{hit.diagnostic_sites} diagnostic sites, "
+                f"single={hit.single_mismatches} chimera={hit.chimera_mismatches}")
 
     def _compare_candidate_against_validated(
         self,
@@ -2760,6 +2832,27 @@ class SpecimenClusterer:
             else:
                 cluster_dict['cluster_id'] = f"c{final_idx}"
 
+        # Resolve chimera parent references (stamped in Phase 11 as dict refs)
+        # to final variant ranks, now that ranks exist. The header value
+        # "v{prefix}+v{suffix}" names the two parents within the candidate's
+        # own identity group, prefix parent first.
+        for cluster_dict in clusters:
+            chimera = cluster_dict.get('chimera')
+            parent_dicts = cluster_dict.get('_chimera_parent_dicts')
+            if not chimera or not parent_dicts:
+                continue
+            prefix_vid = parent_dicts[0].get('identity_variant_rank')
+            suffix_vid = parent_dicts[1].get('identity_variant_rank')
+            if prefix_vid is None or suffix_vid is None:
+                # Parents bypassed rank assignment (shouldn't happen — they
+                # outrank the candidate by construction). Keep metadata detail
+                # but omit the header field rather than emit a dangling ref.
+                chimera['parents'] = None
+                continue
+            chimera['parents'] = [parent_dicts[0]['cluster_id'],
+                                  parent_dicts[1]['cluster_id']]
+            cluster_dict['chimera_header'] = f"v{prefix_vid}+v{suffix_vid}"
+
         # Write output files sequentially (I/O bound, must preserve order).
         with open(output_file, 'w') as consensus_fasta_handle:
             for cluster_dict in clusters:
@@ -2795,6 +2888,7 @@ class SpecimenClusterer:
                     err_factor=err_factor,
                     identity_group_rank=cluster_dict.get('identity_group_rank'),
                     identity_variant_rank=cluster_dict.get('identity_variant_rank'),
+                    chimera=cluster_dict.get('chimera_header'),
                 )
 
         self._log_stage("Final", clusters)

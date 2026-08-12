@@ -18,11 +18,12 @@ treatment of RiC and merging.
 - original clustering: `-c1`, `-c2`, `-c3`
 - summarization: `-1.v1`, `-1.v2`, `-2.v1` (group and variant)
 
-Four tracks in `__Summary__/variants/`:
+Tracks in `__Summary__/variants/`:
 - pass — `{name}-RiC{ric}.fasta`
 - `.ns` — `{name}.ns-RiC{ric}.fasta`
 - `.lq` — `{name}.lq-RiC{ric}.fasta`
 - `.filtered` — `{name}.filtered-RiC{ric}.fasta`
+- `.chimera` — `{name}.chimera-RiC{ric}.fasta` (only with `--filter-chimeras`)
 
 Pre-merge contributors: `{name}.raw.{gid}.v{vid}-RiC{ric}.fasta`, named by the contributor's
 core `gid.vid` for direct traceability.
@@ -40,9 +41,15 @@ Every variant goes to exactly one track:
 - **`.filtered`** — passes quality gates but excluded by a selection or pruning decision:
   `--select-max-variants`, `--select-min-size-ratio`, `--select-max-groups`, or
   `--prune-group-ratio`/`--prune-group-count`.
+- **`.chimera`** (opt-in) — carries core's `chimera=` flag (two-parent recombinant test) and
+  `--filter-chimeras` was passed. Default is report-only: without the flag, chimera-flagged
+  records stay on the pass track with `chimera=` visible in headers. Routing priority when
+  enabled: `.lq` > `.chimera` > `.ns` — an incoherent cluster isn't worth diagnosing further,
+  and a recombinant is by construction highly significant under CER so `.ns` would never
+  catch it.
 
-The `.ns`/`.lq` versus `.filtered` split is deliberate: it distinguishes a *quality problem*
-from a *selection decision*.
+The `.ns`/`.lq`/`.chimera` versus `.filtered` split is deliberate: it distinguishes a
+*quality problem* from a *selection decision*.
 
 ## Naming policy (`process_single_specimen`)
 
@@ -54,10 +61,10 @@ cross-primer conflation**.
   not a bug.
 - Variants moved into a survivor group by cross-primer conflation adopt the survivor's `gid` and
   get a freshly-minted `vid` strictly above the highest vid core ever wrote under that gid.
-  Collision avoidance considers passed + `.ns` + `.lq` + `.filtered` records under that gid, plus
+  Collision avoidance considers passed + `.ns` + `.lq` + `.chimera` + `.filtered` records under that gid, plus
   any vids already minted in the same pass (this covers 3-or-more-group conflation).
 - Vids under absorbed-group gids stay on disk under their original gid in the `.ns`/`.lq`/
-  `.filtered` outputs, and do not block the survivor's namespace.
+  `.chimera`/`.filtered` outputs, and do not block the survivor's namespace.
 
 ## Post-merge re-check and merge unwind
 
@@ -102,7 +109,7 @@ contributor.
 Each is the variant's `size` as a percentage of a per-specimen denominator:
 
 - `group_frequency` uses the **conflation-aware bucket total** — the sum of `size` over every
-  record (passed + `.ns` + `.lq` + `.filtered`) in the same post-cross-primer-conflation bucket,
+  record (passed + `.ns` + `.lq` + `.chimera` + `.filtered`) in the same post-cross-primer-conflation bucket,
   so a moved variant is measured against the merged-group total
 - `global_frequency` uses `total_input_reads` from the metadata JSON — the post-presample-cap
   count fed into clustering, **not** the literal cap
@@ -111,7 +118,7 @@ Denominators are computed in `process_single_specimen` after Phase 1b and stashe
 `ConsensusInfo` (`group_size_total`, `global_size_total`). Both fields are suppressed when
 denominators are unavailable (legacy inputs without `gid=`; specimens with missing metadata),
 and both propagate through within-group MSA merges, the `-{gid}-full` builder, and the
-`.raw` / `.ns` / `.lq` / `.filtered` writers.
+`.raw` / `.ns` / `.lq` / `.chimera` / `.filtered` writers.
 
 ## Locus labeling
 

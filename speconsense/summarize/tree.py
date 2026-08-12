@@ -31,7 +31,7 @@ from .io import strip_cluster_suffix
 @dataclass
 class _Node:
     info: ConsensusInfo
-    status: str  # "passed" | "ns" | "lq" | "filtered"
+    status: str  # "passed" | "ns" | "lq" | "filtered" | "chimera"
     short_name: str  # display suffix (e.g. "-1.v2") relative to specimen base
     parent_idx: Optional[int] = None
     parent_identity: Optional[float] = None
@@ -49,7 +49,7 @@ def _short_name(sample_name: str, specimen_base: str, status: str) -> str:
         suffix = sample_name[len(specimen_base):] or sample_name
     else:
         suffix = sample_name
-    if status in ('ns', 'lq', 'filtered'):
+    if status in ('ns', 'lq', 'filtered', 'chimera'):
         return f"{suffix}.{status}"
     return suffix
 
@@ -58,6 +58,7 @@ def _tag_status(passed: List[ConsensusInfo],
                 ns: List[ConsensusInfo],
                 lq: List[ConsensusInfo],
                 filtered: Optional[List[ConsensusInfo]] = None,
+                chimera: Optional[List[ConsensusInfo]] = None,
                 ) -> List[Tuple[ConsensusInfo, str]]:
     out: List[Tuple[ConsensusInfo, str]] = []
     for c in passed:
@@ -68,6 +69,8 @@ def _tag_status(passed: List[ConsensusInfo],
         out.append((c, 'lq'))
     for c in (filtered or []):
         out.append((c, 'filtered'))
+    for c in (chimera or []):
+        out.append((c, 'chimera'))
     return out
 
 
@@ -159,11 +162,11 @@ def _format_metrics(c: ConsensusInfo, status: str) -> str:
 
 
 def _render_group(gid: int, nodes: List[_Node], anchor_full_name: str) -> List[str]:
-    counts = {'passed': 0, 'ns': 0, 'lq': 0, 'filtered': 0}
+    counts = {'passed': 0, 'ns': 0, 'lq': 0, 'filtered': 0, 'chimera': 0}
     for node in nodes:
         counts[node.status] = counts.get(node.status, 0) + 1
     breakdown_parts = []
-    for key in ('passed', 'ns', 'lq', 'filtered'):
+    for key in ('passed', 'ns', 'lq', 'filtered', 'chimera'):
         n = counts.get(key, 0)
         if n > 0:
             breakdown_parts.append(f"{n} {key}")
@@ -180,7 +183,7 @@ def _render_group(gid: int, nodes: List[_Node], anchor_full_name: str) -> List[s
 
     anchor = nodes[0]
     anchor_label = anchor_full_name
-    if anchor.status in ('ns', 'lq'):
+    if anchor.status in ('ns', 'lq', 'chimera'):
         anchor_label = f"{anchor_full_name}.{anchor.status}"
     lines.append(f"{anchor_label}  {_format_metrics(anchor.info, anchor.status)}  [anchor]")
 
@@ -218,12 +221,13 @@ def write_specimen_variant_tree(
     output_dir: str,
     hp_normalization_length: int = 6,
     filtered: Optional[List[ConsensusInfo]] = None,
+    chimera: Optional[List[ConsensusInfo]] = None,
 ) -> None:
     """Write a tree-view text file for one specimen at output_dir/{specimen_id}.txt.
 
     No-ops when there are no eligible variants (no group_rank populated).
     """
-    items = _tag_status(passed, ns, lq, filtered)
+    items = _tag_status(passed, ns, lq, filtered, chimera)
     if not items:
         return
 
@@ -240,6 +244,7 @@ def write_specimen_variant_tree(
     total_ns = sum(1 for _, s in items if s == 'ns')
     total_lq = sum(1 for _, s in items if s == 'lq')
     total_filtered = sum(1 for _, s in items if s == 'filtered')
+    total_chimera = sum(1 for _, s in items if s == 'chimera')
 
     header_lines: List[str] = []
     header_lines.append("=" * 80)
@@ -254,6 +259,8 @@ def write_specimen_variant_tree(
         breakdown.append(f"{total_lq} .lq")
     if total_filtered:
         breakdown.append(f"{total_filtered} .filtered")
+    if total_chimera:
+        breakdown.append(f"{total_chimera} .chimera")
     plural = "s" if len(items) != 1 else ""
     header_lines.append(f"{len(items)} variant{plural} total: {', '.join(breakdown) if breakdown else '0'}")
     header_lines.append(f"{len(groups)} identity group{'s' if len(groups) != 1 else ''}")

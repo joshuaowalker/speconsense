@@ -168,6 +168,14 @@ def main():
     add_advanced_argument(advanced_group, "--enable-noise-filter", action="store_false",
                           dest="disable_noise_filter",
                           help="Override --disable-noise-filter or profile setting")
+    add_advanced_argument(advanced_group, "--disable-chimera-detection", action="store_true",
+                          help="Disable the Phase 11 two-parent recombinant (PCR chimera) test. "
+                               "Candidates explained near-perfectly by a single crossover "
+                               "between two larger same-group peers are normally stamped with "
+                               "a chimera= header field; this flag skips the test.")
+    add_advanced_argument(advanced_group, "--enable-chimera-detection", action="store_false",
+                          dest="disable_chimera_detection",
+                          help="Override --disable-chimera-detection or profile setting")
     add_advanced_argument(advanced_group, "--disable-mad-outlier-removal", action="store_true",
                           help="Disable MAD-based outlier removal at final consensus generation. "
                                "Reads whose identity to the cluster consensus is more than n*MAD "
@@ -312,6 +320,7 @@ def main():
         enable_phase8=not args.disable_second_phasing,
         enable_noise_filter=not args.disable_noise_filter,
         enable_mad_outlier_removal=not args.disable_mad_outlier_removal,
+        enable_chimera_detection=not args.disable_chimera_detection,
         mad_z_threshold=args.mad_z_threshold,
         mad_gap_factor=args.mad_gap_factor,
         mad_min_mad=args.mad_min_mad,

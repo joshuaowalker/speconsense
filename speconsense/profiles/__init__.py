@@ -70,6 +70,7 @@ VALID_SPECONSENSE_KEYS = {
     "disable-second-phasing",
     "disable-noise-filter",
     "disable-mad-outlier-removal",
+    "disable-chimera-detection",
     "significance-level",
     "group-identity",
     "hp-normalization-length",
@@ -102,6 +103,7 @@ VALID_SUMMARIZE_KEYS = {
     "max-len",
     "min-cer-factor",
     "max-err-factor",
+    "filter-chimeras",
     "prune-group-ratio",
     "prune-group-count",
     # Grouping

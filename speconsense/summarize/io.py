@@ -32,7 +32,7 @@ from .fields import FastaField, format_fasta_header
 _CLUSTER_SUFFIX_RE = re.compile(
     r'-\d+(?:\.v\d+|-full)'
     r'(?:\.raw(?:\d+|\.\d+\.v\d+))?'
-    r'(?:\.(?:ns|lq|filtered))?$'
+    r'(?:\.(?:ns|lq|filtered|chimera))?$'
 )
 
 
@@ -46,6 +46,7 @@ def strip_cluster_suffix(sample_name: str) -> str:
     - ``specimen-1.v2.ns`` → ``specimen``
     - ``specimen-1.v2.lq`` → ``specimen``
     - ``specimen-1.v2.filtered`` → ``specimen``
+    - ``specimen-1.v2.chimera`` → ``specimen``
     - ``specimen-1-full`` → ``specimen``
 
     Returns the input unchanged when no suffix is present.
@@ -57,24 +58,27 @@ def parse_consensus_header(header: str) -> Tuple[Optional[str], Optional[int], O
                                                    Optional[List[str]], Optional[float], Optional[float],
                                                    Optional[List[int]], Optional[List[int]], Optional[int],
                                                    Optional[float], Optional[float],
-                                                   Optional[int], Optional[int]]:
+                                                   Optional[int], Optional[int], Optional[str]]:
     """
     Extract information from Speconsense consensus FASTA header.
 
     Parses read identity metrics, merge metadata, quality metrics
     (``cer_factor`` CER decision metric and ``err_factor`` cluster-homogeneity
-    metric), and the core-assigned identity ranks (``group_rank`` / ``variant_rank``
-    emitted as ``gid=`` / ``vid=``). Full per-position CER detail (p*, K, context
-    tags, q_ctx values) lives only in the metadata JSON.
+    metric), the core-assigned identity ranks (``group_rank`` / ``variant_rank``
+    emitted as ``gid=`` / ``vid=``), and the ``chimera=`` recombinant flag
+    ("v{prefix}+v{suffix}" naming the two parent vids). Full per-position CER
+    and chimera detail (p*, K, context tags, q_ctx values, diagnostic-site
+    counts) lives only in the metadata JSON.
 
     Returns:
         Tuple of (sample_name, ric, size, primers, rid, rid_min, raw_ric,
-        raw_len, snp_count, cer_factor, err_factor, group_rank, variant_rank).
+        raw_len, snp_count, cer_factor, err_factor, group_rank, variant_rank,
+        chimera).
     """
     sample_match = re.match(r'>([^ ]+) (.+)', header)
     if not sample_match:
         return (None, None, None, None, None, None, None, None, None,
-                None, None, None, None)
+                None, None, None, None, None)
 
     sample_name = sample_match.group(1)
     info_string = sample_match.group(2)
@@ -125,9 +129,12 @@ def parse_consensus_header(header: str) -> Tuple[Optional[str], Optional[int], O
     vid_match = re.search(r'\bvid=(\d+)', info_string)
     variant_rank = int(vid_match.group(1)) if vid_match else None
 
+    chimera_match = re.search(r'\bchimera=(\S+)', info_string)
+    chimera = chimera_match.group(1) if chimera_match else None
+
     return (sample_name, ric, size, primers, rid, rid_min,
             raw_ric, raw_len, snp_count, cer_factor, err_factor,
-            group_rank, variant_rank)
+            group_rank, variant_rank, chimera)
 
 
 def load_consensus_sequences(
@@ -138,7 +145,8 @@ def load_consensus_sequences(
     specimen_id: str = None,
     min_cer_factor: float = DEFAULT_MIN_CER_FACTOR,
     max_err_factor: float = DEFAULT_MAX_ERR_FACTOR,
-) -> Tuple[List[ConsensusInfo], List[ConsensusInfo], List[ConsensusInfo]]:
+    filter_chimeras: bool = False,
+) -> Tuple[List[ConsensusInfo], List[ConsensusInfo], List[ConsensusInfo], List[ConsensusInfo]]:
     """Load consensus sequences from speconsense output files.
 
     Args:
@@ -158,14 +166,21 @@ def load_consensus_sequences(
             err_factor=None (legacy output missing the field) always pass.
             Set to 0 to disable err_factor filtering. When both filters fire
             on the same record, lq takes precedence over ns.
+        filter_chimeras: Route records carrying core's chimera= flag (two-
+            parent recombinant test) to a separate chimera list. Default off:
+            the flag is carried through on the pass track for review
+            (report-only). Routing priority when enabled: lq > chimera > ns —
+            an internally incoherent cluster isn't worth diagnosing further,
+            but the chimera verdict is more specific than CER's.
 
     Returns:
-        Tuple of (passing, ns, lq) lists of ConsensusInfo. All lists have
-        already passed the RiC and length filters.
+        Tuple of (passing, ns, lq, chimera) lists of ConsensusInfo. All lists
+        have already passed the RiC and length filters.
     """
     consensus_list: List[ConsensusInfo] = []
     ns_list: List[ConsensusInfo] = []
     lq_list: List[ConsensusInfo] = []
+    chimera_list: List[ConsensusInfo] = []
     filtered_by_ric = 0
     filtered_by_len = 0
 
@@ -204,7 +219,7 @@ def load_consensus_sequences(
             for record in SeqIO.parse(f, "fasta"):
                 (sample_name, ric, size, primers, rid, rid_min,
                  _, _, _, cer_factor, err_factor,
-                 group_rank, variant_rank) = \
+                 group_rank, variant_rank, chimera) = \
                     parse_consensus_header(f">{record.description}")
 
                 if not sample_name:
@@ -253,14 +268,21 @@ def load_consensus_sequences(
                     err_factor_cols=ef_cols,
                     group_rank=group_rank,
                     variant_rank=variant_rank,
+                    chimera=chimera,
                 )
 
-                # Routing priority: lq (low quality) takes precedence over ns
-                # (CER not significant). A cluster whose reads are internally
-                # incoherent isn't worth evaluating for peer-artifact status.
+                # Routing priority: lq (low quality) takes precedence over
+                # chimera and ns. A cluster whose reads are internally
+                # incoherent isn't worth diagnosing further — the chimera and
+                # CER verdicts both presume a meaningful consensus. Chimera
+                # outranks ns because a recombinant is by construction highly
+                # significant under CER (its differences from each parent are
+                # real), so the ns gate would never catch it anyway.
                 if (err_filter_enabled and err_factor is not None
                         and err_factor > max_err_factor):
                     lq_list.append(consensus_info)
+                elif filter_chimeras and chimera is not None:
+                    chimera_list.append(consensus_info)
                 elif (cer_filter_enabled and cer_factor is not None
                         and cer_factor < min_cer_factor):
                     ns_list.append(consensus_info)
@@ -271,6 +293,8 @@ def load_consensus_sequences(
     filter_parts = [f"Loaded {len(consensus_list)} consensus sequences from {len(fasta_files)} files"]
     if lq_list:
         filter_parts.append(f"routed {len(lq_list)} to lq (err_factor > {max_err_factor})")
+    if chimera_list:
+        filter_parts.append(f"routed {len(chimera_list)} to chimera (core chimera= flag)")
     if ns_list:
         filter_parts.append(f"routed {len(ns_list)} to ns (CER factor < {min_cer_factor})")
     if filtered_by_ric > 0:
@@ -279,7 +303,7 @@ def load_consensus_sequences(
         filter_parts.append(f"filtered {filtered_by_len} by length")
     logging.info(", ".join(filter_parts))
 
-    return consensus_list, ns_list, lq_list
+    return consensus_list, ns_list, lq_list, chimera_list
 
 
 def load_metadata_from_json(source_folder: str, sample_name: str) -> Optional[Dict]:
@@ -645,6 +669,21 @@ def write_lq_variant_files(lq_consensuses: List[ConsensusInfo],
     )
 
 
+def write_chimera_variant_files(chimera_consensuses: List[ConsensusInfo],
+                                summary_folder: str,
+                                fastq_lookup: Dict[str, List[str]],
+                                fasta_fields: List[FastaField]) -> None:
+    """Emit chimera-flagged variants to variants/ using the raw-variant layout.
+
+    These records carry core's chimera= flag (two-parent recombinant test)
+    and were routed off the pass track by --filter-chimeras.
+    """
+    _write_filtered_variant_files(
+        chimera_consensuses, summary_folder, fastq_lookup, fasta_fields,
+        marker='chimera',
+    )
+
+
 def write_filtered_variant_files(filtered_consensuses: List[ConsensusInfo],
                                   summary_folder: str,
                                   fastq_lookup: Dict[str, List[str]],
@@ -891,7 +930,7 @@ def load_existing_specimen_outputs(summary_dir: str) -> List[ConsensusInfo]:
             for record in SeqIO.parse(f, "fasta"):
                 (sample_name, ric, size, primers, rid, rid_min,
                  raw_ric, raw_len, snp_count, cer_factor, err_factor,
-                 group_rank, variant_rank) = \
+                 group_rank, variant_rank, chimera) = \
                     parse_consensus_header(f">{record.description}")
 
                 if not sample_name:
@@ -917,6 +956,7 @@ def load_existing_specimen_outputs(summary_dir: str) -> List[ConsensusInfo]:
                     err_factor=err_factor,
                     group_rank=group_rank,
                     variant_rank=variant_rank,
+                    chimera=chimera,
                 )
                 consensus_list.append(consensus_info)
 

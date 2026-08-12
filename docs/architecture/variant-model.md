@@ -89,6 +89,35 @@ Because the largest cluster can be demoted below `vid=1` when its `err_factor` i
 `fit_error_model` re-derives the primary anchor by max read count rather than trusting the
 `1.v1` label.
 
+## Chimera detection (the hypothesis CER cannot test)
+
+CER's artifact hypothesis is single-parent: "the candidate's reads are miscalled copies of
+one reference." A PCR chimera — a single-crossover recombinant of two real haplotypes in the
+same identity group — is the inverse case: it differs from each parent at many *real* linked
+positions, so the joint q* collapses and **`cer_factor` comes out high**. `err_factor` can't
+catch it either (a chimeric cluster's reads are internally homogeneous). Empirically (ont98,
+2026-08-12), ~2.5% of the default pass track was chimeric, with median `cer_factor` 15.
+
+`speconsense/chimera.py` closes the hole with a uchime-style test, run in Phase 11 alongside
+CER (`_detect_group_chimeras`): each candidate is SPOA-aligned with pairs of strictly-larger
+same-group peers; *diagnostic columns* (parents differ, both plain ACGT — gaps/IUPAC excluded)
+are scanned for the single breakpoint that best explains the candidate as prefix-from-one-parent
++ suffix-from-the-other. Flagging requires a near-perfect partition: ≥6 diagnostic sites, ≤1
+unexplained by the chimera model, ≥4 sites better than the best single parent, ≥3 supporting
+sites on each side of the breakpoint (constants in `chimera.py`, calibrated on ont98).
+
+Parent eligibility follows uchime's abskew idea but at 1.0 (strictly larger) rather than
+uchime's 2.0 — real minor haplotypes routinely sit within 2x of the chimeras they parent, and
+the partition gates carry the specificity. Candidates are tested against pairs from their 6
+largest eligible peers only (parents are always abundant).
+
+Flagged clusters get `chimera=v{prefix}+v{suffix}` in the FASTA header (parent vids within the
+same gid, prefix parent first) and full detail (score, site counts, side support, parent
+cluster ids) in the metadata JSON. **Core never drops flagged clusters.** Summarize carries the
+flag through by default (report-only); `--filter-chimeras` routes flagged records to the
+`.chimera` track. `--disable-chimera-detection` (core) skips the test. Biological recombinants
+are indistinguishable from PCR artifacts by construction — hence flag-and-review, not delete.
+
 ## IUPAC ambiguity handling
 
 - `IUPAC_CODES` (`msa.py`) maps nucleotide sets to codes (R=A/G, Y=C/T, …)

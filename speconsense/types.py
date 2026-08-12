@@ -33,6 +33,7 @@ class ConsensusInfo(NamedTuple):
     group_size_total: Optional[int] = None  # Sum of size over conflation-aware bucket (passed+ns+lq); denominator for group_frequency
     global_size_total: Optional[int] = None  # Specimen-level total_input_reads (post-presample); denominator for global_frequency
     locus: Optional[str] = None  # Detected locus label (e.g. ITS, ITS1, ITS2) from pyitsx or primer-locus-ref
+    chimera: Optional[str] = None  # Core chimera flag: "v{prefix}+v{suffix}" naming the two parent vids (chimera= in header)
 
 
 class OverlapMergeInfo(NamedTuple):
