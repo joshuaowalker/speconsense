@@ -1831,6 +1831,12 @@ This project uses and builds upon:
 
 - **MCL in bioinformatics**: Enright, A.J., Van Dongen, S., Ouzounis, C.A. (2002). *An efficient algorithm for large-scale detection of protein families*. Nucleic Acids Research 30(7):1575-1584. https://doi.org/10.1093/nar/30.7.1575 (PMC: https://pmc.ncbi.nlm.nih.gov/articles/PMC101833/)
 
+- **SPOA** (consensus generation; SPOA is the SIMD partial-order alignment module introduced with Racon): Vaser, R., Sović, I., Nagarajan, N., Šikić, M. (2017). *Fast and accurate de novo genome assembly from long uncorrected reads*. Genome Research 27(5):737-746. https://doi.org/10.1101/gr.214270.116
+
+- **VSEARCH** (scalable candidate finding): Rognes, T., Flouri, T., Nichols, B., Quince, C., Mahé, F. (2016). *VSEARCH: a versatile open source tool for metagenomics*. PeerJ 4:e2584. https://doi.org/10.7717/peerj.2584
+
+- **Edlib** (edit-distance alignment): Šošić, M., Šikić, M. (2017). *Edlib: a C/C++ library for fast, exact sequence alignment using edit distance*. Bioinformatics 33(9):1394-1395. https://doi.org/10.1093/bioinformatics/btw753
+
 - **Chimera detection** (the two-parent recombinant test is modeled on UCHIME's crossover framework):
   - Edgar, R.C., Haas, B.J., Clemente, J.C., Quince, C., Knight, R. (2011). *UCHIME improves sensitivity and speed of chimera detection*. Bioinformatics 27(16):2194-2200. https://doi.org/10.1093/bioinformatics/btr381
   - Edgar, R.C. (2016). *UCHIME2: improved chimera prediction for amplicon sequencing*. bioRxiv 074252. https://doi.org/10.1101/074252
