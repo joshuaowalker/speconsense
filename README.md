@@ -1831,6 +1831,10 @@ This project uses and builds upon:
 
 - **MCL in bioinformatics**: Enright, A.J., Van Dongen, S., Ouzounis, C.A. (2002). *An efficient algorithm for large-scale detection of protein families*. Nucleic Acids Research 30(7):1575-1584. https://doi.org/10.1093/nar/30.7.1575 (PMC: https://pmc.ncbi.nlm.nih.gov/articles/PMC101833/)
 
+- **Chimera detection** (the two-parent recombinant test is modeled on UCHIME's crossover framework):
+  - Edgar, R.C., Haas, B.J., Clemente, J.C., Quince, C., Knight, R. (2011). *UCHIME improves sensitivity and speed of chimera detection*. Bioinformatics 27(16):2194-2200. https://doi.org/10.1093/bioinformatics/btr381
+  - Edgar, R.C. (2016). *UCHIME2: improved chimera prediction for amplicon sequencing*. bioRxiv 074252. https://doi.org/10.1101/074252
+
 - **ONT fungal barcoding protocol**: Russell, S.D., Geurin, Z., Walker, J. (2024). *Primary Data Analysis - Basecalling, Demultiplexing, and Consensus Building for ONT Fungal Barcodes*. protocols.io. https://dx.doi.org/10.17504/protocols.io.dm6gpbm88lzp/v4
 
 ## Contributing

@@ -98,7 +98,8 @@ positions, so the joint q* collapses and **`cer_factor` comes out high**. `err_f
 catch it either (a chimeric cluster's reads are internally homogeneous). Empirically (ont98,
 2026-08-12), ~2.5% of the default pass track was chimeric, with median `cer_factor` 15.
 
-`speconsense/chimera.py` closes the hole with a uchime-style test, run in Phase 11 alongside
+`speconsense/chimera.py` closes the hole with a uchime-style test (Edgar 2011; Edgar 2016
+bioRxiv — full citations in README), run in Phase 11 alongside
 CER (`_detect_group_chimeras`): each candidate is SPOA-aligned with pairs of strictly-larger
 same-group peers; *diagnostic columns* (parents differ, both plain ACGT — gaps/IUPAC excluded)
 are scanned for the single breakpoint that best explains the candidate as prefix-from-one-parent
