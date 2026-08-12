@@ -31,6 +31,8 @@ Parameters for the main clustering and consensus tool.
 | `disable-position-phasing` | Disable variant phasing within clusters (also disables the second phasing pass) | false | — | — | — | true | — |
 | `disable-read-reassignment` | Disable post-phasing concordance-based read reassignment within identity groups | false | — | — | — | true | — |
 | `disable-discard-recovery` | Disable recovery of discarded reads into surviving clusters (requires read reassignment enabled) | false | — | — | — | true | — |
+| `disable-second-phasing` | Disable the Phase 8 second phasing pass without disabling first-pass phasing | false | — | — | — | — | — |
+| `disable-noise-filter` | Disable the Phase 5 noise filter (small clusters with no-majority MSA columns) | false | — | — | — | — | — |
 | `min-variant-frequency` | Min minor allele frequency for variant phasing | 0.10 | 0.20 | 0.05 | — | — | 0.25 |
 | `min-variant-count` | Min read count for minor allele to trigger phasing | 3 | — | — | — | — | — |
 | `significance-level` | Alpha for variant significance (CER) testing | 1e-5 | — | — | — | — | — |
@@ -42,10 +44,16 @@ Parameters for the main clustering and consensus tool.
 | `min-ambiguity-count` | Min read count for IUPAC ambiguity calling | 3 | — | — | — | — | — |
 | `disable-cluster-merging` | Disable merging identical consensus sequences | false | — | — | — | — | — |
 | `disable-homopolymer-equivalence` | Require exact match for cluster merging | false | — | — | — | — | — |
-| `orient-mode` | Sequence orientation: `none`, `primer`, `pyitsx` | none | — | — | — | — | — |
+| `disable-mad-outlier-removal` | Disable MAD-based outlier removal at final consensus generation | false | — | — | — | — | — |
+| `mad-z-threshold` | Modified Z-score cutoff for the MAD outlier rule (lower = more aggressive) | 1.5 | — | — | — | — | — |
+| `mad-gap-factor` | Gap-rule multiplier for flagging the worst read (lower = more aggressive) | 2.5 | — | — | — | — | — |
+| `mad-min-mad` | Floor for the MAD value (0..1 rid scale) to avoid divide-by-zero | 0.002 | — | — | — | — | — |
+| `mad-min-drop-from-median` | Min absolute rid drop below the median before a read can be flagged (0..1 scale) | 0.02 | — | — | — | — | — |
+| `orient-mode` | Sequence orientation: `none`, `primer`, `pyitsx`, `pyitsx+primer` | none | — | — | — | — | — |
 | `pyitsx-organism` | Organism group for pyitsx orientation (e.g. F, T, M) | F | — | — | — | — | — |
 | `scale-threshold` | Sequence count to enable vsearch acceleration (0 = disabled) | 1001 | — | — | — | — | — |
 | `threads` | Max threads for internal parallelism (0 = auto) | 1 | — | — | 0 | — | — |
+| `collect-discards` | Write discarded reads to `cluster_debug/{sample}-discards.fastq` | false | — | — | — | — | — |
 
 **Notes:**
 - "—" indicates the parameter uses the default value

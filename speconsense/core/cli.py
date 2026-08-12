@@ -345,7 +345,8 @@ def main():
     # Read primary sequences
     logging.info(f"Reading sequences from {args.input_file}")
     format = "fasta" if args.input_file.endswith(".fasta") else "fastq"
-    records = list(SeqIO.parse(args.input_file, format))
+    from speconsense.core.records import parse_input
+    records = parse_input(args.input_file, format)
     duplicate_ids = len(records) - len({r.id for r in records})
     if duplicate_ids:
         logging.info(f"Loaded {len(records)} primary reads ({len(records) - duplicate_ids} unique; {duplicate_ids} duplicate ID(s) will be deduplicated)")

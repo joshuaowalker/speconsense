@@ -320,6 +320,24 @@ def extract_alignments_from_msa(
     # Build HP context for normalization (computed once, used for all reads)
     hp_context = _build_hp_context(consensus_aligned, min_hp_length) if enable_homopolymer_normalization else None
 
+    # Vectorized per-read comparison. The masks below reproduce the original
+    # per-character loop exactly: same classification precedence, same
+    # ascending-position ErrorPosition ordering, same score_aligned strings.
+    _GAP = ord('-')
+    _TYPE_NAMES = {1: 'del', 2: 'ins', 3: 'sub'}
+    cons_arr = np.frombuffer(consensus_aligned.encode('ascii'), dtype=np.uint8)
+    cons_gap = cons_arr == _GAP
+    if hp_context is not None:
+        hp_arr = np.array(
+            [0 if b is None else ord(b) for b in hp_context], dtype=np.uint8)
+        hp_present = hp_arr != 0
+
+    def _error_positions_from(type_code: np.ndarray) -> List[ErrorPosition]:
+        return [
+            ErrorPosition(int(pos), _TYPE_NAMES[int(type_code[pos])])
+            for pos in np.nonzero(type_code)[0]
+        ]
+
     # Process each read
     alignments = []
 
@@ -330,70 +348,51 @@ def extract_alignments_from_msa(
             logging.warning(f"Read {read_record.id} length mismatch with MSA length")
             continue
 
-        # Compare read to consensus at each position
-        error_positions = []
-        num_insertions = 0
-        num_deletions = 0
-        num_substitutions = 0
+        read_arr = np.frombuffer(read_aligned.encode('ascii'), dtype=np.uint8)
+        read_gap = read_arr == _GAP
 
-        for msa_pos in range(msa_length):
-            read_base = read_aligned[msa_pos]
-            cons_base = consensus_aligned[msa_pos]
+        # Raw metrics: both-gap positions carry no error; otherwise classify.
+        del_mask = read_gap & ~cons_gap
+        ins_mask = ~read_gap & cons_gap
+        sub_mask = ~read_gap & ~cons_gap & (read_arr != cons_arr)
 
-            # Skip if both are gaps (read doesn't cover this position)
-            if read_base == '-' and cons_base == '-':
-                continue
+        raw_type = np.zeros(msa_length, dtype=np.uint8)
+        raw_type[del_mask] = 1
+        raw_type[ins_mask] = 2
+        raw_type[sub_mask] = 3
+        error_positions = _error_positions_from(raw_type)
 
-            # Classify error type and record at MSA position
-            if read_base == '-' and cons_base != '-':
-                # Deletion (missing base in read)
-                error_positions.append(ErrorPosition(msa_pos, 'del'))
-                num_deletions += 1
-            elif read_base != '-' and cons_base == '-':
-                # Insertion (extra base in read)
-                error_positions.append(ErrorPosition(msa_pos, 'ins'))
-                num_insertions += 1
-            elif read_base != cons_base:
-                # Substitution (different bases)
-                error_positions.append(ErrorPosition(msa_pos, 'sub'))
-                num_substitutions += 1
-            # else: match, no error
+        num_deletions = int(np.count_nonzero(del_mask))
+        num_insertions = int(np.count_nonzero(ins_mask))
+        num_substitutions = int(np.count_nonzero(sub_mask))
 
         # Calculate edit distance and read length
         edit_distance = num_insertions + num_deletions + num_substitutions
-        read_length = len(read_aligned.replace('-', ''))  # Length without gaps
+        read_length = msa_length - int(np.count_nonzero(read_gap))
 
         # Compute homopolymer-normalized metrics using consensus-derived HP context
         if hp_context is not None:
-            score_chars = []
-            normalized_error_positions = []
+            # Match ('|'): equal bases, including the both-gap case.
+            match_mask = read_arr == cons_arr
+            # HP equivalence ('='): deletion or insertion of the HP base.
+            # Disjoint from match_mask by construction (one side is a gap,
+            # the other is the HP base).
+            hp_eq_mask = hp_present & (
+                ((cons_arr == hp_arr) & read_gap)
+                | (cons_gap & (read_arr == hp_arr))
+            )
+            norm_err_mask = ~match_mask & ~hp_eq_mask
 
-            for msa_pos in range(msa_length):
-                read_base = read_aligned[msa_pos]
-                cons_base = consensus_aligned[msa_pos]
-                hp_base = hp_context[msa_pos]
+            score_codes = np.full(msa_length, ord(' '), dtype=np.uint8)
+            score_codes[match_mask] = ord('|')
+            score_codes[hp_eq_mask] = ord('=')
+            score_aligned_str = score_codes.tobytes().decode('ascii')
 
-                if read_base == '-' and cons_base == '-':
-                    score_chars.append('|')
-                elif read_base == cons_base:
-                    score_chars.append('|')
-                elif hp_base is not None and cons_base == hp_base and read_base == '-':
-                    # Deletion of the HP base — treat as HP match
-                    score_chars.append('=')
-                elif hp_base is not None and cons_base == '-' and read_base == hp_base:
-                    # Insertion of the HP base — treat as HP match
-                    score_chars.append('=')
-                else:
-                    # Real mismatch
-                    score_chars.append(' ')
-                    if read_base == '-' and cons_base != '-':
-                        normalized_error_positions.append(ErrorPosition(msa_pos, 'del'))
-                    elif read_base != '-' and cons_base == '-':
-                        normalized_error_positions.append(ErrorPosition(msa_pos, 'ins'))
-                    else:
-                        normalized_error_positions.append(ErrorPosition(msa_pos, 'sub'))
-
-            score_aligned_str = ''.join(score_chars)
+            norm_type = np.zeros(msa_length, dtype=np.uint8)
+            norm_type[norm_err_mask & read_gap & ~cons_gap] = 1
+            norm_type[norm_err_mask & ~read_gap & cons_gap] = 2
+            norm_type[norm_err_mask & ~read_gap & ~cons_gap] = 3
+            normalized_error_positions = _error_positions_from(norm_type)
             normalized_edit_distance = len(normalized_error_positions)
         else:
             # Homopolymer normalization disabled - use raw metrics
@@ -450,77 +449,68 @@ def analyze_positional_variation(alignments: List[ReadAlignment], consensus_alig
     msa_length = len(consensus_aligned)
 
     # Build error frequency matrix in MSA space
-    # For each MSA position: [sub_count, ins_count, del_count, total_coverage]
-    error_matrix = np.zeros((msa_length, 4), dtype=int)
+    # For each MSA position: [sub_count, ins_count, del_count]
+    # Coverage is uniform: every alignment spans the full MSA, so each read
+    # contributes 1 to every position (matching the original per-position
+    # increment, which counted mismatched-length reads too).
+    error_matrix = np.zeros((msa_length, 3), dtype=int)
+    coverage = len(alignments)
 
-    # Build base composition matrix in MSA space (raw counts)
-    base_composition_matrix = [
-        {'A': 0, 'C': 0, 'G': 0, 'T': 0, '-': 0}
-        for _ in range(msa_length)
-    ]
-
-    # Build homopolymer composition matrix in MSA space
-    # Tracks bases that are homopolymer extensions (score_aligned='=')
-    homopolymer_composition_matrix = [
-        {'A': 0, 'C': 0, 'G': 0, 'T': 0, '-': 0}
-        for _ in range(msa_length)
-    ]
-
-    # Process alignments to count errors at MSA positions
-    for read_idx, alignment in enumerate(alignments):
-        # Count this read as coverage for all MSA positions
-        # Note: alignments span the full MSA
-        for msa_pos in range(msa_length):
-            error_matrix[msa_pos, 3] += 1  # coverage
-
-        # Add errors at specific MSA positions using normalized errors
-        # (excludes homopolymer extensions)
+    _ERR_COL = {'sub': 0, 'ins': 1, 'del': 2}
+    for alignment in alignments:
+        # Errors are sparse (a few % of positions), so this loop is cheap.
         for error_pos in alignment.normalized_error_positions:
             msa_pos = error_pos.msa_position
             if 0 <= msa_pos < msa_length:
-                if error_pos.error_type == 'sub':
-                    error_matrix[msa_pos, 0] += 1
-                elif error_pos.error_type == 'ins':
-                    error_matrix[msa_pos, 1] += 1
-                elif error_pos.error_type == 'del':
-                    error_matrix[msa_pos, 2] += 1
+                col = _ERR_COL.get(error_pos.error_type)
+                if col is not None:
+                    error_matrix[msa_pos, col] += 1
 
-        # Extract base composition from aligned sequence with homopolymer normalization
-        read_aligned = alignment.aligned_sequence
-        if len(read_aligned) != msa_length:
-            continue
+    # Base composition and HP-extension composition, vectorized. Rows are
+    # restricted to full-length alignments (same reads the original loop
+    # processed after its length check). Non-ACGT characters count toward
+    # '-', reproducing the original "treat N or other ambiguous as gap".
+    full_rows = [a for a in alignments if len(a.aligned_sequence) == msa_length]
+    base_counts: Dict[str, np.ndarray] = {}
+    hp_counts: Dict[str, np.ndarray] = {}
+    if full_rows:
+        read_matrix = np.frombuffer(
+            ''.join(a.aligned_sequence for a in full_rows).encode('ascii'),
+            dtype=np.uint8,
+        ).reshape(len(full_rows), msa_length)
+        # score_aligned rows padded to msa_length: positions past the end of
+        # a short/empty score string count as "not an HP extension", exactly
+        # like the original bounds check.
+        eq_matrix = np.frombuffer(
+            ''.join(
+                (a.score_aligned or '').ljust(msa_length, ' ')[:msa_length]
+                for a in full_rows
+            ).encode('ascii'),
+            dtype=np.uint8,
+        ).reshape(len(full_rows), msa_length) == ord('=')
 
-        # Track what base each read has at each MSA position
-        # Raw base composition plus separate tracking of homopolymer extensions
-        for msa_pos in range(msa_length):
-            read_base = read_aligned[msa_pos]
-
-            # Track raw base composition
-            if read_base in ['A', 'C', 'G', 'T', '-']:
-                base_composition_matrix[msa_pos][read_base] += 1
-            else:
-                # Treat N or other ambiguous as gap
-                base_composition_matrix[msa_pos]['-'] += 1
-
-            # Additionally track if this is a homopolymer extension
-            # NOTE: score_aligned is from the READ's perspective (seq1), which is what we want
-            # since we're asking whether this particular READ base is an HP extension
-            if alignment.score_aligned and msa_pos < len(alignment.score_aligned):
-                if alignment.score_aligned[msa_pos] == '=':
-                    # Homopolymer extension - track separately
-                    if read_base in ['A', 'C', 'G', 'T', '-']:
-                        homopolymer_composition_matrix[msa_pos][read_base] += 1
-                    else:
-                        homopolymer_composition_matrix[msa_pos]['-'] += 1
+        for base in 'ACGT':
+            is_base = read_matrix == ord(base)
+            base_counts[base] = np.count_nonzero(is_base, axis=0)
+            hp_counts[base] = np.count_nonzero(is_base & eq_matrix, axis=0)
+        acgt_total = sum(base_counts[b] for b in 'ACGT')
+        base_counts['-'] = len(full_rows) - acgt_total
+        hp_counts['-'] = (
+            np.count_nonzero(eq_matrix, axis=0) - sum(hp_counts[b] for b in 'ACGT')
+        )
+    else:
+        zeros = np.zeros(msa_length, dtype=int)
+        for base in 'ACGT-':
+            base_counts[base] = zeros
+            hp_counts[base] = zeros
 
     # Calculate statistics for each MSA position
     position_stats = []
 
     for msa_pos in range(msa_length):
-        sub_count = error_matrix[msa_pos, 0]
-        ins_count = error_matrix[msa_pos, 1]
-        del_count = error_matrix[msa_pos, 2]
-        coverage = error_matrix[msa_pos, 3]
+        sub_count = int(error_matrix[msa_pos, 0])
+        ins_count = int(error_matrix[msa_pos, 1])
+        del_count = int(error_matrix[msa_pos, 2])
 
         # Total error events
         error_count = sub_count + ins_count + del_count
@@ -532,11 +522,8 @@ def analyze_positional_variation(alignments: List[ReadAlignment], consensus_alig
         # Get consensus nucleotide at this MSA position
         cons_nucleotide = consensus_aligned[msa_pos]
 
-        # Get base composition for this MSA position (raw counts)
-        base_comp = base_composition_matrix[msa_pos].copy()
-
-        # Get homopolymer extension composition for this MSA position
-        hp_comp = homopolymer_composition_matrix[msa_pos].copy()
+        base_comp = {b: int(base_counts[b][msa_pos]) for b in ('A', 'C', 'G', 'T', '-')}
+        hp_comp = {b: int(hp_counts[b][msa_pos]) for b in ('A', 'C', 'G', 'T', '-')}
 
         position_stats.append(PositionStats(
             msa_position=msa_pos,
@@ -880,17 +867,32 @@ def compute_cluster_err_factor(
     non_hp_rate = q_sub + q_ind
     hp_l5_rate = qctx_table.get('hp-l5', 0.011)
 
+    # Vectorized per-column mismatch counts. Reads in a SPOA MSA share the
+    # consensus row's length; fall back to the scalar comparison if a
+    # malformed MSA ever violates that. Values (and therefore the float
+    # accumulation below, which keeps the original column order) are
+    # identical to the per-character loop this replaces.
+    msa_len = len(consensus)
+    if all(len(r) == msa_len for r in read_seqs):
+        read_matrix = np.frombuffer(
+            ''.join(r.upper() for r in read_seqs).encode('ascii'), dtype=np.uint8
+        ).reshape(n_reads, msa_len)
+        cons_row = np.frombuffer(consensus.upper().encode('ascii'), dtype=np.uint8)
+        mismatch_counts = np.count_nonzero(read_matrix != cons_row[None, :], axis=0)
+    else:
+        mismatch_counts = None
+
     obs_sum = 0.0
     exp_sum = 0.0
     cols = 0
     for col, base in enumerate(consensus):
         if base == '-':
             continue
-        base_u = base.upper()
-        mismatches = 0
-        for rseq in read_seqs:
-            if rseq[col].upper() != base_u:
-                mismatches += 1
+        if mismatch_counts is not None:
+            mismatches = int(mismatch_counts[col])
+        else:
+            base_u = base.upper()
+            mismatches = sum(1 for rseq in read_seqs if rseq[col].upper() != base_u)
         obs_sum += mismatches / n_reads
 
         run = hp_runs[col]

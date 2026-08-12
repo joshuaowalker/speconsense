@@ -901,3 +901,270 @@ def _generate_cluster_consensus_worker(args) -> Dict:
         'dropped_by_min_reads': dropped_by_min_reads,
         'iupac_count': iupac_count
     }
+
+
+# ============================================================================
+# Group-MSA helpers (shared by read reassignment and discard recovery)
+# ============================================================================
+
+def _extract_consensus_aligned_from_msa(msa_string: str) -> Optional[str]:
+    """Extract SPOA's consensus aligned sequence from MSA FASTA output."""
+    from io import StringIO
+    msa_handle = StringIO(msa_string)
+    records = list(SeqIO.parse(msa_handle, 'fasta'))
+    for record in records:
+        if 'Consensus' in record.description or 'Consensus' in record.id:
+            return str(record.seq).upper()
+    return None
+
+
+def _find_variant_columns(alignment_by_id: Dict, consensus_spoa_ids: Dict[str, int],
+                          spoa_consensus_aligned: str) -> List[int]:
+    """Find MSA columns where any two cluster consensuses differ.
+
+    Args:
+        alignment_by_id: {id: ReadAlignment} for all MSA entries
+        consensus_spoa_ids: {spoa_id: cluster_index} for cluster consensus entries
+        spoa_consensus_aligned: SPOA's own consensus aligned sequence (for HP normalization)
+
+    Returns:
+        Sorted list of MSA column indices with variant differences.
+    """
+    msa_length = len(spoa_consensus_aligned)
+
+    # Extract HP-normalized base for each cluster consensus at each position
+    cluster_bases: Dict[int, Dict[int, str]] = {}  # cluster_idx -> {msa_pos -> base}
+    for spoa_id, cluster_idx in consensus_spoa_ids.items():
+        aln = alignment_by_id.get(spoa_id)
+        if not aln:
+            continue
+        bases = {}
+        for pos in range(msa_length):
+            base = aln.aligned_sequence[pos] if pos < len(aln.aligned_sequence) else '-'
+            if aln.score_aligned and pos < len(aln.score_aligned):
+                if aln.score_aligned[pos] == '=':
+                    base = spoa_consensus_aligned[pos]
+            bases[pos] = base
+        cluster_bases[cluster_idx] = bases
+
+    if len(cluster_bases) < 2:
+        return []
+
+    # Find positions where any two consensus bases differ
+    cluster_indices = list(cluster_bases.keys())
+    variant_columns = []
+    for pos in range(msa_length):
+        bases_at_pos = set()
+        for idx in cluster_indices:
+            b = cluster_bases[idx].get(pos, '-')
+            if b != '-':
+                bases_at_pos.add(b)
+        if len(bases_at_pos) > 1:
+            variant_columns.append(pos)
+
+    return variant_columns
+
+
+def _extract_bases_at_columns(aln, columns: List[int], spoa_consensus_aligned: str) -> Dict[int, str]:
+    """Extract HP-normalized bases at specific MSA columns from an alignment."""
+    bases = {}
+    for col in columns:
+        base = aln.aligned_sequence[col] if col < len(aln.aligned_sequence) else '-'
+        if aln.score_aligned and col < len(aln.score_aligned):
+            if aln.score_aligned[col] == '=':
+                base = spoa_consensus_aligned[col] if col < len(spoa_consensus_aligned) else '-'
+        bases[col] = base
+    return bases
+
+
+def _generate_group_consensus(read_ids: Set[str],
+                              sequences: Dict[str, str],
+                              mean_quals: Dict[str, float],
+                              disable_homopolymer_equivalence: bool,
+                              min_hp_length: int,
+                              max_sample_size: int,
+                              memo: Dict[frozenset, Optional[str]]) -> Optional[str]:
+    """Standalone equivalent of SpecimenClusterer._generate_consensus_for_validation
+    (no IUPAC calling): same single-read shortcut, quality-sorted sampling, and
+    SPOA invocation, memoized per worker so unchanged clusters across
+    reassignment iterations cost a dict lookup (mirroring the parent-side
+    _validation_consensus_cache behavior, with identical values since the
+    computation is deterministic)."""
+    if not read_ids:
+        return None
+    if len(read_ids) == 1:
+        return sequences.get(next(iter(read_ids)))
+    key = frozenset(read_ids)
+    if key in memo:
+        return memo[key]
+    sorted_ids = sorted(read_ids, key=lambda x: (-mean_quals.get(x, 0), x))
+    if len(sorted_ids) > max_sample_size:
+        sorted_ids = sorted_ids[:max_sample_size]
+    seqs = {sid: sequences[sid] for sid in sorted_ids}
+    result = _run_spoa_for_cluster_worker(seqs, disable_homopolymer_equivalence, min_hp_length)
+    consensus = result.consensus if result and result.consensus else None
+    memo[key] = consensus
+    return consensus
+
+
+def _reassign_group_worker(args) -> Tuple[int, List[Set[str]], int]:
+    """Reassign reads within one identity group. Standalone port of the former
+    SpecimenClusterer._reassign_reads_in_group, operating on plain data so
+    groups can run in a ProcessPoolExecutor. Groups are mutually independent,
+    so pooling preserves results exactly.
+
+    Args:
+        args: (group_key, read_sets, consensuses, sequences, mean_quals,
+               disable_homopolymer_equivalence, min_hp_length, max_sample_size)
+            read_sets: per-cluster read-id sets, in group order
+            consensuses: initial per-cluster consensuses, same order
+
+    Returns:
+        (group_key, final_read_sets, total_moved)
+    """
+    (group_key, read_sets, consensuses, sequences, mean_quals,
+     disable_homopolymer_equivalence, min_hp_length, max_sample_size) = args
+
+    n = len(read_sets)
+    read_sets = [set(s) for s in read_sets]
+    consensuses = list(consensuses)
+    memo: Dict[frozenset, Optional[str]] = {}
+    total_reassigned = 0
+    max_iterations = 3
+
+    for iteration in range(max_iterations):
+        # Collect all reads and consensus sequences in this group
+        cluster_consensus_seqs: Dict[int, str] = {}
+        read_to_cluster: Dict[str, int] = {}
+        all_read_seqs: Dict[str, str] = {}
+
+        for idx in range(n):
+            consensus = consensuses[idx]
+            if not consensus:
+                continue
+            cluster_consensus_seqs[idx] = consensus
+            # Quality-sorted, NOT raw set order: all_read_seqs insertion
+            # order becomes the SPOA input order below, and SPOA output
+            # depends on input order (the coordinate-frame gotcha).
+            cluster_rids = sorted(read_sets[idx],
+                key=lambda x: (-mean_quals.get(x, 0), x))
+            for rid in cluster_rids:
+                read_to_cluster[rid] = idx
+                all_read_seqs[rid] = sequences[rid]
+
+        if len(cluster_consensus_seqs) <= 1:
+            break
+
+        # Build SPOA input: consensus sequences (special IDs sort first) + reads
+        spoa_input: Dict[str, str] = {}
+        consensus_spoa_ids: Dict[str, int] = {}
+        for idx, cons in cluster_consensus_seqs.items():
+            spoa_id = f"__cons_{idx}__"
+            spoa_input[spoa_id] = cons
+            consensus_spoa_ids[spoa_id] = idx
+
+        # Subsample reads if group is large
+        max_reads = 500
+        if len(all_read_seqs) > max_reads:
+            per_cluster_cap = max(10, max_reads // len(cluster_consensus_seqs))
+            sampled_reads: Dict[str, str] = {}
+            for idx in range(n):
+                cluster_rids = sorted(read_sets[idx],
+                    key=lambda x: (-mean_quals.get(x, 0), x))
+                for rid in cluster_rids[:per_cluster_cap]:
+                    sampled_reads[rid] = sequences[rid]
+            spoa_input.update(sampled_reads)
+            reads_in_msa = set(sampled_reads.keys())
+        else:
+            spoa_input.update(all_read_seqs)
+            reads_in_msa = set(all_read_seqs.keys())
+
+        # Run SPOA
+        msa_result = _run_spoa_for_cluster_worker(spoa_input, disable_homopolymer_equivalence, min_hp_length)
+        if not msa_result:
+            break
+
+        # Extract SPOA's consensus aligned sequence for HP normalization
+        spoa_consensus_aligned = _extract_consensus_aligned_from_msa(msa_result.msa_string)
+        if not spoa_consensus_aligned:
+            break
+
+        # Build alignment lookup
+        alignment_by_id = {a.read_id: a for a in msa_result.alignments}
+
+        # Find variant columns
+        variant_columns = _find_variant_columns(alignment_by_id, consensus_spoa_ids,
+                                                spoa_consensus_aligned)
+        if not variant_columns:
+            break
+
+        logging.debug(f"Reassignment iteration {iteration + 1}: "
+                     f"{len(cluster_consensus_seqs)} clusters, "
+                     f"{len(reads_in_msa)} reads, "
+                     f"{len(variant_columns)} variant columns")
+
+        # Extract cluster consensus bases at variant columns
+        cluster_bases: Dict[int, Dict[int, str]] = {}
+        for spoa_id, idx in consensus_spoa_ids.items():
+            aln = alignment_by_id.get(spoa_id)
+            if aln:
+                cluster_bases[idx] = _extract_bases_at_columns(
+                    aln, variant_columns, spoa_consensus_aligned)
+
+        # Score each read and reassign
+        iteration_moves = 0
+        for rid in reads_in_msa:
+            if rid not in read_to_cluster:
+                continue
+            current_idx = read_to_cluster[rid]
+            aln = alignment_by_id.get(rid)
+            if not aln:
+                continue
+
+            read_bases = _extract_bases_at_columns(aln, variant_columns, spoa_consensus_aligned)
+
+            # Concordance: count matches at variant positions for each cluster
+            best_idx = current_idx
+            best_score = -1
+            for idx, cbases in cluster_bases.items():
+                score = sum(1 for col in variant_columns
+                            if read_bases.get(col) == cbases.get(col))
+                if score > best_score or (score == best_score and idx == current_idx):
+                    best_score = score
+                    best_idx = idx
+
+            if best_idx != current_idx:
+                # Verify via edit distance: read must be at least as close
+                # to target consensus as to source consensus
+                read_seq = all_read_seqs[rid]
+                source_cons = cluster_consensus_seqs.get(current_idx, '')
+                target_cons = cluster_consensus_seqs.get(best_idx, '')
+                if source_cons and target_cons:
+                    dist_source = edlib.align(read_seq, source_cons)['editDistance']
+                    dist_target = edlib.align(read_seq, target_cons)['editDistance']
+                    if dist_target > dist_source:
+                        continue  # Read is closer to current cluster overall
+
+                read_sets[current_idx].discard(rid)
+                read_sets[best_idx].add(rid)
+                read_to_cluster[rid] = best_idx
+                iteration_moves += 1
+
+        total_reassigned += iteration_moves
+
+        if iteration_moves == 0:
+            break
+
+        logging.debug(f"Reassignment iteration {iteration + 1}: {iteration_moves} reads moved")
+
+        # Regenerate consensus for changed clusters
+        for idx in range(n):
+            if read_sets[idx]:
+                consensuses[idx] = _generate_group_consensus(
+                    read_sets[idx], sequences, mean_quals,
+                    disable_homopolymer_equivalence, min_hp_length,
+                    max_sample_size, memo)
+            else:
+                consensuses[idx] = None
+
+    return group_key, read_sets, total_reassigned

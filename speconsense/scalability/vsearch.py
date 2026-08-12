@@ -23,12 +23,18 @@ class VsearchCandidateFinder:
     """
 
     def __init__(self,
-                 batch_size: int = 1000,
+                 batch_size: int = 25000,
                  num_threads: int = 1):
         """Initialize VsearchCandidateFinder.
 
         Args:
-            batch_size: Number of sequences to query per batch
+            batch_size: Number of sequences to query per vsearch invocation.
+                Each invocation re-reads and re-indexes the database FASTA, so
+                small batches pay that cost repeatedly (measured ~40% of
+                candidate-finding wall time at batch_size=1000 on a 16.5k-read
+                run). 25000 keeps the per-batch stdout buffer modest
+                (~10-20MB at max_candidates=10) while making DB re-indexing
+                negligible for typical inputs.
             num_threads: Number of threads for vsearch (default: 1 for backward compatibility)
         """
         self.batch_size = batch_size
