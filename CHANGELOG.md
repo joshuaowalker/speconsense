@@ -5,6 +5,49 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.8.6] - 2026-08-12
+
+Performance release: ~4x faster on large single-job (eDNA-style) inputs, ~2x faster summarize,
+lower memory, and a run-to-run determinism fix. No CLI changes; outputs are byte-identical to
+0.8.5 except where noted below.
+
+### Fixed
+
+- **Run-to-run nondeterminism in read reassignment** (core) — Phase 6 built SPOA input by
+  iterating a Python set, so hash randomization leaked into the SPOA coordinate frame and
+  reassignment results could vary between runs on identical input. Reads are now ordered by
+  `(-mean_quality, read_id)`. Outputs are deterministic across runs; results may differ
+  one-time from any particular pre-0.8.6 run of the same input.
+- **Leftover `.vsearch_cache_{pid}` directories** (core) — three scalable operations skipped
+  candidate-finder cleanup, leaving temporary vsearch cache directories in the output tree.
+
+### Changed
+
+- **Cluster-level scalability operations now activate at >50 clusters** (core) — equivalence
+  merging (phases 2/4), identity grouping, and discard screening previously re-checked the
+  read-calibrated `--scale-threshold` (default 1001) against *cluster* counts, which silently
+  forced dense O(n²) paths on large inputs. They now use the vsearch-backed sparse path
+  whenever there are >50 clusters and vsearch is available. For specimens with many clusters
+  this can produce minor differences in identity-group composition versus 0.8.5 (verified at
+  parity on the ont98 integration baseline: PRAUC 0.9990, precision/recall 1.0).
+  `--scale-threshold 0` still disables scalability entirely.
+
+### Performance
+
+- **Core, large single-job inputs**: pooled SPOA consensus generation in phases 6/7/8, pooled
+  per-group read reassignment (Phase 6), memoized validation consensuses shared across merge
+  and validation phases, per-read mean-quality caching, vsearch candidate batches raised
+  1000→25000 (avoids re-indexing the target DB per batch). Benchmark (16.5k mixed reads,
+  8 threads): 609s → 141s wall.
+- **Core, MSA analysis**: `analyze_positional_variation`, `extract_alignments_from_msa`, and
+  `compute_cluster_err_factor` vectorized with NumPy (byte-identical outputs). ~10-15% faster
+  per-specimen amplicon jobs.
+- **Core, memory**: BioPython SeqRecords replaced by lightweight string-based `ReadRecord`s
+  (`core/records.py`) with a fast 4-line FASTQ reader and byte-identical writer. ~7KB less
+  resident memory per read (~7GB at 1M reads).
+- **Summarize**: per-character `Seq` indexing in MSA analysis and merging replaced by
+  str-once conversion — ~2x faster end-to-end on large outputs.
+
 ## [0.8.5] - 2026-06-17
 
 pyitsx-based orientation, combined orientation mode, locus labeling, and FASTQ provenance stamping.

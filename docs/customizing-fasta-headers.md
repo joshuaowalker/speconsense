@@ -99,6 +99,7 @@ speconsense-summarize --fasta-fields minimal,cer_factor,err_factor
 | `cer_factor` | Per-position CER factor (statistical validation) | `cer_factor=12.4` | When applicable (None for anchors) |
 | `err_factor` | Cluster homogeneity ratio | `err_factor=1.05` | When applicable |
 | `primers` | Detected primer names | `primers=ITS1F,ITS4` | When detected |
+| `locus` | Detected locus via pyitsx HMM classification (`ITS`, `ITS1`, or `ITS2`) | `locus=ITS` | When pyitsx + ITSx profiles are installed; silently omitted otherwise |
 | `group` | Identity group number (extracted from filename) | `group=1` | Yes (superseded by `gid=` from core) |
 | `variant` | Variant identifier within group | `variant=v1` | Yes (superseded by `vid=` from core) |
 | `group_frequency` | Variant size as % of conflation-aware identity-bucket total (passed+`.ns`+`.lq`) | `group_frequency=37.4` | `full` preset only; suppressed when `gid=` is absent |
@@ -146,7 +147,7 @@ When summarize collapses ≥2 contributors into a single record via within-group
 | `default` | `size, ric, rawric, rawlen, snp, ambig, primers` | General use; balanced metadata |
 | `minimal` | `size, ric` | Quick inspection, essential info only |
 | `qc` | `size, ric, length, rid, ambig, cer_factor, err_factor` | Quality control with statistical validation |
-| `full` | `size, ric, length, rawric, rawlen, snp, ambig, rid, cer_factor, err_factor, primers` | Comprehensive metadata for archival or review |
+| `full` | `size, ric, length, rawric, rawlen, snp, ambig, rid, cer_factor, err_factor, primers, locus, group_frequency, global_frequency` | Comprehensive metadata for archival or review |
 | `id-only` | *(none)* | Clean IDs only, no metadata fields |
 
 **Preset composition:**

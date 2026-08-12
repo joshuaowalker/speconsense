@@ -10,7 +10,10 @@ Phasing does **not** gate on significance. The pipeline instead:
 1. **Phases indiscriminately** — split by haplotype wherever MSA position analysis supports it
 2. **Groups by identity** — complete linkage on `--group-identity` (default `0.85`) via
    `scipy.cluster.hierarchy`. Every pair in a group must meet the threshold, which prevents the
-   transitive chains that would otherwise collapse closely related variants in eDNA-style mixtures
+   transitive chains that would otherwise collapse closely related variants in eDNA-style mixtures.
+   Above 50 clusters (with vsearch available), the distance matrix is sparse — vsearch candidate
+   pairs get exact HP-normalized distances, all other pairs are treated as maximally distant —
+   which can occasionally split a group that dense computation would have kept together
 3. **Annotates pairwise via CER** — after the fact, per candidate
 
 The same identity groups gate read reassignment and discard recovery: reads can only move

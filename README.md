@@ -395,6 +395,8 @@ speconsense-summarize --scale-threshold 500 --source clusters/
 
 The threshold parameter allows you to run a single command across multiple specimens of varying sizes. Smaller specimens will use brute-force (which has less overhead for small inputs), while larger specimens will use vsearch acceleration.
 
+The threshold applies to *read-level* operations (initial clustering). Internal *cluster-level* operations (cluster merging, identity grouping, discard screening) switch to vsearch acceleration whenever there are more than 50 clusters, independent of the read count — cluster counts are far smaller than read counts, so the read-calibrated threshold does not apply to them. `--scale-threshold 0` disables both.
+
 ### Requirements
 
 Scalability mode requires **vsearch** to be installed:
@@ -429,7 +431,7 @@ Based on benchmarking, the break-even point is approximately 1000 sequences:
 
 ### Concurrency Control
 
-The `--threads` option controls internal parallelism (vsearch, SPOA consensus generation). Use `0` for auto-detect.
+The `--threads` option controls internal parallelism (vsearch, SPOA consensus generation, read reassignment, second-pass phasing). Use `0` for auto-detect.
 
 **Default behavior differs between tools:**
 - `speconsense`: defaults to `--threads 1` (safe for GNU parallel workflows)
@@ -828,7 +830,7 @@ speconsense-summarize --fasta-fields minimal,qc
 - `default`: `size, ric, rawric, rawlen, snp, ambig, primers`
 - `minimal`: `size, ric`
 - `qc`: `size, ric, length, rid, ambig, cer_factor, err_factor`
-- `full`: `size, ric, length, rawric, rawlen, snp, ambig, rid, cer_factor, err_factor, primers, locus`
+- `full`: `size, ric, length, rawric, rawlen, snp, ambig, rid, cer_factor, err_factor, primers, locus, group_frequency, global_frequency`
 - `id-only`: (no fields)
 
 The `default` preset does not include `cer_factor` / `err_factor` / `gid` / `vid`. If you want CER and homogeneity metrics in summarize-emitted FASTAs, use `--fasta-fields qc` or `--fasta-fields full`. Core's own FASTA always includes `gid`, `vid`, `cer_factor`, and `err_factor` regardless of the summarize preset.
@@ -1194,53 +1196,64 @@ Variant 2: (size=180, ric=180) - 3 substitutions, 1 single-nt indel - skipping
 - **File lineage**: maintains connection between final outputs and original speconsense clusters
 - **Read aggregation**: `FASTQ Files/` directory contains all reads that contributed to each final consensus
 - **Pre-merge preservation**: `variants/` directory contains `.raw` files that preserve individual pre-merge variants with their original sequences and reads
-- **Cluster boundaries in merged FASTQ**: When multiple clusters are merged, synthetic delimiter records mark boundaries between clusters for easy identification in sequence viewers (e.g., UGENE). Format: `@CLUSTER_BOUNDARY_{n}:{cluster}:RiC={ric}:reads={count}`
+- **Cluster boundaries in merged FASTQ**: When multiple clusters are merged, synthetic delimiter records mark boundaries between clusters for easy identification in sequence viewers (e.g., UGENE). Format: `@CLUSTER_BOUNDARY_{n}:{cluster}:RiC={ric}:reads={count}:speconsense={version}`
 
 This comprehensive logging allows users to understand exactly how the pipeline processed their data and make informed decisions about parameter tuning.
 
 ## Full Command Line Options
 
+Output of `speconsense --help-advanced`. Plain `--help` shows the commonly-tuned subset;
+`--help-advanced` includes the pre-tuned/internal flags as well.
+
 ```
-usage: speconsense [-h] [-O OUTPUT_DIR] [--primers PRIMERS]
+usage: speconsense [-h] [--help-advanced] [-O OUTPUT_DIR] [--primers PRIMERS]
                    [--algorithm {graph,greedy}] [--min-identity MIN_IDENTITY]
-                   [--inflation INFLATION]
-                   [--k-nearest-neighbors K_NEAREST_NEIGHBORS]
-                   [--min-size MIN_SIZE]
-                   [--max-sample-size MAX_SAMPLE_SIZE]
-                   [--disable-position-phasing] [--enable-position-phasing]
-                   [--disable-read-reassignment] [--enable-read-reassignment]
-                   [--disable-discard-recovery] [--enable-discard-recovery]
+                   [--min-size MIN_SIZE] [--max-sample-size MAX_SAMPLE_SIZE]
                    [--min-variant-frequency MIN_VARIANT_FREQUENCY]
                    [--min-variant-count MIN_VARIANT_COUNT]
                    [--significance-level SIGNIFICANCE_LEVEL]
                    [--group-identity GROUP_IDENTITY]
                    [--hp-normalization-length HP_NORMALIZATION_LENGTH]
                    [--error-model ERROR_MODEL]
-                   [--disable-ambiguity-calling] [--enable-ambiguity-calling]
                    [--min-ambiguity-frequency MIN_AMBIGUITY_FREQUENCY]
                    [--min-ambiguity-count MIN_AMBIGUITY_COUNT]
+                   [--orient-mode {none,primer,pyitsx,pyitsx+primer}]
+                   [--pyitsx-organism PYITSX_ORGANISM] [--presample PRESAMPLE]
+                   [--scale-threshold SCALE_THRESHOLD] [--threads N]
+                   [--collect-discards] [--no-collect-discards]
+                   [--log-level {DEBUG,INFO,WARNING,ERROR,CRITICAL}]
+                   [--inflation INFLATION]
+                   [--k-nearest-neighbors K_NEAREST_NEIGHBORS]
+                   [--disable-position-phasing] [--enable-position-phasing]
+                   [--disable-read-reassignment] [--enable-read-reassignment]
+                   [--disable-discard-recovery] [--enable-discard-recovery]
+                   [--disable-second-phasing] [--enable-second-phasing]
+                   [--disable-noise-filter] [--enable-noise-filter]
+                   [--disable-mad-outlier-removal]
+                   [--enable-mad-outlier-removal]
+                   [--disable-ambiguity-calling] [--enable-ambiguity-calling]
                    [--disable-cluster-merging] [--enable-cluster-merging]
                    [--disable-homopolymer-equivalence]
                    [--enable-homopolymer-equivalence]
-                   [--orient-mode {none,primer,pyitsx}]
-                   [--pyitsx-organism PYITSX_ORGANISM]
-                   [--presample PRESAMPLE] [--scale-threshold SCALE_THRESHOLD]
-                   [--threads N] [--collect-discards]
-                   [--no-collect-discards]
-                   [--log-level {DEBUG,INFO,WARNING,ERROR,CRITICAL}]
+                   [--mad-z-threshold MAD_Z_THRESHOLD]
+                   [--mad-gap-factor MAD_GAP_FACTOR]
+                   [--mad-min-mad MAD_MIN_MAD]
+                   [--mad-min-drop-from-median MAD_MIN_DROP_FROM_MEDIAN]
                    [--version] [-p NAME] [--list-profiles]
-                   [--list-error-models]
+                   [--show-profile NAME] [--list-error-models]
                    input_file
 
 MCL-based clustering of nanopore amplicon reads
 
 options:
   -h, --help            show this help message and exit
+  --help-advanced       Show full help including pre-tuned / internal flags
   --version             Show program's version number and exit
   -p NAME, --profile NAME
                         Load parameter profile (use --list-profiles to see
                         available)
   --list-profiles       List available profiles and exit
+  --show-profile NAME   Show contents of a named profile and exit
   --list-error-models   List available error models and exit
 
 Input/Output:
@@ -1256,41 +1269,13 @@ Clustering:
   --min-identity MIN_IDENTITY
                         Minimum sequence identity threshold for clustering
                         (default: 0.9)
-  --inflation INFLATION
-                        MCL inflation parameter (default: 4.0)
-  --k-nearest-neighbors K_NEAREST_NEIGHBORS
-                        Number of nearest neighbors for graph construction
-                        (default: 5)
 
 Filtering:
   --min-size MIN_SIZE   Minimum cluster size (default: 3, 0 to disable)
   --max-sample-size MAX_SAMPLE_SIZE
                         Maximum cluster size for consensus (default: 100)
 
-Variant Phasing:
-  --disable-position-phasing
-                        Disable position-based variant phasing (enabled by
-                        default). MCL graph clustering already separates most
-                        variants; this second pass analyzes MSA positions to
-                        phase remaining variants.
-  --enable-position-phasing
-                        Override --disable-position-phasing or profile setting
-  --disable-read-reassignment
-                        Disable post-phasing read reassignment within identity
-                        groups. Reassignment moves reads between clusters
-                        based on consensus concordance; disable to preserve
-                        original phasing-time membership.
-  --enable-read-reassignment
-                        Override --disable-read-reassignment or profile
-                        setting
-  --disable-discard-recovery
-                        Disable recovery of previously discarded reads into
-                        existing clusters. Has no effect if
-                        --disable-read-reassignment is also set (recovery
-                        requires reassignment).
-  --enable-discard-recovery
-                        Override --disable-discard-recovery or profile
-                        setting
+Variant Phasing & Validation:
   --min-variant-frequency MIN_VARIANT_FREQUENCY
                         Minimum alternative allele frequency to call variant
                         (default: 0.10 for 10%)
@@ -1308,12 +1293,12 @@ Variant Phasing:
   --hp-normalization-length HP_NORMALIZATION_LENGTH
                         Minimum homopolymer run length at/above which HP
                         length variants are blanket-normalized (treated as
-                        noise). Runs of length >= this value have their
-                        length variants suppressed in MSA variant detection;
-                        runs shorter than this surface as candidates and are
-                        evaluated by context-aware CER. Default 6 matches
-                        the HP paper recommendation of CER-evaluating
-                        L <= 5 HP variants. (default: 6)
+                        noise). Runs of length >= this value have their length
+                        variants suppressed in MSA variant detection; runs
+                        shorter than this surface as candidates and are
+                        evaluated by context-aware CER. Default 6 matches the
+                        HP paper recommendation of CER-evaluating L <= 5 HP
+                        variants. (default: 6)
   --error-model ERROR_MODEL
                         Per-basecaller error model used for context-aware
                         variant validation. Either a shipped model name (use
@@ -1323,12 +1308,6 @@ Variant Phasing:
                         dorado-v5.0)
 
 Ambiguity Calling:
-  --disable-ambiguity-calling
-                        Disable IUPAC ambiguity code calling for unphased
-                        variant positions
-  --enable-ambiguity-calling
-                        Override --disable-ambiguity-calling or profile
-                        setting
   --min-ambiguity-frequency MIN_AMBIGUITY_FREQUENCY
                         Minimum alternative allele frequency for IUPAC
                         ambiguity calling (default: 0.10 for 10%)
@@ -1336,31 +1315,19 @@ Ambiguity Calling:
                         Minimum alternative allele read count for IUPAC
                         ambiguity calling (default: 3)
 
-Cluster Merging:
-  --disable-cluster-merging
-                        Disable merging of clusters with identical consensus
-                        sequences
-  --enable-cluster-merging
-                        Override --disable-cluster-merging or profile setting
-  --disable-homopolymer-equivalence
-                        Disable homopolymer equivalence in cluster merging
-                        (only merge identical sequences)
-  --enable-homopolymer-equivalence
-                        Override --disable-homopolymer-equivalence or profile
-                        setting
-
 Orientation:
-  --orient-mode {none,primer,pyitsx}
+  --orient-mode {none,primer,pyitsx,pyitsx+primer}
                         Sequence orientation mode: none (default, no
                         orientation), primer (orient via primer matching,
-                        discard failed), or pyitsx (orient via ITS HMM
-                        profiles, discard failed/chimeric; requires pyitsx +
-                        ITSx)
+                        discard failed), pyitsx (orient via ITS HMM profiles,
+                        discard failed/chimeric; requires pyitsx + ITSx), or
+                        pyitsx+primer (pyitsx with primer fallback for
+                        unrecognized reads)
   --pyitsx-organism PYITSX_ORGANISM
-                        Organism group for pyitsx (default: F for Fungi).
-                        Used for --orient-mode=pyitsx orientation and locus
-                        labeling in summarize. Common codes: F (Fungi),
-                        T (Tracheophyta), M (Metazoa)
+                        Organism group for pyitsx (default: F for Fungi). Used
+                        for --orient-mode pyitsx/pyitsx+primer and locus
+                        labeling in summarize. Common codes: F (Fungi), T
+                        (Tracheophyta), M (Metazoa)
 
 Performance:
   --presample PRESAMPLE
@@ -1379,42 +1346,146 @@ Debugging:
   --no-collect-discards
                         Override --collect-discards or profile setting
   --log-level {DEBUG,INFO,WARNING,ERROR,CRITICAL}
+
+Advanced (pre-tuned — rarely needed):
+  Hidden from --help; view with --help-advanced. Pre-tuned algorithm
+  internals, MAD knobs, and phase-disable flags retained primarily for
+  empirical analysis.
+
+  --inflation INFLATION
+                        MCL inflation parameter (default: 4.0)
+  --k-nearest-neighbors K_NEAREST_NEIGHBORS
+                        Number of nearest neighbors for graph construction
+                        (default: 5)
+  --disable-position-phasing
+                        Disable position-based variant phasing (enabled by
+                        default). MCL graph clustering already separates most
+                        variants; this second pass analyzes MSA positions to
+                        phase remaining variants.
+  --enable-position-phasing
+                        Override --disable-position-phasing or profile setting
+  --disable-read-reassignment
+                        Disable post-phasing read reassignment within identity
+                        groups. Reassignment moves reads between clusters
+                        based on consensus concordance; disable to preserve
+                        original phasing-time membership.
+  --enable-read-reassignment
+                        Override --disable-read-reassignment or profile
+                        setting
+  --disable-discard-recovery
+                        Disable recovery of previously discarded reads into
+                        existing clusters. Has no effect if --disable-read-
+                        reassignment is also set (recovery requires
+                        reassignment).
+  --enable-discard-recovery
+                        Override --disable-discard-recovery or profile setting
+  --disable-second-phasing
+                        Disable the Phase 8 second phasing pass without
+                        disabling the Phase 3 first pass. Has no effect if
+                        --disable-position-phasing or --disable-read-
+                        reassignment is also set (Phase 8 is gated on both).
+  --enable-second-phasing
+                        Override --disable-second-phasing or profile setting
+  --disable-noise-filter
+                        Disable the Phase 5 noise filter. Small clusters whose
+                        MSA has no-majority columns are normally disbanded;
+                        this flag preserves them and lets them flow through to
+                        final consensus.
+  --enable-noise-filter
+                        Override --disable-noise-filter or profile setting
+  --disable-mad-outlier-removal
+                        Disable MAD-based outlier removal at final consensus
+                        generation. Reads whose identity to the cluster
+                        consensus is more than n*MAD from the median are
+                        normally dropped; this flag preserves them.
+  --enable-mad-outlier-removal
+                        Override --disable-mad-outlier-removal or profile
+                        setting
+  --disable-ambiguity-calling
+                        Disable IUPAC ambiguity code calling for unphased
+                        variant positions
+  --enable-ambiguity-calling
+                        Override --disable-ambiguity-calling or profile
+                        setting
+  --disable-cluster-merging
+                        Disable merging of clusters with identical consensus
+                        sequences
+  --enable-cluster-merging
+                        Override --disable-cluster-merging or profile setting
+  --disable-homopolymer-equivalence
+                        Disable homopolymer equivalence in cluster merging
+                        (only merge identical sequences)
+  --enable-homopolymer-equivalence
+                        Override --disable-homopolymer-equivalence or profile
+                        setting
+  --mad-z-threshold MAD_Z_THRESHOLD
+                        Modified Z-score cutoff for the MAD rule. A read with
+                        (0.6745 * (rid - median) / MAD) below -threshold is
+                        flagged. Lower values flag more aggressively. The
+                        0.8.1 default of 1.5 is empirically tuned for
+                        speconsense's 3-10-read clusters; the literature-
+                        standard 3.0 is too conservative for that regime (see
+                        speconsense.outliers.detect_rid_outliers docstring).
+                        (default: 1.5)
+  --mad-gap-factor MAD_GAP_FACTOR
+                        Gap-rule multiplier. The worst read is flagged if
+                        (r_second - r_worst) > gap_factor * (r_best -
+                        r_second). Lower values flag more aggressively.
+                        (default: 2.5)
+  --mad-min-mad MAD_MIN_MAD
+                        Floor for the MAD value to avoid divide-by-zero when
+                        most reads have near-identical rid. Expressed on the
+                        0..1 rid scale (0.002 = 0.2pp). (default: 0.002)
+  --mad-min-drop-from-median MAD_MIN_DROP_FROM_MEDIAN
+                        Safety floor on the absolute drop below the cluster's
+                        median rid. A statistically-unusual read is only
+                        flagged when its rid is at least this far below the
+                        median. Expressed on the 0..1 rid scale (0.02 = 2pp).
+                        (default: 0.02)
 ```
 
 ### speconsense-summarize Options
 
+Output of `speconsense-summarize --help-advanced`.
+
 ```
-usage: speconsense-summarize [-h] [--source SOURCE]
+usage: speconsense-summarize [-h] [--help-advanced] [--source SOURCE]
                              [--summary-dir SUMMARY_DIR] [--specimen SPECIMEN]
                              [--aggregate-only] [--fasta-fields FASTA_FIELDS]
                              [--min-ric MIN_RIC] [--min-len MIN_LEN]
                              [--max-len MAX_LEN]
                              [--min-cer-factor MIN_CER_FACTOR]
                              [--max-err-factor MAX_ERR_FACTOR]
+                             [--prune-group-ratio PRUNE_GROUP_RATIO]
+                             [--prune-group-count PRUNE_GROUP_COUNT]
                              [--group-identity GROUP_IDENTITY]
-                             [--disable-merging] [--enable-merging]
                              [--merge-snp | --no-merge-snp]
                              [--merge-indel-length MERGE_INDEL_LENGTH]
                              [--merge-position-count MERGE_POSITION_COUNT]
                              [--merge-min-size-ratio MERGE_MIN_SIZE_RATIO]
                              [--min-merge-overlap MIN_MERGE_OVERLAP]
-                             [--disable-homopolymer-equivalence]
-                             [--enable-homopolymer-equivalence]
                              [--merge-effort LEVEL]
                              [--hp-normalization-length HP_NORMALIZATION_LENGTH]
                              [--select-max-groups SELECT_MAX_GROUPS]
                              [--select-max-variants SELECT_MAX_VARIANTS]
                              [--select-min-size-ratio SELECT_MIN_SIZE_RATIO]
+                             [--enable-full-consensus]
+                             [--disable-full-consensus]
                              [--min-position-frequency MIN_POSITION_FREQUENCY]
                              [--min-position-count MIN_POSITION_COUNT]
                              [--scale-threshold SCALE_THRESHOLD] [--threads N]
+                             [--disable-merging] [--enable-merging]
+                             [--disable-homopolymer-equivalence]
+                             [--enable-homopolymer-equivalence]
                              [--log-level {DEBUG,INFO,WARNING,ERROR,CRITICAL}]
                              [--version] [-p NAME] [--list-profiles]
+                             [--show-profile NAME]
 
 Process Speconsense output with advanced variant handling.
 
 options:
   -h, --help            show this help message and exit
+  --help-advanced       Show full help including pre-tuned / internal flags
   --log-level {DEBUG,INFO,WARNING,ERROR,CRITICAL}
                         Logging level
   --version             Show program's version number and exit
@@ -1422,6 +1493,7 @@ options:
                         Load parameter profile (use --list-profiles to see
                         available)
   --list-profiles       List available profiles and exit
+  --show-profile NAME   Show contents of a named profile and exit
 
 Input/Output:
   --source SOURCE       Source directory containing Speconsense output
@@ -1462,6 +1534,18 @@ Filtering:
                         Variants with err_factor=None (legacy output) always
                         pass. Set to 0 to disable err_factor filtering.
                         (default: 1.5)
+  --prune-group-ratio PRUNE_GROUP_RATIO
+                        Prune secondary identity groups (gid >= 2) whose total
+                        size is below this ratio of the largest group. Both
+                        --prune-group-ratio and --prune-group-count must be
+                        satisfied to prune. Set to 0 to disable. (default:
+                        0.10)
+  --prune-group-count PRUNE_GROUP_COUNT
+                        Absolute size threshold for secondary group pruning.
+                        Groups with total size >= this value are kept
+                        regardless of --prune-group-ratio. Both conditions
+                        must be met to prune. Set to 0 to disable. (default:
+                        15)
 
 Grouping:
   --group-identity GROUP_IDENTITY, --variant-group-identity GROUP_IDENTITY
@@ -1470,9 +1554,6 @@ Grouping:
                         core's --group-identity default. (default: 0.85)
 
 Merging:
-  --disable-merging     Disable all variant merging (skip MSA-based merge
-                        evaluation entirely)
-  --enable-merging      Override --disable-merging or profile setting
   --merge-snp, --no-merge-snp
                         Enable SNP-based merging (default: True, use --no-
                         merge-snp to disable)
@@ -1485,17 +1566,11 @@ Merging:
   --merge-min-size-ratio MERGE_MIN_SIZE_RATIO
                         Minimum size ratio (contributor/merged total) for
                         merging clusters. Subsets where any contributor is
-                        below this fraction are skipped. (default: 0.1,
-                        0 to disable)
+                        below this fraction of the subset total are skipped.
+                        (default: 0.1, 0 to disable)
   --min-merge-overlap MIN_MERGE_OVERLAP
                         Minimum overlap in bp for merging sequences of
                         different lengths (default: 200, 0 to disable)
-  --disable-homopolymer-equivalence
-                        Disable homopolymer equivalence in merging (treat AAA
-                        vs AAAA as different)
-  --enable-homopolymer-equivalence
-                        Override --disable-homopolymer-equivalence or profile
-                        setting
   --merge-effort LEVEL  Merging effort level: fast (8), balanced (10),
                         thorough (12), or numeric 6-14. Higher values allow
                         larger batch sizes for exhaustive subset search.
@@ -1519,6 +1594,18 @@ Selection:
                         Minimum size ratio (variant/group total) to include in
                         output. The largest variant in each group is always
                         kept. (default: 0 = disabled, e.g. 0.2 for 20% cutoff)
+  --enable-full-consensus
+                        Per identity group with >=2 selected variants, emit an
+                        additional ``-{gid}-full`` consensus built from a
+                        size-weighted, quality-sorted sample of the pre-merge
+                        core variants' reads. Intended as a query substrate
+                        for BLAST against legacy unphased references. Uses
+                        local SPOA alignment when the group spans multiple
+                        primer sets.
+  --disable-full-consensus
+                        Override --enable-full-consensus or profile setting
+                        (e.g. when using the compressed profile but the -full
+                        artifact isn't wanted for this run).
 
 Consensus output:
   --min-position-frequency MIN_POSITION_FREQUENCY
@@ -1540,6 +1627,20 @@ Performance:
                         Default: 1001
   --threads N           Max threads for internal parallelism. 0=auto-detect
                         (default), N>0 for explicit count.
+
+Advanced (pre-tuned — rarely needed):
+  Hidden from --help; view with --help-advanced. Disable flags for integral
+  merging phases — primarily retained for ablation studies.
+
+  --disable-merging     Disable all variant merging (skip MSA-based merge
+                        evaluation entirely)
+  --enable-merging      Override --disable-merging or profile setting
+  --disable-homopolymer-equivalence
+                        Disable homopolymer equivalence in merging (treat AAA
+                        vs AAAA as different)
+  --enable-homopolymer-equivalence
+                        Override --disable-homopolymer-equivalence or profile
+                        setting
 ```
 
 ## Specialized Workflows

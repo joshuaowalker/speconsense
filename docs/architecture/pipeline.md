@@ -1,16 +1,20 @@
 # Architecture: Module Map and Pipeline
 
 Reference for how a run is structured. The authoritative per-phase detail lives in
-the docstrings of `SpecimenClusterer._phase_*` (`speconsense/core/clusterer.py`) and
-the `# Phase N:` comments in `speconsense/summarize/cli.py`; this file is the map that
-tells you which phase to go read.
+the `SpecimenClusterer.cluster()` docstring and the per-phase `_run_*` method docstrings
+(`speconsense/core/clusterer.py`), and the `# Phase N:` comments in
+`speconsense/summarize/cli.py`; this file is the map that tells you which phase to go read.
 
 ## Module map
 
 **`speconsense/core/`** — clustering and consensus generation:
 - `clusterer.py`: `SpecimenClusterer` — orchestrates the pipeline
-- `workers.py`: parallel workers (SPOA, cluster processing, phasing, primer trimming)
-- `cli.py`: argument parsing
+- `workers.py`: parallel workers (SPOA, cluster processing, phasing, primer trimming,
+  Phase 6 group reassignment)
+- `records.py`: `ReadRecord` — lightweight read container (id/title/seq/qual strings)
+  replacing BioPython SeqRecords in core; fast 4-line FASTQ parse/write, byte-identical
+  output to SeqIO
+- `cli.py`: argument parsing and input loading (`records.parse_input`)
 
 **`speconsense/summarize/`** — post-processing:
 - `cli.py`: entry point and `process_single_specimen`
@@ -41,12 +45,19 @@ tells you which phase to go read.
 **`speconsense/scalability/`** — optional acceleration for O(n²) pairwise work:
 - `base.py`: `CandidateFinder` protocol, `ScalablePairwiseOperation`
 - `vsearch.py`: vsearch-backed candidate finder; `config.py`: `ScalabilityConfig`
-- Activates when `len(seqs) >= scale_threshold` **and** vsearch is on PATH. Active uses:
-  initial-clustering K-NN (MCL graph), cluster-equivalence merging (HP-equivalence union-find),
-  identity grouping (`_form_identity_groups` sparse distance matrix — used by read reassignment,
-  discard recovery, and CER validation), discard screening (top-K cluster matches per discard),
-  CER validation within-group top-K (when a group exceeds 50). Noise-filter SPOA is parallelized
-  via `ProcessPoolExecutor` when `--threads N>1`, with no vsearch dependency.
+- Two activation regimes, both requiring vsearch on PATH and `--scale-threshold > 0`:
+  **read-level** operations (initial-clustering K-NN for the MCL graph) gate on
+  `len(seqs) >= scale_threshold` (default 1001, calibrated for read counts);
+  **cluster-level** operations pass `force_scalable=True` and activate at `n > 50` items
+  regardless of the read-count threshold — cluster-equivalence merging (HP-equivalence
+  union-find, phases 2/4), identity grouping (`_form_identity_groups` sparse distance
+  matrix — used by read reassignment, discard recovery, and CER validation), discard
+  screening (top-K cluster matches per discard), CER validation within-group top-K (when
+  a group exceeds 50). `--scale-threshold 0` disables all of it.
+- Independent of vsearch, `--threads N>1` parallelizes SPOA via `ProcessPoolExecutor`:
+  noise-filter consensus (Phase 5), validation-consensus batches (phases 6/7,
+  `_generate_validation_consensuses`), per-group read reassignment (Phase 6,
+  `_reassign_group_worker`), and the second phasing pass (Phase 8).
 
 **`speconsense/profiles/`** — parameter presets. See `docs/profile-parameters.md` for the
 user-facing reference. Implementation notes:
@@ -79,7 +90,8 @@ and approach-2 (non-HP rates pooled across all-cluster MSAs) from HP paper §8 /
 
 ## Core pipeline (`SpecimenClusterer.cluster()`)
 
-Fourteen sequential phases. Each has a `_phase_*` method with a docstring covering its contract.
+Fourteen sequential phases. Each has a `_run_*` (or `_filter_*` / `_write_*`) method with a
+docstring covering its contract; the `cluster()` docstring lists them all.
 
 1. **Initial clustering** — MCL graph-based or greedy
 2. **Pre-phasing merge** — combine HP-equivalent initial clusters

@@ -32,8 +32,9 @@ current for every flag; prefer it over any list written down here.
 | Naming policy, four output tracks, merge-time field recompute, `-full` | `docs/architecture/summarize-outputs.md` |
 | Profile parameters / FASTA header fields / RiC semantics (user-facing) | `docs/profile-parameters.md`, `docs/customizing-fasta-headers.md`, `docs/understanding-ric-and-merging.md` |
 
-Phase-level detail lives in code: `SpecimenClusterer._phase_*` docstrings
-(`speconsense/core/clusterer.py`) and the `# Phase N:` comments in `speconsense/summarize/cli.py`.
+Phase-level detail lives in code: the `SpecimenClusterer.cluster()` docstring and the per-phase
+`_run_*` method docstrings (`speconsense/core/clusterer.py`) and the `# Phase N:` comments in
+`speconsense/summarize/cli.py`.
 Those are authoritative — the docs above are the map, not the territory.
 
 ## Gotchas
@@ -66,7 +67,9 @@ goes ambiguous more than once. `ambig` is the canonical IUPAC-site count.
 
 **SPOA output depends on input order.** The first sequence anchors the graph and therefore the
 alignment coordinate frame. `_run_spoa_for_cluster_worker` writes dict entries in insertion order,
-so callers control the frame by construction order. All cluster-level SPOA calls use linear gap
+so callers control the frame by construction order. Corollary: never build SPOA input by iterating
+a set — hash-seed order leaks into the coordinate frame and makes results vary run-to-run (this
+was a real bug, fixed in 0.8.6 by sorting on `(-mean_quality, read_id)`). Sort explicitly. All cluster-level SPOA calls use linear gap
 scoring (`-m 1 -n -1 -g -1 -e -1`), which produces roughly 4x fewer ambiguities than SPOA's
 defaults — keep them in sync across `core/workers.py` and `summarize/analysis.py`.
 
