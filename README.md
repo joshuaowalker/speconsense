@@ -1831,7 +1831,11 @@ This project uses and builds upon:
 
 - **MCL in bioinformatics**: Enright, A.J., Van Dongen, S., Ouzounis, C.A. (2002). *An efficient algorithm for large-scale detection of protein families*. Nucleic Acids Research 30(7):1575-1584. https://doi.org/10.1093/nar/30.7.1575 (PMC: https://pmc.ncbi.nlm.nih.gov/articles/PMC101833/)
 
-- **SPOA** (consensus generation; SPOA is the SIMD partial-order alignment module introduced with Racon): Vaser, R., Sović, I., Nagarajan, N., Šikić, M. (2017). *Fast and accurate de novo genome assembly from long uncorrected reads*. Genome Research 27(5):737-746. https://doi.org/10.1101/gr.214270.116
+- **Partial order alignment (POA)** (the algorithm underlying consensus generation):
+  - Lee, C., Grasso, C., Sharlow, M.F. (2002). *Multiple sequence alignment using partial order graphs*. Bioinformatics 18(3):452-464. https://doi.org/10.1093/bioinformatics/18.3.452
+  - Lee, C. (2003). *Generating consensus sequences from partial order multiple sequence alignment graphs*. Bioinformatics 19(8):999-1008. https://doi.org/10.1093/bioinformatics/btg109
+
+- **SPOA** (consensus generation; SPOA has no standalone publication — it is the SIMD partial-order alignment implementation introduced with Racon): Vaser, R., Sović, I., Nagarajan, N., Šikić, M. (2017). *Fast and accurate de novo genome assembly from long uncorrected reads*. Genome Research 27(5):737-746. https://doi.org/10.1101/gr.214270.116
 
 - **VSEARCH** (scalable candidate finding): Rognes, T., Flouri, T., Nichols, B., Quince, C., Mahé, F. (2016). *VSEARCH: a versatile open source tool for metagenomics*. PeerJ 4:e2584. https://doi.org/10.7717/peerj.2584
 
