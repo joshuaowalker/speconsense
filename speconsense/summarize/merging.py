@@ -239,8 +239,9 @@ def create_consensus_from_msa(aligned_seqs: List, variants: List[ConsensusInfo],
     snp_count = 0
     alignment_length = len(aligned_seqs[0].seq)
 
+    seq_strs = [str(seq.seq) for seq in aligned_seqs]
     for col_idx in range(alignment_length):
-        column = [str(seq.seq[col_idx]) for seq in aligned_seqs]
+        column = [s[col_idx] for s in seq_strs]
 
         # Weight each base/gap by cluster size
         votes_with_size = [(base, variants[i].size) for i, base in enumerate(column)]
@@ -325,11 +326,12 @@ def build_full_consensus_from_msa(
     consensus_seq = []
     snp_count = 0
 
+    read_strs = [str(record.seq) for record in aligned_reads]
     for col_idx in range(alignment_length):
         base_counts: Dict[str, int] = defaultdict(int)
         gap_count = 0
-        for record in aligned_reads:
-            symbol = str(record.seq[col_idx]).upper()
+        for rs in read_strs:
+            symbol = rs[col_idx].upper()
             if symbol == '-':
                 gap_count += 1
             else:
@@ -400,8 +402,9 @@ def create_overlap_consensus_from_msa(aligned_seqs: List, variants: List[Consens
     overlap_end = min(end for _, end in content_regions)
 
     # Process each column
+    seq_strs = [str(seq.seq) for seq in aligned_seqs]
     for col_idx in range(alignment_length):
-        column = [str(seq.seq[col_idx]) for seq in aligned_seqs]
+        column = [s[col_idx] for s in seq_strs]
 
         # Determine which sequences have content at this position
         seqs_with_content = []

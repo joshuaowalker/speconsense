@@ -215,8 +215,9 @@ def identify_indel_events(aligned_seqs: List, alignment_length: int) -> List[Tup
     in_event = False
     start_col = None
 
+    seq_strs = [str(seq.seq) for seq in aligned_seqs]
     for col_idx in range(alignment_length):
-        column = [str(seq.seq[col_idx]) for seq in aligned_seqs]
+        column = [s[col_idx] for s in seq_strs]
         has_gap = '-' in column
         has_bases = any(c != '-' for c in column)
 
@@ -324,9 +325,10 @@ def is_homopolymer_event(aligned_seqs: List, start_col: int, end_col: int,
         True if homopolymer event, False if structural
     """
     # Extract all bases from the event region (excluding gaps)
+    seq_strs = [str(seq.seq) for seq in aligned_seqs]
     bases_in_event = set()
     for col_idx in range(start_col, end_col + 1):
-        column = [str(seq.seq[col_idx]) for seq in aligned_seqs]
+        column = [s[col_idx] for s in seq_strs]
         bases_in_event.update(c for c in column if c != '-')
 
     # Must have exactly one base type across the entire event
@@ -345,7 +347,7 @@ def is_homopolymer_event(aligned_seqs: List, start_col: int, end_col: int,
     # Check left flank
     if start_col > 0:
         left_col = start_col - 1
-        left_column = [str(seq.seq[left_col]) for seq in aligned_seqs]
+        left_column = [s[left_col] for s in seq_strs]
         left_bases = set(c for c in left_column if c != '-')
         left_has_gap = '-' in left_column
 
@@ -355,7 +357,7 @@ def is_homopolymer_event(aligned_seqs: List, start_col: int, end_col: int,
     # Check right flank
     if not has_matching_flank and end_col < alignment_length - 1:
         right_col = end_col + 1
-        right_column = [str(seq.seq[right_col]) for seq in aligned_seqs]
+        right_column = [s[right_col] for s in seq_strs]
         right_bases = set(c for c in right_column if c != '-')
         right_has_gap = '-' in right_column
 
@@ -369,8 +371,8 @@ def is_homopolymer_event(aligned_seqs: List, start_col: int, end_col: int,
     # threshold, the length diff carries short-HP signal — treat as structural.
     if min_hp_length > 1:
         run_lengths = [
-            _aligned_hp_run_length(str(seq.seq), start_col, end_col, event_base)
-            for seq in aligned_seqs
+            _aligned_hp_run_length(s, start_col, end_col, event_base)
+            for s in seq_strs
         ]
         if run_lengths and min(run_lengths) < min_hp_length:
             return False
@@ -410,9 +412,10 @@ def analyze_msa_columns(aligned_seqs: List, min_hp_length: int = 1) -> dict:
     alignment_length = len(aligned_seqs[0].seq)
 
     # Step 1: Count SNPs
+    seq_strs = [str(seq.seq) for seq in aligned_seqs]
     snp_count = 0
     for col_idx in range(alignment_length):
-        column = [str(seq.seq[col_idx]) for seq in aligned_seqs]
+        column = [s[col_idx] for s in seq_strs]
         unique_bases = set(c for c in column if c != '-')
         has_gap = '-' in column
 
@@ -512,10 +515,11 @@ def analyze_msa_columns_overlap_aware(aligned_seqs: List, min_overlap_bp: int,
     suffix_bp = union_end - overlap_end
 
     # Calculate actual overlap in base pairs (count only columns where all have bases)
+    seq_strs = [str(seq.seq) for seq in aligned_seqs]
     overlap_bp = 0
     if overlap_end >= overlap_start:
         for col_idx in range(overlap_start, overlap_end + 1):
-            column = [str(seq.seq[col_idx]) for seq in aligned_seqs]
+            column = [s[col_idx] for s in seq_strs]
             if all(c != '-' for c in column):
                 overlap_bp += 1
 
@@ -526,7 +530,7 @@ def analyze_msa_columns_overlap_aware(aligned_seqs: List, min_overlap_bp: int,
     # Step 3: Count SNPs only within overlap region
     snp_count = 0
     for col_idx in range(overlap_start, overlap_end + 1):
-        column = [str(seq.seq[col_idx]) for seq in aligned_seqs]
+        column = [s[col_idx] for s in seq_strs]
         unique_bases = set(c for c in column if c != '-')
         has_gap = '-' in column
 
@@ -557,7 +561,7 @@ def analyze_msa_columns_overlap_aware(aligned_seqs: List, min_overlap_bp: int,
             if start_col == seq_start or end_col == seq_end:
                 # Check if the gaps in this event are from this sequence's terminal
                 for col_idx in range(start_col, end_col + 1):
-                    column = [str(seq.seq[col_idx]) for seq in aligned_seqs]
+                    column = [s[col_idx] for s in seq_strs]
                     for i, (s, e) in enumerate(content_regions):
                         if col_idx < s or col_idx > e:
                             if column[i] == '-':
