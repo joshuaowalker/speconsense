@@ -136,9 +136,12 @@ class ScalablePairwiseOperation:
         relaxed_threshold = min_identity * self.config.relaxed_identity_factor
 
         seq_ids = sorted(sequences.keys())
-        candidates = self.candidate_finder.find_candidates(
-            seq_ids, sequences, relaxed_threshold, candidate_count
-        )
+        try:
+            candidates = self.candidate_finder.find_candidates(
+                seq_ids, sequences, relaxed_threshold, candidate_count
+            )
+        finally:
+            self.candidate_finder.cleanup()
 
         # Refine with exact scoring
         results: Dict[str, List[Tuple[str, float]]] = {}
@@ -307,9 +310,12 @@ class ScalablePairwiseOperation:
         max_candidates = 500
 
         logging.debug(f"Finding candidates: identity>={relaxed_threshold:.2f}, max_candidates={max_candidates}")
-        all_candidates = self.candidate_finder.find_candidates(
-            seq_ids, sequences, relaxed_threshold, max_candidates
-        )
+        try:
+            all_candidates = self.candidate_finder.find_candidates(
+                seq_ids, sequences, relaxed_threshold, max_candidates
+            )
+        finally:
+            self.candidate_finder.cleanup()
 
         distances: Dict[Tuple[str, str], float] = {}
         computed_pairs: set = set()
@@ -430,9 +436,12 @@ class ScalablePairwiseOperation:
         # Find candidates with high identity (likely equivalent sequences)
         # Use a reasonable max_candidates to limit work while still finding all equivalents
         max_candidates = min(n, 100)
-        all_candidates = self.candidate_finder.find_candidates(
-            seq_ids, sequences, min_candidate_identity, max_candidates
-        )
+        try:
+            all_candidates = self.candidate_finder.find_candidates(
+                seq_ids, sequences, min_candidate_identity, max_candidates
+            )
+        finally:
+            self.candidate_finder.cleanup()
 
         # Union-find data structure
         parent = {sid: sid for sid in seq_ids}
