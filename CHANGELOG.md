@@ -5,7 +5,9 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [Unreleased]
+## [0.8.7] - 2026-08-13
+
+PCR chimera detection.
 
 ### Added
 
@@ -13,7 +15,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - Core stamps `chimera=v{prefix}+v{suffix}` (parent vids within the record's gid, prefix parent first) in FASTA headers and full detail (score, diagnostic sites, side support, parent cluster ids) in the metadata JSON. `--disable-chimera-detection` skips the test. Parent eligibility requires strictly greater read count (uchime abskew logic at 1.0 rather than uchime's 2.0 — real minor haplotypes routinely sit within 2x of the chimeras they parent); candidates are tested against pairs from their 6 largest eligible peers.
   - Summarize is **report-only by default**: flagged records stay on the pass track with `chimera=` visible in headers, because a genuine biological recombinant is indistinguishable from a PCR artifact by sequence alone. New `--filter-chimeras` flag routes flagged records to a new `.chimera` track (`variants/{name}.chimera-RiC{ric}.fasta`), with routing priority `.lq` > `.chimera` > `.ns`. The `chimera` field joins the `full` FASTA preset and the per-specimen variant trees.
 
-### Migration notes
+### Migration notes (0.8.6 → 0.8.7)
 
 - **New `chimera=` header field** may appear in core `-all.fasta` output and (via the `full` preset) summarize output. Downstream parsers that split on `=` should handle the new key.
 - **New `.chimera` track**: with `--filter-chimeras`, summarize output directories contain `*.chimera-RiC*.fasta` files. Tools that glob `variants/` may need to account for the new pattern.
