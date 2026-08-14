@@ -642,6 +642,14 @@ Unlike `cer_factor`, `err_factor` distinguishes novel-but-real sequences (low `e
 
 Filtering happens in summarize via `--max-err-factor` (default `1.5`, set to `0` to disable). Records above threshold route to `__Summary__/variants/{name}.lq-RiC{ric}.fasta`. The `1.5` default is safe because MAD outlier removal at final consensus removes single-read outliers that would otherwise inflate `err_factor` on real clusters.
 
+### Chimera Detection (chimera=)
+
+PCR chimeras — single-crossover recombinants of two haplotypes co-amplified from the same specimen — are the one artifact class the CER framework structurally cannot catch: a chimera differs from each parent at many *real* linked positions, so it receives a *high* `cer_factor` and looks like a strong variant, and its reads are internally homogeneous so `err_factor` stays low.
+
+Speconsense therefore runs a uchime-style recombinant test during CER validation. Each candidate is aligned against pairs of larger same-group peers; at positions where the two parents disagree, the test asks whether a single crossover explains the candidate almost perfectly (and much better than either parent alone, with real support on both sides of the breakpoint). Flagged records carry `chimera=v1+v3` in the FASTA header — the two parent variants within the same group, prefix parent first — with full detail in the metadata JSON.
+
+By default the flag is **report-only**: flagged variants stay in the output for review, because a genuine biological recombinant is indistinguishable from a PCR artifact by sequence alone. Pass `--filter-chimeras` to summarize to route flagged records to `__Summary__/variants/{name}.chimera-RiC{ric}.fasta` instead of the pass track. `--disable-chimera-detection` (core) skips the test entirely.
+
 ### Error Models (q_ctx tables)
 
 Both `cer_factor` and `err_factor` rely on a per-context error model that says "what's the basecaller's error rate at a position with this HP context?" These models live as YAML files keyed by event type:
@@ -830,7 +838,7 @@ speconsense-summarize --fasta-fields minimal,qc
 - `default`: `size, ric, rawric, rawlen, snp, ambig, primers`
 - `minimal`: `size, ric`
 - `qc`: `size, ric, length, rid, ambig, cer_factor, err_factor`
-- `full`: `size, ric, length, rawric, rawlen, snp, ambig, rid, cer_factor, err_factor, primers, locus, group_frequency, global_frequency`
+- `full`: `size, ric, length, rawric, rawlen, snp, ambig, rid, cer_factor, err_factor, chimera, primers, locus, group_frequency, global_frequency`
 - `id-only`: (no fields)
 
 The `default` preset does not include `cer_factor` / `err_factor` / `gid` / `vid`. If you want CER and homogeneity metrics in summarize-emitted FASTAs, use `--fasta-fields qc` or `--fasta-fields full`. Core's own FASTA always includes `gid`, `vid`, `cer_factor`, and `err_factor` regardless of the summarize preset.
@@ -1229,6 +1237,7 @@ usage: speconsense [-h] [--help-advanced] [-O OUTPUT_DIR] [--primers PRIMERS]
                    [--disable-discard-recovery] [--enable-discard-recovery]
                    [--disable-second-phasing] [--enable-second-phasing]
                    [--disable-noise-filter] [--enable-noise-filter]
+                   [--disable-chimera-detection] [--enable-chimera-detection]
                    [--disable-mad-outlier-removal]
                    [--enable-mad-outlier-removal]
                    [--disable-ambiguity-calling] [--enable-ambiguity-calling]
@@ -1393,6 +1402,15 @@ Advanced (pre-tuned — rarely needed):
                         final consensus.
   --enable-noise-filter
                         Override --disable-noise-filter or profile setting
+  --disable-chimera-detection
+                        Disable the Phase 11 two-parent recombinant (PCR
+                        chimera) test. Candidates explained near-perfectly by
+                        a single crossover between two larger same-group peers
+                        are normally stamped with a chimera= header field;
+                        this flag skips the test.
+  --enable-chimera-detection
+                        Override --disable-chimera-detection or profile
+                        setting
   --disable-mad-outlier-removal
                         Disable MAD-based outlier removal at final consensus
                         generation. Reads whose identity to the cluster
@@ -1456,6 +1474,7 @@ usage: speconsense-summarize [-h] [--help-advanced] [--source SOURCE]
                              [--max-len MAX_LEN]
                              [--min-cer-factor MIN_CER_FACTOR]
                              [--max-err-factor MAX_ERR_FACTOR]
+                             [--filter-chimeras]
                              [--prune-group-ratio PRUNE_GROUP_RATIO]
                              [--prune-group-count PRUNE_GROUP_COUNT]
                              [--group-identity GROUP_IDENTITY]
@@ -1534,6 +1553,11 @@ Filtering:
                         Variants with err_factor=None (legacy output) always
                         pass. Set to 0 to disable err_factor filtering.
                         (default: 1.5)
+  --filter-chimeras     Route variants carrying core's chimera= flag (two-
+                        parent recombinant test) to __Summary__/variants/ as
+                        .chimera records instead of the pass track. Default
+                        off: the flag is carried through in headers for review
+                        (report-only).
   --prune-group-ratio PRUNE_GROUP_RATIO
                         Prune secondary identity groups (gid >= 2) whose total
                         size is below this ratio of the largest group. Both
@@ -1806,6 +1830,20 @@ This project uses and builds upon:
   - van Dongen, S. (2008). *Graph clustering via a discrete uncoupling process*. SIAM Journal on Matrix Analysis and Applications 30(1):121-141. https://doi.org/10.1137/040608635
 
 - **MCL in bioinformatics**: Enright, A.J., Van Dongen, S., Ouzounis, C.A. (2002). *An efficient algorithm for large-scale detection of protein families*. Nucleic Acids Research 30(7):1575-1584. https://doi.org/10.1093/nar/30.7.1575 (PMC: https://pmc.ncbi.nlm.nih.gov/articles/PMC101833/)
+
+- **Partial order alignment (POA)** (the algorithm underlying consensus generation):
+  - Lee, C., Grasso, C., Sharlow, M.F. (2002). *Multiple sequence alignment using partial order graphs*. Bioinformatics 18(3):452-464. https://doi.org/10.1093/bioinformatics/18.3.452
+  - Lee, C. (2003). *Generating consensus sequences from partial order multiple sequence alignment graphs*. Bioinformatics 19(8):999-1008. https://doi.org/10.1093/bioinformatics/btg109
+
+- **SPOA** (consensus generation; SPOA has no standalone publication — it is the SIMD partial-order alignment implementation introduced with Racon): Vaser, R., Sović, I., Nagarajan, N., Šikić, M. (2017). *Fast and accurate de novo genome assembly from long uncorrected reads*. Genome Research 27(5):737-746. https://doi.org/10.1101/gr.214270.116
+
+- **VSEARCH** (scalable candidate finding): Rognes, T., Flouri, T., Nichols, B., Quince, C., Mahé, F. (2016). *VSEARCH: a versatile open source tool for metagenomics*. PeerJ 4:e2584. https://doi.org/10.7717/peerj.2584
+
+- **Edlib** (edit-distance alignment): Šošić, M., Šikić, M. (2017). *Edlib: a C/C++ library for fast, exact sequence alignment using edit distance*. Bioinformatics 33(9):1394-1395. https://doi.org/10.1093/bioinformatics/btw753
+
+- **Chimera detection** (the two-parent recombinant test is modeled on UCHIME's crossover framework):
+  - Edgar, R.C., Haas, B.J., Clemente, J.C., Quince, C., Knight, R. (2011). *UCHIME improves sensitivity and speed of chimera detection*. Bioinformatics 27(16):2194-2200. https://doi.org/10.1093/bioinformatics/btr381
+  - Edgar, R.C. (2016). *UCHIME2: improved chimera prediction for amplicon sequencing*. bioRxiv 074252. https://doi.org/10.1101/074252
 
 - **ONT fungal barcoding protocol**: Russell, S.D., Geurin, Z., Walker, J. (2024). *Primary Data Analysis - Basecalling, Demultiplexing, and Consensus Building for ONT Fungal Barcodes*. protocols.io. https://dx.doi.org/10.17504/protocols.io.dm6gpbm88lzp/v4
 

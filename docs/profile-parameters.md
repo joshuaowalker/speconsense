@@ -45,6 +45,7 @@ Parameters for the main clustering and consensus tool.
 | `disable-cluster-merging` | Disable merging identical consensus sequences | false | — | — | — | — | — |
 | `disable-homopolymer-equivalence` | Require exact match for cluster merging | false | — | — | — | — | — |
 | `disable-mad-outlier-removal` | Disable MAD-based outlier removal at final consensus generation | false | — | — | — | — | — |
+| `disable-chimera-detection` | Disable the Phase 11 two-parent recombinant (PCR chimera) test | false | — | — | — | — | — |
 | `mad-z-threshold` | Modified Z-score cutoff for the MAD outlier rule (lower = more aggressive) | 1.5 | — | — | — | — | — |
 | `mad-gap-factor` | Gap-rule multiplier for flagging the worst read (lower = more aggressive) | 2.5 | — | — | — | — | — |
 | `mad-min-mad` | Floor for the MAD value (0..1 rid scale) to avoid divide-by-zero | 0.002 | — | — | — | — | — |
@@ -73,6 +74,7 @@ Parameters for the post-processing and summarization tool.
 | `max-len` | Maximum sequence length in bp (0 = disabled) | 0 | — | — | — | — | — |
 | `min-cer-factor` | Min per-position CER factor to keep a variant as primary (routes to `variants/*.ns-…` otherwise; 0 disables) | 1.0 | — | 0 | — | 0 | — |
 | `max-err-factor` | Max cluster err_factor (observed/expected disagreement); routes to `variants/*.lq-…` above (0 disables) | 1.5 | — | 0 | — | 0 | — |
+| `filter-chimeras` | Route core chimera-flagged variants to `variants/*.chimera-…` instead of the pass track | false | — | — | — | — | — |
 | `prune-group-ratio` | Prune secondary groups below this ratio of the largest group (0 disables) | 0.10 | — | — | — | — | — |
 | `prune-group-count` | Absolute size threshold — groups with total size ≥ this are kept regardless of ratio (0 disables) | 15 | — | — | — | — | — |
 | `group-identity` | Anchor identity for cross-primer overlap conflation between core groups | 0.85 | — | — | 0.95 | — | — |

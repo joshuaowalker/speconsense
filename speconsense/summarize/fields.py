@@ -187,6 +187,20 @@ class LocusField(FastaField):
         return None
 
 
+class ChimeraField(FastaField):
+    """Core's two-parent recombinant flag: "v{prefix}+v{suffix}" names the
+    parent vids (within the record's own gid) whose single-crossover
+    recombination explains this variant. Absent on unflagged records."""
+
+    def __init__(self):
+        super().__init__('chimera', 'Two-parent recombinant flag (parent vids)')
+
+    def format_value(self, consensus: ConsensusInfo) -> Optional[str]:
+        if consensus.chimera:
+            return f"chimera={consensus.chimera}"
+        return None
+
+
 class GroupField(FastaField):
     def __init__(self):
         super().__init__('group', 'Variant group number')
@@ -198,7 +212,7 @@ class GroupField(FastaField):
         match = re.search(
             r'-(\d+)\.v\d+'
             r'(?:\.raw(?:\d+|\.\d+\.v\d+))?'
-            r'(?:\.(?:ns|lq|filtered))?$',
+            r'(?:\.(?:ns|lq|filtered|chimera))?$',
             consensus.sample_name,
         )
         if match:
@@ -218,7 +232,7 @@ class VariantField(FastaField):
         match = re.search(
             r'\.(v\d+)'
             r'(?:\.raw(?:\d+|\.\d+\.v\d+))?'
-            r'(?:\.(?:ns|lq|filtered))?$',
+            r'(?:\.(?:ns|lq|filtered|chimera))?$',
             consensus.sample_name,
         )
         if match:
@@ -245,6 +259,7 @@ FASTA_FIELDS = {
     'group_frequency': GroupFrequencyField(),
     'global_frequency': GlobalFrequencyField(),
     'locus': LocusField(),
+    'chimera': ChimeraField(),
 }
 
 # Preset definitions
@@ -252,7 +267,7 @@ FASTA_FIELD_PRESETS = {
     'default': ['size', 'ric', 'rawric', 'rawlen', 'snp', 'ambig', 'primers'],
     'minimal': ['size', 'ric'],
     'qc': ['size', 'ric', 'length', 'rid', 'ambig', 'cer_factor', 'err_factor'],
-    'full': ['size', 'ric', 'length', 'rawric', 'rawlen', 'snp', 'ambig', 'rid', 'cer_factor', 'err_factor', 'primers', 'locus', 'group_frequency', 'global_frequency'],
+    'full': ['size', 'ric', 'length', 'rawric', 'rawlen', 'snp', 'ambig', 'rid', 'cer_factor', 'err_factor', 'chimera', 'primers', 'locus', 'group_frequency', 'global_frequency'],
     'id-only': [],
 }
 

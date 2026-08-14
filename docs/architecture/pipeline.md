@@ -32,6 +32,8 @@ the `SpecimenClusterer.cluster()` docstring and the per-phase `_run_*` method do
   variant position detection/phasing support. Defines `IUPAC_CODES`, `DEFAULT_MAX_ERR_FACTOR`
 - `distances.py`: IUPAC-aware edlib alignment, adjusted-identity distance, variant difference
   counting. Defines `IUPAC_EQUIV`, `STANDARD_ADJUSTMENT_PARAMS`
+- `chimera.py`: two-parent recombinant (PCR chimera) detection — diagnostic-column breakpoint
+  scan over SPOA triples; gates calibrated on ont98 (see `variant-model.md`)
 - `context.py`: per-position variant context classification (`ContextClass`, `ContextTag`)
   driving CER q_ctx lookup
 - `qctx.py`: loads error models from `error_models/*.yaml`. `DEFAULT_MODEL_NAME = "dorado-v5.0"`,
@@ -109,7 +111,9 @@ docstring covering its contract; the `cluster()` docstring lists them all.
    calling → primer trimming; stamps the post-MAD MSA and consensus on each `cluster_dict`
 10. **Post-refinement merge** — combine clusters whose post-MAD consensuses are identical or
     HP-equivalent; reruns the Phase 9 worker on each merge survivor
-11. **CER validation** — annotate each non-anchor candidate with its `cer_factor`
+11. **CER validation** — annotate each non-anchor candidate with its `cer_factor`; also runs
+    two-parent recombinant (chimera) detection per identity group (`chimera=` header field,
+    see `docs/architecture/variant-model.md` and `speconsense/chimera.py`)
 12. **Size filtering** — drop clusters below `--min-size`
 13. **Output emission** — compute `err_factor` on each stamped MSA, assign identity ranks
     (`_assign_identity_ranks`), write FASTA/FASTQ/MSA

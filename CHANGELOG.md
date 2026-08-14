@@ -5,6 +5,21 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.8.7] - 2026-08-13
+
+PCR chimera detection.
+
+### Added
+
+- **PCR chimera detection** (core + summarize) — A uchime-style two-parent recombinant test now runs during CER validation (Phase 11). Each candidate cluster is SPOA-aligned against pairs of larger peers in its identity group; at positions where the parents disagree, a single-crossover model that explains the candidate near-perfectly (≥6 diagnostic sites, ≤1 unexplained, ≥4 sites better than the best single parent, ≥3 supporting sites per side) flags it as chimeric. This closes the one artifact class the CER framework structurally cannot catch: a recombinant's differences from each parent are real, so it receives a *high* cer_factor, and its reads are internally homogeneous, so err_factor stays low. On the ont98 dataset ~2.5% of the default pass track was chimeric (median cer_factor 15 among flagged pass-track records).
+  - Core stamps `chimera=v{prefix}+v{suffix}` (parent vids within the record's gid, prefix parent first) in FASTA headers and full detail (score, diagnostic sites, side support, parent cluster ids) in the metadata JSON. `--disable-chimera-detection` skips the test. Parent eligibility requires strictly greater read count (uchime abskew logic at 1.0 rather than uchime's 2.0 — real minor haplotypes routinely sit within 2x of the chimeras they parent); candidates are tested against pairs from their 6 largest eligible peers.
+  - Summarize is **report-only by default**: flagged records stay on the pass track with `chimera=` visible in headers, because a genuine biological recombinant is indistinguishable from a PCR artifact by sequence alone. New `--filter-chimeras` flag routes flagged records to a new `.chimera` track (`variants/{name}.chimera-RiC{ric}.fasta`), with routing priority `.lq` > `.chimera` > `.ns`. The `chimera` field joins the `full` FASTA preset and the per-specimen variant trees.
+
+### Migration notes (0.8.6 → 0.8.7)
+
+- **New `chimera=` header field** may appear in core `-all.fasta` output and (via the `full` preset) summarize output. Downstream parsers that split on `=` should handle the new key.
+- **New `.chimera` track**: with `--filter-chimeras`, summarize output directories contain `*.chimera-RiC*.fasta` files. Tools that glob `variants/` may need to account for the new pattern.
+
 ## [0.8.6] - 2026-08-12
 
 Performance release: ~4x faster on large single-job (eDNA-style) inputs, ~2x faster summarize,

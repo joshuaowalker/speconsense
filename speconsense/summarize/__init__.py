@@ -69,6 +69,7 @@ from .io import (
     write_ns_variant_files,
     write_lq_variant_files,
     write_filtered_variant_files,
+    write_chimera_variant_files,
     write_position_debug_file,
     write_output_files,
 )
@@ -124,6 +125,7 @@ __all__ = [
     "write_ns_variant_files",
     "write_lq_variant_files",
     "write_filtered_variant_files",
+    "write_chimera_variant_files",
     "write_position_debug_file",
     "write_output_files",
 ]
