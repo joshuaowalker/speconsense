@@ -142,3 +142,64 @@ def test_calibration_thresholds_are_module_constants():
     # Defaults are intentionally weakly-held; verify they exist and are sane.
     assert 0 < CALIBRATION_LOW < 1.0 < CALIBRATION_HIGH
     assert MIN_CALIBRATION_COLS > 0
+
+
+# ---------------------------------------------------------------------------
+# write_quality_report: state accounting
+# ---------------------------------------------------------------------------
+
+from speconsense.quality_report import write_quality_report  # noqa: E402
+
+
+def _info(name, size=10, obs=10.0, exp=10.0, cols=1000):
+    return ConsensusInfo(
+        sample_name=name, cluster_id=name.rsplit("-", 1)[-1], sequence="ACGT",
+        ric=size, size=size, file_path="",
+        err_factor=obs / exp,
+        err_factor_obs_sum=obs, err_factor_exp_sum=exp, err_factor_cols=cols,
+    )
+
+
+def _write(tmp_path, **lists):
+    write_quality_report([], [], str(tmp_path), str(tmp_path), **lists)
+    return (tmp_path / "quality_report.txt").read_text()
+
+
+def test_filtered_clusters_are_not_also_counted_as_passed(tmp_path):
+    # Selection drops sp-1.v2 after load-time routing put it on the pass
+    # list; pruning moves the .ns record sp-2.v1 to .filtered too. Each
+    # cluster must be counted once, in its final state.
+    passed = [_info("sp-1.v1"), _info("sp-1.v2")]
+    ns = [_info("sp-2.v1")]
+    filtered = [_info("sp-1.v2"), _info("sp-2.v1")]
+    out = _write(tmp_path, consensus_list=passed, ns_list=ns,
+                 filtered_list=filtered)
+    assert ("Total clusters:    3  (1 passed | 0 routed to .ns | "
+            "0 routed to .lq | 2 routed to .filtered)") in out
+    assert "Variants/specimen: median 1" in out
+
+
+def test_filtered_dedupe_keeps_calibration_sums_single_counted(tmp_path):
+    cols = MIN_CALIBRATION_COLS
+    passed = [_info("sp-1.v1", obs=100.0, exp=100.0, cols=cols),
+              _info("sp-1.v2", obs=300.0, exp=100.0, cols=cols)]
+    filtered = [_info("sp-1.v2", obs=300.0, exp=100.0, cols=cols)]
+    out = _write(tmp_path, consensus_list=passed, filtered_list=filtered)
+    # (100 + 300) / (100 + 100) = 2.00; double counting would give 3.50.
+    assert "Pooled obs/exp:    2.00 (all states: 2 clusters" in out
+
+
+def test_chimera_state_reported_when_present(tmp_path):
+    cols = MIN_CALIBRATION_COLS
+    out = _write(tmp_path,
+                 consensus_list=[_info("sp-1.v1", cols=cols)],
+                 chimera_list=[_info("sp-1.v3", cols=cols)])
+    assert ("(1 passed | 0 routed to .ns | 0 routed to .lq | "
+            "1 routed to .chimera | 0 routed to .filtered)") in out
+    assert "1 .chimera (50.0%)" in out
+    assert "    .chimera " in out  # calibration per-state row
+
+
+def test_chimera_state_absent_by_default(tmp_path):
+    out = _write(tmp_path, consensus_list=[_info("sp-1.v1")])
+    assert ".chimera" not in out

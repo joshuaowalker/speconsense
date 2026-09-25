@@ -170,9 +170,13 @@ def parse_arguments():
     io_group.add_argument("--summary-dir", type=str, default="__Summary__",
                           help="Output directory for summary files (default: __Summary__)")
     io_group.add_argument("--specimen", type=str, default=None,
-                          help="Process only this specimen. Loads only <specimen>-all.fasta from --source.")
+                          help="Process only this specimen. Loads only <specimen>-all.fasta from --source. "
+                               "Also writes <specimen>-summarize-report.json to --source/cluster_debug/ "
+                               "so a later --aggregate-only run can build quality_report.txt.")
     io_group.add_argument("--aggregate-only", action="store_true",
-                          help="Skip processing. Generate aggregate summary from existing per-specimen outputs.")
+                          help="Skip processing. Generate aggregate summary (summary.fasta, summary.txt, "
+                               "quality_report.txt) from existing per-specimen outputs and --source "
+                               "(searched recursively for core output directories).")
     io_group.add_argument("--fasta-fields", type=str, default="default",
                           help="FASTA header fields to output. Can be: "
                                "(1) a preset name (default, minimal, qc, full, id-only), "
@@ -1117,6 +1121,96 @@ def _clean_specimen_output(summary_dir: str, specimen_id: str) -> None:
         logging.info(f"Cleaned {removed} previous output files for {specimen_id}")
 
 
+def _report_params(args) -> Dict[str, object]:
+    """Routing/report parameters recorded in, and checked against, sidecars."""
+    from speconsense.quality_report import REPORT_SIDECAR_PARAMS
+    return {k: getattr(args, k) for k in REPORT_SIDECAR_PARAMS}
+
+
+def _write_aggregate_quality_report(args, final_consensus: List[ConsensusInfo]) -> None:
+    """Write quality_report.txt for --aggregate-only.
+
+    The passing/.ns/.lq split is load-time state, so it is rebuilt by
+    re-running ``load_consensus_sequences`` over every core output directory
+    under --source (header parsing only, no SPOA). Directories are found
+    recursively so a one-directory-per-specimen layout works as well as a
+    flat one. The .filtered list and overlap merge events only exist
+    mid-run; they come from the per-specimen sidecars that ``--specimen``
+    runs leave in each directory's cluster_debug/. Specimens without a
+    (current) sidecar still contribute their passing/.ns/.lq clusters but no
+    .filtered or overlap detail.
+    """
+    from speconsense import quality_report
+
+    source_dirs = quality_report.find_source_dirs(args.source)
+    source_records: List[ConsensusInfo] = []
+    consensus_list: List[ConsensusInfo] = []
+    ns_list: List[ConsensusInfo] = []
+    lq_list: List[ConsensusInfo] = []
+    chimera_list: List[ConsensusInfo] = []
+    for d in source_dirs:
+        passing, ns, lq, chimera = load_consensus_sequences(
+            d, args.min_ric, args.min_len, args.max_len,
+            min_cer_factor=args.min_cer_factor,
+            max_err_factor=args.max_err_factor,
+            filter_chimeras=args.filter_chimeras,
+            quiet=True,
+        )
+        consensus_list.extend(passing)
+        ns_list.extend(ns)
+        lq_list.extend(lq)
+        chimera_list.extend(chimera)
+        source_records.extend(passing + ns + lq + chimera)
+    if not source_records:
+        logging.warning(
+            f"No consensus sequences found under --source {args.source}; "
+            f"skipping quality report"
+        )
+        return
+    logging.info(
+        f"Quality report: loaded {len(source_records)} source clusters from "
+        f"{len(source_dirs)} director{'y' if len(source_dirs) == 1 else 'ies'} "
+        f"under {args.source}"
+    )
+
+    sidecars, stale = quality_report.load_report_sidecars(source_dirs)
+    if stale:
+        logging.warning(
+            f"Ignored {len(stale)} stale report sidecar(s) whose -all.fasta "
+            f"changed after summarize ran (e.g. {stale[0]}); re-run --specimen "
+            f"for those specimens"
+        )
+    source_specimens = {strip_cluster_suffix(c.sample_name) for c in source_records}
+    without_sidecar = source_specimens - set(sidecars) - set(stale)
+    if without_sidecar:
+        logging.warning(
+            f"{len(without_sidecar)} of {len(source_specimens)} specimen(s) "
+            f"have no report sidecar (not summarized with --specimen); their "
+            f".filtered and overlap-merge detail is absent from the quality report"
+        )
+
+    filtered_list, overlap_merges = quality_report.assemble_from_sidecars(
+        sidecars, source_records, _report_params(args),
+    )
+
+    quality_report.write_quality_report(
+        final_consensus,
+        [],
+        args.summary_dir,
+        args.source,
+        overlap_merges,
+        args.min_merge_overlap,
+        consensus_list=consensus_list,
+        ns_list=ns_list,
+        lq_list=lq_list,
+        chimera_list=chimera_list,
+        filtered_list=filtered_list,
+        min_cer_factor=args.min_cer_factor,
+        max_err_factor=args.max_err_factor,
+        source_dirs=source_dirs,
+    )
+
+
 def _cleanup_log(log_path: str) -> None:
     """Clean up temporary log file."""
     try:
@@ -1196,6 +1290,7 @@ def main():
             temp_log_file.name,
             fasta_fields
         )
+        _write_aggregate_quality_report(args, all_final_consensus)
 
         logging.info(f"Aggregate summary complete: {len(all_final_consensus)} sequences")
         _cleanup_log(temp_log_file.name)
@@ -1397,6 +1492,15 @@ def main():
         all_filtered_consensus.extend(specimen_filtered)
         total_limited_merges += limited_count
 
+        # Incremental mode: persist the mid-run report inputs so a later
+        # --aggregate-only pass can write quality_report.txt.
+        if args.specimen:
+            from speconsense import quality_report
+            quality_report.write_report_sidecar(
+                os.path.dirname(file_path), specimen_id, specimen_filtered, overlap_merges,
+                _report_params(args), __version__,
+            )
+
         # Update naming info with unique keys per specimen
         file_name = os.path.basename(file_path)
         for group_id, group_naming in naming_info.items():
@@ -1434,7 +1538,8 @@ def main():
 
     # Write quality report (deferred import to avoid circular dependency).
     # Pass pre-merge consensus_list (with full per-cluster err/cer metrics)
-    # and the routed ns/lq lists so the report can surface filter decisions.
+    # and the routed ns/lq/chimera lists so the report can surface filter
+    # decisions. .filtered wins over load-time routing inside the report.
     from speconsense import quality_report
     quality_report.write_quality_report(
         all_final_consensus,
@@ -1446,6 +1551,7 @@ def main():
         consensus_list=consensus_list,
         ns_list=ns_list,
         lq_list=lq_list,
+        chimera_list=chimera_list,
         filtered_list=all_filtered_consensus,
         min_cer_factor=args.min_cer_factor,
         max_err_factor=args.max_err_factor,

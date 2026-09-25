@@ -5,6 +5,26 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.8.8] - 2026-09-25
+
+Quality report for incremental (`--specimen` + `--aggregate-only`) workflows, and report accounting fixes.
+
+### Added
+
+- **`quality_report.txt` in `--aggregate-only` mode** (summarize) — Incremental workflows (one `--specimen` run per specimen, then a final `--aggregate-only`, as specimux-suite does) previously produced no quality report. Each `--specimen` run now writes a small `{specimen}-summarize-report.json` sidecar to `--source/cluster_debug/` holding the two pieces of report state that exist only mid-run (the `.filtered` record names and cross-primer overlap merge events). `--aggregate-only` rebuilds the passing/`.ns`/`.lq` split by re-reading `--source` (header parsing only, no SPOA), joins in the sidecars, and writes a report identical to a single full-mode run's apart from the timestamp and path lines. Sidecars live beside core's metadata JSON, so they are never part of the summary directory and are unaffected by per-specimen prefix pruning there. Full-mode runs write no sidecars.
+  - `--aggregate-only` discovers core output directories recursively under `--source`, so both a flat layout and one directory per specimen (`<source>/<id>/<id>-all.fasta`, as specimux-suite uses) work.
+  - Each sidecar records a hash of the `-all.fasta` it was computed from; if core re-runs a specimen and summarize doesn't, the stale sidecar is ignored with a warning.
+  - Warnings are also logged when a sidecar's filter parameters differ from the aggregate invocation's, or when specimens have no sidecar.
+
+### Fixed
+
+- **Quality report double-counted `.filtered` clusters** — The report's passing/`.ns`/`.lq` lists are load-time routing, and clusters that selection or pruning later moved to `.filtered` stayed in them as well. Those clusters were counted twice: in the executive-summary and pipeline-activity totals, in the passed-variant outlier tables, and — with their obs/exp sums — in the q_ctx calibration check, skewing the pooled ratio toward whatever the filtered clusters looked like. `.filtered` is now treated as each cluster's final state, so every source cluster is counted exactly once.
+- **Quality report omitted `.chimera` clusters** — With `--filter-chimeras`, chimera-routed clusters were never passed to the report and disappeared from every count. They now appear as a `.chimera` state in the executive summary, pipeline activity, and calibration breakdown. Reports without `--filter-chimeras` are unaffected.
+
+### Changed
+
+- **Quality report yield excludes `.filtered` reads** — As a consequence of the double-count fix, "Yield (passed reads / input)" no longer counts reads in clusters that selection or pruning dropped, since those are not in the output. On runs using `--select-max-variants`, `--select-min-size-ratio`, `--select-max-groups`, or group pruning, reported yields will be lower than under 0.8.7, and the "possible rescues" low-yield cutoff shifts accordingly.
+
 ## [0.8.7] - 2026-08-13
 
 PCR chimera detection.

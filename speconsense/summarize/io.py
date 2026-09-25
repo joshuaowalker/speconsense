@@ -146,6 +146,7 @@ def load_consensus_sequences(
     min_cer_factor: float = DEFAULT_MIN_CER_FACTOR,
     max_err_factor: float = DEFAULT_MAX_ERR_FACTOR,
     filter_chimeras: bool = False,
+    quiet: bool = False,
 ) -> Tuple[List[ConsensusInfo], List[ConsensusInfo], List[ConsensusInfo], List[ConsensusInfo]]:
     """Load consensus sequences from speconsense output files.
 
@@ -172,6 +173,8 @@ def load_consensus_sequences(
             (report-only). Routing priority when enabled: lq > chimera > ns —
             an internally incoherent cluster isn't worth diagnosing further,
             but the chimera verdict is more specific than CER's.
+        quiet: Log the loading summary at DEBUG instead of INFO (for
+            callers that load many directories one at a time).
 
     Returns:
         Tuple of (passing, ns, lq, chimera) lists of ConsensusInfo. All lists
@@ -301,7 +304,7 @@ def load_consensus_sequences(
         filter_parts.append(f"filtered {filtered_by_ric} by RiC")
     if filtered_by_len > 0:
         filter_parts.append(f"filtered {filtered_by_len} by length")
-    logging.info(", ".join(filter_parts))
+    (logging.debug if quiet else logging.info)(", ".join(filter_parts))
 
     return consensus_list, ns_list, lq_list, chimera_list
 
