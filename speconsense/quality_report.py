@@ -19,6 +19,7 @@ or rescue rather than presenting raw statistics. Five sections:
 """
 
 import glob
+import hashlib
 import json
 import logging
 import math
@@ -54,7 +55,7 @@ CALIBRATION_HIGH = 1.40
 class _Cluster:
     """View of a single source-level cluster for reporting purposes."""
     info: ConsensusInfo
-    state: str           # "passed", "ns", or "lq"
+    state: str           # "passed", "ns", "lq", "chimera", or "filtered"
     specimen: str
     short: str           # specimen-relative tail, e.g. "1.v3"
 
@@ -117,7 +118,7 @@ def _specimen_from_name(cluster_name: str) -> str:
     return re.sub(
         r"-\d+\.v\d+"
         r"(?:\.raw(?:\d+|\.\d+\.v\d+))?"
-        r"(?:\.(?:ns|lq|filtered))?$",
+        r"(?:\.(?:ns|lq|chimera|filtered))?$",
         "", cluster_name,
     )
 
@@ -125,7 +126,7 @@ def _specimen_from_name(cluster_name: str) -> str:
 def _short_id(cluster_name: str) -> str:
     m = re.search(
         r"-(\d+\.v\d+(?:\.raw(?:\d+|\.\d+\.v\d+))?)"
-        r"(?:\.(?:ns|lq|filtered))?$",
+        r"(?:\.(?:ns|lq|chimera|filtered))?$",
         cluster_name,
     )
     return m.group(1) if m else cluster_name
@@ -135,8 +136,9 @@ def _build_specimens(
     consensus_list: List[ConsensusInfo],
     ns_list: List[ConsensusInfo],
     lq_list: List[ConsensusInfo],
-    source_folder: str,
+    source_dirs: List[str],
     filtered_list: Optional[List[ConsensusInfo]] = None,
+    chimera_list: Optional[List[ConsensusInfo]] = None,
 ) -> Tuple[Dict[str, _Specimen], List[Tuple[str, int]]]:
     """Group source-level clusters by specimen and pull total_input_reads.
 
@@ -160,15 +162,20 @@ def _build_specimens(
         _add(info, "ns")
     for info in lq_list:
         _add(info, "lq")
+    for info in (chimera_list or []):
+        _add(info, "chimera")
     for info in (filtered_list or []):
         _add(info, "filtered")
 
     # Pull total_input_reads from per-specimen metadata JSONs. Also catch
     # specimens that had input but produced zero clusters.
     zero_cluster_specimens: List[Tuple[str, int]] = []
-    debug_dir = os.path.join(source_folder, "cluster_debug")
-    if os.path.isdir(debug_dir):
-        for path in sorted(glob.glob(os.path.join(debug_dir, "*-metadata.json"))):
+    metadata_paths = sorted(
+        path for d in source_dirs
+        for path in glob.glob(os.path.join(d, "cluster_debug", "*-metadata.json"))
+    )
+    if metadata_paths:
+        for path in metadata_paths:
             base = os.path.basename(path).replace("-metadata.json", "")
             try:
                 with open(path) as f:
@@ -281,11 +288,14 @@ def _render_executive_summary(
             f" {zero_reads} reads total)"
         )
 
+    chimera_part = (f" | {counts['chimera']} routed to .chimera"
+                    if counts["chimera"] else "")
     lines = [
         spec_line,
         f"Total clusters:    {counts['total']}  "
         f"({counts['passed']} passed | {counts['ns']} routed to .ns | "
-        f"{counts['lq']} routed to .lq | {counts['filtered']} routed to .filtered)",
+        f"{counts['lq']} routed to .lq{chimera_part} | "
+        f"{counts['filtered']} routed to .filtered)",
     ]
     if rics:
         lines.append(
@@ -609,7 +619,9 @@ def _render_pipeline_activity(
         f"{counts['passed']} passed ({100*counts['passed']/total:.1f}%), "
         f"{counts['ns']} .ns ({100*counts['ns']/total:.1f}%), "
         f"{counts['lq']} .lq ({100*counts['lq']/total:.1f}%), "
-        f"{counts['filtered']} .filtered ({100*counts['filtered']/total:.1f}%)",
+        + (f"{counts['chimera']} .chimera ({100*counts['chimera']/total:.1f}%), "
+           if counts["chimera"] else "")
+        + f"{counts['filtered']} .filtered ({100*counts['filtered']/total:.1f}%)",
         f"  Merged variants:   {merged} (carry snp > 0)",
         f"  Cross-primer overlap merges: {len(overlap_merges)} "
         f"(threshold --min-merge-overlap={min_merge_overlap})",
@@ -648,7 +660,8 @@ def _render_qctx_calibration(specimens: Dict[str, _Specimen]) -> str:
     directional signal that the bundled q_ctx model diverges from the
     basecaller's actual error behavior.
 
-    The headline number pools all states (passed + .ns + .lq) to match the
+    The headline number pools all states (passed + .ns + .lq + .chimera +
+    .filtered) to match the
     "all-cluster pooled" methodology used to derive the shipped q_ctx tables
     (see cer_in_practice §8.4 / Appendix B). Excluding .lq would top-truncate
     the right tail by construction and bias the estimator low regardless of
@@ -657,8 +670,9 @@ def _render_qctx_calibration(specimens: Dict[str, _Specimen]) -> str:
     """
     body = _section("q_ctx CALIBRATION CHECK (run-pooled)")
 
-    bucket_order = ("passed", "ns", "lq", "filtered")
-    bucket_label = {"passed": "passed", "ns": ".ns", "lq": ".lq", "filtered": ".filtered"}
+    bucket_order = ("passed", "ns", "lq", "chimera", "filtered")
+    bucket_label = {"passed": "passed", "ns": ".ns", "lq": ".lq",
+                    "chimera": ".chimera", "filtered": ".filtered"}
     buckets: Dict[str, Dict[str, float]] = {
         s: {"obs": 0.0, "exp": 0.0, "cols": 0, "n": 0} for s in bucket_order
     }
@@ -749,8 +763,10 @@ def write_quality_report(
     ns_list: Optional[List[ConsensusInfo]] = None,
     lq_list: Optional[List[ConsensusInfo]] = None,
     filtered_list: Optional[List[ConsensusInfo]] = None,
+    chimera_list: Optional[List[ConsensusInfo]] = None,
     min_cer_factor: float = DEFAULT_MIN_CER_FACTOR,
     max_err_factor: float = DEFAULT_MAX_ERR_FACTOR,
+    source_dirs: Optional[List[str]] = None,
 ) -> None:
     """Write the action-oriented quality report.
 
@@ -771,9 +787,19 @@ def write_quality_report(
         ns_list: Source clusters routed to .ns by the CER filter.
         lq_list: Source clusters routed to .lq by the err_factor filter.
         filtered_list: Variants excluded by selection/pruning parameters
-            (--select-max-variants, --select-min-size-ratio, etc.).
+            (--select-max-variants, --select-min-size-ratio, etc.). These
+            are the final disposition of their clusters: any of them that
+            also appear in the load-time passing/.ns/.lq/.chimera lists are
+            removed from those lists, so every source cluster is counted in
+            exactly one state.
+        chimera_list: Source clusters routed to .chimera by
+            --filter-chimeras (empty otherwise).
         min_cer_factor: Threshold used for .ns routing (for header context).
         max_err_factor: Threshold used for .lq routing (for header context).
+        source_dirs: Core output directories whose cluster_debug/ metadata
+            supplies total_input_reads. Defaults to ``[source_folder]``;
+            --aggregate-only passes every directory found under --source
+            (see ``find_source_dirs``).
     """
     if overlap_merges is None:
         overlap_merges = []
@@ -782,21 +808,35 @@ def write_quality_report(
     # final_consensus is lossy (merged variants have no err/cer factors)
     # but keeps the function callable with legacy arguments.
     passing = consensus_list if consensus_list is not None else final_consensus
-    ns_list = ns_list or []
-    lq_list = lq_list or []
-    filtered_list = filtered_list or []
+
+    # The passing/.ns/.lq/.chimera lists are load-time routing; selection and
+    # pruning later move some of those same clusters to .filtered. Treat
+    # .filtered as the final disposition so no cluster is counted twice
+    # (which would also double its obs/exp sums in the calibration check).
+    filtered_list = list({c.sample_name: c for c in (filtered_list or [])}.values())
+    filtered_names = {c.sample_name for c in filtered_list}
+
+    def _unfiltered(records: Optional[List[ConsensusInfo]]) -> List[ConsensusInfo]:
+        return [c for c in (records or []) if c.sample_name not in filtered_names]
+
+    passing = _unfiltered(passing)
+    ns_list = _unfiltered(ns_list)
+    lq_list = _unfiltered(lq_list)
+    chimera_list = _unfiltered(chimera_list)
 
     specimens, zero_cluster_specimens = _build_specimens(
-        passing, ns_list, lq_list, source_folder,
+        passing, ns_list, lq_list, source_dirs or [source_folder],
         filtered_list=filtered_list,
+        chimera_list=chimera_list,
     )
     counts = {
         "passed": len(passing),
         "ns": len(ns_list),
         "lq": len(lq_list),
+        "chimera": len(chimera_list),
         "filtered": len(filtered_list),
-        "total": len(passing) + len(ns_list) + len(lq_list) + len(filtered_list),
     }
+    counts["total"] = sum(counts.values())
 
     report = (
         _render_header(source_folder, summary_folder, min_cer_factor,
@@ -815,3 +855,178 @@ def write_quality_report(
     with open(quality_report_path, "w") as f:
         f.write(report)
     logging.info(f"Quality report written to: {quality_report_path}")
+
+
+# ---------------------------------------------------------------------------
+# Per-specimen report sidecars (incremental --specimen / --aggregate-only)
+# ---------------------------------------------------------------------------
+#
+# The report needs two things that only exist mid-run: which source clusters
+# selection/pruning routed to .filtered, and the cross-primer overlap merge
+# events. Everything else (passing/.ns/.lq routing, err/cer factors, obs/exp
+# sums, total_input_reads) is load-time state that --aggregate-only can
+# rebuild cheaply from --source. So each --specimen run persists just those
+# two lists, and the aggregate pass joins them back onto a fresh source load.
+#
+# Sidecars live in the core output directory's cluster_debug/, next to core's
+# metadata JSON, not in the summary dir: callers that publish summary/ as a
+# deliverable (specimux-suite → MycoMap) must not pick them up, and the
+# summary dir's per-specimen prefix pruning must not delete them.
+#
+# --aggregate-only discovers core output directories recursively, so both a
+# flat --source (all specimens in one core run) and one-directory-per-
+# specimen layouts (specimux-suite: <source>/<id>/<id>-all.fasta) work.
+#
+# Each sidecar records a hash of the -all.fasta it was computed from. If core
+# re-runs a specimen without summarize following, the hash no longer matches
+# and the stale sidecar is ignored rather than joined onto the new clusters.
+
+REPORT_SIDECAR_SUFFIX = "-summarize-report.json"
+
+# Parameters that determine load-time routing and the report's overlap
+# section. A mismatch between a sidecar and the aggregate invocation means
+# the rebuilt passing/.ns/.lq split may not match what the specimen run saw.
+REPORT_SIDECAR_PARAMS = (
+    "min_ric", "min_len", "max_len", "min_cer_factor", "max_err_factor",
+    "filter_chimeras", "min_merge_overlap",
+)
+
+
+def find_source_dirs(root: str) -> List[str]:
+    """Core output directories at or below ``root``.
+
+    A directory qualifies if it holds a ``*-all.fasta`` or a
+    ``cluster_debug/`` subdirectory (the latter catches core runs whose
+    specimens produced no clusters). ``cluster_debug/`` itself is never
+    descended into — it can hold many thousands of read files.
+    """
+    found = []
+    for dirpath, dirnames, filenames in os.walk(root):
+        has_debug = "cluster_debug" in dirnames
+        if has_debug:
+            dirnames.remove("cluster_debug")
+        dirnames.sort()
+        if has_debug or any(f.endswith("-all.fasta") for f in filenames):
+            found.append(dirpath)
+    return found
+
+
+def report_sidecar_path(source_folder: str, specimen_id: str) -> str:
+    return os.path.join(source_folder, "cluster_debug",
+                        f"{specimen_id}{REPORT_SIDECAR_SUFFIX}")
+
+
+def _file_sha256(path: str) -> Optional[str]:
+    try:
+        with open(path, "rb") as f:
+            return hashlib.sha256(f.read()).hexdigest()
+    except OSError:
+        return None
+
+
+def write_report_sidecar(
+    source_folder: str,
+    specimen_id: str,
+    filtered_list: List[ConsensusInfo],
+    overlap_merges: List[OverlapMergeInfo],
+    params: Dict[str, object],
+    version: str,
+) -> None:
+    """Persist one specimen's mid-run report inputs for --aggregate-only.
+
+    ``filtered_list`` is stored by source ``sample_name`` only — .filtered
+    records keep core's names, so the aggregate pass recovers their full
+    metrics by joining against a fresh load of --source.
+    """
+    path = report_sidecar_path(source_folder, specimen_id)
+    payload = {
+        "speconsense_version": version,
+        "specimen": specimen_id,
+        "source_sha256": _file_sha256(
+            os.path.join(source_folder, f"{specimen_id}-all.fasta")),
+        "params": params,
+        "filtered": [c.sample_name for c in filtered_list],
+        "overlap_merges": [m._asdict() for m in overlap_merges],
+    }
+    try:
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        with open(path, "w") as f:
+            json.dump(payload, f, indent=1)
+    except OSError as e:
+        logging.warning(f"Could not write quality report sidecar {path}: {e}")
+
+
+def load_report_sidecars(source_dirs: List[str]) -> Tuple[Dict[str, dict], List[str]]:
+    """Load report sidecars from each core output directory.
+
+    Returns ``(sidecars, stale)``: sidecars keyed by specimen id, and the ids
+    whose sidecar was dropped because the specimen's -all.fasta has changed
+    (or vanished) since the sidecar was written.
+    """
+    sidecars: Dict[str, dict] = {}
+    stale: List[str] = []
+    for d in source_dirs:
+        pattern = os.path.join(d, "cluster_debug", f"*{REPORT_SIDECAR_SUFFIX}")
+        for path in sorted(glob.glob(pattern)):
+            specimen = os.path.basename(path)[:-len(REPORT_SIDECAR_SUFFIX)]
+            try:
+                with open(path) as f:
+                    data = json.load(f)
+            except (OSError, json.JSONDecodeError) as e:
+                logging.warning(f"Skipping unreadable report sidecar {path}: {e}")
+                continue
+            current = _file_sha256(os.path.join(d, f"{specimen}-all.fasta"))
+            if current is None or current != data.get("source_sha256"):
+                stale.append(specimen)
+                continue
+            sidecars[specimen] = data
+    return sidecars, stale
+
+
+def assemble_from_sidecars(
+    sidecars: Dict[str, dict],
+    source_records: List[ConsensusInfo],
+    params: Dict[str, object],
+) -> Tuple[List[ConsensusInfo], List[OverlapMergeInfo]]:
+    """Rebuild (filtered_list, overlap_merges) from sidecars.
+
+    ``source_records`` is every record from a fresh --source load (passing +
+    .ns + .lq + .chimera). Warns when a sidecar was written with routing
+    parameters that differ from ``params``, or names a record the fresh load
+    no longer contains.
+    """
+    by_name = {c.sample_name: c for c in source_records}
+    filtered: List[ConsensusInfo] = []
+    merges: List[OverlapMergeInfo] = []
+    mismatched: List[str] = []
+    missing = 0
+
+    for specimen, data in sorted(sidecars.items()):
+        recorded = data.get("params") or {}
+        if any(k in recorded and recorded[k] != params.get(k) for k in params):
+            mismatched.append(specimen)
+        for name in data.get("filtered") or []:
+            info = by_name.get(name)
+            if info is None:
+                missing += 1
+            else:
+                filtered.append(info)
+        for m in data.get("overlap_merges") or []:
+            try:
+                merges.append(OverlapMergeInfo(**m))
+            except TypeError:
+                logging.debug(f"Skipping malformed overlap merge in {specimen} sidecar")
+
+    if mismatched:
+        logging.warning(
+            f"{len(mismatched)} specimen(s) were summarized with different "
+            f"filter parameters than this --aggregate-only run "
+            f"(e.g. {mismatched[0]}); quality report routing counts may be "
+            f"inconsistent"
+        )
+    if missing:
+        logging.warning(
+            f"{missing} .filtered record(s) named in report sidecars were not "
+            f"found in --source; omitted from the quality report"
+        )
+    return filtered, merges

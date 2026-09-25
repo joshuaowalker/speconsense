@@ -25,6 +25,16 @@ Tracks in `__Summary__/variants/`:
 - `.filtered` — `{name}.filtered-RiC{ric}.fasta`
 - `.chimera` — `{name}.chimera-RiC{ric}.fasta` (only with `--filter-chimeras`)
 
+Run-level files: `summary.fasta`, `summary.txt`, `summarize_log.txt`, `quality_report.txt`.
+In the incremental workflow (`--specimen` per specimen, then `--aggregate-only`), each
+`--specimen` run writes `{specimen}-summarize-report.json` to `--source/cluster_debug/` — the
+report's mid-run-only inputs (`.filtered` names, overlap merge events). `--aggregate-only`
+re-reads `--source` for the load-time passing/`.ns`/`.lq` split and joins the sidecars, so
+the report matches full mode. The sidecar deliberately lives outside the summary dir.
+`--source` is walked recursively (`quality_report.find_source_dirs`) so a parent of
+one-directory-per-specimen core outputs works; sidecars whose recorded `-all.fasta` hash no
+longer matches are dropped as stale.
+
 Pre-merge contributors: `{name}.raw.{gid}.v{vid}-RiC{ric}.fasta`, named by the contributor's
 core `gid.vid` for direct traceability.
 

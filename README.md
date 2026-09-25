@@ -855,6 +855,7 @@ Speconsense-summarize automatically generates a `quality_report.txt` to help pri
 
 **Report Generation:**
 - Created automatically in the summary output directory
+- Also produced by `--aggregate-only` after incremental `--specimen` runs: each `--specimen` run leaves a small `{specimen}-summarize-report.json` sidecar in `--source/cluster_debug/` (never in the summary directory), and the aggregate pass combines those with a re-read of `--source`. The aggregate `--source` may be the same directory or a parent of per-specimen core output directories (`<source>/<id>/<id>-all.fasta`); it is searched recursively. Run the aggregate pass with the same filter options as the per-specimen runs; mismatches, and sidecars left stale by a later core re-run, are logged as warnings
 - No configuration required — generated regardless of `--fasta-fields` settings
 - Focuses on actionable issues, not exhaustive enumeration
 
@@ -1521,9 +1522,14 @@ Input/Output:
                         Output directory for summary files (default:
                         __Summary__)
   --specimen SPECIMEN   Process only this specimen. Loads only
-                        <specimen>-all.fasta from --source.
-  --aggregate-only      Skip processing. Generate aggregate summary from
-                        existing per-specimen outputs.
+                        <specimen>-all.fasta from --source. Also writes
+                        <specimen>-summarize-report.json to
+                        --source/cluster_debug/ so a later --aggregate-only
+                        run can build quality_report.txt.
+  --aggregate-only      Skip processing. Generate aggregate summary
+                        (summary.fasta, summary.txt, quality_report.txt) from
+                        existing per-specimen outputs and --source (searched
+                        recursively for core output directories).
   --fasta-fields FASTA_FIELDS
                         FASTA header fields to output. Can be: (1) a preset
                         name (default, minimal, qc, full, id-only), (2) comma-
